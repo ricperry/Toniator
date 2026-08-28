@@ -5,8 +5,8 @@ use toniator_domain::{
     AuthoredStructureKind, CanvasSpec, CoveragePolicy, DensityMetric2D, Document,
     GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
     MarkOrientation, MarkPrototype, PatternDefinition, PatternDefinitionId, PatternMechanismId,
-    PatternOutputLayerId, PatternOutputRealization, SourceMapping, SourceMappingComponent,
-    SourceReference, StraightGuideDimension, StraightGuideRepetition,
+    PatternOutputLayerId, PatternOutputRealization, ResolvedDensityMetric2D, SourceMapping,
+    SourceMappingComponent, SourceReference, StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_geometry::{CanonicalMark, CurveSegment, Point2};
 use toniator_patterns::{
@@ -217,10 +217,9 @@ fn family_request() -> GridInspectRequest {
             width: 100.0,
             height: 100.0,
         },
-        density: DensityMetric2D {
+        density: ResolvedDensityMetric2D {
             across_x: 10.0,
             across_y: 10.0,
-            aspect_locked: true,
         },
         rotation_degrees: 0.0,
         translation_x: 0.0,
@@ -425,6 +424,67 @@ fn authored_shape_normalization_and_all_orientations_are_exact() {
         .unwrap_err();
         assert_eq!(error.path(), "realization.mark.segment_limit");
     }
+}
+
+/// Proves density-aspect changes relocate sites without distorting authored closed-shape ratios.
+#[test]
+fn density_aspect_preserves_authored_mark_shape_proportions() {
+    let (document, definition) = multi_site_shape_document();
+    let plan = resolve_document_pattern_pipeline(&document, &definition)
+        .expect("authored-shape pipeline resolves");
+    let source = decode_source(&one_pixel_png([255, 255, 255, 255]), SourceFormatHint::Png)
+        .expect("opaque one-pixel source decodes");
+    let mut site_positions = Vec::new();
+    for aspect in [0.5, 1.0, 2.0] {
+        let mut request = family_request();
+        request.max_family_candidates = 4_096;
+        request.density = DensityMetric2D {
+            density: 10.0,
+            aspect,
+        }
+        .resolve(&request.canvas)
+        .expect("positive density aspect resolves");
+        let family =
+            evaluate_document_typed_family_cancellable(&document, &definition, &request, &|| false)
+                .expect("aspect-specific family evaluates");
+        site_positions.push(
+            family
+                .site_set()
+                .sites()
+                .iter()
+                .map(|site| site.position)
+                .collect::<Vec<_>>(),
+        );
+        let realized = realize_typed_canonical_marks(
+            &document,
+            &family,
+            &plan,
+            &source,
+            &request.canvas,
+            CanonicalMarkRequest {
+                mapping: SourceMapping::canonical(SourceMappingComponent::Luminance),
+                sampled_paint: false,
+                response: MarkResponse {
+                    minimum_fill: 1.0,
+                    maximum_fill: 1.0,
+                    rotation_offset_degrees: 0.0,
+                },
+                max_transformed_curve_segment_instances: 100_000,
+            },
+        )
+        .expect("aspect-specific authored marks realize");
+        assert!(!realized.output.marks.is_empty());
+        for mark in &realized.output.marks {
+            let CanonicalMark::ClosedPath(mark) = mark else {
+                panic!("custom prototype remains a closed-path mark")
+            };
+            let width = mark.bounds.max.x - mark.bounds.min.x;
+            let height = mark.bounds.max.y - mark.bounds.min.y;
+            assert!((width / height - 2.0).abs() < 1e-10);
+        }
+    }
+    assert_ne!(site_positions[0], site_positions[1]);
+    assert_ne!(site_positions[1], site_positions[2]);
 }
 
 /// Proves a finite domain-valid closed construction with no reference radius fails before any

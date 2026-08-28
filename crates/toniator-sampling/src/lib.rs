@@ -5,10 +5,13 @@
 use std::{
     error::Error,
     fmt,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
-use image::{ImageFormat, ImageReader};
+use image::{ColorType, ImageEncoder, ImageFormat, ImageReader, codecs::png::PngEncoder};
 use rayon::prelude::*;
 use resvg::{tiny_skia, usvg};
 use serde::Serialize;
@@ -24,14 +27,21 @@ const MAX_SOURCE_PIXELS: u64 = 64 * 1024 * 1024;
 /// Versioned identity for the decoder behavior that participates in derived
 /// cache keys. Bump it whenever decoding can yield different source pixels for
 /// the same bytes and format hint.
-pub const DECODER_CONTRACT_ID: &str = "toniator-sampling-decoder-v2-linear-source-fields";
+pub const DECODER_CONTRACT_ID: &str =
+    "toniator-sampling-decoder-v3-still-image-linear-source-fields";
 
-/// The only source formats supported by the bounded Stage 4 decoder.
+/// The supported single-still source formats at the sampling boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceFormat {
     Png,
     Svg,
+    Jpeg,
+    Webp,
+    Bmp,
+    Tiff,
+    OpenExr,
+    Avif,
 }
 
 /// A caller-supplied decoding hint. Decoding never opens a filesystem path.
@@ -39,6 +49,12 @@ pub enum SourceFormat {
 pub enum SourceFormatHint {
     Png,
     Svg,
+    Jpeg,
+    Webp,
+    Bmp,
+    Tiff,
+    OpenExr,
+    Avif,
     Unsupported,
 }
 
@@ -49,6 +65,21 @@ pub struct SourcePixel {
     pub green: f64,
     pub blue: f64,
     pub alpha: f64,
+}
+
+/// Stores a deterministic PNG proxy decoded from the supplied source for a private preview.
+///
+/// The proxy is derived only from decoded source pixels and preserves their aspect ratio and
+/// alpha coverage. It is presentation-only: callers retain the original source reference and
+/// must never substitute these bytes into a document, export, or main evaluation request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReducedPreviewSource {
+    /// Contains the supported PNG byte stream submitted to the canonical evaluator.
+    pub png_bytes: Vec<u8>,
+    /// Identifies the deterministic proxy width after long-edge reduction.
+    pub width: u32,
+    /// Identifies the deterministic proxy height after long-edge reduction.
+    pub height: u32,
 }
 
 /// A straight linear-light source color associated with a mark response.
@@ -78,7 +109,7 @@ pub struct SourceColorSample {
 /// Bounded work configuration for deterministic region sampling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegionSamplingLimits {
-    /// Caps decoded-source cell intersection work for a complete request.
+    /// Caps decoded-source pixel-footprint classification work for a complete request.
     pub max_cell_intersections: usize,
     /// Caps flattened boundary segments for a complete request.
     pub max_flattened_segments: usize,
@@ -111,7 +142,7 @@ pub struct RegionSourceSample {
 pub struct RegionSamplingDiagnostics {
     /// Counts emitted deterministic flattened boundary chords across all sampled regions.
     pub flattened_segments: usize,
-    /// Counts candidate source-cell intersections across all sampled regions.
+    /// Counts candidate literal source-pixel footprints across all sampled regions.
     pub cell_intersections: usize,
 }
 
@@ -355,7 +386,12 @@ pub fn sample_region_reference(
     })
 }
 
-/// Deterministically averages one untreated closed region through the complete edge-clamped field.
+/// Selects and equally averages full decoded pixels for one complete untreated closed region.
+///
+/// A literal source-pixel footprint contributes its complete mapped scalar and associated RGBA
+/// exactly once when exact polygon overlap is at least `50%`; smaller overlap contributes nothing.
+/// Off-source unit footprints retain their edge-clamped decoded value. This is not continuous
+/// bilinear integration and never substitutes pixel-center inclusion.
 ///
 /// This convenience boundary owns one request-wide budget for the single region. Callers that
 /// sample multiple base regions must use [`sample_region_area_average_batch`] so their work shares
@@ -378,7 +414,10 @@ pub fn sample_region_area_average(
     sample_region_area_average_with_work(field, region, canvas, mapping, &work)
 }
 
-/// Deterministically averages every supplied untreated base region with one shared work budget.
+/// Selects and equally averages full decoded pixels for every untreated base region with one shared work budget.
+///
+/// Each result uses exact `>=50%` literal footprint selection and equal full-value averaging,
+/// including edge-clamped exterior unit footprints.
 ///
 /// Results retain input order and are returned only if every region completes, so failures and
 /// cancellation never leak a partially aligned paint/sample table.
@@ -400,7 +439,7 @@ pub fn sample_region_area_average_batch(
     .map(|(samples, _)| samples)
 }
 
-/// Samples one ordered AreaAverage batch and reports lightweight request work counts.
+/// Samples one ordered literal-footprint AreaAverage batch and reports lightweight request work counts.
 ///
 /// Diagnostics are produced from the same shared atomic budget counters, remain outside source
 /// identity and persistence, and are returned only after every indexed result succeeds.
@@ -417,6 +456,56 @@ pub fn sample_region_area_average_batch_with_diagnostics(
     limits: RegionSamplingLimits,
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<(Vec<RegionSourceSample>, RegionSamplingDiagnostics), SamplingError> {
+    sample_region_area_average_batch_with_diagnostics_impl(
+        field, regions, canvas, mapping, limits, cancelled, None,
+    )
+}
+
+/// Samples one ordered AreaAverage batch while reporting completed candidate-pixel-footprint work.
+///
+/// Progress is observational and per-mille coalesced before invoking the callback, so parallel
+/// footprint classification cannot flood a frontend queue or alter deterministic sample ordering.
+///
+/// # Errors
+///
+/// Returns the same stable failures as [`sample_region_area_average_batch_with_diagnostics`]
+/// without returning partial samples or treating progress as publication authority.
+#[allow(clippy::too_many_arguments)]
+pub fn sample_region_area_average_batch_with_diagnostics_and_progress(
+    field: &SourceField,
+    regions: &[CurvePath],
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    limits: RegionSamplingLimits,
+    cancelled: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<(Vec<RegionSourceSample>, RegionSamplingDiagnostics), SamplingError> {
+    sample_region_area_average_batch_with_diagnostics_impl(
+        field,
+        regions,
+        canvas,
+        mapping,
+        limits,
+        cancelled,
+        Some(progress),
+    )
+}
+
+/// Implements ordered exact-footprint AreaAverage sampling with an optional observational progress sink.
+///
+/// # Errors
+///
+/// Returns stable validation, geometry, allocation, limit, or cancellation failures atomically.
+#[allow(clippy::too_many_arguments)]
+fn sample_region_area_average_batch_with_diagnostics_impl(
+    field: &SourceField,
+    regions: &[CurvePath],
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    limits: RegionSamplingLimits,
+    cancelled: &(dyn Fn() -> bool + Sync),
+    progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+) -> Result<(Vec<RegionSourceSample>, RegionSamplingDiagnostics), SamplingError> {
     validate_canvas(canvas)?;
     validate_mapping(mapping)?;
     let work = RegionSamplingWork::new(limits, cancelled)?;
@@ -424,18 +513,22 @@ pub fn sample_region_area_average_batch_with_diagnostics(
         .iter()
         .map(|region| prepare_region_area_average(field, region, canvas, &work))
         .collect::<Result<Vec<_>, _>>()?;
+    let progress = RegionSamplingProgress::new(work.diagnostics().cell_intersections, progress);
     let results = prepared
         .par_iter()
-        .map(|region| integrate_prepared_region_average(field, region, mapping, &work))
+        .map_init(RegionClipScratch::default, |scratch, region| {
+            integrate_prepared_region_average(field, region, mapping, &work, &progress, scratch)
+        })
         .collect::<Vec<_>>();
     let samples = results.into_iter().collect::<Result<Vec<_>, _>>()?;
     Ok((samples, work.diagnostics()))
 }
 
-/// Integrates one flattened region over all intersected source cells and exterior clamp bands.
+/// Selects full decoded source pixels whose footprints are at least half covered by one region.
 ///
-/// The caller owns `work`, which makes every flattening and cell charge request-wide. Scalar
-/// response and associated RGB/alpha are integrated against the same exact polygon moments.
+/// The caller owns `work`, which makes every flattening and footprint charge request-wide. Scalar
+/// response and associated RGB/alpha use the same exact polygon-footprint classification. Each
+/// included pixel contributes its full value once; fractional coverage never multiplies a value.
 ///
 /// # Errors
 ///
@@ -448,14 +541,22 @@ fn sample_region_area_average_with_work(
     work: &RegionSamplingWork<'_>,
 ) -> Result<RegionSourceSample, SamplingError> {
     let prepared = prepare_region_area_average(field, region, canvas, work)?;
-    integrate_prepared_region_average(field, &prepared, mapping, work)
+    let progress = RegionSamplingProgress::new(work.diagnostics().cell_intersections, None);
+    integrate_prepared_region_average(
+        field,
+        &prepared,
+        mapping,
+        work,
+        &progress,
+        &mut RegionClipScratch::default(),
+    )
 }
 
 /// Prepares one region and charges request budgets in authoritative input order.
 ///
-/// Flattening, geometry validation, source partition allocation, and candidate-cell charges stay
+/// Flattening, geometry validation, source-footprint run planning, and candidate-footprint charges stay
 /// serial across a batch. This makes bounded failures identical for every worker count while the
-/// independent cell integrations remain eligible for indexed parallel execution.
+/// independent footprint classifications remain eligible for indexed parallel execution.
 ///
 /// # Errors
 ///
@@ -473,29 +574,31 @@ fn prepare_region_area_average(
         field.identity.height,
         work,
     )?;
-    let complete = polygon_moments(&polygon);
-    if !complete.area.is_finite() || complete.area.abs() <= f64::EPSILON {
+    let complete_area = polygon_signed_area(&polygon);
+    if !complete_area.is_finite() || complete_area.abs() <= f64::EPSILON {
         return Err(SamplingError::new(
             "sampling.region_average.geometry",
             "region average requires nonzero finite area",
         ));
     }
     let (minimum, maximum) = polygon_bounds(&polygon)?;
-    let xs = source_axis_intervals(minimum.x, maximum.x, field.identity.width)?;
-    let ys = source_axis_intervals(minimum.y, maximum.y, field.identity.height)?;
-    for _ in 0..ys.len().saturating_mul(xs.len()) {
-        work.poll()?;
-        work.charge_cell()?;
-    }
-    Ok(PreparedRegionAverage {
-        polygon,
-        complete,
-        xs,
-        ys,
-    })
+    let xs = SourceAxisPartitions::new(minimum.x, maximum.x, field.identity.width)?;
+    let ys = SourceAxisPartitions::new(minimum.y, maximum.y, field.identity.height)?;
+    let candidate_count = xs.count()?.checked_mul(ys.count()?).ok_or_else(|| {
+        SamplingError::new(
+            "sampling.region_average.limits.cell_intersections",
+            "source footprint count is unsafe",
+        )
+    })?;
+    work.poll()?;
+    work.charge_cells(candidate_count)?;
+    Ok(PreparedRegionAverage { polygon, xs, ys })
 }
 
-/// Integrates one fully budgeted region without mutating request workload counters.
+/// Classifies one fully budgeted region’s literal pixel footprints without mutating workload counters.
+///
+/// Every candidate footprint is clipped exactly, selected only at `>=50%` coverage, and contributes
+/// its complete decoded value once to the equal average.
 ///
 /// # Errors
 ///
@@ -505,43 +608,53 @@ fn integrate_prepared_region_average(
     prepared: &PreparedRegionAverage,
     mapping: SourceMapping,
     work: &RegionSamplingWork<'_>,
+    progress: &RegionSamplingProgress<'_>,
+    scratch: &mut RegionClipScratch,
 ) -> Result<RegionSourceSample, SamplingError> {
     let mut totals = [0.0; 5];
-    for y in &prepared.ys {
-        for x in &prepared.xs {
+    let mut included = 0usize;
+    for y in prepared.ys.iter() {
+        for x in prepared.xs.iter() {
             work.poll()?;
-            let clipped = clip_polygon_to_rect_cancellable(
+            clip_polygon_to_rect_into_cancellable(
                 &prepared.polygon,
                 x.start,
                 x.end,
                 y.start,
                 y.end,
                 work.cancelled,
+                &mut scratch.clipped,
+                &mut scratch.intermediate,
             )?;
-            if clipped.is_empty() {
-                continue;
+            if !scratch.clipped.is_empty() {
+                let coverage = polygon_signed_area(&scratch.clipped).abs();
+                if coverage >= 0.5 {
+                    let pixel = field
+                        .pixel(x.cell, y.cell)
+                        .expect("validated source pixel footprint");
+                    totals[0] += mapped_response(pixel, mapping);
+                    for (total, value) in totals[1..].iter_mut().zip(associated_linear(pixel)) {
+                        *total += value;
+                    }
+                    included = included.saturating_add(1);
+                }
             }
-            let moments = translate_polygon_moments(
-                polygon_moments(&clipped),
-                Point2::new(f64::from(x.cell), f64::from(y.cell)),
-            );
-            let values = region_cell_values(field, mapping, *x, *y);
-            for (total, coefficients) in totals.iter_mut().zip(values) {
-                *total += coefficients[0] * moments.area
-                    + coefficients[1] * moments.mx
-                    + coefficients[2] * moments.my
-                    + coefficients[3] * moments.mxy;
-            }
+            progress.complete_cell();
         }
     }
-    let orientation = prepared.complete.area.signum();
-    let area = prepared.complete.area.abs();
-    let response = (totals[0] * orientation / area).clamp(0.0, 1.0);
-    let alpha = (totals[4] * orientation / area).clamp(0.0, 1.0);
+    if included == 0 {
+        return Ok(RegionSourceSample {
+            response: 0.0,
+            paint: None,
+        });
+    }
+    let count = included as f64;
+    let response = (totals[0] / count).clamp(0.0, 1.0);
+    let alpha = (totals[4] / count).clamp(0.0, 1.0);
     let paint = (alpha > 0.0).then(|| SampledSourcePaint {
-        red: (totals[1] * orientation / area / alpha).clamp(0.0, 1.0),
-        green: (totals[2] * orientation / area / alpha).clamp(0.0, 1.0),
-        blue: (totals[3] * orientation / area / alpha).clamp(0.0, 1.0),
+        red: (totals[1] / count / alpha).clamp(0.0, 1.0),
+        green: (totals[2] / count / alpha).clamp(0.0, 1.0),
+        blue: (totals[3] / count / alpha).clamp(0.0, 1.0),
         alpha: 1.0,
     });
     Ok(RegionSourceSample { response, paint })
@@ -550,16 +663,69 @@ fn integrate_prepared_region_average(
 /// One ordered region after deterministic source-space preparation and budget accounting.
 struct PreparedRegionAverage {
     polygon: Vec<Point2>,
-    complete: PolygonMoments,
-    xs: Vec<SourceAxisInterval>,
-    ys: Vec<SourceAxisInterval>,
+    xs: SourceAxisPartitions,
+    ys: SourceAxisPartitions,
+}
+
+/// Reuses both Sutherland-Hodgman buffers across every source-pixel footprint handled by one worker.
+#[derive(Default)]
+struct RegionClipScratch {
+    clipped: Vec<Point2>,
+    intermediate: Vec<Point2>,
+}
+
+/// Coalesces parallel completed-footprint observations before invoking a caller progress sink.
+struct RegionSamplingProgress<'a> {
+    total: usize,
+    completed: AtomicUsize,
+    reported_per_mille: AtomicUsize,
+    callback_lock: Mutex<()>,
+    callback: Option<&'a (dyn Fn(usize, usize) + Sync)>,
+}
+
+impl<'a> RegionSamplingProgress<'a> {
+    /// Creates an observational progress counter over the complete prepared footprint workload.
+    fn new(total: usize, callback: Option<&'a (dyn Fn(usize, usize) + Sync)>) -> Self {
+        Self {
+            total,
+            completed: AtomicUsize::new(0),
+            reported_per_mille: AtomicUsize::new(0),
+            callback_lock: Mutex::new(()),
+            callback,
+        }
+    }
+
+    /// Records one completed footprint and publishes only the first observation of each per-mille.
+    fn complete_cell(&self) {
+        let Some(callback) = self.callback else {
+            return;
+        };
+        let completed = self
+            .completed
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
+            .min(self.total);
+        let per_mille = completed.saturating_mul(1_000) / self.total.max(1);
+        if self
+            .reported_per_mille
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |reported| {
+                (per_mille > reported).then_some(per_mille)
+            })
+            .is_ok()
+            && let Ok(_guard) = self.callback_lock.lock()
+            && self.reported_per_mille.load(Ordering::Relaxed) == per_mille
+        {
+            callback(per_mille, 1_000);
+        }
+    }
 }
 
 /// Flattens one closed region into unclamped decoded-source coordinates.
 ///
-/// The transform intentionally preserves off-source geometry for later exterior clamp-band
-/// integration. Cubics use ordered `t = 0.5` De Casteljau subdivision with a `1/64` pixel
-/// chord tolerance and never append a duplicate closure point.
+/// Canvas edges map to decoded pixel edges: canvas `0..width` becomes source
+/// `-0.5..width-0.5`. The transform preserves off-source geometry for later unit edge-clamped
+/// footprint classification. Cubics use ordered `t = 0.5` De Casteljau subdivision with a
+/// `1/64` pixel chord tolerance and never append a duplicate closure point.
 ///
 /// # Errors
 ///
@@ -580,8 +746,9 @@ fn flatten_region_source_space(
 
 /// Flattens one closed boundary into source space while charging the caller-owned request budget.
 ///
-/// Source dimensions determine the transform; no pixel data is read before exact cell
-/// integration. Off-canvas coordinates remain unclamped so the exterior clamp bands retain area.
+/// Source dimensions determine the pixel-edge transform; no pixel data is read before exact
+/// footprint classification. Off-canvas coordinates remain unclamped so every exterior unit
+/// footprint retains its edge-clamped decoded value.
 ///
 /// # Errors
 ///
@@ -602,8 +769,8 @@ fn flatten_region_source_space_with_work(
     validate_canvas(canvas)?;
     let map = |point: Point2| {
         Point2::new(
-            point.x * f64::from(source_width.saturating_sub(1)) / canvas.width,
-            point.y * f64::from(source_height.saturating_sub(1)) / canvas.height,
+            point.x * f64::from(source_width) / canvas.width - 0.5,
+            point.y * f64::from(source_height) / canvas.height - 0.5,
         )
     };
     let mut output = Vec::new();
@@ -735,7 +902,7 @@ struct PolygonMoments {
     mxy: f64,
 }
 
-/// Tracks request-wide flattened-segment and cell-intersection work without publishing samples.
+/// Tracks request-wide flattened-segment and pixel-footprint work without publishing samples.
 #[allow(dead_code)]
 struct RegionSamplingWork<'a> {
     limits: RegionSamplingLimits,
@@ -792,23 +959,33 @@ impl<'a> RegionSamplingWork<'a> {
                 )
             })
     }
-    /// Charges one candidate cell intersection across every region using this request.
+    /// Charges one candidate pixel-footprint classification across every region using this request.
     fn charge_cell(&self) -> Result<(), SamplingError> {
+        self.charge_cells(1)
+    }
+    /// Charges an already bounded number of candidate source footprints atomically.
+    ///
+    /// The caller computes this count before allocating or iterating a footprint run, so an
+    /// oversized complete untreated region fails through the ordinary request-wide limit without
+    /// exposing partial sampling work.
+    fn charge_cells(&self, count: usize) -> Result<(), SamplingError> {
         self.cell_intersections
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                (current < self.limits.max_cell_intersections).then_some(current + 1)
+                current
+                    .checked_add(count)
+                    .filter(|next| *next <= self.limits.max_cell_intersections)
             })
             .map(|_| ())
             .map_err(|_| {
                 SamplingError::new(
                     "sampling.region_average.limits.cell_intersections",
-                    "cell intersection limit exceeded",
+                    "pixel-footprint classification limit exceeded",
                 )
             })
     }
 }
 
-/// One finite source-space interval paired with its edge-clamped bilinear-cell index.
+/// One finite source-space pixel-footprint partition paired with its edge-clamped decoded pixel.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[allow(dead_code)]
 struct SourceAxisInterval {
@@ -817,7 +994,97 @@ struct SourceAxisInterval {
     cell: u32,
 }
 
-/// Enumerates low exterior, ordered interior cells, then high exterior for one source axis.
+/// Represents a finite run of literal decoded-pixel footprints without allocating one entry per pixel.
+///
+/// Footprints retain integer-centered source coordinates and clamp their decoded-pixel lookup at
+/// the source edge. The run never supplies values itself; callers must visit every interval so
+/// binary inclusion retains the required exterior edge-pixel multiplicity.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SourceAxisPartitions {
+    minimum: f64,
+    maximum: f64,
+    first: i64,
+    last: i64,
+    extent: u32,
+}
+
+impl SourceAxisPartitions {
+    /// Plans all intersected unit pixel footprints for one finite source-space axis.
+    ///
+    /// # Errors
+    ///
+    /// Returns the established region geometry diagnostic for nonfinite, inverted, or unbounded
+    /// axis input. It does not allocate the run or charge evaluation work.
+    fn new(minimum: f64, maximum: f64, extent: u32) -> Result<Self, SamplingError> {
+        if !minimum.is_finite() || !maximum.is_finite() || maximum < minimum || extent == 0 {
+            return Err(SamplingError::new(
+                "sampling.region_average.geometry",
+                "source interval bounds must be finite and ordered",
+            ));
+        }
+        let first_value = (minimum + 0.5).floor();
+        let last_edge = (maximum + 0.5).ceil();
+        let i64_min = -(2_f64.powi(63));
+        let i64_upper_exclusive = 2_f64.powi(63);
+        if !first_value.is_finite()
+            || !last_edge.is_finite()
+            || first_value < i64_min
+            || first_value >= i64_upper_exclusive
+            || last_edge < i64_min
+            || last_edge >= i64_upper_exclusive
+        {
+            return Err(SamplingError::new(
+                "sampling.region_average.limits.cell_intersections",
+                "source footprint range is unsafe",
+            ));
+        }
+        let first = first_value as i64;
+        let last = (last_edge as i64).checked_sub(1).ok_or_else(|| {
+            SamplingError::new(
+                "sampling.region_average.limits.cell_intersections",
+                "source footprint range is unsafe",
+            )
+        })?;
+        Ok(Self {
+            minimum,
+            maximum,
+            first,
+            last,
+            extent,
+        })
+    }
+
+    /// Returns the exact finite count of candidate literal footprints without allocation.
+    fn count(self) -> Result<usize, SamplingError> {
+        let count = self
+            .last
+            .checked_sub(self.first)
+            .and_then(|value| value.checked_add(1))
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| {
+                SamplingError::new(
+                    "sampling.region_average.limits.cell_intersections",
+                    "source footprint range is unsafe",
+                )
+            })?;
+        Ok(count)
+    }
+
+    /// Iterates exact clipped unit footprints in ascending source-coordinate order.
+    fn iter(self) -> impl Iterator<Item = SourceAxisInterval> {
+        (self.first..=self.last).map(move |index| SourceAxisInterval {
+            start: self.minimum.max(index as f64 - 0.5),
+            end: self.maximum.min(index as f64 + 0.5),
+            cell: index.clamp(0, i64::from(self.extent - 1)) as u32,
+        })
+    }
+}
+
+/// Enumerates low exterior, ordered decoded-pixel footprints, then high exterior for one source axis.
+///
+/// Source coordinates identify pixel centers, so each literal pixel footprint spans
+/// `center - 0.5 .. center + 0.5`. Exterior partitions retain one unit footprint per source
+/// coordinate and clamp each decoded lookup to the nearest edge pixel.
 ///
 /// # Errors
 ///
@@ -828,55 +1095,15 @@ fn source_axis_intervals(
     maximum: f64,
     extent: u32,
 ) -> Result<Vec<SourceAxisInterval>, SamplingError> {
-    if !minimum.is_finite() || !maximum.is_finite() || maximum < minimum || extent == 0 {
-        return Err(SamplingError::new(
-            "sampling.region_average.geometry",
-            "source interval bounds must be finite and ordered",
-        ));
-    }
+    let partitions = SourceAxisPartitions::new(minimum, maximum, extent)?;
     let mut result = Vec::new();
-    result.try_reserve(3).map_err(|_| {
+    result.try_reserve(partitions.count()?).map_err(|_| {
         SamplingError::new(
             "sampling.region_average.allocation.partition",
             "source interval allocation failed",
         )
     })?;
-    if extent == 1 {
-        result.push(SourceAxisInterval {
-            start: minimum,
-            end: maximum,
-            cell: 0,
-        });
-        return Ok(result);
-    }
-    let last = f64::from(extent - 1);
-    if minimum < 0.0 {
-        result.push(SourceAxisInterval {
-            start: minimum,
-            end: maximum.min(0.0),
-            cell: 0,
-        });
-    }
-    let first = minimum.max(0.0).floor() as u32;
-    let end = maximum.min(last).ceil() as u32;
-    for cell in first..end.min(extent - 1) {
-        let start = minimum.max(f64::from(cell));
-        let finish = maximum.min(f64::from(cell) + 1.0);
-        if finish > start {
-            result.push(SourceAxisInterval {
-                start,
-                end: finish,
-                cell,
-            });
-        }
-    }
-    if maximum > last {
-        result.push(SourceAxisInterval {
-            start: minimum.max(last),
-            end: maximum,
-            cell: extent - 2,
-        });
-    }
+    result.extend(partitions.iter());
     Ok(result)
 }
 
@@ -901,86 +1128,6 @@ fn polygon_bounds(points: &[Point2]) -> Result<(Point2, Point2), SamplingError> 
         maximum.y = maximum.y.max(point.y);
     }
     Ok((minimum, maximum))
-}
-
-/// Computes scalar and associated RGBA bilinear coefficients for one partition rectangle.
-///
-/// Coefficients operate on local coordinates relative to the selected source cell. Exterior
-/// bands collapse the corresponding coordinate to the required edge-clamped zero or one value.
-fn region_cell_values(
-    field: &SourceField,
-    mapping: SourceMapping,
-    x: SourceAxisInterval,
-    y: SourceAxisInterval,
-) -> [[f64; 4]; 5] {
-    let x1 = (x.cell + 1).min(field.identity.width - 1);
-    let y1 = (y.cell + 1).min(field.identity.height - 1);
-    let pixels = [
-        field.pixel(x.cell, y.cell).expect("validated source pixel"),
-        field.pixel(x1, y.cell).expect("validated source pixel"),
-        field.pixel(x.cell, y1).expect("validated source pixel"),
-        field.pixel(x1, y1).expect("validated source pixel"),
-    ];
-    let mut result = [[0.0; 4]; 5];
-    let scalar = pixels.map(|pixel| mapped_response(pixel, mapping));
-    result[0] = bilinear_coefficients(scalar, x, y, field.identity.width, field.identity.height);
-    for channel in 0..4 {
-        result[channel + 1] = bilinear_coefficients(
-            pixels.map(|pixel| associated_linear(pixel)[channel]),
-            x,
-            y,
-            field.identity.width,
-            field.identity.height,
-        );
-    }
-    result
-}
-
-/// Converts four grid-corner values into local bilinear coefficients with edge-clamp collapse.
-fn bilinear_coefficients(
-    values: [f64; 4],
-    x: SourceAxisInterval,
-    y: SourceAxisInterval,
-    width: u32,
-    height: u32,
-) -> [f64; 4] {
-    let x_mode = interval_axis_mode(x, width);
-    let y_mode = interval_axis_mode(y, height);
-    match (x_mode, y_mode) {
-        (AxisMode::Variable, AxisMode::Variable) => [
-            values[0],
-            values[1] - values[0],
-            values[2] - values[0],
-            values[3] - values[1] - values[2] + values[0],
-        ],
-        (AxisMode::Zero, AxisMode::Variable) => [values[0], 0.0, values[2] - values[0], 0.0],
-        (AxisMode::One, AxisMode::Variable) => [values[1], 0.0, values[3] - values[1], 0.0],
-        (AxisMode::Variable, AxisMode::Zero) => [values[0], values[1] - values[0], 0.0, 0.0],
-        (AxisMode::Variable, AxisMode::One) => [values[2], values[3] - values[2], 0.0, 0.0],
-        (AxisMode::Zero, AxisMode::Zero) => [values[0], 0.0, 0.0, 0.0],
-        (AxisMode::One, AxisMode::Zero) => [values[1], 0.0, 0.0, 0.0],
-        (AxisMode::Zero, AxisMode::One) => [values[2], 0.0, 0.0, 0.0],
-        (AxisMode::One, AxisMode::One) => [values[3], 0.0, 0.0, 0.0],
-    }
-}
-
-/// Distinguishes a variable interior source coordinate from a clamped exterior coordinate.
-fn interval_axis_mode(interval: SourceAxisInterval, extent: u32) -> AxisMode {
-    if extent <= 1 || interval.end <= 0.0 {
-        AxisMode::Zero
-    } else if interval.start >= f64::from(extent - 1) {
-        AxisMode::One
-    } else {
-        AxisMode::Variable
-    }
-}
-
-/// Names the coordinate behavior for one source partition interval.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AxisMode {
-    Zero,
-    Variable,
-    One,
 }
 
 /// Polls the shared cancellation callback and uses the canonical evaluation diagnostic.
@@ -1009,7 +1156,51 @@ fn clip_polygon_to_rect_cancellable(
     top: f64,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<Point2>, SamplingError> {
-    let mut output = polygon.to_vec();
+    let mut output = Vec::new();
+    let mut scratch = Vec::new();
+    clip_polygon_to_rect_into_cancellable(
+        polygon,
+        left,
+        right,
+        bottom,
+        top,
+        cancelled,
+        &mut output,
+        &mut scratch,
+    )?;
+    Ok(output)
+}
+
+/// Clips one polygon into caller-owned reusable buffers in fixed edge order.
+///
+/// Reusing the two buffers avoids allocating and freeing several polygons for every source-pixel footprint
+/// in a large AreaAverage request. The accepted vertices and moment calculations remain identical
+/// to [`clip_polygon_to_rect_cancellable`].
+///
+/// # Errors
+///
+/// Returns cancellation or a fallible clip-buffer allocation failure without exposing a partial
+/// polygon as complete.
+#[allow(clippy::too_many_arguments)]
+fn clip_polygon_to_rect_into_cancellable(
+    polygon: &[Point2],
+    left: f64,
+    right: f64,
+    bottom: f64,
+    top: f64,
+    cancelled: &dyn Fn() -> bool,
+    output: &mut Vec<Point2>,
+    scratch: &mut Vec<Point2>,
+) -> Result<(), SamplingError> {
+    output.clear();
+    scratch.clear();
+    output.try_reserve(polygon.len()).map_err(|_| {
+        SamplingError::new(
+            "sampling.region_average.allocation.clip",
+            "region clip-buffer allocation failed",
+        )
+    })?;
+    output.extend_from_slice(polygon);
     for edge in [
         ClipEdge::Left(left),
         ClipEdge::Right(right),
@@ -1017,34 +1208,34 @@ fn clip_polygon_to_rect_cancellable(
         ClipEdge::Top(top),
     ] {
         poll_region(cancelled)?;
-        let input = std::mem::take(&mut output);
-        if input.is_empty() {
-            return Ok(Vec::new());
+        if output.is_empty() {
+            return Ok(());
         }
-        for (start, end) in input
+        scratch.clear();
+        for (start, end) in output
             .iter()
-            .zip(input.iter().cycle().skip(1))
-            .take(input.len())
+            .zip(output.iter().cycle().skip(1))
+            .take(output.len())
         {
             poll_region(cancelled)?;
             let start_inside = edge.contains(*start);
             let end_inside = edge.contains(*end);
             if start_inside {
-                push_distinct(&mut output, *start);
+                push_distinct_fallible(scratch, *start)?;
             }
             if start_inside != end_inside {
-                push_distinct(&mut output, edge.intersection(*start, *end));
+                push_distinct_fallible(scratch, edge.intersection(*start, *end))?;
             }
         }
-        if output.len() > 1 && output.first() == output.last() {
-            output.pop();
+        if scratch.len() > 1 && scratch.first() == scratch.last() {
+            scratch.pop();
         }
+        std::mem::swap(output, scratch);
     }
-    if output.len() < 3 || polygon_moments(&output).area.abs() <= f64::EPSILON {
-        Ok(Vec::new())
-    } else {
-        Ok(output)
+    if output.len() < 3 || polygon_signed_area(output).abs() <= f64::EPSILON {
+        output.clear();
     }
+    Ok(())
 }
 
 /// Names one Sutherland-Hodgman rectangle half-plane in deterministic processing order.
@@ -1092,6 +1283,24 @@ fn push_distinct(points: &mut Vec<Point2>, point: Point2) {
     }
 }
 
+/// Appends one distinct clip vertex through a fallible reusable-buffer growth boundary.
+///
+/// # Errors
+///
+/// Returns a stable allocation diagnostic without changing an already complete prior result.
+fn push_distinct_fallible(points: &mut Vec<Point2>, point: Point2) -> Result<(), SamplingError> {
+    if points.last().copied() != Some(point) {
+        points.try_reserve(1).map_err(|_| {
+            SamplingError::new(
+                "sampling.region_average.allocation.clip",
+                "region clip-buffer allocation failed",
+            )
+        })?;
+        points.push(point);
+    }
+    Ok(())
+}
+
 /// Computes signed area plus raw first and mixed moments from ordered polygon edges.
 #[allow(dead_code)]
 fn polygon_moments(points: &[Point2]) -> PolygonMoments {
@@ -1120,6 +1329,20 @@ fn polygon_moments(points: &[Point2]) -> PolygonMoments {
     }
 }
 
+/// Computes only the signed polygon area needed by footprint classification and sliver rejection.
+///
+/// This hot path intentionally avoids first and mixed moment work because literal AreaAverage
+/// selection depends solely on exact overlap area. Empty and degenerate input returns zero.
+fn polygon_signed_area(points: &[Point2]) -> f64 {
+    points
+        .iter()
+        .zip(points.iter().cycle().skip(1))
+        .take(points.len())
+        .map(|(left, right)| left.x * right.y - right.x * left.y)
+        .sum::<f64>()
+        / 2.0
+}
+
 /// Translates raw polygon moments to a bilinear source cell-local origin.
 #[allow(dead_code)]
 fn translate_polygon_moments(moments: PolygonMoments, origin: Point2) -> PolygonMoments {
@@ -1143,13 +1366,476 @@ pub fn decode_source(bytes: &[u8], hint: SourceFormatHint) -> Result<SourceField
     match hint {
         SourceFormatHint::Png => decode_png(bytes),
         SourceFormatHint::Svg => decode_svg(bytes),
+        SourceFormatHint::Jpeg => decode_raster(bytes, ImageFormat::Jpeg, SourceFormat::Jpeg),
+        SourceFormatHint::Webp => decode_raster(bytes, ImageFormat::WebP, SourceFormat::Webp),
+        SourceFormatHint::Bmp => decode_raster(bytes, ImageFormat::Bmp, SourceFormat::Bmp),
+        SourceFormatHint::Tiff => decode_raster(bytes, ImageFormat::Tiff, SourceFormat::Tiff),
+        SourceFormatHint::OpenExr => decode_openexr(bytes),
+        SourceFormatHint::Avif => decode_avif(bytes),
         SourceFormatHint::Unsupported => Err(SamplingError::new(
             "source.format",
-            "only PNG and SVG source formats are supported",
+            "unsupported source format",
         )),
     }
 }
 
+/// Decodes a supported still source and encodes an aspect-preserving PNG proxy with a bounded long edge.
+///
+/// Alpha is retained in every encoded pixel, while RGB is deterministically quantized from the
+/// sampling field's straight normalized values. Downsampling writes directly into the bounded
+/// proxy buffer and never materializes a second full-resolution RGBA image. `maximum_long_edge`
+/// must be nonzero. This helper owns decoding and resampling policy only; source IDs, document
+/// authority, evaluation requests, and cache policy remain with the caller.
+///
+/// # Errors
+///
+/// Returns the established decoder diagnostics, a nonzero-bound diagnostic, or a PNG encoding
+/// diagnostic. It never reads a path, mutates source bytes, or silently falls back to full size.
+pub fn reduced_preview_png(
+    bytes: &[u8],
+    hint: SourceFormatHint,
+    maximum_long_edge: u32,
+) -> Result<ReducedPreviewSource, SamplingError> {
+    if maximum_long_edge == 0 {
+        return Err(SamplingError::new(
+            "preview.proxy",
+            "preview proxy long edge must be greater than zero",
+        ));
+    }
+    let source = decode_source(bytes, hint)?;
+    let source_width = source.identity.width;
+    let source_height = source.identity.height;
+    let source_long_edge = source_width.max(source_height);
+    let (width, height) = if source_long_edge <= maximum_long_edge {
+        (source_width, source_height)
+    } else if source_width >= source_height {
+        (
+            maximum_long_edge,
+            rounded_scaled_dimension(source_height, maximum_long_edge, source_width),
+        )
+    } else {
+        (
+            rounded_scaled_dimension(source_width, maximum_long_edge, source_height),
+            maximum_long_edge,
+        )
+    };
+    let proxy = bounded_preview_rgba(&source, width, height)?;
+    let mut png_bytes = Vec::new();
+    PngEncoder::new(&mut png_bytes)
+        .write_image(&proxy, width, height, ColorType::Rgba8.into())
+        .map_err(|_| SamplingError::new("preview.proxy", "could not encode preview proxy PNG"))?;
+    Ok(ReducedPreviewSource {
+        png_bytes,
+        width,
+        height,
+    })
+}
+
+/// Downsamples one decoded field directly into its bounded private-preview RGBA byte buffer.
+///
+/// Each proxy pixel box-averages overlapping decoded source-pixel footprints in straight RGBA.
+/// The output allocation is exactly `width * height * 4`; the helper never creates another
+/// full-resolution image beside the authoritative decoded [`SourceField`].
+///
+/// # Errors
+///
+/// Returns a stable proxy diagnostic when source storage is inconsistent or the bounded output
+/// byte count cannot be represented or reserved. It does not mutate the source field.
+fn bounded_preview_rgba(
+    source: &SourceField,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, SamplingError> {
+    let source_width = source.identity.width;
+    let source_height = source.identity.height;
+    let source_pixels = usize::try_from(source_width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(source_height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or_else(|| SamplingError::new("preview.proxy", "source dimensions are unsafe"))?;
+    if source.pixels.len() != source_pixels || width == 0 || height == 0 {
+        return Err(SamplingError::new(
+            "preview.proxy",
+            "preview proxy dimensions or decoded source pixels are invalid",
+        ));
+    }
+    let output_bytes = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| {
+            SamplingError::new("preview.proxy", "preview proxy dimensions are unsafe")
+        })?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(output_bytes)
+        .map_err(|_| SamplingError::new("preview.proxy", "preview proxy byte allocation failed"))?;
+    for destination_y in 0..height {
+        let top = f64::from(destination_y) * f64::from(source_height) / f64::from(height);
+        let bottom = f64::from(destination_y + 1) * f64::from(source_height) / f64::from(height);
+        let first_y = top.floor() as u32;
+        let last_y = bottom.ceil() as u32;
+        for destination_x in 0..width {
+            let left = f64::from(destination_x) * f64::from(source_width) / f64::from(width);
+            let right = f64::from(destination_x + 1) * f64::from(source_width) / f64::from(width);
+            let first_x = left.floor() as u32;
+            let last_x = right.ceil() as u32;
+            let mut totals = [0.0; 4];
+            for source_y in first_y..last_y {
+                let y_coverage =
+                    (bottom.min(f64::from(source_y + 1)) - top.max(f64::from(source_y))).max(0.0);
+                for source_x in first_x..last_x {
+                    let x_coverage = (right.min(f64::from(source_x + 1))
+                        - left.max(f64::from(source_x)))
+                    .max(0.0);
+                    let weight = x_coverage * y_coverage;
+                    let pixel = source.pixels
+                        [source_y as usize * source_width as usize + source_x as usize];
+                    totals[0] += pixel.red * weight;
+                    totals[1] += pixel.green * weight;
+                    totals[2] += pixel.blue * weight;
+                    totals[3] += pixel.alpha * weight;
+                }
+            }
+            let area = (right - left) * (bottom - top);
+            output.extend(totals.map(|value| normalized_preview_byte(value / area)));
+        }
+    }
+    Ok(output)
+}
+
+/// Rounds one positive aspect-preserving dimension without allowing a zero-sized proxy.
+///
+/// The integer calculation avoids platform-dependent floating-point rounding and is used only
+/// after validated nonzero source dimensions and a nonzero requested long edge.
+fn rounded_scaled_dimension(value: u32, maximum_long_edge: u32, source_long_edge: u32) -> u32 {
+    let numerator = u64::from(value) * u64::from(maximum_long_edge);
+    let rounded =
+        numerator.saturating_add(u64::from(source_long_edge) / 2) / u64::from(source_long_edge);
+    u32::try_from(rounded.max(1)).expect("source preview proxy dimension fits u32")
+}
+
+/// Converts one finite normalized sampling component to deterministic 8-bit PNG storage.
+///
+/// Decoder-owned source fields guarantee finite normalized values, but this defensive clamp keeps
+/// an invalid internal value from escaping the private preview boundary.
+fn normalized_preview_byte(value: f64) -> u8 {
+    if !value.is_finite() {
+        return 0;
+    }
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// Decodes one finite still raster through the explicitly selected image codec.
+///
+/// The hint is authoritative: signature mismatches and malformed content fail rather than being
+/// guessed. Decoded samples remain straight normalized RGBA; OpenEXR values are deterministically
+/// clamped into that finite range without tone mapping or color-management policy.
+fn decode_raster(
+    bytes: &[u8],
+    format: ImageFormat,
+    source_format: SourceFormat,
+) -> Result<SourceField, SamplingError> {
+    let signature_matches = if matches!(format, ImageFormat::Tiff) {
+        matches!(
+            bytes.get(..4),
+            Some(b"II*\0" | b"MM\0*" | b"II+\0" | b"MM\0+")
+        )
+    } else {
+        image::guess_format(bytes).ok() == Some(format)
+    };
+    if !signature_matches {
+        return Err(SamplingError::new(
+            "source.format",
+            "bytes do not match raster format hint",
+        ));
+    }
+    if matches!(format, ImageFormat::WebP) && webp_is_animated(bytes) {
+        return Err(SamplingError::new(
+            "source.sequence",
+            "animated WebP sources are not supported",
+        ));
+    }
+    if matches!(format, ImageFormat::Tiff) && tiff_has_multiple_pages(bytes)? {
+        return Err(SamplingError::new(
+            "source.sequence",
+            "multipage TIFF sources are not supported",
+        ));
+    }
+    let reader = ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|_| SamplingError::new("source.decode", "malformed raster source"))?;
+    validate_dimensions(width, height)?;
+    let image = ImageReader::with_format(std::io::Cursor::new(bytes), format)
+        .decode()
+        .map_err(|_| SamplingError::new("source.decode", "malformed raster source"))?
+        .to_rgba8();
+    let decoded_pixel_hash = sha256(image.as_raw());
+    let pixels = image
+        .pixels()
+        .map(|pixel| SourcePixel {
+            red: f64::from(pixel[0]) / 255.0,
+            green: f64::from(pixel[1]) / 255.0,
+            blue: f64::from(pixel[2]) / 255.0,
+            alpha: f64::from(pixel[3]) / 255.0,
+        })
+        .collect();
+    Ok(SourceField {
+        identity: SourceIdentity {
+            format: source_format,
+            width,
+            height,
+            content_hash: sha256(bytes),
+            decoded_pixel_hash,
+            svg_text: None,
+        },
+        pixels,
+    })
+}
+
+/// Decodes a non-deep OpenEXR source as linear floating-point RGBA without tone mapping.
+///
+/// Finite channels are clamped to normalized `0.0..=1.0`; non-finite channels become zero so
+/// source sampling remains finite. The decoded identity hashes the canonical f64 bit stream rather
+/// than a lossy 8-bit conversion.
+fn decode_openexr(bytes: &[u8]) -> Result<SourceField, SamplingError> {
+    if image::guess_format(bytes).ok() != Some(ImageFormat::OpenExr) {
+        return Err(SamplingError::new(
+            "source.format",
+            "bytes do not match OpenEXR hint",
+        ));
+    }
+    let reader = ImageReader::with_format(std::io::Cursor::new(bytes), ImageFormat::OpenExr);
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|_| SamplingError::new("source.decode", "malformed OpenEXR source"))?;
+    validate_dimensions(width, height)?;
+    let image = ImageReader::with_format(std::io::Cursor::new(bytes), ImageFormat::OpenExr)
+        .decode()
+        .map_err(|_| SamplingError::new("source.decode", "malformed OpenEXR source"))?
+        .to_rgba32f();
+    let pixels: Vec<_> = image
+        .pixels()
+        .map(|pixel| SourcePixel {
+            red: normalized_exr_channel(pixel[0]),
+            green: normalized_exr_channel(pixel[1]),
+            blue: normalized_exr_channel(pixel[2]),
+            alpha: normalized_exr_channel(pixel[3]),
+        })
+        .collect();
+    let mut canonical = Vec::with_capacity(pixels.len() * 32);
+    for pixel in &pixels {
+        for channel in [pixel.red, pixel.green, pixel.blue, pixel.alpha] {
+            canonical.extend(channel.to_bits().to_le_bytes());
+        }
+    }
+    Ok(SourceField {
+        identity: SourceIdentity {
+            format: SourceFormat::OpenExr,
+            width,
+            height,
+            content_hash: sha256(bytes),
+            decoded_pixel_hash: sha256(&canonical),
+            svg_text: None,
+        },
+        pixels,
+    })
+}
+
+/// Maps one OpenEXR linear sample into finite normalized sampling authority without tone mapping.
+const fn normalized_exr_channel(value: f32) -> f64 {
+    if !value.is_finite() || value <= 0.0 {
+        0.0
+    } else if value >= 1.0 {
+        1.0
+    } else {
+        value as f64
+    }
+}
+
+/// Rejects AVIF sequence containers before the still-image decoder selects a primary item.
+fn decode_avif(bytes: &[u8]) -> Result<SourceField, SamplingError> {
+    if image::guess_format(bytes).ok() != Some(ImageFormat::Avif) {
+        return Err(SamplingError::new(
+            "source.format",
+            "bytes do not match AVIF hint",
+        ));
+    }
+    if avif_is_animated(bytes) {
+        return Err(SamplingError::new(
+            "source.sequence",
+            "animated AVIF sources are not supported",
+        ));
+    }
+    decode_raster(bytes, ImageFormat::Avif, SourceFormat::Avif)
+}
+
+/// Detects animated WebP RIFF chunks without accepting a first frame implicitly.
+fn webp_is_animated(bytes: &[u8]) -> bool {
+    if bytes.get(..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WEBP") {
+        return false;
+    }
+    let mut offset = 12usize;
+    while let Some(header) = bytes.get(offset..offset.saturating_add(8)) {
+        let kind = &header[..4];
+        if kind == b"ANIM" || kind == b"ANMF" {
+            return true;
+        }
+        let size = u32::from_le_bytes(header[4..8].try_into().expect("four WebP size bytes"));
+        let Ok(size) = usize::try_from(size) else {
+            return false;
+        };
+        let Some(next) = offset
+            .checked_add(8)
+            .and_then(|value| value.checked_add(size))
+            .and_then(|value| value.checked_add(size % 2))
+        else {
+            return false;
+        };
+        if next <= offset || next > bytes.len() {
+            return false;
+        }
+        offset = next;
+    }
+    false
+}
+
+/// Detects an AVIF movie track, which denotes a sequence rather than a single AVIF image item.
+fn avif_is_animated(bytes: &[u8]) -> bool {
+    bmff_boxes(bytes).any(|box_| {
+        box_.kind == *b"moov" && bmff_boxes(box_.payload).any(|child| child.kind == *b"trak")
+    })
+}
+
+/// Describes one bounds-checked ISO base media file box payload.
+struct BmffBox<'a> {
+    kind: [u8; 4],
+    payload: &'a [u8],
+}
+
+/// Iterates complete ISO base media file boxes and stops at the first malformed boundary.
+fn bmff_boxes(bytes: &[u8]) -> impl Iterator<Item = BmffBox<'_>> {
+    let mut offset = 0usize;
+    std::iter::from_fn(move || {
+        let header = bytes.get(offset..offset.checked_add(8)?)?;
+        let size32 = u32::from_be_bytes(header[..4].try_into().expect("four BMFF size bytes"));
+        let kind = header[4..8].try_into().expect("four BMFF type bytes");
+        let (header_len, size) = match size32 {
+            0 => (8usize, bytes.len().checked_sub(offset)?),
+            1 => {
+                let extended = bytes.get(offset.checked_add(8)?..offset.checked_add(16)?)?;
+                let size = u64::from_be_bytes(
+                    extended.try_into().expect("eight extended BMFF size bytes"),
+                );
+                (16usize, usize::try_from(size).ok()?)
+            }
+            size => (8usize, usize::try_from(size).ok()?),
+        };
+        if size < header_len {
+            return None;
+        }
+        let end = offset.checked_add(size)?;
+        let payload_start = offset.checked_add(header_len)?;
+        let payload = bytes.get(payload_start..end)?;
+        offset = end;
+        Some(BmffBox { kind, payload })
+    })
+}
+
+/// Reports whether a classic TIFF or BigTIFF has a subsequent IFD page.
+///
+/// Malformed offset widths, directory bounds, and arithmetic fail explicitly
+/// before the image decoder can select an implicit first page.
+fn tiff_has_multiple_pages(bytes: &[u8]) -> Result<bool, SamplingError> {
+    if bytes.len() < 8 {
+        return Err(SamplingError::new("source.decode", "malformed TIFF source"));
+    }
+    let little_endian = match &bytes[..2] {
+        b"II" => true,
+        b"MM" => false,
+        _ => return Err(SamplingError::new("source.decode", "malformed TIFF source")),
+    };
+    let read_u16 = |offset: usize| -> Option<u16> {
+        bytes.get(offset..offset + 2).map(|value| {
+            if little_endian {
+                u16::from_le_bytes(value.try_into().expect("two TIFF bytes"))
+            } else {
+                u16::from_be_bytes(value.try_into().expect("two TIFF bytes"))
+            }
+        })
+    };
+    let read_u32 = |offset: usize| -> Option<u32> {
+        bytes.get(offset..offset + 4).map(|value| {
+            if little_endian {
+                u32::from_le_bytes(value.try_into().expect("four TIFF bytes"))
+            } else {
+                u32::from_be_bytes(value.try_into().expect("four TIFF bytes"))
+            }
+        })
+    };
+    let read_u64 = |offset: usize| -> Option<u64> {
+        bytes.get(offset..offset + 8).map(|value| {
+            if little_endian {
+                u64::from_le_bytes(value.try_into().expect("eight TIFF bytes"))
+            } else {
+                u64::from_be_bytes(value.try_into().expect("eight TIFF bytes"))
+            }
+        })
+    };
+    match read_u16(2) {
+        Some(42) => {
+            let ifd = usize::try_from(
+                read_u32(4)
+                    .ok_or_else(|| SamplingError::new("source.decode", "malformed TIFF source"))?,
+            )
+            .map_err(|_| SamplingError::new("source.decode", "malformed TIFF source"))?;
+            let entries = usize::from(
+                read_u16(ifd)
+                    .ok_or_else(|| SamplingError::new("source.decode", "malformed TIFF source"))?,
+            );
+            let next_offset = ifd
+                .checked_add(2)
+                .and_then(|value| value.checked_add(entries.checked_mul(12)?))
+                .ok_or_else(|| SamplingError::new("source.decode", "malformed TIFF source"))?;
+            Ok(read_u32(next_offset)
+                .ok_or_else(|| SamplingError::new("source.decode", "malformed TIFF source"))?
+                != 0)
+        }
+        Some(43) if read_u16(4) == Some(8) && read_u16(6) == Some(0) => {
+            let ifd =
+                usize::try_from(read_u64(8).ok_or_else(|| {
+                    SamplingError::new("source.decode", "malformed BigTIFF source")
+                })?)
+                .map_err(|_| SamplingError::new("source.decode", "malformed BigTIFF source"))?;
+            let entries =
+                usize::try_from(read_u64(ifd).ok_or_else(|| {
+                    SamplingError::new("source.decode", "malformed BigTIFF source")
+                })?)
+                .map_err(|_| SamplingError::new("source.decode", "malformed BigTIFF source"))?;
+            let next_offset = ifd
+                .checked_add(8)
+                .and_then(|value| value.checked_add(entries.checked_mul(20)?))
+                .ok_or_else(|| SamplingError::new("source.decode", "malformed BigTIFF source"))?;
+            Ok(read_u64(next_offset)
+                .ok_or_else(|| SamplingError::new("source.decode", "malformed BigTIFF source"))?
+                != 0)
+        }
+        _ => Err(SamplingError::new(
+            "source.decode",
+            "unsupported TIFF container",
+        )),
+    }
+}
+
+/// Decodes PNG with its historical explicit signature check retained for stable diagnostics.
 fn decode_png(bytes: &[u8]) -> Result<SourceField, SamplingError> {
     const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
     if !bytes.starts_with(PNG_SIGNATURE) {
@@ -1557,6 +2243,198 @@ mod tests {
                 .unwrap_err()
                 .path(),
             "source.dimensions"
+        );
+    }
+
+    /// Exercises each locally encodable Stage 21A still codec through the shared decoder boundary.
+    #[test]
+    fn supported_still_raster_codecs_decode_as_finite_rgba_fields() {
+        let source = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            2,
+            3,
+            image::Rgba([32, 96, 192, 128]),
+        ));
+        for (format, hint, expected) in [
+            (
+                image::ImageFormat::Jpeg,
+                SourceFormatHint::Jpeg,
+                SourceFormat::Jpeg,
+            ),
+            (
+                image::ImageFormat::WebP,
+                SourceFormatHint::Webp,
+                SourceFormat::Webp,
+            ),
+            (
+                image::ImageFormat::Bmp,
+                SourceFormatHint::Bmp,
+                SourceFormat::Bmp,
+            ),
+            (
+                image::ImageFormat::Tiff,
+                SourceFormatHint::Tiff,
+                SourceFormat::Tiff,
+            ),
+        ] {
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            source
+                .write_to(&mut bytes, format)
+                .expect("test codec encodes");
+            let decoded = decode_source(bytes.get_ref(), hint).expect("test codec decodes");
+            assert_eq!(decoded.identity().format, expected);
+            assert_eq!(
+                (decoded.identity().width, decoded.identity().height),
+                (2, 3)
+            );
+            assert!(decoded.pixels.iter().all(|pixel| pixel.red.is_finite()
+                && pixel.green.is_finite()
+                && pixel.blue.is_finite()
+                && pixel.alpha.is_finite()));
+            if expected == SourceFormat::Jpeg {
+                assert!(decoded.pixels.iter().all(|pixel| pixel.alpha == 1.0));
+            }
+            assert_eq!(
+                decode_source(bytes.get_ref(), SourceFormatHint::Png)
+                    .expect_err("explicit mismatched hint rejects")
+                    .path(),
+                "source.format"
+            );
+            assert!(
+                decode_source(&bytes.get_ref()[..bytes.get_ref().len() / 2], hint).is_err(),
+                "truncated {expected:?} input rejects"
+            );
+        }
+    }
+
+    /// Decodes a deterministic single-image AVIF witness through the native dav1d boundary.
+    #[test]
+    fn avif_still_image_decodes_without_sequence_fallback() {
+        const STILL_AVIF: &[u8] = &[
+            0, 0, 0, 32, 102, 116, 121, 112, 97, 118, 105, 102, 0, 0, 0, 0, 97, 118, 105, 102, 109,
+            105, 102, 49, 109, 105, 97, 102, 77, 65, 49, 65, 0, 0, 0, 249, 109, 101, 116, 97, 0, 0,
+            0, 0, 0, 0, 0, 47, 104, 100, 108, 114, 0, 0, 0, 0, 0, 0, 0, 0, 112, 105, 99, 116, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 105, 99, 116, 117, 114, 101, 72, 97, 110, 100, 108,
+            101, 114, 0, 0, 0, 0, 14, 112, 105, 116, 109, 0, 0, 0, 0, 0, 1, 0, 0, 0, 30, 105, 108,
+            111, 99, 0, 0, 0, 0, 68, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 33, 0, 0, 0, 27, 0, 0, 0,
+            40, 105, 105, 110, 102, 0, 0, 0, 0, 0, 1, 0, 0, 0, 26, 105, 110, 102, 101, 2, 0, 0, 0,
+            0, 1, 0, 0, 97, 118, 48, 49, 67, 111, 108, 111, 114, 0, 0, 0, 0, 106, 105, 112, 114,
+            112, 0, 0, 0, 75, 105, 112, 99, 111, 0, 0, 0, 20, 105, 115, 112, 101, 0, 0, 0, 0, 0, 0,
+            0, 2, 0, 0, 0, 4, 0, 0, 0, 16, 112, 105, 120, 105, 0, 0, 0, 0, 3, 8, 8, 8, 0, 0, 0, 12,
+            97, 118, 49, 67, 129, 32, 0, 0, 0, 0, 0, 19, 99, 111, 108, 114, 110, 99, 108, 120, 0,
+            2, 0, 2, 0, 2, 0, 0, 0, 0, 23, 105, 112, 109, 97, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 4, 1,
+            2, 131, 4, 0, 0, 0, 35, 109, 100, 97, 116, 10, 5, 56, 0, 123, 96, 128, 50, 18, 24, 0,
+            0, 0, 80, 0, 0, 0, 0, 176, 19, 142, 113, 219, 133, 218, 34, 128,
+        ];
+        let decoded = decode_source(STILL_AVIF, SourceFormatHint::Avif)
+            .expect("single-image AVIF decodes through dav1d");
+        assert_eq!(decoded.identity().format, SourceFormat::Avif);
+        assert_eq!(
+            (decoded.identity().width, decoded.identity().height),
+            (2, 4)
+        );
+        assert!(decoded.pixels.iter().all(|pixel| pixel.red.is_finite()
+            && pixel.green.is_finite()
+            && pixel.blue.is_finite()
+            && pixel.alpha == 1.0));
+        assert_eq!(
+            decode_source(STILL_AVIF, SourceFormatHint::Png)
+                .expect_err("AVIF bytes cannot satisfy a PNG hint")
+                .path(),
+            "source.format"
+        );
+        assert!(
+            decode_source(&STILL_AVIF[..STILL_AVIF.len() / 2], SourceFormatHint::Avif).is_err()
+        );
+    }
+
+    /// Preserves finite OpenEXR linear samples beyond 8-bit precision and clamps HDR values.
+    #[test]
+    fn openexr_decoding_uses_linear_float_samples_without_tone_mapping() {
+        let source = image::DynamicImage::ImageRgba32F(image::Rgba32FImage::from_pixel(
+            1,
+            1,
+            image::Rgba([0.125, 1.5, -0.5, 0.75]),
+        ));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        source
+            .write_to(&mut bytes, image::ImageFormat::OpenExr)
+            .expect("test OpenEXR encodes");
+        let decoded = decode_source(bytes.get_ref(), SourceFormatHint::OpenExr)
+            .expect("test OpenEXR decodes");
+        let pixel = decoded.pixels[0];
+        assert!((pixel.red - 0.125).abs() < 1e-12);
+        assert_eq!(pixel.green, 1.0);
+        assert_eq!(pixel.blue, 0.0);
+        assert!((pixel.alpha - 0.75).abs() < 1e-12);
+        assert_eq!(
+            decode_source(bytes.get_ref(), SourceFormatHint::Jpeg)
+                .expect_err("OpenEXR bytes cannot satisfy a JPEG hint")
+                .path(),
+            "source.format"
+        );
+        assert!(
+            decode_source(
+                &bytes.get_ref()[..bytes.get_ref().len() / 2],
+                SourceFormatHint::OpenExr,
+            )
+            .is_err()
+        );
+    }
+
+    /// Rejects sequence containers before an image decoder can silently choose a primary frame.
+    #[test]
+    fn sequence_container_detection_rejects_webp_avif_and_multipage_tiff() {
+        let animated_webp = b"RIFF\x0c\0\0\0WEBPANIM\0\0\0\0";
+        assert!(webp_is_animated(animated_webp));
+        assert_eq!(
+            decode_source(animated_webp, SourceFormatHint::Webp)
+                .expect_err("animated WebP rejects before frame decoding")
+                .path(),
+            "source.sequence"
+        );
+        assert!(!webp_is_animated(b"RIFF\x0c\0\0\0WEBPVP8 \x04\0\0\0ANIM"));
+        let animated_avif = [
+            0, 0, 0, 16, b'f', b't', b'y', b'p', b'a', b'v', b'i', b'f', 0, 0, 0, 0, 0, 0, 0, 16,
+            b'm', b'o', b'o', b'v', 0, 0, 0, 8, b't', b'r', b'a', b'k',
+        ];
+        assert!(avif_is_animated(&animated_avif));
+        assert_eq!(
+            decode_source(&animated_avif, SourceFormatHint::Avif)
+                .expect_err("animated AVIF rejects before primary-item decoding")
+                .path(),
+            "source.sequence"
+        );
+        let still_payload_with_track_text = [
+            0, 0, 0, 16, b'f', b't', b'y', b'p', b'a', b'v', b'i', b'f', b't', b'r', b'a', b'k',
+        ];
+        assert!(!avif_is_animated(&still_payload_with_track_text));
+        let multipage_little_endian_tiff = [
+            b'I', b'I', 42, 0, 8, 0, 0, 0, // header and first IFD offset
+            0, 0, // zero entries
+            16, 0, 0, 0, // nonzero next IFD offset
+        ];
+        assert!(tiff_has_multiple_pages(&multipage_little_endian_tiff).unwrap());
+        assert_eq!(
+            decode_source(&multipage_little_endian_tiff, SourceFormatHint::Tiff,)
+                .expect_err("multipage TIFF rejects before page decoding")
+                .path(),
+            "source.sequence"
+        );
+        assert_eq!(
+            tiff_has_multiple_pages(b"II*").unwrap_err().path(),
+            "source.decode"
+        );
+        let multipage_big_tiff = [
+            b'I', b'I', 43, 0, 8, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, // zero 64-bit entry count
+            32, 0, 0, 0, 0, 0, 0, 0, // nonzero next 64-bit IFD offset
+        ];
+        assert!(tiff_has_multiple_pages(&multipage_big_tiff).unwrap());
+        assert_eq!(
+            decode_source(&multipage_big_tiff, SourceFormatHint::Tiff)
+                .expect_err("multipage BigTIFF rejects before page decoding")
+                .path(),
+            "source.sequence"
         );
     }
 
@@ -2025,7 +2903,7 @@ mod tests {
         );
         assert_eq!(
             DECODER_CONTRACT_ID,
-            "toniator-sampling-decoder-v2-linear-source-fields"
+            "toniator-sampling-decoder-v3-still-image-linear-source-fields"
         );
     }
 
@@ -2234,6 +3112,23 @@ mod tests {
         assert_eq!(cw.mxy, -ccw.mxy);
     }
 
+    /// Confirms the AreaAverage hot path's area-only helper matches full polygon moments for either winding.
+    #[test]
+    fn stage21a_polygon_signed_area_matches_full_moments_without_extra_moment_work() {
+        let points = [
+            Point2::new(-2.0, 1.0),
+            Point2::new(3.0, 1.0),
+            Point2::new(3.0, 4.0),
+            Point2::new(-2.0, 4.0),
+        ];
+        assert_eq!(polygon_signed_area(&points), polygon_moments(&points).area);
+        let reversed = points.into_iter().rev().collect::<Vec<_>>();
+        assert_eq!(
+            polygon_signed_area(&reversed),
+            polygon_moments(&reversed).area
+        );
+    }
+
     /// Verifies cell-local translation preserves exact local rectangle moments.
     #[test]
     fn stage20q_translated_polygon_moments_are_cell_local() {
@@ -2328,8 +3223,8 @@ mod tests {
             &|| false,
         )
         .unwrap();
-        assert_eq!(points[0], Point2::new(-5.0, 0.0));
-        assert_eq!(points[1], Point2::new(15.0, 0.0));
+        assert_eq!(points[0], Point2::new(-6.0, -0.5));
+        assert_eq!(points[1], Point2::new(16.0, -0.5));
     }
 
     /// Verifies a straight cubic emits one stable chord and does not duplicate joins.
@@ -2378,7 +3273,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(first, second);
-        assert_eq!(first[0], Point2::new(0.0, 0.0));
+        assert_eq!(first[0], Point2::new(-0.5, -0.5));
     }
 
     /// Verifies a genuine cubic flattens deterministically and honors the global segment limit.
@@ -2456,53 +3351,60 @@ mod tests {
         assert_eq!(error.path(), "evaluation.cancelled");
     }
 
-    /// Verifies source interval enumeration orders low exterior, cells, and high exterior.
+    /// Verifies literal footprint enumeration retains every exterior edge-clamped contribution.
     #[test]
-    fn stage20q_source_intervals_cover_all_clamp_bands_in_order() {
+    fn stage21a_source_intervals_preserve_each_edge_clamped_footprint_in_order() {
         let intervals = source_axis_intervals(-2.0, 4.0, 4).unwrap();
         assert_eq!(
             intervals,
             vec![
                 SourceAxisInterval {
                     start: -2.0,
-                    end: 0.0,
+                    end: -1.5,
                     cell: 0
                 },
                 SourceAxisInterval {
-                    start: 0.0,
-                    end: 1.0,
+                    start: -1.5,
+                    end: -0.5,
                     cell: 0
                 },
                 SourceAxisInterval {
-                    start: 1.0,
-                    end: 2.0,
+                    start: -0.5,
+                    end: 0.5,
+                    cell: 0
+                },
+                SourceAxisInterval {
+                    start: 0.5,
+                    end: 1.5,
                     cell: 1
                 },
                 SourceAxisInterval {
-                    start: 2.0,
-                    end: 3.0,
+                    start: 1.5,
+                    end: 2.5,
                     cell: 2
                 },
                 SourceAxisInterval {
-                    start: 3.0,
+                    start: 2.5,
+                    end: 3.5,
+                    cell: 3
+                },
+                SourceAxisInterval {
+                    start: 3.5,
                     end: 4.0,
-                    cell: 2
+                    cell: 3
                 }
             ]
         );
     }
 
-    /// Verifies one-pixel source axes retain one finite constant clamp interval.
+    /// Verifies a one-pixel source axis partitions every edge-clamped unit footprint.
     #[test]
-    fn stage20q_one_pixel_source_axis_has_one_clamp_interval() {
-        assert_eq!(
-            source_axis_intervals(-3.0, 7.0, 1).unwrap(),
-            vec![SourceAxisInterval {
-                start: -3.0,
-                end: 7.0,
-                cell: 0
-            }]
-        );
+    fn stage21a_one_pixel_source_axis_partitions_edge_clamped_unit_footprints() {
+        let intervals = source_axis_intervals(-3.0, 7.0, 1).unwrap();
+        assert_eq!(intervals.len(), 11);
+        assert!(intervals.iter().all(|interval| interval.cell == 0));
+        assert_eq!(intervals.first().map(|interval| interval.start), Some(-3.0));
+        assert_eq!(intervals.last().map(|interval| interval.end), Some(7.0));
     }
 
     /// Verifies shared request counters aggregate limits and canonical cancellation failures.
@@ -2538,7 +3440,7 @@ mod tests {
         );
     }
 
-    /// Builds a finite two-dimensional decoded field for exact Stage 20Q integration witnesses.
+    /// Builds a finite two-dimensional decoded field for focused deterministic sampling witnesses.
     fn stage20q_field(width: u32, height: u32, pixels: Vec<SourcePixel>) -> SourceField {
         assert_eq!(pixels.len(), (width * height) as usize);
         SourceField {
@@ -2598,9 +3500,9 @@ mod tests {
         assert_eq!(average.paint, reference.paint);
     }
 
-    /// Verifies exact moments integrate a unit-cell bilinear alpha field without point sampling.
+    /// Verifies fully covered literal pixel footprints equally average full alpha values without point sampling.
     #[test]
-    fn stage20q_area_average_integrates_bilinear_scalar_exactly() {
+    fn stage21a_area_average_equally_averages_full_covered_pixel_values() {
         let field = stage20q_field(
             2,
             2,
@@ -2695,6 +3597,120 @@ mod tests {
         );
     }
 
+    /// Classifies literal source-pixel footprints below, at, and above the exact 50% threshold.
+    ///
+    /// The one-pixel field makes the full decoded scalar contribution unambiguous: sub-threshold
+    /// coverage excludes it, while exact and super-threshold coverage include the complete value
+    /// without fractional multiplication or point-center substitution.
+    #[test]
+    fn stage21a_area_average_binary_footprint_threshold_is_inclusive() {
+        let field = stage20q_field(
+            1,
+            1,
+            vec![SourcePixel {
+                red: 1.0,
+                green: 1.0,
+                blue: 1.0,
+                alpha: 1.0,
+            }],
+        );
+        let sample = |right| {
+            sample_region_area_average(
+                &field,
+                &stage20q_rectangle(0.0, right, 0.0, 1.0),
+                &CanvasSpec {
+                    width: 1.0,
+                    height: 1.0,
+                },
+                SourceMapping::canonical(SourceMappingComponent::Alpha),
+                RegionSamplingLimits::default(),
+                &|| false,
+            )
+            .expect("finite threshold rectangle samples")
+        };
+        let below = sample(0.49);
+        let at = sample(0.50);
+        let above = sample(0.51);
+        assert_eq!(below.response, 0.0);
+        assert_eq!(below.paint, None);
+        for included in [at, above] {
+            assert_eq!(included.response, 1.0);
+            assert_eq!(
+                included.paint,
+                Some(SampledSourcePaint {
+                    red: 1.0,
+                    green: 1.0,
+                    blue: 1.0,
+                    alpha: 1.0,
+                })
+            );
+        }
+    }
+
+    /// Proves a sub-threshold source pixel is excluded while a separately covered pixel keeps its full value.
+    #[test]
+    fn stage21a_area_average_excludes_partial_pixel_without_diluting_full_neighbor() {
+        let full_pixel = SourcePixel {
+            red: 0.8,
+            green: 0.4,
+            blue: 0.2,
+            alpha: 1.0,
+        };
+        let field = stage20q_field(
+            2,
+            1,
+            vec![
+                SourcePixel {
+                    red: 0.2,
+                    green: 0.1,
+                    blue: 0.0,
+                    alpha: 1.0,
+                },
+                full_pixel,
+            ],
+        );
+        let sample = sample_region_area_average(
+            &field,
+            &stage20q_rectangle(0.255, 1.0, 0.0, 1.0),
+            &CanvasSpec {
+                width: 1.0,
+                height: 1.0,
+            },
+            SourceMapping::canonical(SourceMappingComponent::Red),
+            RegionSamplingLimits::default(),
+            &|| false,
+        )
+        .expect("mixed-coverage region samples");
+        let expected_response = mapping_component_value(full_pixel, SourceMappingComponent::Red);
+        let (red, green, blue) = linear_rgb(full_pixel);
+        assert!(
+            (sample.response - expected_response).abs() < 1e-12,
+            "only the fully covered second pixel contributes: {sample:?}"
+        );
+        assert_eq!(
+            sample.paint,
+            Some(SampledSourcePaint {
+                red,
+                green,
+                blue,
+                alpha: 1.0,
+            })
+        );
+    }
+
+    /// Rejects extreme finite footprint coordinates before lossy integer conversion can overflow.
+    #[test]
+    fn stage21a_area_average_extreme_finite_footprint_bounds_reject_without_panic() {
+        for bounds in [(f64::MAX, f64::MAX), (f64::MIN, f64::MIN)] {
+            assert_eq!(
+                SourceAxisPartitions::new(bounds.0, bounds.1, 1)
+                    .expect_err("extreme finite footprint bounds reject")
+                    .path(),
+                "sampling.region_average.limits.cell_intersections"
+            );
+        }
+    }
+
     /// Verifies exact-zero average alpha suppresses hidden RGB instead of publishing transparent paint.
     #[test]
     fn stage20q_area_average_suppresses_all_zero_alpha() {
@@ -2727,9 +3743,9 @@ mod tests {
         assert_eq!(sample.paint, None);
     }
 
-    /// Verifies complete off-canvas area is included through the finite exterior clamp bands.
+    /// Verifies complete off-canvas area retains all edge-clamped exterior footprint contributions.
     #[test]
-    fn stage20q_area_average_integrates_complete_off_canvas_clamp_bands() {
+    fn stage21a_area_average_includes_complete_off_canvas_edge_clamped_footprints() {
         let pixel = SourcePixel {
             red: 0.0,
             green: 0.0,
@@ -2851,7 +3867,7 @@ mod tests {
         assert!((partitioned - polygon_moments(&polygon).area).abs() < 1e-12);
     }
 
-    /// Verifies batch sampling charges cell work across regions and returns no partial table.
+    /// Verifies batch sampling charges footprint work across regions and returns no partial table.
     #[test]
     fn stage20q_area_average_batch_exhausts_aggregate_cell_budget() {
         let field = stage20q_field(
@@ -2965,6 +3981,49 @@ mod tests {
         }
     }
 
+    /// Proves AreaAverage progress is completed-footprint based, monotonic, bounded, and complete.
+    #[test]
+    fn stage21a_area_average_progress_is_per_mille_coalesced() {
+        let field = stage20q_field(
+            8,
+            8,
+            vec![
+                SourcePixel {
+                    red: 0.25,
+                    green: 0.5,
+                    blue: 0.75,
+                    alpha: 1.0,
+                };
+                64
+            ],
+        );
+        let regions = vec![stage20q_rectangle(0.0, 1.0, 0.0, 1.0); 16];
+        let updates = std::sync::Mutex::new(Vec::new());
+        sample_region_area_average_batch_with_diagnostics_and_progress(
+            &field,
+            &regions,
+            &CanvasSpec {
+                width: 1.0,
+                height: 1.0,
+            },
+            SourceMapping::canonical(SourceMappingComponent::Alpha),
+            RegionSamplingLimits::default(),
+            &|| false,
+            &|completed, total| {
+                updates
+                    .lock()
+                    .expect("progress lock")
+                    .push((completed, total));
+            },
+        )
+        .expect("progressed AreaAverage batch evaluates");
+        let updates = updates.into_inner().expect("progress lock");
+        assert!(!updates.is_empty());
+        assert!(updates.len() <= 1_000);
+        assert!(updates.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert_eq!(updates.last().copied(), Some((1_000, 1_000)));
+    }
+
     /// Verifies cancellation is reported before any area-average candidate can publish.
     #[test]
     fn stage20q_area_average_cancellation_is_exact() {
@@ -2994,6 +4053,65 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.path(), "evaluation.cancelled");
+    }
+
+    /// Produces deterministic alpha-preserving PNG proxies for both immutable still baselines.
+    ///
+    /// This test exercises the sampling-owned decoder/resizer boundary only. It never mutates
+    /// either source asset, constructs a document, or claims proxy bytes are export authority.
+    #[test]
+    fn reduced_preview_png_bounds_raster_and_svg_baselines_deterministically() {
+        for (name, hint, expected) in [
+            ("raster-sample.png", SourceFormatHint::Png, (128, 128)),
+            ("vector-sample.svg", SourceFormatHint::Svg, (128, 88)),
+        ] {
+            let bytes = asset(name);
+            let first = reduced_preview_png(&bytes, hint, 128)
+                .expect("immutable baseline builds a bounded preview proxy");
+            let second = reduced_preview_png(&bytes, hint, 128)
+                .expect("immutable baseline repeats the bounded preview proxy");
+            assert_eq!((first.width, first.height), expected);
+            assert_eq!(first, second, "{name} proxy stays deterministic");
+            let decoded = decode_source(&first.png_bytes, SourceFormatHint::Png)
+                .expect("generated proxy remains supported PNG bytes");
+            assert_eq!(
+                (decoded.identity().width, decoded.identity().height),
+                expected
+            );
+            assert!(
+                decoded
+                    .pixels
+                    .iter()
+                    .all(|pixel| pixel.alpha.is_finite() && (0.0..=1.0).contains(&pixel.alpha))
+            );
+        }
+    }
+
+    /// Keeps direct private-preview resampling bounded by proxy bytes without a second source-sized RGBA image.
+    #[test]
+    fn stage21a_reduced_preview_resampler_uses_only_bounded_proxy_storage() {
+        let source = stage20q_field(
+            4_096,
+            1,
+            vec![
+                SourcePixel {
+                    red: 0.25,
+                    green: 0.5,
+                    blue: 0.75,
+                    alpha: 0.6,
+                };
+                4_096
+            ],
+        );
+        let proxy = bounded_preview_rgba(&source, 128, 1)
+            .expect("bounded proxy directly resamples decoded source pixels");
+        assert_eq!(proxy.len(), 128 * 4);
+        assert!(proxy.len() < source.pixels.len());
+        assert!(
+            proxy
+                .chunks_exact(4)
+                .all(|pixel| pixel == [64, 128, 191, 153])
+        );
     }
 
     /// Computes the ZIP CRC32 value required by small synthetic PNG builders.

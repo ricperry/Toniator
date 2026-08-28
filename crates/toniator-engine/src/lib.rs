@@ -6,6 +6,7 @@ use std::cell::Cell;
 #[cfg(test)]
 use std::cell::RefCell;
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
@@ -35,21 +36,21 @@ use toniator_domain::{
     HalftoneChannelModel, HalftoneChannelRole, ModeledChannelState,
 };
 use toniator_patterns::{
-    Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID, CanonicalRegionSet,
-    CurvePath, CurveSegment, FamilyCapability, GUIDE_FACE_CONTRACT_ID, GenericGuideCapability,
-    GridFamilyOutput, GuideFaceLimits, GuideFaceRequest, MAZE_WALL_CONTRACT_ID,
-    MappedCircularMarkRealization, MazeLimits, PatternPipelineError, REGION_TREATMENT_CONTRACT_ID,
-    RegionReference, RegionTreatmentLimits, SITE_ADJACENCY_CONTRACT_ID, SiteUsageSet,
-    SourceColorCircularMarkRealization, TypedFamilyOutput, TypedRealization,
+    Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID, CanonicalRegionLimits,
+    CanonicalRegionSet, CurvePath, CurveSegment, FamilyCapability, GUIDE_FACE_CONTRACT_ID,
+    GenericGuideCapability, GridFamilyOutput, GuideFaceLimits, GuideFaceRequest,
+    MAZE_WALL_CONTRACT_ID, MazeLimits, PathOffsetLimits, PatternPipelineError,
+    REGION_TREATMENT_CONTRACT_ID, RegionReference, RegionTreatmentLimits,
+    SITE_ADJACENCY_CONTRACT_ID, SiteUsageSet, TypedFamilyOutput, TypedRealization,
     VORONOI_REGION_CONTRACT_ID, VoronoiRegionDiagnostics, VoronoiRegionLimits,
     VoronoiRegionRequest, build_connection_paths_cancellable, build_guide_faces_cancellable,
     build_typed_site_adjacency_cancellable, build_voronoi_regions_cancellable,
     connection_program_contract_id, evaluate_straight_grid,
     evaluate_typed_connection_paths_with_source_cancellable,
-    evaluate_typed_family_product_with_source_cancellable,
+    evaluate_typed_family_product_with_source_progress_cancellable,
     evaluate_typed_maze_walls_from_family_cancellable, family_requires_decoded_source,
     maximum_emitted_guide_spacing, maximum_nominal_cell_diameter, realize_circular_marks,
-    realize_region_output_cancellable, voronoi_region_references,
+    realize_region_output_with_progress_cancellable, voronoi_region_references,
 };
 pub use toniator_patterns::{
     CanonicalCircleMark, CanonicalMark, CanonicalMarkRealization, CanonicalStrokeRealization,
@@ -64,12 +65,14 @@ use toniator_patterns::{
 pub use toniator_render::{
     GeometryOutput, OutputRasterTarget, PreviewRasterTarget, RasterAntialiasing, RasterBackground,
     RasterSurface, RenderError, RenderLayer, RenderScene, SceneIdentity, encode_png,
-    linear_to_srgb, raster_output_identity, rasterize, rasterize_cancellable, rasterize_output,
-    rasterize_preview, rasterize_preview_cancellable, srgb_to_linear, write_svg,
+    linear_to_srgb, raster_output_identity, rasterize, rasterize_cancellable,
+    rasterize_cancellable_with_progress, rasterize_output, rasterize_preview,
+    rasterize_preview_cancellable, rasterize_preview_cancellable_with_progress, srgb_to_linear,
+    write_svg,
 };
 pub use toniator_sampling::{
-    DECODER_CONTRACT_ID, SourceField, SourceFormat, SourceFormatHint, SourceIdentity,
-    SvgTextDiagnostic,
+    DECODER_CONTRACT_ID, ReducedPreviewSource, SourceField, SourceFormat, SourceFormatHint,
+    SourceIdentity, SvgTextDiagnostic, reduced_preview_png,
 };
 use toniator_sampling::{RegionSamplingLimits, decode_source};
 
@@ -193,6 +196,12 @@ pub struct ResolvedSource {
 }
 
 impl ResolvedSource {
+    /// Retains nonempty source bytes with one supported decoder hint.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable source diagnostic for empty bytes or an unsupported
+    /// format hint without decoding or changing the supplied bytes.
     pub fn new(
         reference_id: SourceReferenceId,
         bytes: impl Into<Arc<[u8]>>,
@@ -208,7 +217,7 @@ impl ResolvedSource {
         if matches!(format, SourceFormatHint::Unsupported) {
             return Err(EvaluationError::new(
                 "source.format",
-                "only PNG and SVG source formats are supported",
+                "supported source formats are PNG, SVG, JPEG, WebP, BMP, TIFF, OpenEXR, and AVIF",
             ));
         }
         Ok(Self {
@@ -309,7 +318,12 @@ pub struct EvaluationLimits {
 impl Eq for EvaluationLimits {}
 
 impl EvaluationLimits {
-    pub const DEFAULT_MAX_FAMILY_CANDIDATES: usize = 1_048_576;
+    /// Represents the absence of an application-authored creative-work ceiling.
+    ///
+    /// Checked arithmetic, allocation failure, cancellation, and machine
+    /// addressability remain authoritative even when this sentinel is active.
+    pub const UNBOUNDED_WORK_LIMIT: usize = usize::MAX;
+    pub const DEFAULT_MAX_FAMILY_CANDIDATES: usize = Self::UNBOUNDED_WORK_LIMIT;
 
     /// Builds the complete nonzero default E2 work policy with a caller-selected family bound.
     ///
@@ -323,22 +337,75 @@ impl EvaluationLimits {
                 "configured candidate limit must be nonzero",
             ));
         }
-        Ok(Self {
+        Ok(Self::without_creative_work_ceilings(max_family_candidates))
+    }
+
+    /// Builds normal evaluation policy without application-authored count ceilings.
+    ///
+    /// Algorithmic subdivision depth and numerical tolerances retain their
+    /// accepted values because they define deterministic approximation rather
+    /// than limiting an artist's requested geometry. Explicit `with_*` methods
+    /// remain available to tests and constrained callers.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if `usize::MAX` is ever rejected as a nonzero policy by a
+    /// geometry-owned constructor, which would violate those constructors'
+    /// documented contracts.
+    fn without_creative_work_ceilings(max_family_candidates: usize) -> Self {
+        let unlimited = Self::UNBOUNDED_WORK_LIMIT;
+        let default_offsets = PathOffsetLimits::default();
+        Self {
             max_family_candidates,
-            max_flattened_raster_edges: toniator_render::DEFAULT_MAX_FLATTENED_RASTER_EDGES,
-            max_transformed_curve_segment_instances:
-                toniator_patterns::MAX_TRANSFORMED_CURVE_SEGMENT_INSTANCES,
-            max_stroke_profile_samples: toniator_patterns::MAX_STROKE_PROFILE_SAMPLES,
-            max_stroke_outline_segments: toniator_patterns::MAX_STROKE_OUTLINE_SEGMENTS,
-            site_adjacency: SiteAdjacencyLimits::default(),
-            connection_paths: ConnectionPathLimits::default(),
-            maze: MazeLimits::default(),
-            voronoi: VoronoiRegionLimits::default(),
-            guide_faces: GuideFaceLimits::default(),
-            region_sampling: RegionSamplingLimits::default(),
-            region_treatment: RegionTreatmentLimits::default(),
-            composite_outputs: CompositeOutputLimits::default(),
-        })
+            max_flattened_raster_edges: unlimited,
+            max_transformed_curve_segment_instances: unlimited,
+            max_stroke_profile_samples: unlimited,
+            max_stroke_outline_segments: unlimited,
+            site_adjacency: SiteAdjacencyLimits::new(unlimited, unlimited, unlimited, unlimited)
+                .expect("machine work limit is nonzero"),
+            connection_paths: ConnectionPathLimits::new(unlimited, unlimited, unlimited, unlimited)
+                .expect("machine work limit is nonzero"),
+            maze: MazeLimits::new(
+                unlimited, unlimited, unlimited, unlimited, unlimited, unlimited, unlimited,
+            )
+            .expect("machine work limit is nonzero"),
+            voronoi: VoronoiRegionLimits::new(
+                unlimited, unlimited, unlimited, unlimited, unlimited,
+            )
+            .expect("machine work limit is nonzero"),
+            guide_faces: GuideFaceLimits {
+                max_source_paths: unlimited,
+                max_source_segments: unlimited,
+                max_intersection_contacts: unlimited,
+                max_split_segments: unlimited,
+                max_vertices: unlimited,
+                max_half_edges: unlimited,
+                max_faces: unlimited,
+                max_ring_segments: unlimited,
+                max_inspections: unlimited,
+            },
+            region_sampling: RegionSamplingLimits {
+                max_cell_intersections: unlimited,
+                max_flattened_segments: unlimited,
+                ..RegionSamplingLimits::default()
+            },
+            region_treatment: RegionTreatmentLimits {
+                canonical: CanonicalRegionLimits::new(unlimited, unlimited, unlimited, unlimited)
+                    .expect("machine work limit is nonzero"),
+                path_offset: PathOffsetLimits {
+                    maximum_segments: unlimited,
+                    maximum_components: unlimited,
+                    maximum_cleanup_pairs: unlimited,
+                    maximum_cusp_isolation_work: unlimited,
+                    ..default_offsets
+                },
+            },
+            composite_outputs: CompositeOutputLimits {
+                maximum_output_units: unlimited,
+                maximum_usage_memberships: unlimited,
+                maximum_dependency_inspections: unlimited,
+            },
+        }
     }
 
     pub const fn max_family_candidates(self) -> usize {
@@ -673,24 +740,13 @@ impl EvaluationLimits {
 }
 
 impl Default for EvaluationLimits {
-    /// Supplies exact finite family, transformed-segment, and flattened-edge defaults.
+    /// Supplies normal policy without application-authored creative-work ceilings.
+    ///
+    /// Machine addressability, checked arithmetic, fallible allocation,
+    /// cancellation, stale-result rejection, and deterministic algorithmic
+    /// subdivision remain enforced.
     fn default() -> Self {
-        Self {
-            max_family_candidates: Self::DEFAULT_MAX_FAMILY_CANDIDATES,
-            max_flattened_raster_edges: toniator_render::DEFAULT_MAX_FLATTENED_RASTER_EDGES,
-            max_transformed_curve_segment_instances:
-                toniator_patterns::MAX_TRANSFORMED_CURVE_SEGMENT_INSTANCES,
-            max_stroke_profile_samples: toniator_patterns::MAX_STROKE_PROFILE_SAMPLES,
-            max_stroke_outline_segments: toniator_patterns::MAX_STROKE_OUTLINE_SEGMENTS,
-            site_adjacency: SiteAdjacencyLimits::default(),
-            connection_paths: ConnectionPathLimits::default(),
-            maze: MazeLimits::default(),
-            voronoi: VoronoiRegionLimits::default(),
-            guide_faces: GuideFaceLimits::default(),
-            region_sampling: RegionSamplingLimits::default(),
-            region_treatment: RegionTreatmentLimits::default(),
-            composite_outputs: CompositeOutputLimits::default(),
-        }
+        Self::without_creative_work_ceilings(Self::DEFAULT_MAX_FAMILY_CANDIDATES)
     }
 }
 
@@ -698,17 +754,47 @@ impl Default for EvaluationLimits {
 mod stage20e2_limit_tests {
     use super::*;
 
-    /// Fixes both Stage 20E2 defaults and rejects disabled transformed or flattened work bounds.
+    /// Fixes monotonic family/output milestone weights independently of worker timing.
     #[test]
-    fn evaluation_limits_keep_exact_nonzero_shape_work_bounds() {
+    fn document_progress_assigns_fixed_family_and_output_contributions() {
+        assert_eq!(document_work_progress(0, 3, 0, 6), 200);
+        assert_eq!(document_work_progress(1, 3, 0, 6), 283);
+        assert_eq!(document_work_progress(3, 3, 3, 6), 675);
+        assert_eq!(document_work_progress(3, 3, 6, 6), 900);
+        assert_eq!(document_family_work_progress(0, 2, 0, 2, 0, 100), 200);
+        assert_eq!(document_family_work_progress(0, 2, 0, 2, 50, 100), 262);
+        assert_eq!(document_family_work_progress(1, 2, 1, 2, 50, 100), 612);
+        assert_eq!(document_output_work_progress(2, 2, 0, 2, 0, 100), 450);
+        assert_eq!(document_output_work_progress(2, 2, 0, 2, 50, 100), 562);
+        assert_eq!(document_output_work_progress(2, 2, 1, 2, 50, 100), 787);
+        assert_eq!(raster_work_progress(0, 100), 950);
+        assert_eq!(raster_work_progress(50, 100), 970);
+        assert_eq!(raster_work_progress(100, 100), 990);
+    }
+
+    /// Proves normal evaluation has no creative count ceiling while explicit limits remain valid.
+    #[test]
+    fn evaluation_defaults_disable_creative_work_ceilings() {
         let defaults = EvaluationLimits::default();
         assert_eq!(
             defaults.max_transformed_curve_segment_instances(),
-            toniator_patterns::MAX_TRANSFORMED_CURVE_SEGMENT_INSTANCES
+            EvaluationLimits::UNBOUNDED_WORK_LIMIT
         );
         assert_eq!(
             defaults.max_flattened_raster_edges(),
-            toniator_render::DEFAULT_MAX_FLATTENED_RASTER_EDGES
+            EvaluationLimits::UNBOUNDED_WORK_LIMIT
+        );
+        assert_eq!(
+            defaults.max_family_candidates(),
+            EvaluationLimits::UNBOUNDED_WORK_LIMIT
+        );
+        assert_eq!(
+            defaults.guide_face_limits().max_inspections,
+            EvaluationLimits::UNBOUNDED_WORK_LIMIT
+        );
+        assert_eq!(
+            defaults.site_adjacency_limits().maximum_nodes,
+            EvaluationLimits::UNBOUNDED_WORK_LIMIT
         );
         assert_eq!(
             defaults
@@ -929,8 +1015,8 @@ impl ChannelDiagnosticRequest {
 pub struct ChannelDiagnosticResult {
     token: EvaluationToken,
     source_identity: SourceIdentity,
-    scene: RenderScene,
-    raster: RasterSurface,
+    scene: Arc<RenderScene>,
+    raster: Arc<RasterSurface>,
 }
 
 impl ChannelDiagnosticResult {
@@ -940,11 +1026,15 @@ impl ChannelDiagnosticResult {
     pub fn source_identity(&self) -> &SourceIdentity {
         &self.source_identity
     }
+
+    /// Returns the immutable diagnostic scene without exposing result/cache ownership.
     pub fn scene(&self) -> &RenderScene {
-        &self.scene
+        self.scene.as_ref()
     }
+
+    /// Returns the immutable diagnostic raster without exposing result/cache ownership.
     pub fn raster(&self) -> &RasterSurface {
-        &self.raster
+        self.raster.as_ref()
     }
 }
 
@@ -960,7 +1050,6 @@ struct SourceCacheKey {
 struct FamilyCacheKey {
     canvas: (u64, u64),
     density: (u64, u64),
-    aspect_locked: bool,
     rotation: u64,
     translation: (u64, u64),
     guard_steps: u32,
@@ -1190,6 +1279,15 @@ pub(crate) fn evaluate_channel_diagnostic_cancellable_with_gate(
 trait CancellationProbe: Sync {
     fn is_cancelled(&self) -> bool;
 
+    /// Reports one non-authoritative document-worker milestone and its current-stage completion.
+    fn report_progress(
+        &self,
+        _stage: EvaluationProgressStage,
+        _completed_per_mille: u16,
+        _stage_completed_per_mille: u16,
+    ) {
+    }
+
     #[cfg(test)]
     fn observe_stage(&self, _stage: EvaluationStage, _checkpoint: EvaluationCheckpoint) {}
 }
@@ -1260,6 +1358,17 @@ impl CancellationProbe for ProfiledCancellation<'_> {
         self.inner.is_cancelled()
     }
 
+    /// Forwards document-worker progress without including it in profiling identity.
+    fn report_progress(
+        &self,
+        stage: EvaluationProgressStage,
+        completed_per_mille: u16,
+        stage_completed_per_mille: u16,
+    ) {
+        self.inner
+            .report_progress(stage, completed_per_mille, stage_completed_per_mille);
+    }
+
     #[cfg(test)]
     /// Forwards test-only stage gates without altering scheduler ordering.
     fn observe_stage(&self, stage: EvaluationStage, checkpoint: EvaluationCheckpoint) {
@@ -1280,6 +1389,62 @@ struct AtomicCancellation<'a>(&'a AtomicBool);
 impl CancellationProbe for AtomicCancellation<'_> {
     fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
+    }
+}
+
+/// Couples scheduler cancellation with ticketed monotonic progress delivery.
+struct SchedulerCancellation<'a> {
+    cancelled: &'a AtomicBool,
+    ticket: EvaluationTicket,
+    progress: &'a Sender<EvaluationProgress>,
+    last_progress: &'a Mutex<Option<EvaluationProgress>>,
+    #[cfg(test)]
+    gate: Option<&'a EvaluationStageGate>,
+}
+
+impl CancellationProbe for SchedulerCancellation<'_> {
+    /// Reads the scheduler-owned cancellation flag without changing progress.
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    /// Publishes nondecreasing, duplicate-coalesced progress while silently tolerating shutdown.
+    fn report_progress(
+        &self,
+        stage: EvaluationProgressStage,
+        completed_per_mille: u16,
+        stage_completed_per_mille: u16,
+    ) {
+        let completed = completed_per_mille.min(1_000);
+        let stage_completed = stage_completed_per_mille.min(1_000);
+        let next = EvaluationProgress {
+            ticket: self.ticket,
+            stage,
+            completed_per_mille: completed,
+            stage_completed_per_mille: stage_completed,
+        };
+        let mut previous = self
+            .last_progress
+            .lock()
+            .expect("scheduler progress lock poisoned");
+        if previous.is_some_and(|previous| {
+            completed < previous.completed_per_mille
+                || (completed == previous.completed_per_mille
+                    && stage == previous.stage
+                    && stage_completed <= previous.stage_completed_per_mille)
+        }) {
+            return;
+        }
+        *previous = Some(next);
+        let _ = self.progress.send(next);
+    }
+
+    #[cfg(test)]
+    /// Preserves deterministic test gates beside production progress reporting.
+    fn observe_stage(&self, stage: EvaluationStage, checkpoint: EvaluationCheckpoint) {
+        if let Some(gate) = self.gate {
+            gate.wait(stage, checkpoint);
+        }
     }
 }
 
@@ -1422,18 +1587,26 @@ fn evaluate_stage<T>(
     result.map_err(EvaluationRunError::Evaluation)
 }
 
+/// Evaluates one structural family with cancellation and optional unit progress.
+///
+/// # Errors
+///
+/// Returns cancellation or the first family-pipeline diagnostic without
+/// exposing partial structural output.
 fn evaluate_generic_family_stage(
     family: &FamilyCapability,
     request: &GridInspectRequest,
     source: &SourceField,
     cancellation: &dyn CancellationProbe,
+    report_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<TypedFamilyOutput, EvaluationRunError> {
     match evaluate_stage(EvaluationStage::Family, cancellation, || {
-        evaluate_typed_family_product_with_source_cancellable(
+        evaluate_typed_family_product_with_source_progress_cancellable(
             family,
             request,
             family_requires_decoded_source(family).then_some(source),
             &|| cancellation.is_cancelled(),
+            report_progress,
         )
         .map_err(EvaluationError::from_pipeline)
     }) {
@@ -1540,10 +1713,9 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
     let family_key = FamilyCacheKey {
         canvas: canvas_key(document.canvas()),
         density: (
-            effective.density.across_x.to_bits(),
-            effective.density.across_y.to_bits(),
+            effective.density.density.to_bits(),
+            effective.density.aspect.to_bits(),
         ),
-        aspect_locked: effective.density.aspect_locked,
         rotation: effective.pattern_rotation_degrees.to_bits(),
         translation: (
             effective.translation_x.to_bits(),
@@ -1571,7 +1743,7 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
     };
     let grid = GridInspectRequest {
         canvas: document.canvas().clone(),
-        density: effective.density.clone(),
+        density: effective.resolved_density,
         rotation_degrees: effective.pattern_rotation_degrees,
         translation_x: effective.translation_x,
         translation_y: effective.translation_y,
@@ -1594,6 +1766,7 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
                 &grid,
                 &source,
                 cancellation,
+                &|_, _| {},
             )?),
             CacheDisposition::Miss,
         ),
@@ -1702,8 +1875,11 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
         result: ChannelDiagnosticResult {
             token: request.snapshot.token(),
             source_identity: source.identity().clone(),
-            scene: (*scene).clone(),
-            raster: (*raster).clone(),
+            // The diagnostic result and pending cache transaction share the
+            // same immutable render payloads. Accessors continue to project
+            // borrows, preserving the public result contract.
+            scene: Arc::clone(&scene),
+            raster: Arc::clone(&raster),
         },
         diagnostics,
         transaction,
@@ -2381,17 +2557,69 @@ pub struct EvaluationResult {
     token: DocumentEvaluationToken,
     source_identity: SourceIdentity,
     channels: Vec<ChannelEvaluationSummary>,
-    scene: RenderScene,
-    raster: RasterSurface,
+    scene: Arc<RenderScene>,
+    raster: Arc<RasterSurface>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EvaluationTicket(u64);
 impl EvaluationTicket {
+    /// Returns the scheduler-local monotonic ticket value.
     pub const fn value(self) -> u64 {
         self.0
     }
 }
+
+/// Identifies one artist-visible complete-document evaluation phase.
+///
+/// The variants describe coordinator work rather than renderer internals and
+/// never enter document, cache, scene, or export identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvaluationProgressStage {
+    Preparing,
+    DecodingSource,
+    GeneratingGeometry,
+    RealizingOutputs,
+    ComposingScene,
+    RasterizingPreview,
+    Finalizing,
+    Complete,
+}
+
+/// Carries monotonic ticketed progress from a document worker.
+///
+/// Per-mille completion permits deterministic fixed stage weights without
+/// making floating-point values part of scheduler equality or identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EvaluationProgress {
+    ticket: EvaluationTicket,
+    stage: EvaluationProgressStage,
+    completed_per_mille: u16,
+    stage_completed_per_mille: u16,
+}
+
+impl EvaluationProgress {
+    /// Returns the scheduler ticket whose worker emitted this update.
+    pub const fn ticket(self) -> EvaluationTicket {
+        self.ticket
+    }
+
+    /// Returns the current coarse evaluation phase.
+    pub const fn stage(self) -> EvaluationProgressStage {
+        self.stage
+    }
+
+    /// Returns determinate completion in the inclusive `0.0..=1.0` range.
+    pub fn fraction(self) -> f64 {
+        f64::from(self.completed_per_mille) / 1_000.0
+    }
+
+    /// Returns completion within the currently named stage in the inclusive `0.0..=1.0` range.
+    pub fn stage_fraction(self) -> f64 {
+        f64::from(self.stage_completed_per_mille) / 1_000.0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum EvaluationCompletion {
     Completed {
@@ -2468,6 +2696,7 @@ pub struct EvaluationScheduler {
     latest_ticket: Arc<AtomicU64>,
     shutdown: Arc<AtomicBool>,
     completions: Mutex<Receiver<DocumentWorkerCompletion>>,
+    progress: Mutex<Receiver<EvaluationProgress>>,
 }
 impl EvaluationScheduler {
     pub fn new() -> Result<Self, SchedulerError> {
@@ -2504,6 +2733,7 @@ impl EvaluationScheduler {
     ) -> Result<Self, SchedulerError> {
         let (sender, receiver) = mpsc::channel::<DocumentJob>();
         let (completion_sender, completions) = mpsc::channel::<DocumentWorkerCompletion>();
+        let (progress_sender, progress) = mpsc::channel::<EvaluationProgress>();
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
         #[cfg(test)]
@@ -2524,32 +2754,29 @@ impl EvaluationScheduler {
                         continue;
                     }
                     let token = job.request.snapshot.token();
-                    #[cfg(test)]
-                    let outcome = match worker_gate.as_ref() {
-                        Some(gate) => evaluate_cached_document_with_test_observer(
-                            job.request,
-                            limits,
-                            &job.cache,
-                            &ObservedCancellation {
-                                cancelled: &job.cancelled,
-                                gate,
-                            },
-                            job.decode_observer.as_deref(),
-                        ),
-                        None => evaluate_cached_document_with_test_observer(
-                            job.request,
-                            limits,
-                            &job.cache,
-                            &AtomicCancellation(&job.cancelled),
-                            job.decode_observer.as_deref(),
-                        ),
+                    let last_progress = Mutex::new(None);
+                    let worker_cancellation = SchedulerCancellation {
+                        cancelled: &job.cancelled,
+                        ticket: job.ticket,
+                        progress: &progress_sender,
+                        last_progress: &last_progress,
+                        #[cfg(test)]
+                        gate: worker_gate.as_deref(),
                     };
+                    #[cfg(test)]
+                    let outcome = evaluate_cached_document_with_test_observer(
+                        job.request,
+                        limits,
+                        &job.cache,
+                        &worker_cancellation,
+                        job.decode_observer.as_deref(),
+                    );
                     #[cfg(not(test))]
                     let outcome = evaluate_cached_document(
                         job.request,
                         limits,
                         &job.cache,
-                        &AtomicCancellation(&job.cancelled),
+                        &worker_cancellation,
                     );
                     if job.cancelled.load(Ordering::Acquire) {
                         continue;
@@ -2574,6 +2801,11 @@ impl EvaluationScheduler {
                         Err(EvaluationRunError::Cancelled) => continue,
                     };
                     if !job.cancelled.load(Ordering::Acquire) {
+                        worker_cancellation.report_progress(
+                            EvaluationProgressStage::Complete,
+                            1_000,
+                            1_000,
+                        );
                         let _ = completion_sender.send(completion);
                     }
                 }
@@ -2595,6 +2827,7 @@ impl EvaluationScheduler {
             latest_ticket: Arc::new(AtomicU64::new(0)),
             shutdown,
             completions: Mutex::new(completions),
+            progress: Mutex::new(progress),
         })
     }
 
@@ -2658,6 +2891,49 @@ impl EvaluationScheduler {
             .next_ticket = next_ticket;
     }
 
+    /// Returns the next queued progress update for the latest ticket.
+    ///
+    /// Stale or cancelled ticket updates are discarded at the scheduler boundary,
+    /// before a frontend can project them. Progress never commits cache state.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WorkerUnavailable` if the progress channel disconnects while
+    /// the scheduler remains active.
+    pub fn try_receive_latest_progress(
+        &self,
+    ) -> Result<Option<EvaluationProgress>, SchedulerError> {
+        let receiver = self
+            .progress
+            .lock()
+            .expect("document scheduler progress lock poisoned");
+        loop {
+            match receiver.try_recv() {
+                Ok(progress) => {
+                    if !self.shutdown.load(Ordering::Acquire)
+                        && self
+                            .state
+                            .lock()
+                            .expect("document scheduler state lock poisoned")
+                            .latest_ticket
+                            == Some(progress.ticket())
+                    {
+                        return Ok(Some(progress));
+                    }
+                }
+                Err(TryRecvError::Empty) => return Ok(None),
+                Err(TryRecvError::Disconnected) => {
+                    return if self.shutdown.load(Ordering::Acquire) {
+                        Ok(None)
+                    } else {
+                        Err(SchedulerError::WorkerUnavailable)
+                    };
+                }
+            }
+        }
+    }
+
+    /// Drains worker completions and returns only the latest ticket's atomic candidate.
     pub fn try_receive_latest(&self) -> Result<Option<EvaluationCompletion>, SchedulerError> {
         let receiver = self
             .completions
@@ -2759,10 +3035,10 @@ impl EvaluationResult {
         &self.channels
     }
     pub fn scene(&self) -> &RenderScene {
-        &self.scene
+        self.scene.as_ref()
     }
     pub fn raster(&self) -> &RasterSurface {
-        &self.raster
+        self.raster.as_ref()
     }
 }
 
@@ -2965,6 +3241,183 @@ fn evaluate_cached_document_with_test_observer(
     )
 }
 
+/// Computes the fixed-weight coordinator progress for completed family/output units.
+///
+/// Source preparation owns the first 200 per-mille, channel family generation
+/// owns 250, and ordered output realization owns 450. Zero totals are treated
+/// as already complete so malformed work cannot divide by zero; document
+/// preflight remains responsible for rejecting invalid topology.
+///
+/// # Panics
+///
+/// Cannot panic: the fixed weights sum to at most 900, which fits in `u16`.
+fn document_work_progress(
+    completed_families: usize,
+    total_families: usize,
+    completed_outputs: usize,
+    total_outputs: usize,
+) -> u16 {
+    let weighted = |completed: usize, total: usize, weight: u128| {
+        if total == 0 {
+            weight
+        } else {
+            weight * completed.min(total) as u128 / total as u128
+        }
+    };
+    let value = 200_u128
+        + weighted(completed_families, total_families, 250)
+        + weighted(completed_outputs, total_outputs, 450);
+    u16::try_from(value.min(900)).expect("document progress is at most 900 per-mille")
+}
+
+/// Resolves unit progress inside the current family into its fixed document share.
+///
+/// Completed output work is retained because document evaluation interleaves
+/// family generation and ordered realization by channel. Invalid zero totals
+/// contribute no partial-family work and cannot divide by zero.
+///
+/// # Panics
+///
+/// Cannot panic: the fixed preparation, family, and output weights sum to at
+/// most 900 per-mille.
+fn document_family_work_progress(
+    completed_families: usize,
+    total_families: usize,
+    completed_outputs: usize,
+    total_outputs: usize,
+    completed_units: usize,
+    total_units: usize,
+) -> u16 {
+    let output = if total_outputs == 0 {
+        450_u128
+    } else {
+        450_u128 * completed_outputs.min(total_outputs) as u128 / total_outputs as u128
+    };
+    let family = if total_families == 0 {
+        250_u128
+    } else {
+        let local_total = total_units.max(1) as u128;
+        let local_completed = completed_units.min(total_units) as u128;
+        let numerator = (completed_families.min(total_families) as u128)
+            .saturating_mul(local_total)
+            .saturating_add(local_completed);
+        let denominator = (total_families as u128).saturating_mul(local_total);
+        250_u128 * numerator.min(denominator) / denominator
+    };
+    let value = 200_u128 + family + output;
+    u16::try_from(value.min(900)).expect("document progress is at most 900 per-mille")
+}
+
+/// Resolves site-worker progress inside the current output into its fixed document share.
+///
+/// Cancellation polls are issued at deterministic unit boundaries throughout
+/// realization, including Rayon workers. The caller supplies the family-site
+/// count as the determinate unit total; excess nested polls are clamped and the
+/// coordinator completes the output only after atomic realization succeeds.
+///
+/// # Panics
+///
+/// Cannot panic: the fixed preparation, family, and output weights sum to at
+/// most 900 per-mille.
+fn document_output_work_progress(
+    completed_families: usize,
+    total_families: usize,
+    completed_outputs: usize,
+    total_outputs: usize,
+    completed_units: usize,
+    total_units: usize,
+) -> u16 {
+    let family = if total_families == 0 {
+        250_u128
+    } else {
+        250_u128 * completed_families.min(total_families) as u128 / total_families as u128
+    };
+    let output = if total_outputs == 0 {
+        450_u128
+    } else {
+        let local_total = total_units.max(1) as u128;
+        let local_completed = completed_units.min(total_units) as u128;
+        let numerator = (completed_outputs.min(total_outputs) as u128)
+            .saturating_mul(local_total)
+            .saturating_add(local_completed);
+        let denominator = (total_outputs as u128).saturating_mul(local_total);
+        450_u128 * numerator.min(denominator) / denominator
+    };
+    let value = 200_u128 + family + output;
+    u16::try_from(value.min(900)).expect("document progress is at most 900 per-mille")
+}
+
+/// Resolves completed family groups plus current-family work into local stage progress.
+fn family_stage_progress(
+    completed_families: usize,
+    total_families: usize,
+    completed_units: usize,
+    total_units: usize,
+) -> u16 {
+    grouped_stage_progress(
+        completed_families,
+        total_families,
+        completed_units,
+        total_units,
+    )
+}
+
+/// Resolves completed output groups plus current-output work into local stage progress.
+fn output_stage_progress(
+    completed_outputs: usize,
+    total_outputs: usize,
+    completed_units: usize,
+    total_units: usize,
+) -> u16 {
+    grouped_stage_progress(
+        completed_outputs,
+        total_outputs,
+        completed_units,
+        total_units,
+    )
+}
+
+/// Maps grouped completed/current work into the inclusive local per-mille range.
+fn grouped_stage_progress(
+    completed_groups: usize,
+    total_groups: usize,
+    completed_units: usize,
+    total_units: usize,
+) -> u16 {
+    if total_groups == 0 {
+        return 1_000;
+    }
+    let local_total = total_units.max(1) as u128;
+    let numerator = (completed_groups.min(total_groups) as u128)
+        .saturating_mul(local_total)
+        .saturating_add(completed_units.min(total_units) as u128);
+    let denominator = (total_groups as u128).saturating_mul(local_total);
+    let value = 1_000_u128 * numerator.min(denominator) / denominator;
+    u16::try_from(value).expect("local stage progress is at most 1,000 per-mille")
+}
+
+/// Maps one stage's completed units into the inclusive local per-mille range.
+fn unit_stage_progress(completed_units: usize, total_units: usize) -> u16 {
+    if total_units == 0 {
+        return 1_000;
+    }
+    let value = 1_000_u128 * completed_units.min(total_units) as u128 / total_units as u128;
+    u16::try_from(value).expect("local unit progress is at most 1,000 per-mille")
+}
+
+/// Maps completed raster primitives and parallel phases into the fixed four-percent share.
+///
+/// Empty work begins at the raster-stage boundary and completion is finalized
+/// by the coordinator's following publication stage.
+fn raster_work_progress(completed_units: usize, total_units: usize) -> u16 {
+    if total_units == 0 {
+        return 950;
+    }
+    let completed = completed_units.min(total_units) as u128;
+    let value = 950_u128 + 40_u128 * completed / total_units as u128;
+    u16::try_from(value.min(990)).expect("raster progress is at most 990 per-mille")
+}
+
 /// Evaluates one complete modeled document into private cache candidates under request-wide limits.
 ///
 /// # Errors
@@ -2979,6 +3432,7 @@ fn evaluate_cached_document_impl(
     mut performance: Option<&mut EvaluationPerformanceBuilder>,
     #[cfg(test)] decode_observer: Option<&AtomicUsize>,
 ) -> Result<CachedDocumentEvaluation, EvaluationRunError> {
+    cancellation.report_progress(EvaluationProgressStage::Preparing, 10, 0);
     let preflight_started = Instant::now();
     if cancellation.is_cancelled() {
         return Err(EvaluationRunError::Cancelled);
@@ -3079,6 +3533,8 @@ fn evaluate_cached_document_impl(
             }],
         );
     }
+    cancellation.report_progress(EvaluationProgressStage::Preparing, 100, 1_000);
+    cancellation.report_progress(EvaluationProgressStage::DecodingSource, 100, 0);
     let source_key = SourceCacheKey {
         reference_id: request.source.reference_id().as_str().to_owned(),
         bytes: Arc::clone(&request.source.bytes),
@@ -3125,6 +3581,8 @@ fn evaluate_cached_document_impl(
             }],
         );
     }
+    cancellation.report_progress(EvaluationProgressStage::DecodingSource, 200, 1_000);
+    cancellation.report_progress(EvaluationProgressStage::GeneratingGeometry, 200, 0);
     let mut summaries = Vec::with_capacity(topology.channels().len());
     let mut layers = Vec::with_capacity(topology.channels().len());
     let mut families = Vec::with_capacity(topology.channels().len());
@@ -3138,6 +3596,9 @@ fn evaluate_cached_document_impl(
     let mut remaining_stroke_outline_segments = limits.max_stroke_outline_segments();
     let mut remaining_usage_memberships = composite_limits.maximum_usage_memberships;
     let mut remaining_dependency_inspections = composite_limits.maximum_dependency_inspections;
+    let total_family_channels = resolved.len();
+    let mut completed_family_channels = 0_usize;
+    let mut completed_output_units = 0_usize;
     for (channel, effective, definition, plan) in &resolved {
         if cancellation.is_cancelled() {
             return Err(EvaluationRunError::Cancelled);
@@ -3158,6 +3619,16 @@ fn evaluate_cached_document_impl(
             &source,
         )?;
         let family_started = Instant::now();
+        cancellation.report_progress(
+            EvaluationProgressStage::GeneratingGeometry,
+            document_work_progress(
+                completed_family_channels,
+                total_family_channels,
+                completed_output_units,
+                output_units,
+            ),
+            family_stage_progress(completed_family_channels, total_family_channels, 0, 1),
+        );
         let (family, disposition, family_execution) = match families
             .iter()
             .find(|(candidate, _, _)| document_family_key_supports(candidate, &key))
@@ -3182,7 +3653,7 @@ fn evaluate_cached_document_impl(
                         &plan.family,
                         &GridInspectRequest {
                             canvas: document.canvas().clone(),
-                            density: effective.density.clone(),
+                            density: effective.resolved_density,
                             rotation_degrees: effective.pattern_rotation_degrees,
                             translation_x: effective.translation_x,
                             translation_y: effective.translation_y,
@@ -3198,12 +3669,42 @@ fn evaluate_cached_document_impl(
                         },
                         &source,
                         cancellation,
+                        &|completed, total| {
+                            cancellation.report_progress(
+                                EvaluationProgressStage::GeneratingGeometry,
+                                document_family_work_progress(
+                                    completed_family_channels,
+                                    total_family_channels,
+                                    completed_output_units,
+                                    output_units,
+                                    completed,
+                                    total,
+                                ),
+                                family_stage_progress(
+                                    completed_family_channels,
+                                    total_family_channels,
+                                    completed,
+                                    total,
+                                ),
+                            );
+                        },
                     )?),
                     CacheDisposition::Miss,
                     EvaluationExecutionClass::Computed,
                 ),
             },
         };
+        completed_family_channels = completed_family_channels.saturating_add(1);
+        cancellation.report_progress(
+            EvaluationProgressStage::GeneratingGeometry,
+            document_work_progress(
+                completed_family_channels,
+                total_family_channels,
+                completed_output_units,
+                output_units,
+            ),
+            family_stage_progress(completed_family_channels, total_family_channels, 0, 1),
+        );
         if let Some(performance) = performance.as_deref_mut() {
             let mut workloads = vec![EvaluationWorkloadMetric {
                 kind: EvaluationWorkloadKind::FamilySites,
@@ -3272,9 +3773,11 @@ fn evaluate_cached_document_impl(
                     "request-wide dependency and selection inspection limit exceeded",
                 ))?;
             let filter_started = Instant::now();
-            let filtered_family = family
-                .filtered_for_output(output_capability.source_filter, referenced_usage)
-                .map_err(EvaluationError::from_pipeline)?;
+            let filtered_family = filtered_family_for_output(
+                family.as_ref(),
+                output_capability.source_filter,
+                referenced_usage,
+            )?;
             if let Some(performance) = performance.as_deref_mut() {
                 performance.record(
                     EvaluationPerformanceStage::DependencyFilter,
@@ -3301,7 +3804,33 @@ fn evaluate_cached_document_impl(
                 limits,
             )?;
             let realization_started = Instant::now();
+            cancellation.report_progress(
+                EvaluationProgressStage::RealizingOutputs,
+                document_work_progress(
+                    completed_family_channels,
+                    total_family_channels,
+                    completed_output_units,
+                    output_units,
+                ),
+                output_stage_progress(completed_output_units, output_units, 0, 1),
+            );
             let collect_performance = performance.is_some();
+            let output_progress_units = AtomicUsize::new(0);
+            let output_total_units = filtered_family.site_set().len().max(1);
+            let report_output_progress = |completed: usize, total: usize| {
+                cancellation.report_progress(
+                    EvaluationProgressStage::RealizingOutputs,
+                    document_output_work_progress(
+                        completed_family_channels,
+                        total_family_channels,
+                        completed_output_units,
+                        output_units,
+                        completed,
+                        total,
+                    ),
+                    output_stage_progress(completed_output_units, output_units, completed, total),
+                );
+            };
             let (realization, realization_disposition, region_performance) = match accepted
                 .realizations
                 .iter()
@@ -3333,7 +3862,24 @@ fn evaluate_cached_document_impl(
                                 limits.region_sampling_limits(),
                                 limits.region_treatment_limits(),
                                 collect_performance,
-                                &|| cancellation.is_cancelled(),
+                                &|| {
+                                    if cancellation.is_cancelled() {
+                                        return true;
+                                    }
+                                    if output_capability.regions().is_none()
+                                        && let Ok(previous) = output_progress_units.fetch_update(
+                                            Ordering::Relaxed,
+                                            Ordering::Relaxed,
+                                            |value| {
+                                                (value < output_total_units).then_some(value + 1)
+                                            },
+                                        )
+                                    {
+                                        report_output_progress(previous + 1, output_total_units);
+                                    }
+                                    false
+                                },
+                                &report_output_progress,
                             )
                         }) {
                             Err(EvaluationRunError::Evaluation(error))
@@ -3437,6 +3983,17 @@ fn evaluate_cached_document_impl(
             realizations.push((realization_key, Arc::clone(&realization)));
             completed_dispositions.insert(output_setting.output_layer_id, realization_disposition);
             completed_outputs.insert(output_setting.output_layer_id, realization);
+            completed_output_units = completed_output_units.saturating_add(1);
+            cancellation.report_progress(
+                EvaluationProgressStage::RealizingOutputs,
+                document_work_progress(
+                    completed_family_channels,
+                    total_family_channels,
+                    completed_output_units,
+                    output_units,
+                ),
+                output_stage_progress(completed_output_units, output_units, 0, 1),
+            );
         }
         let channel_outputs = output_bindings
             .iter()
@@ -3480,13 +4037,7 @@ fn evaluate_cached_document_impl(
                     .collect::<Vec<_>>(),
             ),
         });
-        layers.push(document_render_layer(
-            channel,
-            channel_outputs
-                .into_iter()
-                .map(|output| (*output).clone())
-                .collect(),
-        )?);
+        layers.push(document_render_layer(channel, &channel_outputs)?);
         families.push((key, family, disposition));
         family_dispositions.push(disposition);
         realization_dispositions.push(realization_disposition);
@@ -3513,6 +4064,7 @@ fn evaluate_cached_document_impl(
             )
         }),
     );
+    cancellation.report_progress(EvaluationProgressStage::ComposingScene, 900, 0);
     let scene_started = Instant::now();
     let built_scene = evaluate_stage(EvaluationStage::Scene, cancellation, || {
         RenderScene::new_modeled(
@@ -3556,6 +4108,8 @@ fn evaluate_cached_document_impl(
             limits.max_flattened_raster_edges()
         ),
     };
+    cancellation.report_progress(EvaluationProgressStage::ComposingScene, 950, 1_000);
+    cancellation.report_progress(EvaluationProgressStage::RasterizingPreview, 950, 0);
     let raster_started = Instant::now();
     let (raster, raster_disposition) = match &accepted.raster {
         Some((key, value)) if *key == raster_key => (Arc::clone(value), CacheDisposition::Hit),
@@ -3565,7 +4119,7 @@ fn evaluate_cached_document_impl(
                 cancellation,
                 || {
                     match request.preview_target {
-                        Some(target) => rasterize_preview_cancellable(
+                        Some(target) => rasterize_preview_cancellable_with_progress(
                             &scene,
                             target,
                             toniator_render::RasterizationLimits::new(
@@ -3573,8 +4127,15 @@ fn evaluate_cached_document_impl(
                             )
                             .expect("EvaluationLimits validates raster edge bounds"),
                             &|| cancellation.is_cancelled(),
+                            &|completed, total| {
+                                cancellation.report_progress(
+                                    EvaluationProgressStage::RasterizingPreview,
+                                    raster_work_progress(completed, total),
+                                    unit_stage_progress(completed, total),
+                                );
+                            },
                         ),
-                        None => rasterize_cancellable(
+                        None => rasterize_cancellable_with_progress(
                             &scene,
                             RasterBackground::Transparent,
                             toniator_render::RasterizationLimits::new(
@@ -3582,6 +4143,13 @@ fn evaluate_cached_document_impl(
                             )
                             .expect("EvaluationLimits validates raster edge bounds"),
                             &|| cancellation.is_cancelled(),
+                            &|completed, total| {
+                                cancellation.report_progress(
+                                    EvaluationProgressStage::RasterizingPreview,
+                                    raster_work_progress(completed, total),
+                                    unit_stage_progress(completed, total),
+                                );
+                            },
                         ),
                     }
                     .map_err(EvaluationError::from_render)
@@ -3611,12 +4179,17 @@ fn evaluate_cached_document_impl(
             }],
         );
     }
+    cancellation.report_progress(EvaluationProgressStage::RasterizingPreview, 990, 1_000);
+    cancellation.report_progress(EvaluationProgressStage::Finalizing, 990, 0);
     let result = EvaluationResult {
         token: request.snapshot.token(),
         source_identity: source.identity().clone(),
         channels: summaries,
-        scene: (*scene).clone(),
-        raster: (*raster).clone(),
+        // Evaluation results share the immutable cache values directly. The
+        // public accessors still expose ordinary borrows, so callers cannot
+        // observe this storage optimization or mutate cached authority.
+        scene: Arc::clone(&scene),
+        raster: Arc::clone(&raster),
     };
     let channels = result
         .channels
@@ -3629,6 +4202,7 @@ fn evaluate_cached_document_impl(
             outputs: output_realization_dispositions[index].clone(),
         })
         .collect();
+    cancellation.report_progress(EvaluationProgressStage::Finalizing, 1_000, 1_000);
     Ok(CachedDocumentEvaluation {
         result,
         diagnostics: DocumentCacheDiagnostics {
@@ -3715,16 +4289,127 @@ fn maze_cache_contracts(
 
 #[derive(Clone)]
 enum DocumentRealization {
-    Mapped(TypedRealization<MappedCircularMarkRealization>),
-    SourceColor(TypedRealization<SourceColorCircularMarkRealization>),
-    Canonical(TypedRealization<CanonicalMarkRealization>),
-    Strokes(TypedRealization<CanonicalStrokeRealization>),
+    Mapped {
+        geometry: Arc<GeometryOutput>,
+        fingerprint: String,
+    },
+    SourceColor {
+        geometry: Arc<GeometryOutput>,
+        paints: Arc<Vec<toniator_domain::ColorValue>>,
+        fingerprint: String,
+    },
+    Canonical {
+        geometry: Arc<GeometryOutput>,
+        paints: Option<Arc<Vec<toniator_domain::ColorValue>>>,
+        fingerprint: String,
+    },
+    Strokes {
+        geometry: Arc<GeometryOutput>,
+        fingerprint: String,
+    },
     Regions {
-        regions: CanonicalRegionSet,
-        paints: Option<Vec<toniator_sampling::SampledSourcePaint>>,
+        geometry: Arc<GeometryOutput>,
+        paints: Option<Arc<Vec<toniator_domain::ColorValue>>>,
         fingerprint: String,
         diagnostics: RegionRealizationDiagnostics,
     },
+}
+
+impl DocumentRealization {
+    /// Returns the one immutable renderer-ready geometry payload retained by the output cache.
+    fn geometry(&self) -> &Arc<GeometryOutput> {
+        match self {
+            Self::Mapped { geometry, .. }
+            | Self::SourceColor { geometry, .. }
+            | Self::Canonical { geometry, .. }
+            | Self::Strokes { geometry, .. }
+            | Self::Regions { geometry, .. } => geometry,
+        }
+    }
+
+    /// Returns immutable sampled paint when the cached output owns per-primitive color.
+    fn primitive_paints(&self) -> Option<&Arc<Vec<toniator_domain::ColorValue>>> {
+        match self {
+            Self::SourceColor { paints, .. } => Some(paints),
+            Self::Canonical { paints, .. } | Self::Regions { paints, .. } => paints.as_ref(),
+            Self::Mapped { .. } | Self::Strokes { .. } => None,
+        }
+    }
+}
+
+/// Converts sampled source paint into renderer-owned immutable linear color storage.
+fn shared_sampled_paints(
+    paints: Option<Vec<toniator_sampling::SampledSourcePaint>>,
+) -> Option<Arc<Vec<toniator_domain::ColorValue>>> {
+    paints.map(|paints| {
+        Arc::new(
+            paints
+                .into_iter()
+                .map(|paint| toniator_domain::ColorValue {
+                    red: paint.red,
+                    green: paint.green,
+                    blue: paint.blue,
+                    alpha: paint.alpha,
+                })
+                .collect(),
+        )
+    })
+}
+
+/// Moves one typed mapped-mark output into the engine's shared renderer-ready cache record.
+fn cache_mapped_realization(
+    value: toniator_patterns::TypedRealization<toniator_patterns::MappedCircularMarkRealization>,
+) -> DocumentRealization {
+    let output = value.output;
+    DocumentRealization::Mapped {
+        geometry: Arc::new(GeometryOutput::CircularMarks(output.marks)),
+        fingerprint: output.realization_fingerprint,
+    }
+}
+
+/// Splits one typed source-colored output once, retaining shared geometry and paint thereafter.
+fn cache_source_color_realization(
+    value: toniator_patterns::TypedRealization<
+        toniator_patterns::SourceColorCircularMarkRealization,
+    >,
+) -> DocumentRealization {
+    let output = value.output;
+    let mut marks = Vec::with_capacity(output.marks.len());
+    let mut paints = Vec::with_capacity(output.marks.len());
+    for entry in output.marks {
+        marks.push(entry.mark);
+        paints.push(toniator_domain::ColorValue {
+            red: entry.paint.red,
+            green: entry.paint.green,
+            blue: entry.paint.blue,
+            alpha: entry.paint.alpha,
+        });
+    }
+    DocumentRealization::SourceColor {
+        geometry: Arc::new(GeometryOutput::CircularMarks(marks)),
+        paints: Arc::new(paints),
+        fingerprint: output.realization_fingerprint,
+    }
+}
+
+/// Moves one generalized canonical-mark output into shared cache/scene payloads.
+fn cache_canonical_mark_realization(
+    value: toniator_patterns::TypedRealization<CanonicalMarkRealization>,
+) -> DocumentRealization {
+    let output = value.output;
+    DocumentRealization::Canonical {
+        geometry: Arc::new(GeometryOutput::CanonicalMarks(output.marks)),
+        paints: shared_sampled_paints(output.paints),
+        fingerprint: output.realization_fingerprint,
+    }
+}
+
+/// Moves one canonical-stroke output into the sole cache/scene geometry allocation.
+fn cache_stroke_realization(value: CanonicalStrokeRealization) -> DocumentRealization {
+    DocumentRealization::Strokes {
+        geometry: Arc::new(GeometryOutput::CanonicalStrokes(value.strokes)),
+        fingerprint: value.realization_fingerprint,
+    }
 }
 
 /// Producer/source/sampling/treatment facts retained beside canonical region geometry identity.
@@ -3791,11 +4476,11 @@ fn ordered_output_bindings<'a>(
 /// Returns the complete immutable realization fingerprint for any retained or canonical variant.
 fn document_realization_identity(value: &DocumentRealization) -> &str {
     match value {
-        DocumentRealization::Mapped(value) => &value.output.realization_fingerprint,
-        DocumentRealization::SourceColor(value) => &value.output.realization_fingerprint,
-        DocumentRealization::Canonical(value) => &value.output.realization_fingerprint,
-        DocumentRealization::Strokes(value) => &value.output.realization_fingerprint,
-        DocumentRealization::Regions { fingerprint, .. } => fingerprint,
+        DocumentRealization::Mapped { fingerprint, .. }
+        | DocumentRealization::SourceColor { fingerprint, .. }
+        | DocumentRealization::Canonical { fingerprint, .. }
+        | DocumentRealization::Strokes { fingerprint, .. }
+        | DocumentRealization::Regions { fingerprint, .. } => fingerprint,
     }
 }
 
@@ -3887,6 +4572,7 @@ fn evaluate_document_output(
     region_treatment_limits: RegionTreatmentLimits,
     profiled: bool,
     is_cancelled: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<
     (
         DocumentOutputRealization,
@@ -3920,6 +4606,7 @@ fn evaluate_document_output(
         region_treatment_limits,
         profiled,
         is_cancelled,
+        progress,
     )?;
     Ok((
         DocumentOutputRealization {
@@ -3952,6 +4639,32 @@ fn aggregate_output_realization_identity(
     }
 }
 
+/// Borrows a complete family for unrestricted output use and owns only dependent filters.
+///
+/// `SiteUseFilter::All` is semantically the cached family itself, so this
+/// helper avoids cloning its sites, structure, diagnostics, or provenance.
+/// Used/unused filters retain the patterns-owned filtered-family validation
+/// boundary and may allocate a distinct exact subset.
+///
+/// # Errors
+///
+/// Returns the patterns-owned filtering diagnostic without modifying cache
+/// state when a dependent usage set is invalid.
+fn filtered_family_for_output<'a>(
+    family: &'a TypedFamilyOutput,
+    filter: toniator_domain::SiteUseFilter,
+    referenced_usage: Option<&SiteUsageSet>,
+) -> Result<Cow<'a, TypedFamilyOutput>, EvaluationError> {
+    if matches!(filter, toniator_domain::SiteUseFilter::All) {
+        Ok(Cow::Borrowed(family))
+    } else {
+        family
+            .filtered_for_output(filter, referenced_usage)
+            .map(Cow::Owned)
+            .map_err(EvaluationError::from_pipeline)
+    }
+}
+
 /// Counts authored path segment instances in one completed channel realization for the
 /// request-wide evaluation budget; circle and retained adapter outputs consume no path work.
 ///
@@ -3961,27 +4674,26 @@ fn aggregate_output_realization_identity(
 fn transformed_curve_segment_instances(
     value: &DocumentRealization,
 ) -> Result<usize, EvaluationError> {
-    if let DocumentRealization::Strokes(value) = value {
-        return value
-            .output
-            .strokes
-            .iter()
-            .try_fold(0_usize, |total, stroke| {
-                total
-                    .checked_add(stroke.path.segments().len())
-                    .ok_or(EvaluationError::new(
-                        "realization.stroke.segment_limit",
-                        "stroke segment instance count overflows",
-                    ))
-            });
+    if let GeometryOutput::CanonicalStrokes(strokes) = value.geometry().as_ref() {
+        return strokes.iter().try_fold(0_usize, |total, stroke| {
+            total
+                .checked_add(stroke.path.segments().len())
+                .ok_or(EvaluationError::new(
+                    "realization.stroke.segment_limit",
+                    "stroke segment instance count overflows",
+                ))
+        });
     }
-    if matches!(value, DocumentRealization::Regions { .. }) {
+    if matches!(
+        value.geometry().as_ref(),
+        GeometryOutput::CanonicalRegions(_)
+    ) {
         return Ok(0);
     }
-    let DocumentRealization::Canonical(value) = value else {
+    let GeometryOutput::CanonicalMarks(marks) = value.geometry().as_ref() else {
         return Ok(0);
     };
-    value.output.marks.iter().try_fold(0_usize, |total, mark| {
+    marks.iter().try_fold(0_usize, |total, mark| {
         let count = match mark {
             CanonicalMark::Circle { .. } => 0,
             CanonicalMark::ClosedPath(path) => path.path.segments().len(),
@@ -4002,10 +4714,10 @@ fn transformed_curve_segment_instances(
 ///
 /// Returns a stable stroke-limit diagnostic if a completed collection overflows `usize`.
 fn stroke_work(value: &DocumentRealization) -> Result<(usize, usize), EvaluationError> {
-    let DocumentRealization::Strokes(value) = value else {
+    let GeometryOutput::CanonicalStrokes(strokes) = value.geometry().as_ref() else {
         return Ok((0, 0));
     };
-    canonical_stroke_work(&value.output.strokes)
+    canonical_stroke_work(strokes)
 }
 
 /// Counts work in one completed canonical stroke slice without inspecting semantic identity.
@@ -4064,25 +4776,21 @@ fn realization_workloads(
         kind: output_workload_kind(value, capability),
         count: 1,
     }];
-    let details = match value {
-        DocumentRealization::Mapped(value) => Ok(vec![EvaluationWorkloadMetric {
+    let details = match value.geometry().as_ref() {
+        GeometryOutput::CircularMarks(marks) => Ok(vec![EvaluationWorkloadMetric {
             kind: EvaluationWorkloadKind::Marks,
-            count: value.output.marks.len(),
+            count: marks.len(),
         }]),
-        DocumentRealization::SourceColor(value) => Ok(vec![EvaluationWorkloadMetric {
+        GeometryOutput::CanonicalMarks(marks) => Ok(vec![EvaluationWorkloadMetric {
             kind: EvaluationWorkloadKind::Marks,
-            count: value.output.marks.len(),
+            count: marks.len(),
         }]),
-        DocumentRealization::Canonical(value) => Ok(vec![EvaluationWorkloadMetric {
-            kind: EvaluationWorkloadKind::Marks,
-            count: value.output.marks.len(),
-        }]),
-        DocumentRealization::Strokes(value) => {
-            let (profile_samples, outline_segments) = canonical_stroke_work(&value.output.strokes)?;
+        GeometryOutput::CanonicalStrokes(strokes) => {
+            let (profile_samples, outline_segments) = canonical_stroke_work(strokes)?;
             Ok(vec![
                 EvaluationWorkloadMetric {
                     kind: EvaluationWorkloadKind::Strokes,
-                    count: value.output.strokes.len(),
+                    count: strokes.len(),
                 },
                 EvaluationWorkloadMetric {
                     kind: EvaluationWorkloadKind::StrokeProfileSamples,
@@ -4094,7 +4802,7 @@ fn realization_workloads(
                 },
             ])
         }
-        DocumentRealization::Regions { regions, .. } => {
+        GeometryOutput::CanonicalRegions(regions) => {
             let boundary_segments =
                 regions
                     .regions()
@@ -4141,7 +4849,10 @@ fn output_workload_kind(
                 EvaluationWorkloadKind::GuideFaceOutput
             }
         }
-    } else if matches!(value, DocumentRealization::Strokes(_)) {
+    } else if matches!(
+        value.geometry().as_ref(),
+        GeometryOutput::CanonicalStrokes(_)
+    ) {
         EvaluationWorkloadKind::StructuralPathOutput
     } else {
         EvaluationWorkloadKind::MarkOutput
@@ -4195,6 +4906,7 @@ fn realize_document_region_output(
     treatment_limits: RegionTreatmentLimits,
     profiled: bool,
     is_cancelled: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<
     (
         toniator_patterns::TypedRegionOutputRealization,
@@ -4238,7 +4950,7 @@ fn realize_document_region_output(
         .map(|(realization, performance)| (realization, Some(performance)))
         .map_err(|error| EvaluationError::new(error.path(), error.message()));
     }
-    realize_region_output_cancellable(
+    realize_region_output_with_progress_cancellable(
         capability,
         setting,
         untreated,
@@ -4250,6 +4962,7 @@ fn realize_document_region_output(
         sampling_limits,
         treatment_limits,
         is_cancelled,
+        progress,
     )
     .map(|realization| (realization, None))
     .map_err(|error| EvaluationError::new(error.path(), error.message()))
@@ -4287,6 +5000,7 @@ fn evaluate_document_channel(
     region_treatment_limits: RegionTreatmentLimits,
     profiled: bool,
     is_cancelled: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<
     (
         DocumentRealization,
@@ -4349,6 +5063,7 @@ fn evaluate_document_channel(
                     region_treatment_limits,
                     profiled,
                     is_cancelled,
+                    progress,
                 )?;
                 let toniator_domain::PatternGeometryResponse::Regions(response) =
                     &output_setting.response
@@ -4359,6 +5074,12 @@ fn evaluate_document_channel(
                     ));
                 };
                 let usage = voronoi_region_site_usage(*site_mechanism_id, &realized.regions)?;
+                let toniator_patterns::TypedRegionOutputRealization {
+                    regions,
+                    paints,
+                    fingerprint,
+                    diagnostics: realization_diagnostics,
+                } = realized;
                 return Ok((
                     DocumentRealization::Regions {
                         fingerprint: format!(
@@ -4366,14 +5087,14 @@ fn evaluate_document_channel(
                             VORONOI_REGION_CONTRACT_ID,
                             output_capability.layer_id.0,
                             site_mechanism_id.0,
-                            realized.fingerprint
+                            fingerprint
                         ),
-                        regions: realized.regions,
-                        paints: realized.paints,
+                        geometry: Arc::new(GeometryOutput::CanonicalRegions(regions)),
+                        paints: shared_sampled_paints(paints),
                         diagnostics: completed_region_diagnostics(
                             response,
                             source,
-                            realized.diagnostics,
+                            realization_diagnostics,
                             RegionProducerCacheDiagnostics::Voronoi(diagnostics),
                         ),
                     },
@@ -4429,6 +5150,7 @@ fn evaluate_document_channel(
                     region_treatment_limits,
                     profiled,
                     is_cancelled,
+                    progress,
                 )?;
                 let toniator_domain::PatternGeometryResponse::Regions(response) =
                     &output_setting.response
@@ -4438,6 +5160,12 @@ fn evaluate_document_channel(
                         "guide-face output requires a region response",
                     ));
                 };
+                let toniator_patterns::TypedRegionOutputRealization {
+                    regions,
+                    paints,
+                    fingerprint,
+                    diagnostics: realization_diagnostics,
+                } = realized;
                 return Ok((
                     DocumentRealization::Regions {
                         fingerprint: format!(
@@ -4445,14 +5173,14 @@ fn evaluate_document_channel(
                             GUIDE_FACE_CONTRACT_ID,
                             output_capability.layer_id.0,
                             guide_mechanism_id.0,
-                            realized.fingerprint
+                            fingerprint
                         ),
-                        regions: realized.regions,
-                        paints: realized.paints,
+                        geometry: Arc::new(GeometryOutput::CanonicalRegions(regions)),
+                        paints: shared_sampled_paints(paints),
                         diagnostics: completed_region_diagnostics(
                             response,
                             source,
-                            realized.diagnostics,
+                            realization_diagnostics,
                             RegionProducerCacheDiagnostics::GuideFaces,
                         ),
                     },
@@ -4462,16 +5190,30 @@ fn evaluate_document_channel(
             }
         }
     }
-    if let Some((_site_mechanism_id, program, _style)) = output_capability.maze_walls() {
+    if let Some((_site_mechanism_id, program, style)) = output_capability.maze_walls() {
         let ChannelPaint::Solid(_) = channel.paint else {
             return Err(EvaluationError::new(
                 "evaluation.maze.paint",
                 "maze-wall output requires solid channel paint",
             ));
         };
+        toniator_patterns::validate_output_realization_binding(
+            plan,
+            output_capability,
+            output_setting,
+        )
+        .map_err(EvaluationError::from_pipeline)?;
+        let toniator_domain::PatternGeometryResponse::Connected(response) =
+            &output_setting.response
+        else {
+            return Err(EvaluationError::new(
+                "pattern.output_layers.setting",
+                "maze realization requires a connected response",
+            ));
+        };
         let request = GridInspectRequest {
             canvas: document.canvas().clone(),
-            density: effective.density.clone(),
+            density: effective.resolved_density,
             rotation_degrees: effective.pattern_rotation_degrees,
             translation_x: effective.translation_x,
             translation_y: effective.translation_y,
@@ -4508,33 +5250,48 @@ fn evaluate_document_channel(
                 .collect(),
         )
         .map_err(EvaluationError::from_pipeline)?;
+        drop(members_by_vertex);
         return Ok((
-            DocumentRealization::Strokes(
-                toniator_patterns::realize_typed_maze_canonical_stroke_output_cancellable(
-                    family,
-                    plan,
-                    output_capability,
-                    output_setting,
-                    &maze,
+            cache_stroke_realization(
+                toniator_patterns::realize_owned_maze_canonical_strokes_cancellable(
+                    maze,
                     source,
                     document.canvas(),
                     channel.mapping,
+                    toniator_patterns::StrokeResponse {
+                        minimum_thickness: response.minimum_thickness,
+                        maximum_thickness: response.maximum_thickness,
+                    },
+                    style,
                     max_stroke_profile_samples,
                     max_stroke_outline_segments,
                     is_cancelled,
                 )
-                .map_err(EvaluationError::from_pipeline)?
-                .realization,
+                .map_err(EvaluationError::from_pipeline)?,
             ),
             usage,
             None,
         ));
     }
-    if let Some((_site_mechanism_id, program, _style)) = output_capability.connection_paths() {
+    if let Some((_site_mechanism_id, program, style)) = output_capability.connection_paths() {
         let ChannelPaint::Solid(_) = channel.paint else {
             return Err(EvaluationError::new(
                 "evaluation.connection.paint",
                 "connection output requires solid channel paint",
+            ));
+        };
+        toniator_patterns::validate_output_realization_binding(
+            plan,
+            output_capability,
+            output_setting,
+        )
+        .map_err(EvaluationError::from_pipeline)?;
+        let toniator_domain::PatternGeometryResponse::Connected(response) =
+            &output_setting.response
+        else {
+            return Err(EvaluationError::new(
+                "pattern.output_layers.setting",
+                "connection realization requires a connected response",
             ));
         };
         let adjacency = program.adjacency();
@@ -4563,6 +5320,7 @@ fn evaluate_document_channel(
             is_cancelled,
         )
         .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
+        drop(graph);
         let usage = SiteUsageSet::new(
             family.site_set().product_mechanism_id(),
             paths
@@ -4573,22 +5331,22 @@ fn evaluate_document_channel(
         )
         .map_err(EvaluationError::from_pipeline)?;
         return Ok((
-            DocumentRealization::Strokes(
-                toniator_patterns::realize_typed_connection_canonical_stroke_output_cancellable(
-                    family,
-                    plan,
-                    output_capability,
-                    output_setting,
-                    &paths,
+            cache_stroke_realization(
+                toniator_patterns::realize_owned_connection_canonical_strokes_cancellable(
+                    paths,
                     source,
                     document.canvas(),
                     channel.mapping,
+                    toniator_patterns::StrokeResponse {
+                        minimum_thickness: response.minimum_thickness,
+                        maximum_thickness: response.maximum_thickness,
+                    },
+                    style,
                     max_stroke_profile_samples,
                     max_stroke_outline_segments,
                     is_cancelled,
                 )
-                .map_err(EvaluationError::from_pipeline)?
-                .realization,
+                .map_err(EvaluationError::from_pipeline)?,
             ),
             usage,
             None,
@@ -4623,7 +5381,7 @@ fn evaluate_document_channel(
             ));
         };
         return Ok((
-            DocumentRealization::Strokes(
+            cache_stroke_realization(
                 toniator_patterns::realize_typed_canonical_stroke_output_cancellable(
                     family,
                     plan,
@@ -4637,7 +5395,8 @@ fn evaluate_document_channel(
                     is_cancelled,
                 )
                 .map_err(EvaluationError::from_pipeline)?
-                .realization,
+                .realization
+                .output,
             ),
             SiteUsageSet::empty_non_site(),
             None,
@@ -4647,7 +5406,7 @@ fn evaluate_document_channel(
         authored_output.realization,
         PatternOutputRealization::MarkPrototype { .. }
     ) {
-        DocumentRealization::Canonical(
+        cache_canonical_mark_realization(
             toniator_patterns::realize_typed_canonical_mark_output_cancellable(
                 document,
                 family,
@@ -4667,7 +5426,7 @@ fn evaluate_document_channel(
         )
     } else {
         match channel.paint {
-            ChannelPaint::Solid(_) => DocumentRealization::Mapped(
+            ChannelPaint::Solid(_) => cache_mapped_realization(
                 toniator_patterns::realize_typed_mapped_output_cancellable(
                     family,
                     plan,
@@ -4682,7 +5441,7 @@ fn evaluate_document_channel(
                 .map_err(EvaluationError::from_pipeline)?
                 .realization,
             ),
-            ChannelPaint::SampledSource => DocumentRealization::SourceColor(
+            ChannelPaint::SampledSource => cache_source_color_realization(
                 toniator_patterns::realize_typed_source_color_output_cancellable(
                     family,
                     plan,
@@ -4745,9 +5504,9 @@ fn mark_site_usage(
     realization: &DocumentRealization,
 ) -> Result<SiteUsageSet, EvaluationError> {
     let mut members = BTreeSet::new();
-    match realization {
-        DocumentRealization::Mapped(value) => {
-            for mark in &value.output.marks {
+    match realization.geometry().as_ref() {
+        GeometryOutput::CircularMarks(marks) => {
+            for mark in marks {
                 if mark.radius > 0.0
                     && let Some(site) = family.site_set().iter().find(|site| {
                         site.position.x.to_bits() == mark.center.x.to_bits()
@@ -4758,20 +5517,8 @@ fn mark_site_usage(
                 }
             }
         }
-        DocumentRealization::SourceColor(value) => {
-            for sampled in &value.output.marks {
-                if sampled.mark.radius > 0.0
-                    && let Some(site) = family.site_set().iter().find(|site| {
-                        site.position.x.to_bits() == sampled.mark.center.x.to_bits()
-                            && site.position.y.to_bits() == sampled.mark.center.y.to_bits()
-                    })
-                {
-                    members.insert(site.id);
-                }
-            }
-        }
-        DocumentRealization::Canonical(value) => {
-            for mark in &value.output.marks {
+        GeometryOutput::CanonicalMarks(marks) => {
+            for mark in marks {
                 match mark {
                     CanonicalMark::Circle {
                         source_site_id,
@@ -4787,7 +5534,7 @@ fn mark_site_usage(
                 }
             }
         }
-        DocumentRealization::Strokes(_) | DocumentRealization::Regions { .. } => {}
+        GeometryOutput::CanonicalStrokes(_) | GeometryOutput::CanonicalRegions(_) => {}
     }
     SiteUsageSet::new(
         family.site_set().product_mechanism_id(),
@@ -4796,14 +5543,19 @@ fn mark_site_usage(
     .map_err(EvaluationError::from_pipeline)
 }
 
-/// Converts all completed channel-output units into one renderer-owned layer without resource lookup.
+/// Converts borrowed cached channel-output units into one renderer-owned layer without resource lookup.
+///
+/// This boundary preserves cached realization/provenance ownership for reuse
+/// and diagnostics. It clones only the canonical geometry and sampled-paint
+/// payload required by the renderer's independent scene ownership, retaining
+/// supplied painter order exactly.
 ///
 /// # Errors
 ///
 /// Returns stable layer validation failures before a scene can publish.
 fn document_render_layer(
     channel: &ModeledChannelState,
-    outputs: Vec<DocumentOutputRealization>,
+    outputs: &[Arc<DocumentOutputRealization>],
 ) -> Result<RenderLayer, EvaluationError> {
     let color = match &channel.paint {
         ChannelPaint::Solid(color) => color.clone(),
@@ -4815,128 +5567,28 @@ fn document_render_layer(
         },
     };
     let outputs = outputs
-        .into_iter()
-        .map(|output| document_render_output(channel, output))
-        .collect::<Result<Vec<_>, _>>()?;
+        .iter()
+        .map(|output| document_render_output(output))
+        .collect::<Vec<_>>();
     RenderLayer::new_outputs(channel.id, channel.visible, color, channel.opacity, outputs)
         .map_err(EvaluationError::from_render)
 }
 
-/// Converts one independently realized output into its ordered renderer payload.
+/// Shares one cached realization payload with its ordered renderer output.
 ///
-/// # Errors
-///
-/// Returns a stable renderer validation error before the containing channel layer is assembled.
+/// This clones only `Arc` handles. Geometry, sampled paint, cache identity,
+/// diagnostics, and usage stay immutable; the containing layer performs the
+/// sole renderer validation before publication.
 fn document_render_output(
-    channel: &ModeledChannelState,
-    output: DocumentOutputRealization,
-) -> Result<toniator_render::RenderOutputLayer, EvaluationError> {
+    output: &DocumentOutputRealization,
+) -> toniator_render::RenderOutputLayer {
     let _capability = &output.capability;
     let _setting = &output.setting;
-    let output_layer_id = output.output_layer_id;
-    match output.realization {
-        DocumentRealization::Mapped(value) => match channel.paint {
-            ChannelPaint::Solid(_) => Ok(toniator_render::RenderOutputLayer {
-                output_layer_id,
-                geometry: GeometryOutput::CircularMarks(value.output.marks),
-                primitive_paints: None,
-            }),
-            ChannelPaint::SampledSource => unreachable!(),
-        },
-        DocumentRealization::SourceColor(value) => Ok(toniator_render::RenderOutputLayer {
-            output_layer_id,
-            geometry: GeometryOutput::CircularMarks(
-                value
-                    .output
-                    .marks
-                    .iter()
-                    .map(|entry| entry.mark.clone())
-                    .collect(),
-            ),
-            primitive_paints: Some(
-                value
-                    .output
-                    .marks
-                    .into_iter()
-                    .map(|entry| toniator_domain::ColorValue {
-                        red: entry.paint.red,
-                        green: entry.paint.green,
-                        blue: entry.paint.blue,
-                        alpha: entry.paint.alpha,
-                    })
-                    .collect(),
-            ),
-        }),
-        DocumentRealization::Canonical(value) => match channel.paint {
-            ChannelPaint::Solid(_) => Ok(toniator_render::RenderOutputLayer {
-                output_layer_id,
-                geometry: GeometryOutput::CanonicalMarks(value.output.marks),
-                primitive_paints: None,
-            }),
-            ChannelPaint::SampledSource => Ok(toniator_render::RenderOutputLayer {
-                output_layer_id,
-                geometry: GeometryOutput::CanonicalMarks(value.output.marks),
-                primitive_paints: Some(
-                    value
-                        .output
-                        .paints
-                        .expect("sampled canonical realization retains paint")
-                        .into_iter()
-                        .map(|paint| toniator_domain::ColorValue {
-                            red: paint.red,
-                            green: paint.green,
-                            blue: paint.blue,
-                            alpha: paint.alpha,
-                        })
-                        .collect(),
-                ),
-            }),
-        },
-        DocumentRealization::Strokes(value) => match channel.paint {
-            ChannelPaint::Solid(_) => Ok(toniator_render::RenderOutputLayer {
-                output_layer_id,
-                geometry: GeometryOutput::CanonicalStrokes(value.output.strokes),
-                primitive_paints: None,
-            }),
-            ChannelPaint::SampledSource => unreachable!("stroke realization rejects sampled paint"),
-        },
-        DocumentRealization::Regions {
-            regions,
-            paints,
-            diagnostics,
-            ..
-        } => {
-            let _ = diagnostics;
-            match (&channel.paint, paints) {
-                (ChannelPaint::Solid(_), None) => Ok(toniator_render::RenderOutputLayer {
-                    output_layer_id,
-                    geometry: GeometryOutput::CanonicalRegions(regions),
-                    primitive_paints: None,
-                }),
-                (ChannelPaint::SampledSource, Some(paints)) => {
-                    Ok(toniator_render::RenderOutputLayer {
-                        output_layer_id,
-                        geometry: GeometryOutput::CanonicalRegions(regions),
-                        primitive_paints: Some(
-                            paints
-                                .into_iter()
-                                .map(|paint| toniator_domain::ColorValue {
-                                    red: paint.red,
-                                    green: paint.green,
-                                    blue: paint.blue,
-                                    alpha: paint.alpha,
-                                })
-                                .collect(),
-                        ),
-                    })
-                }
-                _ => Err(EvaluationError::new(
-                    "evaluation.region.paint",
-                    "region paint and realization payload disagree",
-                )),
-            }
-        }
-    }
+    toniator_render::RenderOutputLayer::from_shared(
+        output.output_layer_id,
+        Arc::clone(output.realization.geometry()),
+        output.realization.primitive_paints().map(Arc::clone),
+    )
 }
 fn aggregate_document_identity<'a>(
     prefix: &str,
@@ -5004,8 +5656,8 @@ fn document_family_cache_key(
         content: DocumentFamilyContentKey {
             canvas: (canvas.width.to_bits(), canvas.height.to_bits()),
             density: (
-                effective.density.across_x.to_bits(),
-                effective.density.across_y.to_bits(),
+                effective.density.density.to_bits(),
+                effective.density.aspect.to_bits(),
             ),
             rotation: effective.pattern_rotation_degrees.to_bits(),
             translation: (
@@ -5037,7 +5689,7 @@ fn required_support_radius_legacy(
 ) -> Result<f64, EvaluationError> {
     required_support_radius_from_fill(
         canvas,
-        &effective.density,
+        &effective.resolved_density,
         MAXIMUM_NORMALIZED_MARK_FILL,
         definition.coverage.additional_margin,
         family,
@@ -5102,7 +5754,7 @@ fn required_support_radius_for_output(
     }
     if output.maze_walls().is_some() || output.guide_paths().is_some() {
         return Ok(
-            maximum_emitted_guide_spacing(family, canvas, &effective.density)
+            maximum_emitted_guide_spacing(family, canvas, &effective.resolved_density)
                 .map_err(EvaluationError::from_pipeline)?
                 + definition.coverage.additional_margin,
         );
@@ -5117,11 +5769,11 @@ fn required_support_radius_for_output(
         let response = region_response_for_output(effective, output.layer_id)?;
         let nominal_extent = match region_source {
             toniator_domain::RegionSourceIntent::GuideFaces { .. } => {
-                maximum_emitted_guide_spacing(family, canvas, &effective.density)
+                maximum_emitted_guide_spacing(family, canvas, &effective.resolved_density)
                     .map_err(EvaluationError::from_pipeline)?
             }
             toniator_domain::RegionSourceIntent::VoronoiSites { .. } => {
-                maximum_nominal_cell_diameter(family, canvas, &effective.density)
+                maximum_nominal_cell_diameter(family, canvas, &effective.resolved_density)
                     .map_err(EvaluationError::from_pipeline)?
             }
         };
@@ -5154,7 +5806,7 @@ fn required_support_radius_for_output(
     }
     required_support_radius_from_fill(
         canvas,
-        &effective.density,
+        &effective.resolved_density,
         MAXIMUM_NORMALIZED_MARK_FILL,
         definition.coverage.additional_margin,
         family,
@@ -5260,9 +5912,9 @@ fn required_connection_base_support(
     family: &FamilyCapability,
 ) -> Result<f64, EvaluationError> {
     let basis = if family.product == toniator_patterns::StructuralProductCapability::RandomSites {
-        maximum_nominal_cell_diameter(family, canvas, &effective.density)
+        maximum_nominal_cell_diameter(family, canvas, &effective.resolved_density)
     } else {
-        maximum_emitted_guide_spacing(family, canvas, &effective.density)
+        maximum_emitted_guide_spacing(family, canvas, &effective.resolved_density)
     }
     .map_err(EvaluationError::from_pipeline)?;
     Ok(basis + definition.coverage.additional_margin)
@@ -5271,7 +5923,7 @@ fn required_connection_base_support(
 /// Computes the conservative family-specific nominal-cell bound before any allocation.
 fn required_support_radius_from_fill(
     canvas: &CanvasSpec,
-    density: &toniator_domain::DensityMetric2D,
+    density: &toniator_domain::ResolvedDensityMetric2D,
     maximum_fill: f64,
     additional_margin: f64,
     family: &FamilyCapability,
@@ -5655,9 +6307,10 @@ pub(crate) mod test_support {
         OffsetSides, ParametricCurve, PathStrokeStyle, PatternDefinition, PatternDefinitionBundle,
         PatternDefinitionEdit, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
         PatternOutputLayer, PatternOutputLayerId, PatternOutputSettings, RandomSiteCharacter,
-        RegionGeometryResponse, RegionSourceIntent, SiteDensityModulation, SiteExclusionPolicy,
-        SiteUseFilter, SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
-        SpiralCurve, SpiralShape, StraightGuideDimension, StraightGuideRepetition,
+        RegionGeometryResponse, RegionSourceIntent, ResolvedDensityMetric2D, SiteDensityModulation,
+        SiteExclusionPolicy, SiteUseFilter, SourceComponent, SourcePlacement, SourceReference,
+        SourceReferenceId, SpiralCurve, SpiralShape, StraightGuideDimension,
+        StraightGuideRepetition,
     };
 
     use super::*;
@@ -5673,6 +6326,12 @@ pub(crate) mod test_support {
 
     const GUARD: Duration = Duration::from_secs(15);
     const CHANNEL_ID: ChannelId = ChannelId(1);
+
+    /// Converts evaluator-facing across-axis frequencies into current density/aspect authority.
+    fn authored_density(canvas: &CanvasSpec, across_x: f64, across_y: f64) -> DensityMetric2D {
+        DensityMetric2D::from_resolved(canvas, &ResolvedDensityMetric2D { across_x, across_y })
+            .expect("test density is finite and positive")
+    }
 
     /// Binds the current default typed response to each output in one test-only structural definition.
     fn bundle_from_test_definition(definition: PatternDefinition) -> PatternDefinitionBundle {
@@ -5760,9 +6419,8 @@ pub(crate) mod test_support {
             DocumentPatternSettings {
                 definition_id: PatternDefinitionId(1),
                 density: DensityMetric2D {
-                    across_x: 90.0,
-                    across_y: 60.0,
-                    aspect_locked: true,
+                    density: 5_400.0_f64.sqrt(),
+                    aspect: 1.0,
                 },
                 pattern_rotation_degrees: 17.0,
                 shape_rotation_degrees: 0.0,
@@ -5958,8 +6616,7 @@ pub(crate) mod test_support {
         )];
         let mut settings = base.pattern_settings().clone();
         settings.definition_id = definition.id;
-        settings.density.across_x = 2.0;
-        settings.density.across_y = 2.0;
+        settings.density = authored_density(base.canvas(), 2.0, 2.0);
         let bundle = bundle_with_sole_response(
             definition,
             PatternGeometryResponse::Connected(ConnectedGeometryResponse {
@@ -6067,8 +6724,7 @@ pub(crate) mod test_support {
         )];
         let mut settings = base.pattern_settings().clone();
         settings.definition_id = definition.id;
-        settings.density.across_x = 5.0;
-        settings.density.across_y = settings.density.across_x * canvas.height / canvas.width;
+        settings.density = authored_density(base.canvas(), 5.0, 5.0 * canvas.height / canvas.width);
         let bundle = bundle_with_sole_response(
             definition,
             PatternGeometryResponse::Connected(ConnectedGeometryResponse {
@@ -6195,7 +6851,7 @@ pub(crate) mod test_support {
         let straight_nominal = maximum_nominal_cell_diameter(
             &straight_plan.family,
             straight_document.canvas(),
-            &straight_effective.density,
+            &straight_effective.resolved_density,
         )
         .expect("straight Voronoi nominal extent is finite");
         let straight_support = required_support_radius_for_output(
@@ -6255,7 +6911,7 @@ pub(crate) mod test_support {
         let random_nominal = maximum_nominal_cell_diameter(
             &random_region_plan.family,
             straight_document.canvas(),
-            &straight_effective.density,
+            &straight_effective.resolved_density,
         )
         .expect("random Voronoi nominal extent is finite");
         let random_region_support = required_support_radius_for_output(
@@ -6312,7 +6968,7 @@ pub(crate) mod test_support {
         let parametric_nominal = maximum_nominal_cell_diameter(
             &parametric_plan.family,
             parametric_document.canvas(),
-            &parametric_effective.density,
+            &parametric_effective.resolved_density,
         )
         .expect("parametric Voronoi nominal extent is finite");
         let parametric_support = required_support_radius_for_output(
@@ -6542,7 +7198,7 @@ pub(crate) mod test_support {
         let mut count = 0usize;
         for layer in scene.layers() {
             for output in layer.outputs() {
-                let GeometryOutput::CanonicalRegions(regions) = &output.geometry else {
+                let GeometryOutput::CanonicalRegions(regions) = output.geometry() else {
                     continue;
                 };
                 for region in regions.regions() {
@@ -6684,7 +7340,7 @@ pub(crate) mod test_support {
         let result = completion
             .result()
             .expect("guide-face realization completes");
-        assert!(result.scene().layers().iter().all(|layer| matches!(layer.outputs().first().map(|output| &output.geometry), Some(GeometryOutput::CanonicalRegions(regions)) if !regions.regions().is_empty())));
+        assert!(result.scene().layers().iter().all(|layer| matches!(layer.outputs().first().map(toniator_render::RenderOutputLayer::geometry), Some(GeometryOutput::CanonicalRegions(regions)) if !regions.regions().is_empty())));
         assert_production_equilateral_triangles(result.scene());
         assert!(write_svg(result.scene()).contains("<path"));
         assert!(
@@ -6743,7 +7399,7 @@ pub(crate) mod test_support {
             .outputs()
             .first()
             .expect("production layer has one output");
-        let GeometryOutput::CanonicalRegions(regions) = &region_output.geometry else {
+        let GeometryOutput::CanonicalRegions(regions) = region_output.geometry() else {
             panic!("production guide faces remain canonical regions");
         };
         let mut identity_record = format!("fingerprint={}\n", regions.fingerprint());
@@ -6790,7 +7446,7 @@ pub(crate) mod test_support {
         let result = completion
             .result()
             .expect("two-guide realization completes");
-        assert!(result.scene().layers().iter().all(|layer| matches!(layer.outputs().first().map(|output| &output.geometry), Some(GeometryOutput::CanonicalRegions(regions)) if !regions.regions().is_empty())));
+        assert!(result.scene().layers().iter().all(|layer| matches!(layer.outputs().first().map(toniator_render::RenderOutputLayer::geometry), Some(GeometryOutput::CanonicalRegions(regions)) if !regions.regions().is_empty())));
         scheduler.shutdown().expect("scheduler shuts down");
     }
 
@@ -6811,8 +7467,7 @@ pub(crate) mod test_support {
             },
         )];
         let mut settings = document.pattern_settings().clone();
-        settings.density.across_x = 24.0;
-        settings.density.across_y = settings.density.across_x * 48.0 / 64.0;
+        settings.density = authored_density(document.canvas(), 24.0, 24.0 * 48.0 / 64.0);
         DocumentSession::new(
             Document::with_source_topology_and_authored_structures(
                 document.id(),
@@ -7024,8 +7679,7 @@ pub(crate) mod test_support {
         .unwrap();
         let mut settings = base.pattern_settings().clone();
         settings.definition_id = definition.id;
-        settings.density.across_x = 2.0;
-        settings.density.across_y = 2.0;
+        settings.density = authored_density(base.canvas(), 2.0, 2.0);
         let bundle = bundle_with_sole_response(
             definition,
             PatternGeometryResponse::Connected(ConnectedGeometryResponse {
@@ -7159,8 +7813,7 @@ pub(crate) mod test_support {
         .expect("vertical authored guide");
         let mut settings = base.pattern_settings().clone();
         settings.definition_id = definition.id;
-        settings.density.across_x = 2.0;
-        settings.density.across_y = 2.0;
+        settings.density = authored_density(base.canvas(), 2.0, 2.0);
         DocumentSession::new(
             Document::with_source_topology_and_authored_structures(
                 base.id(),
@@ -7194,7 +7847,7 @@ pub(crate) mod test_support {
             .unwrap_or_else(|| panic!("cubic realization: {:?}", completion.error()));
         let contains_cubic_region = result.scene().layers().iter().any(|layer| {
             matches!(
-                layer.outputs().first().map(|output| &output.geometry),
+                layer.outputs().first().map(toniator_render::RenderOutputLayer::geometry),
                 Some(GeometryOutput::CanonicalRegions(regions))
                     if regions.regions().iter().any(|region| region.ring.segments().iter().any(
                         |segment| matches!(segment, CurveSegment::CubicBezier(_))
@@ -7210,6 +7863,184 @@ pub(crate) mod test_support {
 
     fn document_request(session: &DocumentSession, bytes: Arc<[u8]>) -> EvaluationRequest {
         document_request_for_source(session, "cancellation-test-source", bytes)
+    }
+
+    /// Proves a single-channel diagnostic result shares pending cache payloads without changing accessor equality.
+    ///
+    /// # Panics
+    ///
+    /// Panics when diagnostic result publication deep-clones cached scene or
+    /// raster values instead of retaining their immutable Arc identity.
+    #[test]
+    fn channel_diagnostic_result_shares_scene_and_raster_with_cache_transaction() {
+        let evaluated = evaluate_channel_diagnostic_cached_with_cancellation(
+            request(),
+            &NeverCancelled,
+            DerivedCacheSnapshot::empty(),
+            EvaluationLimits::default(),
+        )
+        .expect("single-channel diagnostic evaluation completes");
+        let cached_scene = &evaluated
+            .transaction
+            .scene
+            .as_ref()
+            .expect("scene miss schedules cache installation")
+            .1;
+        let cached_raster = &evaluated
+            .transaction
+            .raster
+            .as_ref()
+            .expect("raster miss schedules cache installation")
+            .1;
+        assert!(Arc::ptr_eq(&evaluated.result.scene, cached_scene));
+        assert!(Arc::ptr_eq(&evaluated.result.raster, cached_raster));
+        assert_eq!(evaluated.result.scene(), cached_scene.as_ref());
+        assert_eq!(evaluated.result.raster(), cached_raster.as_ref());
+    }
+
+    /// Proves an evaluation result borrows the same immutable scene and raster Arcs retained for cache commit.
+    ///
+    /// # Panics
+    ///
+    /// Panics when result publication deep-clones cached render payloads rather
+    /// than preserving their pointer identity and public accessor values.
+    #[test]
+    fn evaluation_result_shares_scene_and_raster_with_cache_transaction() {
+        let session = modeled_document_session();
+        let evaluated = evaluate_cached_document(
+            document_request(&session, valid_document_bytes()),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .expect("document evaluation completes");
+        let cached_scene = &evaluated
+            .transaction
+            .scene
+            .as_ref()
+            .expect("scene miss schedules cache installation")
+            .1;
+        let cached_raster = &evaluated
+            .transaction
+            .raster
+            .as_ref()
+            .expect("raster miss schedules cache installation")
+            .1;
+        assert!(Arc::ptr_eq(&evaluated.result.scene, cached_scene));
+        assert!(Arc::ptr_eq(&evaluated.result.raster, cached_raster));
+        assert_eq!(evaluated.result.scene(), cached_scene.as_ref());
+        assert_eq!(evaluated.result.raster(), cached_raster.as_ref());
+    }
+
+    /// Proves cache replay and scene publication share one immutable canonical output payload.
+    ///
+    /// This regression verifies realization-cache reuse, exact renderer order,
+    /// and geometry pointer identity without a global allocator statistic. The
+    /// retained cache record contains no typed provenance or second canonical
+    /// allocation. It performs no I/O beyond its immutable source fixture.
+    #[test]
+    fn cached_output_realizations_share_scene_geometry_and_preserve_output_parity() {
+        let session = modeled_document_session();
+        let request = document_request(&session, valid_document_bytes());
+        let mut cache = DocumentDerivedCache::default();
+        let first = evaluate_cached_document(
+            request.clone(),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("initial document evaluation completes");
+        let cached_realization = Arc::clone(
+            &first
+                .transaction
+                .realizations
+                .first()
+                .expect("initial evaluation retains one output realization")
+                .1,
+        );
+        let first_outputs = first.result.scene().layers()[0].outputs().to_vec();
+        assert!(Arc::ptr_eq(
+            cached_realization.realization.geometry(),
+            &first.result.scene().layers()[0].outputs()[0].geometry
+        ));
+        cache.commit(first.transaction.clone());
+        assert!(Arc::ptr_eq(&cached_realization, &cache.realizations[0].1));
+
+        let replay = evaluate_cached_document(
+            request,
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("cached document evaluation completes");
+        assert_eq!(replay.diagnostics.channels[0].family, CacheDisposition::Hit);
+        assert_eq!(
+            replay.diagnostics.channels[0].outputs[0].realization,
+            CacheDisposition::Hit
+        );
+        assert!(Arc::ptr_eq(
+            &cached_realization,
+            &replay.transaction.realizations[0].1
+        ));
+        assert!(Arc::ptr_eq(
+            cached_realization.realization.geometry(),
+            &replay.result.scene().layers()[0].outputs()[0].geometry
+        ));
+        assert_eq!(replay.result.scene().layers()[0].outputs(), first_outputs);
+    }
+
+    /// Proves sampled primitive paint shares its immutable cache allocation with the scene.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a sampled-region fixture omits paint or scene construction
+    /// deep-clones the renderer-ready cache payload.
+    #[test]
+    fn sampled_output_realization_shares_scene_paint_payload() {
+        let session = modeled_sampled_voronoi_session();
+        let evaluated = evaluate_cached_document(
+            document_request(&session, valid_document_bytes()),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .expect("sampled region document evaluates");
+        let cached = &evaluated.transaction.realizations[0].1.realization;
+        let cached_paints = cached
+            .primitive_paints()
+            .expect("sampled cache output retains paint");
+        let scene_paints = evaluated.result.scene().layers()[0].outputs()[0]
+            .primitive_paints
+            .as_ref()
+            .expect("sampled scene output retains paint");
+        assert!(Arc::ptr_eq(
+            cached.geometry(),
+            &evaluated.result.scene().layers()[0].outputs()[0].geometry
+        ));
+        assert!(Arc::ptr_eq(cached_paints, scene_paints));
+    }
+
+    /// Proves unrestricted output filtering borrows the cached family rather than cloning it.
+    ///
+    /// This focused identity witness covers only `SiteUseFilter::All`; dependent
+    /// filters remain patterns-owned allocating subset operations. It performs
+    /// no cache mutation, scheduling, rendering, or unsafe allocation probing.
+    #[test]
+    fn unrestricted_output_filter_borrows_the_cached_family() {
+        let session = modeled_document_session();
+        let evaluated = evaluate_cached_document(
+            document_request(&session, valid_document_bytes()),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .expect("document family fixture evaluates");
+        let family = &evaluated.transaction.families[0].1;
+        let filtered =
+            filtered_family_for_output(family.as_ref(), toniator_domain::SiteUseFilter::All, None)
+                .expect("unrestricted output filter validates");
+        assert!(matches!(&filtered, Cow::Borrowed(_)));
+        assert!(std::ptr::eq(filtered.as_ref(), family.as_ref()));
     }
 
     fn document_request_for_source(
@@ -7402,8 +8233,11 @@ pub(crate) mod test_support {
     fn stage20q_density_session(session: DocumentSession, across_x: f64) -> DocumentSession {
         let document = session.document();
         let mut settings = document.pattern_settings().clone();
-        settings.density.across_x = across_x;
-        settings.density.across_y = across_x * document.canvas().height / document.canvas().width;
+        settings.density = authored_density(
+            document.canvas(),
+            across_x,
+            across_x * document.canvas().height / document.canvas().width,
+        );
         DocumentSession::new(
             Document::with_source_topology_and_authored_structures(
                 document.id(),
@@ -8268,6 +9102,92 @@ pub(crate) mod test_support {
         }
     }
 
+    /// Proves worker progress is ticketed, monotonic, staged, and complete before publication.
+    #[test]
+    fn document_scheduler_reports_monotonic_stage_progress() {
+        let scheduler = EvaluationScheduler::new().expect("progress scheduler starts");
+        let session = modeled_document_session();
+        let ticket = scheduler
+            .submit(document_request(&session, valid_document_bytes()))
+            .expect("progress request submits");
+        let deadline = Instant::now() + GUARD;
+        let mut progress = Vec::new();
+        let completion = loop {
+            while let Some(update) = scheduler.try_receive_latest_progress().unwrap() {
+                assert_eq!(update.ticket(), ticket);
+                progress.push(update);
+            }
+            if let Some(completion) = scheduler.try_receive_latest().unwrap() {
+                break completion;
+            }
+            assert!(Instant::now() < deadline, "progress scheduler timed out");
+            thread::yield_now();
+        };
+        while let Some(update) = scheduler.try_receive_latest_progress().unwrap() {
+            progress.push(update);
+        }
+
+        assert_eq!(completion.ticket(), ticket);
+        assert!(progress.len() >= 7, "coarse stages remain observable");
+        assert!(
+            progress
+                .windows(2)
+                .all(|pair| { pair[0].completed_per_mille <= pair[1].completed_per_mille })
+        );
+        assert!(
+            progress
+                .iter()
+                .all(|update| (0.0..=1.0).contains(&update.stage_fraction()))
+        );
+        assert!(progress.windows(2).any(|pair| {
+            pair[0].stage() == EvaluationProgressStage::RealizingOutputs
+                && pair[1].stage() == EvaluationProgressStage::RealizingOutputs
+                && pair[0].completed_per_mille < pair[1].completed_per_mille
+        }));
+        assert!(progress.windows(2).any(|pair| {
+            pair[0].stage() == EvaluationProgressStage::RasterizingPreview
+                && pair[1].stage() == EvaluationProgressStage::RasterizingPreview
+                && pair[0].completed_per_mille < pair[1].completed_per_mille
+                && pair[0].stage_fraction() < pair[1].stage_fraction()
+        }));
+        assert_eq!(
+            progress.first().unwrap().stage(),
+            EvaluationProgressStage::Preparing
+        );
+        assert_eq!(
+            progress.last().unwrap().stage(),
+            EvaluationProgressStage::Complete
+        );
+        assert_eq!(progress.last().unwrap().fraction(), 1.0);
+        assert_eq!(progress.last().unwrap().stage_fraction(), 1.0);
+        scheduler.shutdown().unwrap();
+    }
+
+    /// Proves repeated inner-loop polls cannot enqueue an unbounded run of identical progress.
+    #[test]
+    fn scheduler_progress_coalesces_duplicate_worker_observations() {
+        let cancelled = AtomicBool::new(false);
+        let (sender, receiver) = mpsc::channel();
+        let last = Mutex::new(None);
+        let probe = SchedulerCancellation {
+            cancelled: &cancelled,
+            ticket: EvaluationTicket(7),
+            progress: &sender,
+            last_progress: &last,
+            gate: None,
+        };
+        for _ in 0..100_000 {
+            probe.report_progress(EvaluationProgressStage::RealizingOutputs, 425, 500);
+        }
+        probe.report_progress(EvaluationProgressStage::RealizingOutputs, 425, 501);
+        probe.report_progress(EvaluationProgressStage::RealizingOutputs, 424, 900);
+        let updates = receiver.try_iter().collect::<Vec<_>>();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].fraction(), 0.425);
+        assert_eq!(updates[0].stage_fraction(), 0.5);
+        assert_eq!(updates[1].stage_fraction(), 0.501);
+    }
+
     #[test]
     fn actual_pipeline_cancels_at_each_named_before_and_after_checkpoint() {
         for checkpoint in [EvaluationCheckpoint::Before, EvaluationCheckpoint::After] {
@@ -8555,7 +9475,7 @@ pub(crate) mod test_support {
         let result = newest.result().expect("newest Region result");
         assert!(result.scene().layers().iter().all(|layer| {
             matches!(
-                layer.outputs().first().map(|output| &output.geometry),
+                layer.outputs().first().map(toniator_render::RenderOutputLayer::geometry),
                 Some(GeometryOutput::CanonicalRegions(regions)) if !regions.regions().is_empty()
             )
         }));
@@ -8817,7 +9737,7 @@ pub(crate) mod test_support {
         .expect("sampled Region document evaluates");
         let layer = &evaluated.scene().layers()[0];
         let output = &layer.outputs()[0];
-        let GeometryOutput::CanonicalRegions(regions) = &output.geometry else {
+        let GeometryOutput::CanonicalRegions(regions) = output.geometry() else {
             panic!("sampled output retains canonical regions")
         };
         let paints = output
@@ -9479,10 +10399,12 @@ pub(crate) mod test_support {
             .map(|site| site.position)
             .collect::<Vec<_>>();
         for (_, realization) in &candidate.transaction.realizations {
-            let DocumentRealization::Strokes(strokes) = &realization.realization else {
+            let GeometryOutput::CanonicalStrokes(strokes) =
+                realization.realization.geometry().as_ref()
+            else {
                 panic!("connection fixture cannot realize marks")
             };
-            for stroke in &strokes.output.strokes {
+            for stroke in strokes {
                 for segment in stroke.path.segments() {
                     assert!(positions.contains(&segment.start()));
                     assert!(positions.contains(&segment.end()));
@@ -10386,18 +11308,12 @@ pub(crate) mod test_support {
         )
         .expect("cross-channel document evaluates");
         assert!(matches!(
-            first.result.scene().layers()[0].outputs(),
-            [toniator_render::RenderOutputLayer {
-                geometry: GeometryOutput::CanonicalStrokes(_),
-                ..
-            }]
+            first.result.scene().layers()[0].outputs()[0].geometry(),
+            GeometryOutput::CanonicalStrokes(_)
         ));
         assert!(matches!(
-            first.result.scene().layers()[1].outputs(),
-            [toniator_render::RenderOutputLayer {
-                geometry: GeometryOutput::CanonicalRegions(_),
-                ..
-            }]
+            first.result.scene().layers()[1].outputs()[0].geometry(),
+            GeometryOutput::CanonicalRegions(_)
         ));
         assert_eq!(
             first.diagnostics.channels[0].outputs[0].output_layer_id,
@@ -10714,9 +11630,9 @@ pub(crate) mod test_support {
             .transaction
             .realizations
             .iter()
-            .map(|(_, output)| match &output.realization {
-                DocumentRealization::Strokes(strokes) => {
-                    canonical_stroke_work(&strokes.output.strokes)
+            .map(|(_, output)| match output.realization.geometry().as_ref() {
+                GeometryOutput::CanonicalStrokes(strokes) => {
+                    canonical_stroke_work(strokes)
                         .expect("bounded stroke work counts")
                         .0
                 }
@@ -10757,9 +11673,9 @@ pub(crate) mod test_support {
             .transaction
             .realizations
             .iter()
-            .map(|(_, output)| match &output.realization {
-                DocumentRealization::Strokes(strokes) => {
-                    canonical_stroke_work(&strokes.output.strokes)
+            .map(|(_, output)| match output.realization.geometry().as_ref() {
+                GeometryOutput::CanonicalStrokes(strokes) => {
+                    canonical_stroke_work(strokes)
                         .expect("bounded stroke work counts")
                         .1
                 }
@@ -11198,11 +12114,11 @@ pub(crate) mod test_support {
 mod cache_key_tests {
     use super::*;
 
-    fn family(aspect_locked: bool) -> FamilyCacheKey {
+    /// Builds one deterministic family key with authoritative density/aspect identity.
+    fn family(density_aspect: f64) -> FamilyCacheKey {
         FamilyCacheKey {
             canvas: (900.0_f64.to_bits(), 600.0_f64.to_bits()),
-            density: (90.0_f64.to_bits(), 60.0_f64.to_bits()),
-            aspect_locked,
+            density: (5_400.0_f64.sqrt().to_bits(), density_aspect.to_bits()),
             rotation: 17.0_f64.to_bits(),
             translation: (3.25_f64.to_bits(), (-4.5_f64).to_bits()),
             guard_steps: 2,
@@ -11225,7 +12141,7 @@ mod cache_key_tests {
     /// Proves a lower maximum fill reuses a broad family envelope while a wider request misses.
     #[test]
     fn family_cache_reuses_only_an_envelope_broad_enough_for_normalized_fill() {
-        let mut broad = family(true);
+        let mut broad = family(1.0);
         broad.required_support_radius = 8.0_f64.to_bits();
         let mut narrow = broad.clone();
         narrow.required_support_radius = 4.0_f64.to_bits();
@@ -11239,7 +12155,7 @@ mod cache_key_tests {
     fn family_cache_key_reuses_broader_topology_envelope_and_rejects_insufficient_one() {
         let base_support = 4.0_f64;
         let guard_steps = 2.0_f64;
-        let mut broad = family(true);
+        let mut broad = family(1.0);
         broad.required_support_radius = (base_support + guard_steps * 8.0).to_bits();
         let mut requested = broad.clone();
         requested.required_support_radius = (base_support + guard_steps * 5.0).to_bits();
@@ -11455,8 +12371,8 @@ mod cache_key_tests {
             "the adjacent mark output never inherits maze identity"
         );
         assert_eq!(
-            family(true),
-            family(true),
+            family(1.0),
+            family(1.0),
             "maze realization intent never enters the structural family cache key"
         );
     }
@@ -11507,16 +12423,16 @@ mod cache_key_tests {
 
     #[test]
     fn family_key_is_structural_while_decoded_pixels_invalidate_every_downstream_key() {
-        let first_family = family(true);
-        let second_family = family(true);
+        let first_family = family(1.0);
+        let second_family = family(1.0);
         assert_eq!(first_family, second_family);
-        assert_ne!(family(true), family(false));
+        assert_ne!(family(1.0), family(2.0));
         let first_realization = realization(first_family, "content-a", "pixels-a", contract(1));
         let second_realization = realization(second_family, "content-a", "pixels-b", contract(1));
         assert_ne!(first_realization, second_realization);
         assert_ne!(
             first_realization,
-            realization(family(true), "content-b", "pixels-a", contract(1))
+            realization(family(1.0), "content-b", "pixels-a", contract(1))
         );
         let scene = |realization: RealizationCacheKey| SceneCacheKey {
             realization,
@@ -11585,17 +12501,17 @@ mod cache_key_tests {
             ..baseline.clone()
         };
         assert_ne!(baseline, changed_lookup);
-        assert_eq!(family(true), family(true));
+        assert_eq!(family(1.0), family(1.0));
         // Decode cache lookup deliberately sees the logical reference, while
         // realization consumes only the immutable decoder result.
         assert_eq!(
-            realization(family(true), "content-a", "pixels-a", contract(1)),
-            realization(family(true), "content-a", "pixels-a", contract(1)),
+            realization(family(1.0), "content-a", "pixels-a", contract(1)),
+            realization(family(1.0), "content-a", "pixels-a", contract(1)),
         );
-        assert_eq!(family(true), family(true));
+        assert_eq!(family(1.0), family(1.0));
         assert_ne!(
-            realization(family(true), "content", "pixels", contract(1)),
-            realization(family(true), "content", "pixels", contract(2)),
+            realization(family(1.0), "content", "pixels", contract(1)),
+            realization(family(1.0), "content", "pixels", contract(2)),
         );
     }
 }

@@ -1,7 +1,7 @@
 use toniator_domain::{
-    CanvasSpec, CoveragePolicy, DensityMetric2D, GeneralizedSiteProduct, GuideDimensionId,
-    MarkOrientation, PatternDefinition, PatternDefinitionId, PatternMechanismId,
-    PatternOutputLayerId, SourceComponent, SourcePlacement, StraightGuideDimension,
+    CanvasSpec, CoveragePolicy, GeneralizedSiteProduct, GuideDimensionId, MarkOrientation,
+    PatternDefinition, PatternDefinitionId, PatternMechanismId, PatternOutputLayerId,
+    ResolvedDensityMetric2D, SourceComponent, SourcePlacement, StraightGuideDimension,
     StraightGuideRepetition,
 };
 use toniator_patterns::{
@@ -80,10 +80,9 @@ fn repeated_along_guides_preflight_their_largest_nominal_cell() {
             width: 100.0,
             height: 100.0,
         },
-        density: DensityMetric2D {
+        density: ResolvedDensityMetric2D {
             across_x: 10.0,
             across_y: 10.0,
-            aspect_locked: true,
         },
         rotation_degrees: 0.0,
         translation_x: 0.0,

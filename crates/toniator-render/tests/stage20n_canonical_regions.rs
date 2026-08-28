@@ -136,11 +136,11 @@ fn ordered_region_outputs_validate_identity_and_raster_in_painter_order() {
         }],
     })
     .expect("canonical region");
-    let output = RenderOutputLayer {
-        output_layer_id: PatternOutputLayerId(7),
-        geometry: GeometryOutput::CanonicalRegions(regions.clone()),
-        primitive_paints: None,
-    };
+    let output = RenderOutputLayer::new(
+        PatternOutputLayerId(7),
+        GeometryOutput::CanonicalRegions(regions.clone()),
+        None,
+    );
     let layer = RenderLayer::new_outputs(
         ChannelId(1),
         true,
@@ -153,11 +153,11 @@ fn ordered_region_outputs_validate_identity_and_raster_in_painter_order() {
         0.5,
         vec![
             output.clone(),
-            RenderOutputLayer {
-                output_layer_id: PatternOutputLayerId(8),
-                geometry: GeometryOutput::CanonicalRegions(regions),
-                primitive_paints: None,
-            },
+            RenderOutputLayer::new(
+                PatternOutputLayerId(8),
+                GeometryOutput::CanonicalRegions(regions),
+                None,
+            ),
         ],
     )
     .expect("ordered outputs");

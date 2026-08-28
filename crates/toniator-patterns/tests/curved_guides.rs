@@ -1,16 +1,17 @@
 use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureId,
-    AuthoredStructureKind, CanvasSpec, CoveragePolicy, DensityMetric2D, Document, DocumentId,
+    AuthoredStructureKind, CanvasSpec, CoveragePolicy, Document, DocumentId,
     GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
     MarkOrientation, OffsetCleanup, OffsetSides, PatternDefinition, PatternDefinitionBundle,
     PatternDefinitionId, PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
-    PatternOutputRealization, PatternOutputSettings, SourceComponent, SourcePlacement,
-    SourceReference,
+    PatternOutputRealization, PatternOutputSettings, ResolvedDensityMetric2D, SourceComponent,
+    SourcePlacement, SourceReference,
 };
 use toniator_geometry::{AffineTransform2D, FamilySiteProvenance, Point2, SiteScope, Vector2};
 use toniator_patterns::{
     GridInspectRequest, MarkResponse, directional_spacing,
-    evaluate_document_typed_family_cancellable, maximum_nominal_cell_diameter,
+    evaluate_document_typed_family_cancellable,
+    evaluate_typed_family_product_with_source_progress_cancellable, maximum_nominal_cell_diameter,
     realize_typed_diagnostic_outputs, resolve_document_pattern_pipeline, resolve_pattern_pipeline,
 };
 use toniator_sampling::{SourceFormatHint, decode_source};
@@ -108,10 +109,9 @@ fn request(max_family_candidates: usize) -> GridInspectRequest {
             width: 100.0,
             height: 100.0,
         },
-        density: DensityMetric2D {
+        density: ResolvedDensityMetric2D {
             across_x: 10.0,
             across_y: 20.0,
-            aspect_locked: false,
         },
         rotation_degrees: 17.0,
         translation_x: 4.0,
@@ -122,7 +122,7 @@ fn request(max_family_candidates: usize) -> GridInspectRequest {
     }
 }
 
-/// Proves resolved authored guides merge ordered selected contributors without sorting their dimension IDs.
+/// Proves resolved authored guides report work and merge contributors in selected order.
 #[test]
 fn curved_guides_reuse_existing_site_products_with_truthful_guide_and_site_sets() {
     let dimensions = vec![
@@ -189,9 +189,17 @@ fn curved_guides_reuse_existing_site_products_with_truthful_guide_and_site_sets(
         resolve_pattern_pipeline(&definition).unwrap_err().path(),
         "pattern.pipeline.guide_resources"
     );
-    let output =
-        evaluate_document_typed_family_cancellable(&document, &definition, &request(64), &|| false)
-            .expect("document-aware authored curve product evaluates");
+    let plan = resolve_document_pattern_pipeline(&document, &definition)
+        .expect("document-aware authored curve pipeline resolves");
+    let progress = std::sync::Mutex::new(Vec::new());
+    let output = evaluate_typed_family_product_with_source_progress_cancellable(
+        &plan.family,
+        &request(64),
+        None,
+        &|| false,
+        &|completed, total| progress.lock().unwrap().push((completed, total)),
+    )
+    .expect("document-aware authored curve product evaluates");
     assert_eq!(output.structural_path_set().unwrap().paths().len(), 3);
     assert_eq!(
         output.site_set().sites().len(),
@@ -214,6 +222,15 @@ fn curved_guides_reuse_existing_site_products_with_truthful_guide_and_site_sets(
         ),
         other => panic!("expected curved intersection provenance, got {other:?}"),
     }
+    let progress = progress.into_inner().unwrap();
+    assert!(
+        progress
+            .iter()
+            .any(|&(completed, total)| completed > 0 && completed < total),
+        "generic guide expansion and curve contacts advance within the family stage"
+    );
+    assert_eq!(progress.last(), Some(&(1_000, 1_000)));
+    assert!(progress.windows(2).all(|pair| pair[0].0 <= pair[1].0));
 }
 
 /// Places generic curve-guide prototypes from their shared local grid origin.
@@ -482,10 +499,9 @@ fn curved_transform_stacks_and_along_guides_preserve_scope_phase_and_variable_in
         width: 100.0,
         height: 100.0,
     };
-    let density = DensityMetric2D {
+    let density = ResolvedDensityMetric2D {
         across_x: 10.0,
         across_y: 20.0,
-        aspect_locked: false,
     };
     let horizontal_normal = directional_spacing(&spec, &density, Vector2::new(1.0, 0.0)).unwrap();
     let vertical_normal = directional_spacing(&spec, &density, Vector2::new(0.0, 1.0)).unwrap();
@@ -722,10 +738,9 @@ fn diagnostic_cubic_stops_when_terminal_extensions_cross() {
                 width: 320.0,
                 height: 320.0,
             },
-            density: DensityMetric2D {
+            density: ResolvedDensityMetric2D {
                 across_x: 32.0,
                 across_y: 32.0,
-                aspect_locked: false,
             },
             rotation_degrees: 0.0,
             translation_x: 0.0,
@@ -869,10 +884,9 @@ fn normal_offset_along_guides_bound_their_transverse_basis_before_mark_realizati
         width: 225.0,
         height: 155.0,
     };
-    let density = DensityMetric2D {
+    let density = ResolvedDensityMetric2D {
         across_x: 16.0,
         across_y: 16.0 * 155.0 / 225.0,
-        aspect_locked: true,
     };
     let definition = definition(
         vec![GuideDimension {
@@ -925,7 +939,7 @@ fn normal_offset_along_guides_bound_their_transverse_basis_before_mark_realizati
     assert!((maximum - (225.0 / 16.0 + 77.5)).abs() <= 1e-12);
     let request = GridInspectRequest {
         canvas: canvas.clone(),
-        density: density.clone(),
+        density,
         rotation_degrees: 0.0,
         translation_x: 0.0,
         translation_y: 0.0,

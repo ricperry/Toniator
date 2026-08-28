@@ -18,4 +18,5 @@ toniator-engine = { path = "../toniator-engine" }
 toniator-io = { path = "../toniator-io" }
 
 [dev-dependencies]
+image.workspace = true
 sha2.workspace = true

@@ -6,7 +6,7 @@ use std::{
 
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternInstance, ChannelPatternLayoutDelta,
-    ChannelSourceMapping, ChannelState, ColorValue, DensityEditedAxis, DensityMetric2D, Document,
+    ChannelSourceMapping, ChannelState, ColorValue, DensityEditedField, DensityMetric2D, Document,
     DocumentCommand, DocumentHistory, DocumentId, DocumentSession, PatternGeometryResponse,
     SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
 };
@@ -87,7 +87,7 @@ fn document_and_selected_density_edits_have_distinct_family_cache_scope() {
 
     let base_edit = history
         .document()
-        .set_document_density_axis(DensityEditedAxis::AcrossX, 12.0)
+        .set_document_density_field(DensityEditedField::Density, 12.0)
         .expect("base density command builds");
     history.apply(&base_edit).expect("base edit applies");
     let completion = submit_and_accept(&scheduler, &history);
@@ -108,11 +108,9 @@ fn document_and_selected_density_edits_have_distinct_family_cache_scope() {
         .document()
         .set_channel_density_for_effective(
             ChannelId(2),
-            DensityEditedAxis::AcrossX,
             DensityMetric2D {
-                across_x: current.across_x + 1.0,
-                across_y: current.across_y,
-                aspect_locked: current.aspect_locked,
+                density: current.density + 1.0,
+                aspect: current.aspect,
             },
         )
         .expect("selected density command builds");

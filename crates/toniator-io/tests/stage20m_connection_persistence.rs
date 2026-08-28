@@ -7,14 +7,15 @@ use std::{
 use sha2::{Digest, Sha256};
 use toniator_domain::{
     CanvasSpec, ConnectedGeometryResponse, ConnectionAdjacencyIntent, ConnectionProgram,
-    CoveragePolicy, Document, DocumentId, GeneralizedSiteProduct, GeneralizedSiteProductDraft,
-    GridMazeAlgorithm, GridSpanningTreeAlgorithm, GuideDimensionDraft, GuideDimensionId,
-    MarkOrientation, MarkOrientationDraft, MazeProgram, PathStrokeStyle, PatternDefinition,
-    PatternDefinitionBundle, PatternDefinitionDraft, PatternDefinitionId, PatternDefinitionRecipe,
-    PatternGeometryResponse, PatternMechanism, PatternMechanismId, PatternOutputLayer,
-    PatternOutputLayerId, PatternOutputRealization, PatternOutputSettings, PatternStructureRecipe,
-    PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
-    SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
+    CoveragePolicy, DensityMetric2D, Document, DocumentId, GeneralizedSiteProduct,
+    GeneralizedSiteProductDraft, GridMazeAlgorithm, GridSpanningTreeAlgorithm, GuideDimensionDraft,
+    GuideDimensionId, MarkOrientation, MarkOrientationDraft, MazeProgram, PathStrokeStyle,
+    PatternDefinition, PatternDefinitionBundle, PatternDefinitionDraft, PatternDefinitionId,
+    PatternDefinitionRecipe, PatternGeometryResponse, PatternMechanism, PatternMechanismId,
+    PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization, PatternOutputSettings,
+    PatternStructureRecipe, PresetMetadata, PresetRecord, RandomSiteCharacter,
+    ResolvedDensityMetric2D, SiteDensityModulation, SiteExclusionPolicy, SourceReference,
+    SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_io::{
     EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, load_preset, save, save_preset,
@@ -132,8 +133,14 @@ fn connection_document_for(
     )];
     let mut settings = base.pattern_settings().clone();
     settings.definition_id = definition.id;
-    settings.density.across_x = 8.0;
-    settings.density.across_y = settings.density.across_x * height / width;
+    settings.density = DensityMetric2D::from_resolved(
+        base.canvas(),
+        &ResolvedDensityMetric2D {
+            across_x: 8.0,
+            across_y: 8.0 * height / width,
+        },
+    )
+    .expect("connection density resolves to current authority");
     let bundle = PatternDefinitionBundle {
         output_settings: vec![PatternOutputSettings {
             output_layer_id: PatternOutputLayerId(803),
@@ -192,8 +199,14 @@ fn maze_document_for(
         },
     )];
     let mut settings = connection.pattern_settings().clone();
-    settings.density.across_x = 24.0;
-    settings.density.across_y = settings.density.across_x * height / width;
+    settings.density = DensityMetric2D::from_resolved(
+        connection.canvas(),
+        &ResolvedDensityMetric2D {
+            across_x: 24.0,
+            across_y: 24.0 * height / width,
+        },
+    )
+    .expect("maze density resolves to current authority");
     Document::with_source_topology_and_authored_structures(
         connection.id(),
         connection.canvas().clone(),
@@ -258,8 +271,14 @@ fn dispersion_document_for(source_id: SourceReferenceId, width: f64, height: f64
     )];
     let mut settings = base.pattern_settings().clone();
     settings.definition_id = definition.id;
-    settings.density.across_x = 8.0;
-    settings.density.across_y = 8.0;
+    settings.density = DensityMetric2D::from_resolved(
+        base.canvas(),
+        &ResolvedDensityMetric2D {
+            across_x: 8.0,
+            across_y: 8.0,
+        },
+    )
+    .expect("tree density resolves to current authority");
     let bundle = PatternDefinitionBundle {
         output_settings: vec![PatternOutputSettings {
             output_layer_id: PatternOutputLayerId(825),
@@ -666,16 +685,23 @@ fn grid_connection_fixture_configuration_preserves_triangular_lattice_inputs() {
         panic!("three-guide fixture retains its selected intersection product")
     };
     assert!(*merge_epsilon >= 1e-9);
+    let maze2_density = maze2
+        .pattern_settings()
+        .density
+        .resolve(maze2.canvas())
+        .expect("maze2 density resolves");
+    let maze3_density = maze3
+        .pattern_settings()
+        .density
+        .resolve(maze3.canvas())
+        .expect("maze3 density resolves");
     assert_eq!(
-        maze3.pattern_settings().density.across_y,
-        maze3.pattern_settings().density.across_x * 620.0 / 900.0
+        maze3_density.across_y,
+        maze3_density.across_x * 620.0 / 900.0
     );
-    assert_eq!(maze2.pattern_settings().density.across_x, 24.0);
-    assert_eq!(maze3.pattern_settings().density.across_x, 24.0);
-    assert_eq!(
-        maze2.pattern_settings().density.across_y,
-        maze2.pattern_settings().density.across_x
-    );
+    assert_eq!(maze2_density.across_x, 24.0);
+    assert_eq!(maze3_density.across_x, 24.0);
+    assert_eq!(maze2_density.across_y, maze2_density.across_x);
     for (definition, expected_seed) in [(maze2_definition, 17), (maze3_definition, 23)] {
         let [
             PatternOutputLayer {
@@ -702,10 +728,15 @@ fn grid_connection_fixture_configuration_preserves_triangular_lattice_inputs() {
         panic!("prim fixture retains its positive tree output")
     };
     assert_eq!(program.adjacency().maximum_degree, 6);
-    assert_eq!(prim3.pattern_settings().density.across_x, 8.0);
+    let prim3_density = prim3
+        .pattern_settings()
+        .density
+        .resolve(prim3.canvas())
+        .expect("prim3 density resolves");
+    assert_eq!(prim3_density.across_x, 8.0);
     assert_eq!(
-        prim3.pattern_settings().density.across_y,
-        prim3.pattern_settings().density.across_x * 620.0 / 900.0
+        prim3_density.across_y,
+        prim3_density.across_x * 620.0 / 900.0
     );
 }
 

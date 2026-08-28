@@ -1,9 +1,9 @@
 use toniator_domain::{
-    CanvasSpec, CoveragePolicy, CurveWinding, DensityMetric2D, GeneralizedSiteProduct,
-    GuideDimensionId, GuideRepetition, MarkOrientation, MarkPrototype, ParametricCurve,
-    PathStrokeStyle, PatternDefinition, PatternDefinitionId, PatternFamily, PatternMechanism,
-    PatternMechanismId, PatternModulation, PatternOutputLayer, PatternOutputLayerId,
-    PatternOutputRealization, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
+    CanvasSpec, CoveragePolicy, CurveWinding, GeneralizedSiteProduct, GuideDimensionId,
+    GuideRepetition, MarkOrientation, MarkPrototype, ParametricCurve, PathStrokeStyle,
+    PatternDefinition, PatternDefinitionId, PatternFamily, PatternMechanism, PatternMechanismId,
+    PatternModulation, PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization,
+    RandomSiteCharacter, ResolvedDensityMetric2D, SiteDensityModulation, SiteExclusionPolicy,
     SpiralCurve, SpiralShape, StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_patterns::{
@@ -19,10 +19,9 @@ fn request() -> GridInspectRequest {
             width: 80.0,
             height: 60.0,
         },
-        density: DensityMetric2D {
+        density: ResolvedDensityMetric2D {
             across_x: 8.0,
             across_y: 6.0,
-            aspect_locked: true,
         },
         rotation_degrees: 0.0,
         translation_x: 0.0,

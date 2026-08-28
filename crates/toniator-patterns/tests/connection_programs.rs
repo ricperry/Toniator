@@ -6,11 +6,11 @@ use std::{
 
 use toniator_domain::{
     CanvasSpec, ConnectionAdjacencyIntent, ConnectionProgram, CoveragePolicy, CurveWinding,
-    DensityMetric2D, GeneralizedSiteProduct, GridMazeAlgorithm, GridSpanningTreeAlgorithm,
-    GuideDimensionId, GuideRepetition, MarkOrientation, MarkPrototype, ParametricCurve,
-    PathStrokeStyle, PatternDefinition, PatternDefinitionId, PatternFamily, PatternMechanism,
-    PatternMechanismId, PatternModulation, PatternOutputLayer, PatternOutputLayerId,
-    PatternOutputRealization, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
+    GeneralizedSiteProduct, GridMazeAlgorithm, GridSpanningTreeAlgorithm, GuideDimensionId,
+    GuideRepetition, MarkOrientation, MarkPrototype, ParametricCurve, PathStrokeStyle,
+    PatternDefinition, PatternDefinitionId, PatternFamily, PatternMechanism, PatternMechanismId,
+    PatternModulation, PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization,
+    RandomSiteCharacter, ResolvedDensityMetric2D, SiteDensityModulation, SiteExclusionPolicy,
     SourceMapping, SourceMappingComponent, SpiralCurve, SpiralShape, StraightGuideDimension,
     StraightGuideRepetition,
 };
@@ -18,7 +18,8 @@ use toniator_patterns::{
     ConnectionPathLimits, GridInspectRequest, SiteAdjacencyLimits, StrokeResponse,
     StructuralProductCapability, evaluate_typed_connection_paths_with_source_cancellable,
     realize_connection_canonical_strokes_cancellable, realize_maze_canonical_strokes_cancellable,
-    resolve_pattern_pipeline,
+    realize_owned_connection_canonical_strokes_cancellable,
+    realize_owned_maze_canonical_strokes_cancellable, resolve_pattern_pipeline,
 };
 use toniator_sampling::{SourceField, SourceFormatHint, decode_source};
 
@@ -29,10 +30,9 @@ fn request() -> GridInspectRequest {
             width: 80.0,
             height: 60.0,
         },
-        density: DensityMetric2D {
+        density: ResolvedDensityMetric2D {
             across_x: 8.0,
             across_y: 6.0,
-            aspect_locked: true,
         },
         rotation_degrees: 0.0,
         translation_x: 0.0,
@@ -52,10 +52,9 @@ fn artifact_scale_request() -> GridInspectRequest {
 fn artifact_scale_request_for(width: f64, height: f64) -> GridInspectRequest {
     GridInspectRequest {
         canvas: CanvasSpec { width, height },
-        density: DensityMetric2D {
+        density: ResolvedDensityMetric2D {
             across_x: 24.0,
             across_y: 24.0 * height / width,
-            aspect_locked: true,
         },
         rotation_degrees: 0.0,
         translation_x: 0.0,
@@ -1388,4 +1387,65 @@ fn maze_realizer_limits_and_cancellation_are_atomic() {
             .path(),
         "evaluation.cancelled"
     );
+}
+
+/// Proves consuming connection and maze realization preserves borrowed output identity exactly.
+#[test]
+fn consuming_stroke_realizers_preserve_existing_canonical_output() {
+    let response = StrokeResponse {
+        minimum_thickness: 0.25,
+        maximum_thickness: 0.75,
+    };
+    let evaluated = connections(&grid(), &program(0)).expect("connection paths evaluate");
+    let borrowed_connection = realize(&evaluated, response, usize::MAX, usize::MAX, &|| false)
+        .expect("borrowed connection stroke realization succeeds");
+    let owned_connection = realize_owned_connection_canonical_strokes_cancellable(
+        evaluated.paths,
+        &white_source(),
+        &request().canvas,
+        SourceMapping::canonical(SourceMappingComponent::Luminance),
+        response,
+        PathStrokeStyle::default(),
+        usize::MAX,
+        usize::MAX,
+        &|| false,
+    )
+    .expect("consuming connection stroke realization succeeds");
+    assert_eq!(owned_connection, borrowed_connection);
+
+    let plan = resolve_pattern_pipeline(&triangular_grid()).expect("triangular family resolves");
+    let maze = toniator_patterns::evaluate_typed_maze_walls_cancellable(
+        &plan.family,
+        &request(),
+        PatternOutputLayerId(53),
+        &triangular_maze_program(23),
+        toniator_patterns::MazeLimits::default(),
+        &|| false,
+    )
+    .expect("maze evaluates");
+    let borrowed_maze = realize_maze_canonical_strokes_cancellable(
+        &maze,
+        &white_source(),
+        &request().canvas,
+        SourceMapping::canonical(SourceMappingComponent::Luminance),
+        response,
+        PathStrokeStyle::default(),
+        usize::MAX,
+        usize::MAX,
+        &|| false,
+    )
+    .expect("borrowed maze stroke realization succeeds");
+    let owned_maze = realize_owned_maze_canonical_strokes_cancellable(
+        maze,
+        &white_source(),
+        &request().canvas,
+        SourceMapping::canonical(SourceMappingComponent::Luminance),
+        response,
+        PathStrokeStyle::default(),
+        usize::MAX,
+        usize::MAX,
+        &|| false,
+    )
+    .expect("consuming maze stroke realization succeeds");
+    assert_eq!(owned_maze, borrowed_maze);
 }

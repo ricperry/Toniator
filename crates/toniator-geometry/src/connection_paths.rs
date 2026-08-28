@@ -309,19 +309,19 @@ fn select_edges(
             "selected connection edges exceed the configured limit",
         ));
     }
+    let mut selected_degrees = BTreeMap::<FamilySiteId, usize>::new();
+    for edge in &selected {
+        work.tick()?;
+        *selected_degrees.entry(edge.first).or_default() += 1;
+        *selected_degrees.entry(edge.second).or_default() += 1;
+    }
     for (node, edges) in &incident {
         work.tick()?;
         if edges.is_empty() {
             diagnostics.isolated_nodes.push(*node);
         }
         if let ConnectionProgram::RandomLinks { minimum_degree, .. } = program {
-            let mut degree = 0usize;
-            for edge in &selected {
-                work.tick()?;
-                if edge.first == *node || edge.second == *node {
-                    degree += 1;
-                }
-            }
+            let degree = selected_degrees.get(node).copied().unwrap_or(0);
             if degree < *minimum_degree as usize {
                 diagnostics.under_connected_nodes.push(*node);
             }

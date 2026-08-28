@@ -3,15 +3,16 @@ use std::collections::BTreeSet;
 use toniator_domain::{
     CanvasSpec, CoveragePolicy, DensityMetric2D, GeneralizedSiteProduct, GuideDimensionId,
     MarkOrientation, PatternDefinition, PatternDefinitionId, PatternMechanismId,
-    PatternOutputLayerId, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
-    StraightGuideDimension, StraightGuideRepetition,
+    PatternOutputLayerId, RandomSiteCharacter, ResolvedDensityMetric2D, SiteDensityModulation,
+    SiteExclusionPolicy, StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_geometry::{FamilySiteProvenance, SiteId, Vector2};
 use toniator_patterns::{
     ANTIALIAS_MARGIN, GridInspectRequest, MarkResponse, StructuralProductCapability,
     directional_spacing, evaluate_straight_grid, evaluate_typed_family,
     evaluate_typed_family_product_cancellable,
-    evaluate_typed_family_product_with_source_cancellable, realize_typed_mapped_outputs,
+    evaluate_typed_family_product_with_source_cancellable,
+    evaluate_typed_family_product_with_source_progress_cancellable, realize_typed_mapped_outputs,
     resolve_pattern_pipeline,
 };
 use toniator_sampling::{SourceFormatHint, decode_source};
@@ -22,10 +23,9 @@ fn request(rotation_degrees: f64, translation_x: f64, translation_y: f64) -> Gri
             width: 900.0,
             height: 600.0,
         },
-        density: DensityMetric2D {
+        density: ResolvedDensityMetric2D {
             across_x: 90.0,
             across_y: 60.0,
-            aspect_locked: true,
         },
         rotation_degrees,
         translation_x,
@@ -54,10 +54,9 @@ fn resolves_reference_spacing_and_inclusive_guide_ranges() {
 #[test]
 fn directional_frequency_uses_the_authored_axis_density() {
     let mut anisotropic = request(0.0, 0.0, 0.0);
-    anisotropic.density = DensityMetric2D {
+    anisotropic.density = ResolvedDensityMetric2D {
         across_x: 180.0,
         across_y: 60.0,
-        aspect_locked: false,
     };
     let output = evaluate_straight_grid(&anisotropic).expect("valid family");
 
@@ -70,6 +69,40 @@ fn directional_frequency_uses_the_authored_axis_density() {
     )
     .expect("valid diagonal frequency");
     assert!((diagonal - 6.324_555_320_336_759).abs() < 1e-12);
+}
+
+/// Proves current density aspect stretches baseline spacing and emitted sites without storing axes.
+#[test]
+fn density_aspect_stretches_grid_sites_at_one_to_one_two_to_one_and_one_to_two() {
+    let canvas = CanvasSpec {
+        width: 600.0,
+        height: 600.0,
+    };
+    let mut observed = Vec::new();
+    for aspect in [1.0, 2.0, 0.5] {
+        let mut input = request(0.0, 0.0, 0.0);
+        input.canvas = canvas.clone();
+        input.density = DensityMetric2D {
+            density: 60.0,
+            aspect,
+        }
+        .resolve(&canvas)
+        .expect("positive density/aspect resolves for the evaluator");
+        let output = evaluate_straight_grid(&input).expect("resolved layout emits grid sites");
+        let ratio = output.coverage[0].spacing / output.coverage[1].spacing;
+        assert!((ratio - aspect).abs() < 1e-12);
+        assert!(output.sites.iter().all(|site| site.position.is_finite()));
+        observed.push(
+            output
+                .sites
+                .iter()
+                .map(|site| site.position)
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_ne!(observed[0], observed[1]);
+    assert_ne!(observed[0], observed[2]);
+    assert_ne!(observed[1], observed[2]);
 }
 
 #[test]
@@ -119,10 +152,9 @@ fn sites_have_stable_ids_ordering_provenance_and_fingerprint() {
 #[test]
 fn support_envelope_is_complete_and_bounded_across_rotation_translation_and_anisotropy() {
     let mut anisotropic = request(45.0, -6.75, 8.25);
-    anisotropic.density = DensityMetric2D {
+    anisotropic.density = ResolvedDensityMetric2D {
         across_x: 180.0,
         across_y: 40.0,
-        aspect_locked: false,
     };
     for input in [
         request(0.0, 0.0, 0.0),
@@ -278,10 +310,9 @@ fn rejects_invalid_or_nonfinite_values_before_generation() {
 #[test]
 fn candidate_limits_reject_before_family_allocation_and_range_arithmetic_is_checked() {
     let mut default_limited = request(17.0, 3.25, -4.5);
-    default_limited.density = DensityMetric2D {
+    default_limited.density = ResolvedDensityMetric2D {
         across_x: 5_000.0,
         across_y: 5_000.0,
-        aspect_locked: true,
     };
     assert_eq!(
         evaluate_straight_grid(&default_limited)
@@ -565,6 +596,52 @@ fn typed_family_outputs_publish_truthful_family_site_sets() {
                 .all(|site| matches!(site.provenance, FamilySiteProvenance::Random { .. }))
         );
     }
+}
+
+/// Proves a normal high-detail three-guide layout reports and completes local merge work.
+///
+/// This reproduces the Stage 21A Pattern zoom-out regression at density 128 on
+/// a 1024-square canvas. The evaluator must recompute the lattice and preserve
+/// genuine three-contributor sites without an application-authored normal-work ceiling.
+#[test]
+fn high_density_three_guide_intersections_use_local_merge_candidates() {
+    let mut high_density = request(0.0, 0.0, 0.0);
+    high_density.canvas = CanvasSpec {
+        width: 1024.0,
+        height: 1024.0,
+    };
+    high_density.density = ResolvedDensityMetric2D {
+        across_x: 128.0,
+        across_y: 128.0,
+    };
+
+    high_density.max_family_candidates = usize::MAX;
+    let definition = concurrent_multiway_definition();
+    let plan = resolve_pattern_pipeline(&definition).expect("three-guide plan resolves");
+    let progress = std::sync::Mutex::new(Vec::new());
+    let output = evaluate_typed_family_product_with_source_progress_cancellable(
+        &plan.family,
+        &high_density,
+        None,
+        &|| false,
+        &|completed, total| progress.lock().unwrap().push((completed, total)),
+    )
+    .expect("local merging accepts the normal zoom-out density");
+    assert!(output.site_set().sites().iter().any(|site| {
+        matches!(
+            &site.provenance,
+            FamilySiteProvenance::GuideIntersection { contributors }
+                if contributors.len() >= 3
+        )
+    }));
+    let progress = progress.into_inner().unwrap();
+    assert!(
+        progress.len() > 2,
+        "intersection and merge work report progress"
+    );
+    assert!(progress.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+    let &(completed, total) = progress.last().expect("progress completes");
+    assert_eq!(completed, total);
 }
 
 /// Proves the private circle seam preserves current site IDs and contributor bytes.

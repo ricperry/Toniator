@@ -36,6 +36,7 @@ pub(crate) struct ChannelViewModel {
 }
 
 /// Projects one stable bundled pattern catalog item.
+#[allow(dead_code)] // Retained for the Stage 21B gallery projection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PatternCatalogViewModel {
     /// Shows the artist-facing pattern name.
@@ -80,7 +81,7 @@ pub(crate) fn project_document(
             active_pattern,
         },
         PreviewViewModel {
-            pending: model.preview_coordinator.submission().is_some(),
+            pending: model.preview_coordinator.is_pending(),
             accepted_ticket: model.preview_coordinator.last_accepted_ticket(),
         },
     )
@@ -102,6 +103,16 @@ mod tests {
         assert_eq!(channel.name, None);
         assert_eq!(channel.active_pattern, None);
         assert!(!preview.pending);
+        assert_eq!(preview.accepted_ticket, None);
+    }
+
+    /// Projects queued invalidation as pending before a scheduler ticket exists.
+    #[test]
+    fn queued_preview_refresh_projects_pending_without_inventing_a_ticket() {
+        let mut model = ApplicationModel::new();
+        model.preview_coordinator.queue_refresh();
+        let (_, _, preview) = project_document(&model, None, None);
+        assert!(preview.pending);
         assert_eq!(preview.accepted_ticket, None);
     }
 }

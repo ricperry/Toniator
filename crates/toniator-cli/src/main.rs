@@ -65,9 +65,9 @@ struct ValidateArgs {
     #[arg(long)]
     canvas: Option<String>,
     #[arg(long)]
-    density_x: Option<f64>,
+    density: Option<f64>,
     #[arg(long)]
-    density_y: Option<f64>,
+    density_aspect: Option<f64>,
     #[arg(long)]
     opacity: Option<f64>,
 }
@@ -92,9 +92,9 @@ struct DocumentCreateArgs {
     #[arg(long)]
     canvas: String,
     #[arg(long)]
-    density_x: f64,
+    density: f64,
     #[arg(long)]
-    density_y: f64,
+    density_aspect: f64,
     #[arg(long, allow_hyphen_values = true)]
     rotation: f64,
     #[arg(long, allow_hyphen_values = true)]
@@ -133,9 +133,9 @@ struct GridArgs {
     #[arg(long)]
     canvas: String,
     #[arg(long)]
-    density_x: f64,
+    density: f64,
     #[arg(long)]
-    density_y: f64,
+    density_aspect: f64,
     #[arg(long, allow_hyphen_values = true)]
     rotation: f64,
     #[arg(long, allow_hyphen_values = true)]
@@ -146,8 +146,9 @@ struct GridArgs {
     guard_steps: u32,
     #[arg(long)]
     support_radius: f64,
-    #[arg(long, default_value_t = 1_048_576)]
-    max_family_candidates: usize,
+    /// Optional explicit family-work ceiling; omitted means no application-authored ceiling.
+    #[arg(long)]
+    max_family_candidates: Option<usize>,
     #[arg(long, value_enum)]
     format: InspectFormat,
 }
@@ -161,9 +162,9 @@ struct MarksArgs {
     #[arg(long)]
     canvas: String,
     #[arg(long)]
-    density_x: f64,
+    density: f64,
     #[arg(long)]
-    density_y: f64,
+    density_aspect: f64,
     #[arg(long, allow_hyphen_values = true)]
     rotation: f64,
     #[arg(long, allow_hyphen_values = true)]
@@ -174,8 +175,9 @@ struct MarksArgs {
     guard_steps: u32,
     #[arg(long)]
     support_radius: f64,
-    #[arg(long, default_value_t = 1_048_576)]
-    max_family_candidates: usize,
+    /// Optional explicit family-work ceiling; omitted means no application-authored ceiling.
+    #[arg(long)]
+    max_family_candidates: Option<usize>,
     #[arg(long, value_enum)]
     source_component: CliSourceComponent,
     #[arg(long, default_value_t = 0.0)]
@@ -204,9 +206,9 @@ struct RenderArgs {
     #[arg(long)]
     canvas: Option<String>,
     #[arg(long)]
-    density_x: Option<f64>,
+    density: Option<f64>,
     #[arg(long)]
-    density_y: Option<f64>,
+    density_aspect: Option<f64>,
     #[arg(long, allow_hyphen_values = true)]
     rotation: Option<f64>,
     #[arg(long, allow_hyphen_values = true)]
@@ -215,8 +217,9 @@ struct RenderArgs {
     offset_y: Option<f64>,
     #[arg(long)]
     guard_steps: Option<u32>,
-    #[arg(long, default_value_t = 1_048_576)]
-    max_family_candidates: usize,
+    /// Optional explicit family-work ceiling; omitted means no application-authored ceiling.
+    #[arg(long)]
+    max_family_candidates: Option<usize>,
     #[arg(long)]
     fill_min: Option<f64>,
     #[arg(long)]
@@ -224,9 +227,9 @@ struct RenderArgs {
     /// Override opacity for every canonical channel in the selected topology.
     #[arg(long)]
     opacity: Option<f64>,
-    /// Consumer-only PNG backing. SVG remains transparent.
-    #[arg(long, value_enum, default_value_t = CliBackground::Transparent)]
-    background: CliBackground,
+    /// Consumer-only PNG backing. Omitted defaults: RGB black, CMYK white, source color transparent.
+    #[arg(long, value_enum)]
+    background: Option<CliBackground>,
     /// PNG edge rasterization. This never affects document evaluation or SVG.
     #[arg(long, value_enum, default_value_t = CliAntialiasing::On)]
     antialiasing: CliAntialiasing,
@@ -437,8 +440,8 @@ fn document_create(arguments: DocumentCreateArgs) -> Result<(), CliError> {
         source_id.clone(),
         parse_canvas(&arguments.canvas)?,
         arguments.channel_model.into(),
-        arguments.density_x,
-        arguments.density_y,
+        arguments.density,
+        arguments.density_aspect,
         arguments.rotation,
         arguments.offset_x,
         arguments.offset_y,
@@ -452,6 +455,12 @@ fn document_create(arguments: DocumentCreateArgs) -> Result<(), CliError> {
         match format {
             SourceFormatHint::Png => EmbeddedSourceFormat::Png,
             SourceFormatHint::Svg => EmbeddedSourceFormat::Svg,
+            SourceFormatHint::Jpeg => EmbeddedSourceFormat::Jpeg,
+            SourceFormatHint::Webp => EmbeddedSourceFormat::Webp,
+            SourceFormatHint::Bmp => EmbeddedSourceFormat::Bmp,
+            SourceFormatHint::Tiff => EmbeddedSourceFormat::Tiff,
+            SourceFormatHint::OpenExr => EmbeddedSourceFormat::OpenExr,
+            SourceFormatHint::Avif => EmbeddedSourceFormat::Avif,
             SourceFormatHint::Unsupported => unreachable!(),
         },
         bytes,
@@ -482,8 +491,8 @@ fn build_document(
     source_reference: SourceReferenceId,
     canvas: CanvasSpec,
     model: HalftoneChannelModel,
-    density_x: f64,
-    density_y: f64,
+    density: f64,
+    density_aspect: f64,
     rotation: f64,
     offset_x: f64,
     offset_y: f64,
@@ -519,9 +528,8 @@ fn build_document(
         DocumentPatternSettings {
             definition_id: PatternDefinitionId(1),
             density: DensityMetric2D {
-                across_x: density_x,
-                across_y: density_y,
-                aspect_locked: true,
+                density,
+                aspect: density_aspect,
             },
             pattern_rotation_degrees: rotation,
             shape_rotation_degrees: 0.0,
@@ -589,10 +597,20 @@ fn build_document(
     Ok(session.snapshot())
 }
 
+/// Evaluates one current document or direct source and writes its requested consumer output.
+///
+/// Model-sensitive PNG backing is resolved only after canonical evaluation. Explicit backing
+/// remains an output-only override, while SVG rejects explicit opaque backing and stays transparent.
+///
+/// # Errors
+///
+/// Returns stable argument, source, document, evaluation, rendering, or output diagnostics.
 fn render(arguments: RenderArgs) -> Result<(), CliError> {
     let format = output_format(&arguments.output)?;
     if matches!(format, OutputFormat::Svg)
-        && !matches!(arguments.background, CliBackground::Transparent)
+        && arguments
+            .background
+            .is_some_and(|background| !matches!(background, CliBackground::Transparent))
     {
         return Err(CliError::new(
             "render.background",
@@ -602,8 +620,8 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
     if is_toniator_path(&arguments.input) {
         if arguments.channel_model.is_some()
             || arguments.canvas.is_some()
-            || arguments.density_x.is_some()
-            || arguments.density_y.is_some()
+            || arguments.density.is_some()
+            || arguments.density_aspect.is_some()
             || arguments.rotation.is_some()
             || arguments.offset_x.is_some()
             || arguments.offset_y.is_some()
@@ -637,6 +655,12 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
         let hint = match source.format() {
             EmbeddedSourceFormat::Png => SourceFormatHint::Png,
             EmbeddedSourceFormat::Svg => SourceFormatHint::Svg,
+            EmbeddedSourceFormat::Jpeg => SourceFormatHint::Jpeg,
+            EmbeddedSourceFormat::Webp => SourceFormatHint::Webp,
+            EmbeddedSourceFormat::Bmp => SourceFormatHint::Bmp,
+            EmbeddedSourceFormat::Tiff => SourceFormatHint::Tiff,
+            EmbeddedSourceFormat::OpenExr => SourceFormatHint::OpenExr,
+            EmbeddedSourceFormat::Avif => SourceFormatHint::Avif,
         };
         let session = DocumentSession::new(loaded.document().clone())?;
         let result = evaluate_with_limits(
@@ -644,7 +668,11 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
                 session.document_evaluation_snapshot(),
                 ResolvedSource::new(source_id.clone(), source.bytes().to_vec(), hint)?,
             ),
-            EvaluationLimits::new(arguments.max_family_candidates)?,
+            EvaluationLimits::new(
+                arguments
+                    .max_family_candidates
+                    .unwrap_or(EvaluationLimits::UNBOUNDED_WORK_LIMIT),
+            )?,
         )?;
         return write_render_result(
             &arguments.output,
@@ -678,16 +706,16 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
                 )
             })?
             .into(),
-        arguments.density_x.ok_or_else(|| {
+        arguments.density.ok_or_else(|| {
             CliError::new(
-                "density_x",
-                "--density-x is required for direct-source rendering",
+                "density",
+                "--density is required for direct-source rendering",
             )
         })?,
-        arguments.density_y.ok_or_else(|| {
+        arguments.density_aspect.ok_or_else(|| {
             CliError::new(
-                "density_y",
-                "--density-y is required for direct-source rendering",
+                "density_aspect",
+                "--density-aspect is required for direct-source rendering",
             )
         })?,
         arguments.rotation.ok_or_else(|| {
@@ -724,7 +752,11 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
             session.document_evaluation_snapshot(),
             ResolvedSource::new(source_reference, source_bytes, source_format)?,
         ),
-        EvaluationLimits::new(arguments.max_family_candidates)?,
+        EvaluationLimits::new(
+            arguments
+                .max_family_candidates
+                .unwrap_or(EvaluationLimits::UNBOUNDED_WORK_LIMIT),
+        )?,
     )?;
     write_render_result(
         &arguments.output,
@@ -735,16 +767,27 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
     )
 }
 
+/// Writes one already-evaluated canonical result through the selected consumer format.
+///
+/// An omitted PNG background resolves from the result's authoritative model without mutating or
+/// re-identifying the scene. SVG always serializes the unchanged transparent canonical geometry.
+///
+/// # Errors
+///
+/// Returns stable rasterization, encoding, or filesystem output diagnostics.
 fn write_render_result(
     output: &PathBuf,
     format: OutputFormat,
-    background: CliBackground,
+    background: Option<CliBackground>,
     antialiasing: RasterAntialiasing,
     result: &toniator_engine::EvaluationResult,
 ) -> Result<(), CliError> {
     match format {
         OutputFormat::Png => {
-            let background = background.into();
+            let background = background.map_or_else(
+                || RasterBackground::default_for_model(result.scene().model()),
+                RasterBackground::from,
+            );
             let raster = if matches!(background, RasterBackground::Transparent)
                 && matches!(antialiasing, RasterAntialiasing::On)
             {
@@ -797,20 +840,23 @@ fn inspect_marks(arguments: MarksArgs) -> Result<(), CliError> {
     let source_format = source_hint(&arguments.source)?;
     let source_bytes = std::fs::read(&arguments.source)
         .map_err(|_| CliError::new("source", "could not read source file"))?;
+    let canvas = parse_canvas(&arguments.canvas)?;
     let request = MarksInspectRequest {
         grid: GridInspectRequest {
-            canvas: parse_canvas(&arguments.canvas)?,
+            canvas: canvas.clone(),
             density: DensityMetric2D {
-                across_x: arguments.density_x,
-                across_y: arguments.density_y,
-                aspect_locked: true,
-            },
+                density: arguments.density,
+                aspect: arguments.density_aspect,
+            }
+            .resolve(&canvas)?,
             rotation_degrees: arguments.rotation,
             translation_x: arguments.offset_x,
             translation_y: arguments.offset_y,
             guard_steps: arguments.guard_steps,
             support_radius: arguments.support_radius,
-            max_family_candidates: arguments.max_family_candidates,
+            max_family_candidates: arguments
+                .max_family_candidates
+                .unwrap_or(EvaluationLimits::UNBOUNDED_WORK_LIMIT),
         },
         source_bytes: &source_bytes,
         source_format,
@@ -920,6 +966,12 @@ fn representative_marks(marks: &[CanonicalCircleMark]) -> Vec<RepresentativeMark
         .collect()
 }
 
+/// Resolves one accepted direct-source suffix into its explicit decoder hint.
+///
+/// # Errors
+///
+/// Returns a stable error for paths outside the supported still-image set; it never guesses from
+/// bytes because source persistence must retain the caller's declared format.
 fn source_hint(path: &std::path::Path) -> Result<SourceFormatHint, CliError> {
     match path
         .extension()
@@ -929,9 +981,15 @@ fn source_hint(path: &std::path::Path) -> Result<SourceFormatHint, CliError> {
     {
         Some("png") => Ok(SourceFormatHint::Png),
         Some("svg") => Ok(SourceFormatHint::Svg),
+        Some("jpg" | "jpeg") => Ok(SourceFormatHint::Jpeg),
+        Some("webp") => Ok(SourceFormatHint::Webp),
+        Some("bmp") => Ok(SourceFormatHint::Bmp),
+        Some("tif" | "tiff") => Ok(SourceFormatHint::Tiff),
+        Some("exr") => Ok(SourceFormatHint::OpenExr),
+        Some("avif") => Ok(SourceFormatHint::Avif),
         _ => Err(CliError::new(
             "source.format",
-            "source extension must be .png or .svg",
+            "source extension must be .png, .svg, .jpg/.jpeg, .webp, .bmp, .tif/.tiff, .exr, or .avif",
         )),
     }
 }
@@ -973,19 +1031,22 @@ fn render_error(error: toniator_engine::RenderError) -> CliError {
 }
 
 fn inspect_grid(arguments: GridArgs) -> Result<(), CliError> {
+    let canvas = parse_canvas(&arguments.canvas)?;
     let request = GridInspectRequest {
-        canvas: parse_canvas(&arguments.canvas)?,
+        canvas: canvas.clone(),
         density: DensityMetric2D {
-            across_x: arguments.density_x,
-            across_y: arguments.density_y,
-            aspect_locked: true,
-        },
+            density: arguments.density,
+            aspect: arguments.density_aspect,
+        }
+        .resolve(&canvas)?,
         rotation_degrees: arguments.rotation,
         translation_x: arguments.offset_x,
         translation_y: arguments.offset_y,
         guard_steps: arguments.guard_steps,
         support_radius: arguments.support_radius,
-        max_family_candidates: arguments.max_family_candidates,
+        max_family_candidates: arguments
+            .max_family_candidates
+            .unwrap_or(EvaluationLimits::UNBOUNDED_WORK_LIMIT),
     };
     let output = inspect_straight_grid(&request)?;
     let serialized = match arguments.format {
@@ -1010,8 +1071,8 @@ fn inspect_grid(arguments: GridArgs) -> Result<(), CliError> {
 fn validate(arguments: ValidateArgs) -> Result<(), CliError> {
     if let Some(input) = arguments.input {
         if arguments.canvas.is_some()
-            || arguments.density_x.is_some()
-            || arguments.density_y.is_some()
+            || arguments.density.is_some()
+            || arguments.density_aspect.is_some()
             || arguments.opacity.is_some()
         {
             return Err(CliError::new(
@@ -1038,12 +1099,15 @@ fn validate(arguments: ValidateArgs) -> Result<(), CliError> {
             .as_deref()
             .ok_or_else(|| CliError::new("canvas", "--canvas is required without --input"))?,
     )?;
-    let density_x = arguments
-        .density_x
-        .ok_or_else(|| CliError::new("density_x", "--density-x is required without --input"))?;
-    let density_y = arguments
-        .density_y
-        .ok_or_else(|| CliError::new("density_y", "--density-y is required without --input"))?;
+    let density = arguments
+        .density
+        .ok_or_else(|| CliError::new("density", "--density is required without --input"))?;
+    let density_aspect = arguments.density_aspect.ok_or_else(|| {
+        CliError::new(
+            "density_aspect",
+            "--density-aspect is required without --input",
+        )
+    })?;
     let opacity = arguments
         .opacity
         .ok_or_else(|| CliError::new("opacity", "--opacity is required without --input"))?;
@@ -1073,9 +1137,8 @@ fn validate(arguments: ValidateArgs) -> Result<(), CliError> {
         DocumentPatternSettings {
             definition_id: PatternDefinitionId(1),
             density: DensityMetric2D {
-                across_x: density_x,
-                across_y: density_y,
-                aspect_locked: true,
+                density,
+                aspect: density_aspect,
             },
             pattern_rotation_degrees: 0.0,
             shape_rotation_degrees: 0.0,

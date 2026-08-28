@@ -78,7 +78,7 @@ fn rewrite_schema_version(source: &Path, destination: &Path, version: u32) {
             let text = String::from_utf8(bytes).expect("document JSON is UTF-8");
             bytes = text
                 .replacen(
-                    "\"document_schema_version\":5",
+                    "\"document_schema_version\":6",
                     &format!("\"document_schema_version\":{version}"),
                     1,
                 )
@@ -263,80 +263,54 @@ fn port_v4_fixture_to_v5(path: &Path) {
     fs::rename(temporary, path).expect("port atomically replaces fixture");
 }
 
-/// Opens every tracked v5 fixture, resolves each effective channel, and
-/// verifies that the persisted archive carries no runtime-only projection.
+/// Loads the tracked sample containers as strict v6 fixtures with exact source bytes.
 #[test]
-fn v5_fixtures_reopen_with_bundle_and_delta_authority_only() {
-    for fixture in [
-        "HolidayMugs_2024_2025.toniator",
-        "raster-sample.toniator",
-        "vector-sample.toniator",
+fn tracked_sample_fixtures_are_current_v6_with_exact_sources() {
+    for (fixture, source, format) in [
+        (
+            "raster-sample.toniator",
+            "raster-sample.png",
+            EmbeddedSourceFormat::Png,
+        ),
+        (
+            "vector-sample.toniator",
+            "vector-sample.svg",
+            EmbeddedSourceFormat::Svg,
+        ),
     ] {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets")
-            .join(fixture);
-        let loaded = toniator_io::load(&path).expect("current fixture opens");
-        for channel_id in [ChannelId(1), ChannelId(2), ChannelId(3)] {
-            loaded
-                .document()
-                .effective_channel_pattern(channel_id)
-                .expect("persisted channel resolves through document authority");
-        }
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let loaded = load(&assets.join(fixture)).expect("tracked v6 fixture loads");
+        let embedded = loaded
+            .sources()
+            .entries()
+            .next()
+            .expect("tracked fixture embeds one source");
+        assert_eq!(loaded.sources().len(), 1);
+        assert_eq!(embedded.format(), format);
+        assert_eq!(embedded.bytes(), fs::read(assets.join(source)).unwrap());
     }
 }
 
-/// Locks the diverging Holiday channel recipes and rotations after the one-time v5 authority port.
+/// Reports the obsolete Holiday fixture through the same strict version boundary.
 #[test]
-fn holiday_fixture_preserves_diverging_effective_channel_settings() {
+fn holiday_v5_fixture_is_not_migrated_implicitly() {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/HolidayMugs_2024_2025.toniator");
-    let loaded = load(&path).expect("Holiday v5 fixture opens");
-    let effective = [ChannelId(1), ChannelId(2), ChannelId(3)].map(|channel_id| {
-        loaded
-            .document()
-            .effective_channel_pattern(channel_id)
-            .expect("Holiday channel resolves")
-    });
-    assert_eq!(
-        effective
-            .iter()
-            .map(|pattern| pattern.definition_id.0)
-            .collect::<Vec<_>>(),
-        vec![4, 3, 2]
-    );
-    assert_eq!(
-        effective
-            .iter()
-            .map(|pattern| pattern.pattern_rotation_degrees)
-            .collect::<Vec<_>>(),
-        vec![0.0, 30.0, 60.0]
-    );
-    assert!(effective.iter().all(|pattern| {
-        pattern.density.across_x == 400.0
-            && pattern.density.across_y == 400.0
-            && pattern.shape_rotation_degrees == 0.0
-    }));
-    assert_eq!(
-        loaded
-            .document()
-            .channel_pattern_instance(ChannelId(1))
-            .expect("first channel intent")
-            .definition_override,
-        None
-    );
+    let error = load(&path).expect_err("Holiday v5 fixture rejects");
+    assert!(matches!(error, LoadError::Version { .. }));
 }
 
-/// Saves deterministic v5 keyed deltas and omits every effective projection.
+/// Saves deterministic v6 density/aspect deltas and omits every effective projection.
 #[test]
-fn v5_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
+fn v6_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
     let (document, sources) = source_backed_document();
     let document = document
         .apply_command(&DocumentCommand::SetChannelDensityDelta {
             base: document.pattern_settings().clone(),
             channel_id: ChannelId(1),
             density: DensityMetricDelta2D {
-                across_x_delta: 0.0,
-                across_y_delta: 0.0,
+                density_delta: 0.0,
+                aspect_delta: 0.0,
             },
         })
         .expect("explicit zero density applies")
@@ -373,12 +347,12 @@ fn v5_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
         fs::read(&second).expect("second reads")
     );
     let text = document_json(&first);
-    assert!(text.contains("\"document_schema_version\":5"));
+    assert!(text.contains("\"document_schema_version\":6"));
     assert!(text.contains("\"pattern_settings\""));
     assert!(text.contains("\"pattern_instance\""));
     assert!(!text.contains("EffectiveChannelPatternInstance"));
     assert!(!text.contains("effective_channel_pattern"));
-    let loaded = load(&first).expect("v5 reloads");
+    let loaded = load(&first).expect("v6 reloads");
     assert_eq!(loaded.document(), &document);
     let instance = loaded
         .document()
@@ -390,7 +364,7 @@ fn v5_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
             .density
             .as_ref()
             .expect("density delta")
-            .across_x_delta,
+            .density_delta,
         0.0
     );
     assert_eq!(instance.layout_delta.rotation_degrees, Some(0.0));
@@ -408,13 +382,13 @@ fn v5_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
     fs::remove_file(second).expect("second temporary removes");
 }
 
-/// Rejects document schemas one through four without a migration or fallback decoder.
+/// Rejects document schemas one through five without a migration or fallback decoder.
 #[test]
-fn document_versions_one_through_four_are_rejected() {
+fn document_versions_one_through_five_are_rejected() {
     let (document, sources) = source_backed_document();
     let current = temporary("current.toniator");
     save(&current, &document, &sources).expect("current save succeeds");
-    for version in 1..=4 {
+    for version in 1..=5 {
         let stale = temporary(&format!("schema-{version}.toniator"));
         rewrite_schema_version(&current, &stale, version);
         let error = load(&stale).expect_err("obsolete schema rejects");

@@ -5,15 +5,16 @@ use std::{
 };
 
 use toniator_domain::{
-    CanvasSpec, ConnectedGeometryResponse, CoveragePolicy, Document, DocumentId,
+    CanvasSpec, ConnectedGeometryResponse, CoveragePolicy, DensityMetric2D, Document, DocumentId,
     GeneralizedSiteProduct, GuideDimensionId, MarkOrientation, PathStrokeStyle, PatternDefinition,
     PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
     PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization, PatternOutputSettings,
-    SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
+    ResolvedDensityMetric2D, SourceReference, SourceReferenceId, StraightGuideDimension,
+    StraightGuideRepetition,
 };
 use toniator_io::{EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, save};
 
-/// Builds one persisted-v5 connected guide-path document against supplied immutable source bytes.
+/// Builds one persisted-v6 connected guide-path document against supplied immutable source bytes.
 fn stroke_document(
     source_id: SourceReferenceId,
     width: f64,
@@ -61,8 +62,14 @@ fn stroke_document(
     )];
     let mut settings = base.pattern_settings().clone();
     settings.definition_id = definition.id;
-    settings.density.across_x = resolution;
-    settings.density.across_y = resolution;
+    settings.density = DensityMetric2D::from_resolved(
+        base.canvas(),
+        &ResolvedDensityMetric2D {
+            across_x: resolution,
+            across_y: resolution,
+        },
+    )
+    .expect("stroke density resolves to current authority");
     let bundle = PatternDefinitionBundle {
         output_settings: vec![PatternOutputSettings {
             output_layer_id: PatternOutputLayerId(83),

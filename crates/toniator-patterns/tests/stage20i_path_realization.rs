@@ -1,10 +1,10 @@
 use toniator_domain::{
-    CanvasSpec, ConnectedGeometryResponse, CoveragePolicy, Document, DocumentId,
+    CanvasSpec, ConnectedGeometryResponse, CoveragePolicy, DensityMetric2D, Document, DocumentId,
     GeneralizedSiteProduct, GuideDimensionId, MarkOrientation, PathStrokeStyle, PatternDefinition,
     PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
     PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization, PatternOutputSettings,
-    SourceMapping, SourceMappingComponent, SourceReference, StraightGuideDimension,
-    StraightGuideRepetition,
+    ResolvedDensityMetric2D, SourceMapping, SourceMappingComponent, SourceReference,
+    StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_patterns::{
     GridInspectRequest, RealizationStructuralInput, StrokeResponse,
@@ -58,8 +58,14 @@ fn path_document() -> Document {
     )];
     let mut settings = base.pattern_settings().clone();
     settings.definition_id = definition.id;
-    settings.density.across_x = 3.0;
-    settings.density.across_y = 3.0;
+    settings.density = DensityMetric2D::from_resolved(
+        base.canvas(),
+        &ResolvedDensityMetric2D {
+            across_x: 3.0,
+            across_y: 3.0,
+        },
+    )
+    .expect("path density resolves to current authority");
     let bundle = PatternDefinitionBundle {
         output_settings: vec![PatternOutputSettings {
             output_layer_id: PatternOutputLayerId(903),
@@ -99,7 +105,11 @@ fn path_family() -> (
         definition,
         &GridInspectRequest {
             canvas: document.canvas().clone(),
-            density: document.pattern_settings().density.clone(),
+            density: document
+                .pattern_settings()
+                .density
+                .resolve(document.canvas())
+                .expect("path density resolves for evaluation"),
             rotation_degrees: 0.0,
             translation_x: 0.0,
             translation_y: 0.0,
@@ -117,7 +127,7 @@ fn path_family() -> (
     (document, family, plan, source)
 }
 
-/// Proves a public guide-path realization consumes only ordered raw paths/bases and adaptively subdivides source footprint intervals.
+/// Proves a public guide-path realization consumes only ordered raw paths/bases and adaptively subdivides pattern-scale intervals.
 #[test]
 fn guide_path_provenance_is_not_site_authority_and_profile_is_adaptive() {
     let (document, family, plan, source) = path_family();
@@ -163,6 +173,38 @@ fn guide_path_provenance_is_not_site_authority_and_profile_is_adaptive() {
             .iter()
             .any(|stroke| stroke.profile.len() > stroke.path.segments().len() + 1)
     );
+}
+
+/// Proves straight-guide thickness follows pattern-scale spacing instead of half-pixel supersampling.
+#[test]
+fn guide_path_thickness_sampling_uses_pattern_scale_resolution() {
+    let (document, family, plan, source) = path_family();
+    let realized = realize_typed_canonical_strokes_cancellable(
+        &family,
+        &plan,
+        &source,
+        document.canvas(),
+        SourceMapping::canonical(SourceMappingComponent::Red),
+        StrokeResponse {
+            minimum_thickness: 0.2,
+            maximum_thickness: 1.0,
+        },
+        1.0,
+        usize::MAX,
+        usize::MAX,
+        &|| false,
+    )
+    .expect("path realization succeeds");
+    let half_source_pixel = 0.5
+        * (document.canvas().width / f64::from(source.identity().width))
+            .min(document.canvas().height / f64::from(source.identity().height));
+    assert!(realized.output.strokes.iter().any(|stroke| {
+        stroke.profile.windows(2).any(|pair| {
+            let delta_x = pair[1].center.x - pair[0].center.x;
+            let delta_y = pair[1].center.y - pair[0].center.y;
+            delta_x.hypot(delta_y) > half_source_pixel
+        })
+    }));
 }
 
 /// Proves configurable request-wide bounds and cancellation fail before any partial public realization is returned.

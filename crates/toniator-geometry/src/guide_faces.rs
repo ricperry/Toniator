@@ -360,6 +360,9 @@ pub fn build_guide_faces_cancellable(
             "guide-face half-edge limit exceeded",
         ));
     }
+    // Split parameters only govern construction of `pieces`; retaining them through
+    // embedding and face extraction multiplies peak live arrangement state.
+    drop(parameters);
     let vertex_capacity = pieces.len().checked_mul(2).ok_or(GuideFaceError::new(
         "region.guide_faces.allocation.vertices",
         "guide-face vertex capacity overflowed",
@@ -383,6 +386,8 @@ pub fn build_guide_faces_cancellable(
     }
     poll(&cancelled)?;
     let (edges, outgoing) = planar_arrangement::embed(&pieces, &cancelled).map_err(curve_error)?;
+    // Vertex keys are fully represented by the embedded pieces and edge records now.
+    drop(vertices);
     charge(
         &mut inspections,
         pieces
@@ -494,6 +499,9 @@ pub fn build_guide_faces_cancellable(
         if signed_exact_area_cancellable(&ring, &cancelled)? <= 1e-12 {
             continue;
         }
+        if !ring_is_simple_cancellable(&ring, &mut inspections, limits, &cancelled)? {
+            continue;
+        }
         charge(
             &mut inspections,
             ring.segments().len().saturating_add(4),
@@ -538,16 +546,14 @@ pub fn build_guide_faces_cancellable(
             ));
         }
     }
-    let hole_pairs = groups
-        .len()
-        .checked_mul(groups.len().saturating_sub(1))
-        .and_then(|value| value.checked_div(2))
-        .ok_or(GuideFaceError::new(
-            "region.guide_faces.limits.inspections",
-            "guide-face hole inspection count overflowed",
-        ))?;
-    charge(&mut inspections, hole_pairs, limits)?;
-    reject_nested_positive_cycles(&groups, &cancelled)?;
+    // The retained face groups own every result needed by the canonical handoff.
+    // Releasing the transient arrangement before canonicalization avoids an otherwise
+    // avoidable overlap between the split graph and canonical output.
+    drop(used);
+    drop(outgoing);
+    drop(edges);
+    drop(pieces);
+    reject_nested_positive_cycles(&groups, &mut inspections, limits, &cancelled)?;
     if groups.is_empty() {
         return Err(GuideFaceError::new(
             "region.guide_faces.coverage.empty",
@@ -766,6 +772,48 @@ fn canonical_handoff_error(error: crate::CanonicalRegionError) -> GuideFaceError
     }
 }
 
+/// Rejects a closed walk with nonadjacent boundary contacts before canonical publication.
+///
+/// Guide-face half-edge traversal can encounter a positive exterior walk around an open
+/// arrangement. Such a walk is not one bounded face and therefore has no valid canonical
+/// region authority. Adjacent endpoints retain their ordinary ring connection; every other
+/// contact makes the walk ineligible rather than turning one unrelated malformed exterior
+/// traversal into an atomic failure for otherwise valid cells.
+///
+/// # Errors
+///
+/// Returns cancellation, configured inspection-limit, or curve-intersection diagnostics while no
+/// partial face group has been retained for the candidate walk.
+fn ring_is_simple_cancellable(
+    ring: &CurvePath,
+    inspections: &mut usize,
+    limits: GuideFaceLimits,
+    cancelled: &impl Fn() -> bool,
+) -> Result<bool, GuideFaceError> {
+    for first in 0..ring.segments().len() {
+        for second in first + 1..ring.segments().len() {
+            poll(cancelled)?;
+            if second == first + 1 || (first == 0 && second + 1 == ring.segments().len()) {
+                continue;
+            }
+            charge(inspections, 1, limits)?;
+            match ring.segments()[first].intersections(&ring.segments()[second]) {
+                Ok(intersections) if !intersections.is_empty() => return Ok(false),
+                Ok(_) => {}
+                Err(error) if error.path() == "curve.path.intersections.overlap" => {
+                    // A positive-length retrace makes this traversal non-simple just as a
+                    // discrete nonadjacent contact does. Source-guide overlap has already been
+                    // rejected before splitting; this private candidate walk is discarded so it
+                    // cannot turn an exterior traversal into a fatal document error.
+                    return Ok(false);
+                }
+                Err(error) => return Err(intersection_error(error)),
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// Returns a finite exact subrange of a line or cubic segment.
 fn segment_range(
     segment: CurveSegment,
@@ -894,18 +942,54 @@ fn ring_overlaps_canvas(
 }
 
 /// Rejects disconnected positive cycles that would require unsupported hole semantics.
+///
+/// Finite ring bounds are sorted by minimum X so only X-overlapping candidates
+/// can consume containment work. This preserves exact analytic classification
+/// while avoiding all-pairs inspection for ordinary dense guide lattices.
+/// Charged inspections mutate only the caller-owned diagnostic budget.
+///
+/// # Errors
+///
+/// Returns cancellation, curve, containment, or configured inspection-limit
+/// diagnostics without publishing partial region authority.
 fn reject_nested_positive_cycles(
     groups: &[CanonicalRegionSourceGroup],
+    inspections: &mut usize,
+    limits: GuideFaceLimits,
     cancelled: &impl Fn() -> bool,
 ) -> Result<(), GuideFaceError> {
-    for (left_index, left) in groups.iter().enumerate() {
+    let mut bounded = Vec::new();
+    reserve(
+        &mut bounded,
+        groups.len(),
+        "guide-face hole bounds allocation failed",
+    )?;
+    for (index, group) in groups.iter().enumerate() {
+        bounded.push((index, group.components[0].bounds().map_err(curve_error)?));
+    }
+    bounded.sort_by(|left, right| {
+        left.1
+            .min
+            .x
+            .total_cmp(&right.1.min.x)
+            .then(left.1.max.x.total_cmp(&right.1.max.x))
+            .then(left.0.cmp(&right.0))
+    });
+    for (left_position, (left_index, left_bounds)) in bounded.iter().copied().enumerate() {
         poll(cancelled)?;
+        let left = &groups[left_index];
         let left_ring = &left.components[0];
-        for right in groups.iter().skip(left_index + 1) {
+        for (right_index, right_bounds) in bounded.iter().copied().skip(left_position + 1) {
+            if right_bounds.min.x >= left_bounds.max.x {
+                break;
+            }
             poll(cancelled)?;
+            charge(inspections, 1, limits)?;
+            if !bounds_contains(left_bounds, right_bounds) {
+                continue;
+            }
+            let right = &groups[right_index];
             let right_ring = &right.components[0];
-            let left_bounds = left_ring.bounds().map_err(curve_error)?;
-            let right_bounds = right_ring.bounds().map_err(curve_error)?;
             let shares_boundary_source = match (&left.source_id, &right.source_id) {
                 (
                     CanonicalRegionSourceId::GuideBoundary(left_sources),
@@ -915,20 +999,13 @@ fn reject_nested_positive_cycles(
                     .any(|source| right_sources.contains(source)),
                 _ => false,
             };
-            let nested = if !shares_boundary_source && bounds_contains(left_bounds, right_bounds) {
+            let nested = if !shares_boundary_source {
                 let representative = centroid_for_ring_cancellable(
                     right_ring,
                     signed_exact_area_cancellable(right_ring, cancelled)?,
                     cancelled,
                 )?;
                 point_in_ring(representative, left_ring, cancelled)?
-            } else if !shares_boundary_source && bounds_contains(right_bounds, left_bounds) {
-                let representative = centroid_for_ring_cancellable(
-                    left_ring,
-                    signed_exact_area_cancellable(left_ring, cancelled)?,
-                    cancelled,
-                )?;
-                point_in_ring(representative, right_ring, cancelled)?
             } else {
                 false
             };
@@ -1199,6 +1276,47 @@ mod tests {
         .expect("ordered finite structural paths")
     }
 
+    /// Proves a positive-length retrace classifies one private traversal as non-simple.
+    ///
+    /// Source-guide overlap remains an earlier fatal input error. Once half-edge traversal has
+    /// formed a candidate ring, a nonadjacent retrace identifies an exterior/non-face walk and
+    /// must be discarded without aborting unrelated valid cells.
+    #[test]
+    fn retraced_candidate_ring_is_non_simple_without_a_fatal_overlap_error() {
+        let points = [
+            Point2::new(0.0, 0.0),
+            Point2::new(4.0, 0.0),
+            Point2::new(4.0, 4.0),
+            Point2::new(0.0, 4.0),
+            Point2::new(0.0, 0.0),
+            Point2::new(4.0, 0.0),
+            Point2::new(0.0, 0.0),
+        ];
+        let ring = CurvePath::new(
+            points
+                .windows(2)
+                .map(|pair| {
+                    CurveSegment::Line(
+                        LineSegment::new(pair[0], pair[1]).expect("finite retraced ring edge"),
+                    )
+                })
+                .collect(),
+            PathClosure::Closed,
+        )
+        .expect("retraced walk remains a closed candidate path");
+        let mut inspections = 0;
+        assert!(
+            !ring_is_simple_cancellable(
+                &ring,
+                &mut inspections,
+                GuideFaceLimits::default(),
+                &|| false,
+            )
+            .expect("candidate overlap classifies without a fatal source-guide error")
+        );
+        assert!(inspections > 0);
+    }
+
     /// Builds a complete two-guide rectangular arrangement whose canvas-relevant cell is canonical.
     #[test]
     fn two_guide_rectangular_arrangement_builds_a_region() {
@@ -1431,10 +1549,16 @@ mod tests {
                 components: vec![square(-1.0, 1.0)],
             },
         ];
+        let mut inspections = 0;
         assert_eq!(
-            reject_nested_positive_cycles(&groups, &|| false)
-                .expect_err("nested disconnected cycles reject")
-                .path(),
+            reject_nested_positive_cycles(
+                &groups,
+                &mut inspections,
+                GuideFaceLimits::default(),
+                &|| false,
+            )
+            .expect_err("nested disconnected cycles reject")
+            .path(),
             "region.guide_faces.geometry.holes",
         );
     }
@@ -1478,8 +1602,14 @@ mod tests {
                 ])],
             },
         ];
-        reject_nested_positive_cycles(&groups, &|| false)
-            .expect("disjoint concave bounds do not imply a hole");
+        let mut inspections = 0;
+        reject_nested_positive_cycles(
+            &groups,
+            &mut inspections,
+            GuideFaceLimits::default(),
+            &|| false,
+        )
+        .expect("disjoint concave bounds do not imply a hole");
     }
 
     /// Proves the shared material-vector reservation mapper never exposes allocator wording.

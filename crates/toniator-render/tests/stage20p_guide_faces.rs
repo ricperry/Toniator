@@ -230,7 +230,7 @@ fn generate_intrinsic_guide_face_artifacts() {
             .outputs()
             .first()
             .expect("guide-face layer has one output");
-        let GeometryOutput::CanonicalRegions(regions) = &region_layer.geometry else {
+        let GeometryOutput::CanonicalRegions(regions) = region_layer.geometry() else {
             panic!("guide-face evidence retains canonical regions");
         };
         let mut identity_record = format!("fingerprint={}\n", regions.fingerprint());

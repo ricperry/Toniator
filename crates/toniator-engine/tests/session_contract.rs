@@ -1,10 +1,10 @@
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternInstance, ChannelPatternLayoutDelta,
-    ChannelSourceMapping, ChannelState, ColorValue, CoveragePolicy, DensityEditedAxis,
-    DensityMetric2D, Document, DocumentCommand, DocumentId, DocumentSession, InvalidationLevel,
-    MarkGeometryFieldEdit, MarkGeometryResponse, PatternDefinition, PatternDefinitionBundle,
-    PatternDefinitionId, PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
-    PatternOutputSettings, Revision, SourceComponent, SourcePlacement,
+    ChannelSourceMapping, ChannelState, ColorValue, CoveragePolicy, DensityMetric2D, Document,
+    DocumentCommand, DocumentId, DocumentSession, InvalidationLevel, MarkGeometryFieldEdit,
+    MarkGeometryResponse, PatternDefinition, PatternDefinitionBundle, PatternDefinitionId,
+    PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId, PatternOutputSettings,
+    Revision, SourceComponent, SourcePlacement,
 };
 
 const CHANNEL_ID: ChannelId = ChannelId(1);
@@ -41,9 +41,8 @@ fn session() -> DocumentSession {
         toniator_domain::DocumentPatternSettings {
             definition_id: PatternDefinitionId(1),
             density: DensityMetric2D {
-                across_x: 90.0,
-                across_y: 60.0,
-                aspect_locked: true,
+                density: 5_400.0_f64.sqrt(),
+                aspect: 1.0,
             },
             pattern_rotation_degrees: 0.0,
             shape_rotation_degrees: 0.0,
@@ -92,11 +91,9 @@ fn successful_commands_mutate_once_and_advance_revision_once() {
                 .document()
                 .set_channel_density_for_effective(
                     CHANNEL_ID,
-                    DensityEditedAxis::AcrossX,
                     DensityMetric2D {
-                        across_x: 70.0,
-                        across_y: 60.0,
-                        aspect_locked: true,
+                        density: 4_200.0_f64.sqrt(),
+                        aspect: 9.0 / 7.0,
                     },
                 )
                 .expect("density command builds"),
@@ -163,7 +160,7 @@ fn successful_commands_mutate_once_and_advance_revision_once() {
         .document()
         .effective_channel_pattern(CHANNEL_ID)
         .expect("channel resolves");
-    assert_eq!(channel.density.across_x, 70.0);
+    assert!((channel.resolved_density.across_x - 70.0).abs() <= 1.0e-12);
     assert_eq!(channel.pattern_rotation_degrees, 20.0);
     assert_eq!(channel.translation_x, 2.0);
     assert_eq!(channel.translation_y, 0.0);
@@ -191,11 +188,9 @@ fn failed_commands_preserve_exact_document_and_revision() {
     let invalid_commands = [
         session.document().set_channel_density_for_effective(
             CHANNEL_ID,
-            DensityEditedAxis::AcrossX,
             DensityMetric2D {
-                across_x: 0.0,
-                across_y: 60.0,
-                aspect_locked: true,
+                density: 0.0,
+                aspect: 1.0,
             },
         ),
         session

@@ -1,12 +1,13 @@
 use toniator_domain::{
-    CanvasSpec, CoveragePolicy, CurveWinding, DensityMetric2D, GuideRepetition, MarkOrientation,
-    MarkPrototype, OffsetCleanup, OffsetSides, ParametricCurve, PathStrokeStyle, PatternDefinition,
+    CanvasSpec, CoveragePolicy, CurveWinding, GuideRepetition, MarkOrientation, MarkPrototype,
+    OffsetCleanup, OffsetSides, ParametricCurve, PathStrokeStyle, PatternDefinition,
     PatternDefinitionId, PatternFamily, PatternMechanism, PatternMechanismId, PatternModulation,
-    PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization, SpiralCurve, SpiralShape,
+    PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization, ResolvedDensityMetric2D,
+    SpiralCurve, SpiralShape,
 };
 use toniator_patterns::{
     GridInspectRequest, StructuralProductCapability, evaluate_typed_family,
-    resolve_pattern_pipeline,
+    evaluate_typed_family_product_with_source_progress_cancellable, resolve_pattern_pipeline,
 };
 
 /// Builds a deterministic bounded request with room for one finite source.
@@ -16,10 +17,9 @@ fn request() -> GridInspectRequest {
             width: 320.0,
             height: 240.0,
         },
-        density: DensityMetric2D {
+        density: ResolvedDensityMetric2D {
             across_x: 32.0,
             across_y: 24.0,
-            aspect_locked: true,
         },
         rotation_degrees: 0.0,
         translation_x: 0.0,
@@ -100,7 +100,7 @@ fn definition(shape: SpiralShape, sites: bool) -> PatternDefinition {
     }
 }
 
-/// Resolves and evaluates round raw paths through the canonical finite CurvePath boundary.
+/// Resolves round raw paths and observes completed parametric/generic family work.
 #[test]
 fn round_spiral_publishes_one_cubic_path_product() {
     let plan =
@@ -109,8 +109,15 @@ fn round_spiral_publishes_one_cubic_path_product() {
         plan.family.product,
         StructuralProductCapability::ParametricPaths
     );
-    let output = evaluate_typed_family(&definition(SpiralShape::Round, false), &request())
-        .expect("valid output");
+    let progress = std::sync::Mutex::new(Vec::new());
+    let output = evaluate_typed_family_product_with_source_progress_cancellable(
+        &plan.family,
+        &request(),
+        None,
+        &|| false,
+        &|completed, total| progress.lock().unwrap().push((completed, total)),
+    )
+    .expect("valid output");
     let paths = output.structural_path_set().expect("raw path output");
     assert_eq!(paths.paths().len(), 1);
     assert!(matches!(
@@ -124,6 +131,15 @@ fn round_spiral_publishes_one_cubic_path_product() {
             .iter()
             .all(|segment| matches!(segment, toniator_patterns::CurveSegment::CubicBezier(_)))
     );
+    let progress = progress.into_inner().unwrap();
+    assert!(
+        progress
+            .iter()
+            .any(|&(completed, total)| completed > 0 && completed < total),
+        "parametric construction and finite-path work advance within the family stage"
+    );
+    assert_eq!(progress.last(), Some(&(1_000, 1_000)));
+    assert!(progress.windows(2).all(|pair| pair[0].0 <= pair[1].0));
 }
 
 /// Locks parametric geometry and identity outside the centered grid-prototype transform contract.

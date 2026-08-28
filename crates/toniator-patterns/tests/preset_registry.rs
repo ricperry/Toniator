@@ -64,6 +64,51 @@ fn bundled_registry_is_stable_and_reconstructs_every_entry() {
     }
 }
 
+/// Pins the Source-Weighted Voronoi catalog recipe to its full-range Scale and AreaAverage response.
+///
+/// The assertion reads only recipe data. It confirms luminance remains the structural site-weight
+/// mapping while channel source mapping and paint remain document-instance authority rather than a
+/// preset-specific evaluator behavior.
+#[test]
+fn source_weighted_voronoi_recipe_uses_luminance_placement_scale_average_and_full_fill() {
+    let registry = PresetRegistry::bundled();
+    let recipe = &registry
+        .entries()
+        .iter()
+        .find(|entry| entry.metadata.id == "source-weighted-dispersion-voronoi")
+        .expect("bundled source-weighted Voronoi recipe exists")
+        .recipe;
+    let PatternStructureRecipe::VoronoiRegions { definition } = &recipe.structure else {
+        panic!("source-weighted Voronoi remains a region recipe")
+    };
+    let PatternStructureRecipe::RandomSites {
+        density_modulation, ..
+    } = definition.as_ref()
+    else {
+        panic!("source-weighted Voronoi retains random site placement")
+    };
+    assert!(matches!(
+        density_modulation,
+        SiteDensityModulation::ArtworkWeighted {
+            mapping: SourceMapping {
+                component: SourceMappingComponent::Luminance,
+                ..
+            },
+            ..
+        }
+    ));
+    assert!(matches!(
+        recipe.output_settings.as_slice(),
+        [toniator_domain::PatternOutputSettingsRecipe {
+            response: toniator_domain::PatternGeometryResponse::Regions(response),
+            ..
+        }] if response.algorithm == toniator_domain::RegionResizeAlgorithm::Scale
+            && response.sampling == toniator_domain::RegionSamplingStrategy::AreaAverage
+            && response.minimum_fill == 0.0
+            && response.maximum_fill == 1.0
+    ));
+}
+
 /// Rejects duplicate stable metadata IDs before registry consumers can resolve
 /// an ambiguous shortcut or construct a document command.
 #[test]

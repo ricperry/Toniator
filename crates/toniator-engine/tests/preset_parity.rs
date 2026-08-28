@@ -12,13 +12,13 @@ use sha2::{Digest, Sha256};
 use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureId,
     AuthoredStructureKind, CanvasSpec, ChannelId, ConnectedGeometryResponse, ConnectionProgram,
-    CoveragePolicy, DensityEditedAxis, DensityMetric2D, Document, DocumentCommand, DocumentHistory,
-    DocumentSession, GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype,
-    GuideRepetition, MarkOrientation, ModeledMappingFieldEdit, OffsetCleanup, OffsetSides,
-    PathStrokeStyle, PatternCapabilityScope, PatternDefinition, PatternDefinitionBundle,
-    PatternDefinitionEdit, PatternDefinitionId, PatternGeometryResponse, PatternMechanism,
-    PatternMechanismId, PatternOutputLayerId, PatternOutputRealization, PatternOutputSettings,
-    PropertyDescriptor, SourceMappingComponent, SourcePlacement, SourceReference,
+    CoveragePolicy, DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentSession,
+    GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
+    MarkOrientation, ModeledMappingFieldEdit, OffsetCleanup, OffsetSides, PathStrokeStyle,
+    PatternCapabilityScope, PatternDefinition, PatternDefinitionBundle, PatternDefinitionEdit,
+    PatternDefinitionId, PatternGeometryResponse, PatternMechanism, PatternMechanismId,
+    PatternOutputLayerId, PatternOutputRealization, PatternOutputSettings, PropertyDescriptor,
+    ResolvedDensityMetric2D, SourceMappingComponent, SourcePlacement, SourceReference,
     SourceReferenceId,
 };
 use toniator_engine::{
@@ -768,7 +768,7 @@ fn apply_recipe_to_rgb(
 /// The intrinsic one-guide representative uses `AcrossX=4`; derived validation documents use
 /// `AcrossX=16`. Measured slow cards use the corresponding bounded density with
 /// their 25%-linear source and canvas so site and cell work reduce at both
-/// relevant boundaries while the base aspect lock derives the companion axis.
+/// relevant boundaries while density/aspect remains the sole stored authority.
 fn apply_artifact_resolution_density(
     history: &mut DocumentHistory,
     channels: [ChannelId; 3],
@@ -785,20 +785,20 @@ fn apply_artifact_resolution_density(
     } else {
         return "default document density (no artifact-only edit)".to_owned();
     };
-    let canvas = history.document().canvas();
+    let canvas = history.document().canvas().clone();
     let expected_y = density * canvas.height / canvas.width;
     for channel_id in channels {
+        let desired = DensityMetric2D::from_resolved(
+            &canvas,
+            &ResolvedDensityMetric2D {
+                across_x: density,
+                across_y: expected_y,
+            },
+        )
+        .expect("artifact resolution density converts to current authority");
         let edit = history
             .document()
-            .set_channel_density_for_effective(
-                channel_id,
-                DensityEditedAxis::AcrossX,
-                DensityMetric2D {
-                    across_x: density,
-                    across_y: density,
-                    aspect_locked: true,
-                },
-            )
+            .set_channel_density_for_effective(channel_id, desired)
             .expect("artifact resolution density command validates");
         history
             .apply(&edit)
@@ -820,12 +820,11 @@ fn apply_artifact_resolution_density(
             .document()
             .effective_channel_pattern(channel_id)
             .expect("artifact channel retains effective density")
-            .density;
+            .resolved_density;
         assert!(
-            effective_density.aspect_locked,
-            "artifact resolution retains the document-owned aspect lock"
+            (effective_density.across_x - density).abs() <= 1e-12,
+            "artifact resolution retains the domain-derived locked X axis"
         );
-        assert_eq!(effective_density.across_x, density);
         assert!(
             (effective_density.across_y - expected_y).abs() <= 1e-12,
             "artifact resolution retains the domain-derived locked Y axis"
@@ -837,7 +836,7 @@ fn apply_artifact_resolution_density(
         format!("{density:.0}x{expected_y:.4}")
     };
     format!(
-        "typed SetChannelDensityDelta through set_channel_density_for_effective with AcrossX authoritative and base aspect lock: R={axes}, G={axes}, B={axes}"
+        "typed SetChannelDensityDelta through authoritative density/aspect conversion: R={axes}, G={axes}, B={axes}"
     )
 }
 
@@ -1902,6 +1901,71 @@ fn source_weighted_voronoi_uses_independent_rgb_source_mappings() {
     assert_ne!(identities[1], identities[2]);
 }
 
+/// Writes intrinsic native PNG and raw SVG evidence for ordinary ALL/base Source-Weighted Voronoi application.
+///
+/// This ignored generator reads both immutable project baselines and writes only the dedicated
+/// Stage 21A validation directory. It uses the normal RGB channel mappings and solid paints, the
+/// ordinary document-base preset command, and the canonical engine evaluator; it never injects
+/// per-channel artwork-weight remapping or rewrites prior validation evidence.
+#[test]
+#[ignore = "writes Stage 21A source-weighted Voronoi validation artifacts"]
+fn stage21a_source_weighted_voronoi_all_base_artifacts() {
+    let output = Path::new("../../target/validation/stage21a-source-weighted-voronoi");
+    fs::create_dir_all(output).expect("Stage 21A validation directory creates");
+    for (name, format, dimensions) in [
+        (
+            "raster-sample.png",
+            SourceFormatHint::Png,
+            (1024_u32, 1024_u32),
+        ),
+        (
+            "vector-sample.svg",
+            SourceFormatHint::Svg,
+            (900_u32, 620_u32),
+        ),
+    ] {
+        let bytes = fs::read(Path::new("../../assets").join(name))
+            .expect("immutable baseline source reads");
+        let source_id = SourceReferenceId::new(format!("stage21a-{name}"))
+            .expect("validation source ID validates");
+        let source = ResolvedSource::new(source_id.clone(), bytes, format)
+            .expect("immutable baseline source resolves");
+        let (mut history, _, _) =
+            artifact_history(source_id, f64::from(dimensions.0), f64::from(dimensions.1));
+        PresetRegistry::bundled()
+            .apply_to_document_base(&mut history, "source-weighted-dispersion-voronoi")
+            .expect("built-in recipe applies through document-base ALL authority");
+        let result = evaluate(EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            source,
+        ))
+        .expect("document-base source-weighted Voronoi evaluates");
+        let stem = name
+            .strip_suffix(".png")
+            .or_else(|| name.strip_suffix(".svg"))
+            .expect("fixed baseline extension has a stem");
+        let png_path = output.join(format!("{stem}-source-weighted-voronoi.png"));
+        let svg_path = output.join(format!("{stem}-source-weighted-voronoi.svg"));
+        fs::write(
+            &png_path,
+            encode_png(result.raster()).expect("native PNG encodes"),
+        )
+        .expect("native PNG writes");
+        fs::write(&svg_path, write_svg(result.scene())).expect("raw SVG writes");
+        assert_eq!(
+            image::image_dimensions(&png_path).expect("native PNG dimensions read"),
+            dimensions,
+            "{name} preserves intrinsic raster dimensions"
+        );
+        let svg = fs::read_to_string(&svg_path).expect("raw SVG reads");
+        assert!(
+            svg.contains(&format!("width=\"{}\"", dimensions.0))
+                && svg.contains(&format!("height=\"{}\"", dimensions.1)),
+            "{name} raw SVG preserves intrinsic canvas dimensions"
+        );
+    }
+}
+
 /// Evaluates the cubic TransformStack path fixture through three visible RGB
 /// layers and proves repetition publishes more than one canonical stroke.
 #[test]
@@ -2459,9 +2523,8 @@ fn artifact_resolution_density_preserves_authoritative_aspect_lock() {
                 .document()
                 .effective_channel_pattern(channel_id)
                 .expect("artifact channel retains effective density")
-                .density;
-            assert!(density.aspect_locked);
-            assert_eq!(density.across_x, expected_axes.0);
+                .resolved_density;
+            assert!((density.across_x - expected_axes.0).abs() <= 1e-12);
             assert!((density.across_y - expected_axes.1).abs() <= 1e-12);
         }
     }
@@ -2523,9 +2586,8 @@ fn curved_guide_derived_svg_evidence_histories_preserve_variants_and_rgb() {
                 .document()
                 .effective_channel_pattern(channel_id)
                 .expect("derived curved fixture retains effective density")
-                .density;
-            assert!(density.aspect_locked);
-            assert_eq!(density.across_x, 16.0);
+                .resolved_density;
+            assert!((density.across_x - 16.0).abs() <= 1e-12);
             assert!((density.across_y - 16.0 * 155.0 / 225.0).abs() <= 1e-12);
         }
     }

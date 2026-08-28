@@ -34,15 +34,17 @@ use gtk::prelude::*;
 #[cfg(test)]
 use preview_coordinator::PreviewSubmission;
 use preview_coordinator::accepts_submission;
+use toniator_domain::DensityMetric2D;
 use toniator_domain::{
     AuthoredStructureAttachment, CanvasSpec, ChannelId, ChannelPaint, ChannelTopologyTemplate,
-    ColorComponent, DensityEditedAxis, Document, DocumentCommand, DocumentHistory, DocumentSession,
-    HalftoneChannelModel, LegacyMappingFieldEdit, MarkGeometryFieldEdit, MarkOrientationKind,
-    MarkPrototype, ModeledMappingFieldEdit, PaintKind, PatternDefinitionEdit, PatternDefinitionId,
-    PatternGeometryResponse, PatternMechanism, PatternMechanismId, PatternOutputLayerId,
-    PropertyCurrentValue, PropertyCurrentValueKind, PropertyDescriptor, PropertyEnumChoice,
-    PropertyFieldId, PropertyReferenceValue, PropertyTarget, PropertyValueKind,
-    RandomCharacterKind, SourceComponent, SourceMappingComponent, SourceReference,
+    ColorComponent, DensityEditedField, Document, DocumentCommand, DocumentHistory,
+    DocumentSession, HalftoneChannelModel, LegacyMappingFieldEdit, MarkGeometryFieldEdit,
+    MarkOrientationKind, MarkPrototype, ModeledMappingFieldEdit, PaintKind, PatternCapabilityScope,
+    PatternDefinitionEdit, PatternDefinitionId, PatternGeometryResponse, PatternMechanism,
+    PatternMechanismId, PatternOutputLayerId, PropertyCurrentValue, PropertyCurrentValueKind,
+    PropertyDescriptor, PropertyEnumChoice, PropertyFieldId, PropertyInheritance,
+    PropertyReferenceValue, PropertyTarget, PropertyValueKind, RandomCharacterKind,
+    RegionGeometryFieldEdit, SourceComponent, SourceMappingComponent, SourceReference,
     SourceReferenceId, TranslationEditedAxis, VariantTransitionFieldUpdate, VariantTransitionValue,
 };
 #[cfg(test)]
@@ -50,15 +52,15 @@ use toniator_domain::{DensityModulationKind, ExclusionKind};
 use toniator_engine::{
     EvaluationLimits, EvaluationRequest, EvaluationScheduler, OutputRasterTarget,
     RasterAntialiasing, RasterBackground, RasterSurface, ResolvedSource, SourceFormatHint,
-    SourceIdentity, encode_png, evaluate_with_limits, rasterize_output, resolve_source_identity,
-    write_svg,
+    SourceIdentity, encode_png, evaluate_with_limits, rasterize_output, reduced_preview_png,
+    resolve_source_identity, write_svg,
 };
 use toniator_io::{
     EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load as load_container,
     save as save_container,
 };
 use toniator_patterns::PresetRegistry;
-use view_models::{LifecycleViewModel, PatternCatalogViewModel, project_document};
+use view_models::{LifecycleViewModel, project_document};
 
 const APP_ID: &str = "com.silentbutdigital.Toniator";
 const RESOURCE_PREFIX: &str = "/com/silentbutdigital/Toniator";
@@ -66,10 +68,17 @@ const DEFAULT_CANVAS: CanvasSpec = CanvasSpec {
     width: 1024.0,
     height: 1024.0,
 };
-const OPEN_FILTER_LABELS: [&str; 3] = [
+const OPEN_FILTER_LABELS: [&str; 10] = [
+    "All supported files",
     "Toniator documents (.toniator)",
     "PNG artwork",
     "SVG artwork",
+    "JPEG artwork",
+    "WebP artwork",
+    "BMP artwork",
+    "TIFF artwork",
+    "OpenEXR artwork",
+    "AVIF artwork",
 ];
 const SAVE_FILTER_LABEL: &str = "Toniator documents (.toniator)";
 const EXPORT_FILTER_LABELS: [&str; 2] = ["PNG image", "SVG vector image"];
@@ -112,9 +121,38 @@ enum InspectorInput {
     ReferenceCollection(Vec<PropertyReferenceValue>),
 }
 
+/// Selects document-base authority or one real channel for the inspector.
+///
+/// `DocumentAll` is runtime-only presentation state and is never encoded as a
+/// fabricated `ChannelId` in document, command, persistence, or evaluation data.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum InspectorTarget {
+    #[default]
+    DocumentAll,
+    Channel(ChannelId),
+}
+
+impl InspectorTarget {
+    /// Returns the real channel target when this is a named-channel selection.
+    const fn channel_id(self) -> Option<ChannelId> {
+        match self {
+            Self::DocumentAll => None,
+            Self::Channel(channel_id) => Some(channel_id),
+        }
+    }
+}
+
+/// Retains the non-mutating recipe dropdown candidate independently of the document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PatternCandidate {
+    Custom,
+    Preset(String),
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct InspectorRuntime {
-    selected_channel: Option<ChannelId>,
+    target: InspectorTarget,
+    pattern_candidate: Option<PatternCandidate>,
     scope: DefinitionEditScope,
     drafts: BTreeMap<String, String>,
     expanded_groups: BTreeSet<String>,
@@ -123,6 +161,7 @@ struct InspectorRuntime {
 }
 
 impl InspectorRuntime {
+    /// Restores runtime-only inspector state for a newly installed workspace.
     fn reset_for_workspace(&mut self) {
         *self = Self::default();
     }
@@ -195,9 +234,24 @@ fn channel_id_at_selector_position(
     position: u32,
     authoritative_order: &[ChannelId],
 ) -> Option<ChannelId> {
-    (position != gtk::INVALID_LIST_POSITION)
-        .then_some(position as usize)
-        .and_then(|index| authoritative_order.get(index).copied())
+    position
+        .checked_sub(1)
+        .and_then(|index| authoritative_order.get(index as usize).copied())
+}
+
+/// Preserves ALL across every topology transition and preserves a named target
+/// only while its stable channel ID remains authoritative.
+fn inspector_target_after_transition(
+    target: InspectorTarget,
+    authoritative_order: &[ChannelId],
+) -> InspectorTarget {
+    match target {
+        InspectorTarget::DocumentAll => InspectorTarget::DocumentAll,
+        InspectorTarget::Channel(channel_id) if authoritative_order.contains(&channel_id) => {
+            InspectorTarget::Channel(channel_id)
+        }
+        InspectorTarget::Channel(_) => InspectorTarget::DocumentAll,
+    }
 }
 
 impl PreviewModel {
@@ -417,20 +471,37 @@ fn source_id_from_content(identity: &SourceIdentity) -> Result<SourceReferenceId
     SourceReferenceId::new(format!("source-{digest}")).map_err(|error| error.to_string())
 }
 
+/// Converts the decoded still-image hint into the exact persisted source format.
+///
+/// # Errors
+///
+/// Returns a user-facing error for the deliberately unsupported sentinel; no guessed container
+/// format is ever persisted.
 fn embedded_format(format: SourceFormatHint) -> Result<EmbeddedSourceFormat, String> {
     match format {
         SourceFormatHint::Png => Ok(EmbeddedSourceFormat::Png),
         SourceFormatHint::Svg => Ok(EmbeddedSourceFormat::Svg),
-        SourceFormatHint::Unsupported => {
-            Err("source.format: only PNG and SVG source formats are supported".to_owned())
-        }
+        SourceFormatHint::Jpeg => Ok(EmbeddedSourceFormat::Jpeg),
+        SourceFormatHint::Webp => Ok(EmbeddedSourceFormat::Webp),
+        SourceFormatHint::Bmp => Ok(EmbeddedSourceFormat::Bmp),
+        SourceFormatHint::Tiff => Ok(EmbeddedSourceFormat::Tiff),
+        SourceFormatHint::OpenExr => Ok(EmbeddedSourceFormat::OpenExr),
+        SourceFormatHint::Avif => Ok(EmbeddedSourceFormat::Avif),
+        SourceFormatHint::Unsupported => Err("source.format: unsupported source format".to_owned()),
     }
 }
 
+/// Converts the stored source format back into the explicit decoder hint.
 const fn source_format_hint(format: EmbeddedSourceFormat) -> SourceFormatHint {
     match format {
         EmbeddedSourceFormat::Png => SourceFormatHint::Png,
         EmbeddedSourceFormat::Svg => SourceFormatHint::Svg,
+        EmbeddedSourceFormat::Jpeg => SourceFormatHint::Jpeg,
+        EmbeddedSourceFormat::Webp => SourceFormatHint::Webp,
+        EmbeddedSourceFormat::Bmp => SourceFormatHint::Bmp,
+        EmbeddedSourceFormat::Tiff => SourceFormatHint::Tiff,
+        EmbeddedSourceFormat::OpenExr => SourceFormatHint::OpenExr,
+        EmbeddedSourceFormat::Avif => SourceFormatHint::Avif,
     }
 }
 
@@ -687,8 +758,8 @@ fn accepts_preview_submission(
     accepts_submission(current_workspace_generation, submission, completion_ticket)
 }
 
-/// Reports whether one private preview completion is the newest terminal result for its draft epoch.
-fn accepts_draft_preview_terminal(
+/// Reports whether one private preview completion is the newest terminal result for its editor epoch.
+fn accepts_private_preview_terminal(
     current_epoch: u64,
     pending_ticket: Option<u64>,
     completion_epoch: u64,
@@ -902,7 +973,94 @@ struct PendingSharedPathEdit {
 struct DescriptorComponent {
     row: gtk::Box,
     control: gtk::Widget,
+    detail: gtk::Label,
+    reset: Option<gtk::Button>,
     value: PropertyCurrentValue,
+}
+
+/// Routes one Advanced Settings control back to its still-current private modal epoch.
+///
+/// Cloned instances retain no document or GTK surface authority. The app-owned
+/// surface resolves the epoch before accepting commands or scheduling preview work.
+#[derive(Clone)]
+struct AdvancedCommitContext {
+    state: Rc<RefCell<AppState>>,
+    epoch: u64,
+}
+
+/// Holds one modal Advanced Settings history and its cancelable private preview scheduler.
+///
+/// The surface is runtime-only and single-instance. Its scheduler sees only the bounded source
+/// proxy; main workspace history, source bytes, preview tickets, and cache acceptance remain
+/// outside this private editor.
+struct AdvancedSettingsSurface {
+    epoch: u64,
+    window: gtk::Window,
+    draft: Rc<RefCell<DocumentHistory>>,
+    preview_source: AdvancedPreviewSource,
+    target: InspectorTarget,
+    picture: gtk::Picture,
+    status: gtk::Label,
+    scheduler: Arc<EvaluationScheduler>,
+    preview_submission: Option<u64>,
+    preview_bridge_stop: Arc<AtomicBool>,
+}
+
+/// Holds the only source admitted to an Advanced Settings preview evaluation.
+///
+/// A ready value retains the original source reference ID but supplies bounded PNG proxy bytes.
+/// An unavailable value is a visible private-preview failure only; it never blocks editing or
+/// publishing the authoritative draft, and it never falls back to the full-resolution source.
+#[derive(Clone)]
+enum AdvancedPreviewSource {
+    Ready {
+        source: ResolvedSource,
+        width: u32,
+        height: u32,
+    },
+    Unavailable(String),
+}
+
+/// Locates one Advanced Settings descriptor across selected-copy definition-ID replacement.
+///
+/// Structural copies allocate fresh definition, mechanism, and output IDs. Output controls retain
+/// their definition-order painter path and structural realization kind, which selected-copy renewal
+/// preserves. Advanced Settings has no structural reorder action; identical realization layers are
+/// therefore intentionally distinguished by their preserved painter position, not allocation IDs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdvancedDescriptorLocator {
+    field: PropertyFieldId,
+    target_kind: AdvancedDescriptorTargetKind,
+    output_anchor: Option<AdvancedOutputAnchor>,
+}
+
+/// Identifies one output control by the stable structural path retained across selected-copy renewal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdvancedOutputAnchor {
+    painter_index: usize,
+    structural_kind: AdvancedOutputStructuralKind,
+}
+
+/// Distinguishes the current structural output realizations without retaining renewed allocation IDs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdvancedOutputStructuralKind {
+    Marks,
+    GuidePaths,
+    ConnectionPaths,
+    MazeWalls,
+    Regions,
+}
+
+/// Classifies descriptor targets at the stable granularity usable after selected-copy ID renewal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdvancedDescriptorTargetKind {
+    Channel,
+    ChannelOutput,
+    Definition,
+    Mechanism,
+    OutputLayer,
+    GuideDimension,
+    Document,
 }
 
 impl PatternEditorDraft {
@@ -922,7 +1080,11 @@ struct AppState {
     stack: gtk::Stack,
     picture: gtk::Picture,
     viewer: gtk::Overlay,
-    preview_spinner: gtk::Spinner,
+    preview_progress: gtk::Box,
+    preview_overall_progress_label: gtk::Label,
+    preview_progress_label: gtk::Label,
+    preview_progress_bar: gtk::ProgressBar,
+    preview_stage_progress_bar: gtk::ProgressBar,
     error: gtk::Label,
     shell: components::ToniatorMainShell,
     selector: gtk::DropDown,
@@ -930,6 +1092,10 @@ struct AppState {
     channel_selector_model: gtk::StringList,
     inspector_catalog: gtk::Box,
     active_pattern: gtk::Label,
+    pattern_selector: Option<gtk::DropDown>,
+    apply_pattern_button: Option<gtk::Button>,
+    guide_editor_button: Option<gtk::Button>,
+    mark_editor_button: Option<gtk::Button>,
     inspector_descriptors: gtk::Box,
     inspector_status: gtk::Label,
     descriptor_components: BTreeMap<String, DescriptorComponent>,
@@ -939,6 +1105,8 @@ struct AppState {
     inspector_rebuild_scheduled: bool,
     pattern_editor: Option<PatternEditorSurface>,
     draft_epoch: u64,
+    advanced_settings: Option<AdvancedSettingsSurface>,
+    advanced_epoch: u64,
     preview: Option<gtk::gdk::Texture>,
     preview_target: Option<toniator_engine::PreviewRasterTarget>,
     presets: PresetRegistry,
@@ -1020,6 +1188,8 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
         let _ = tooltip;
     }
     let shell = components::ToniatorMainShell::new();
+    let titlebar = shell.detach_titlebar();
+    window.set_titlebar(Some(&titlebar));
     let file_button = shell.file_button();
     file_button.set_menu_model(Some(&file_menu));
     let selector = shell.model_selector();
@@ -1035,9 +1205,12 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
     let error = shell.error();
     let picture = shell.picture();
     let viewer = shell.viewer();
-    let preview_spinner = shell.spinner();
-    preview_spinner.set_visible(false);
-    preview_spinner.update_property(&[gtk::accessible::Property::Label("Preview updating")]);
+    let preview_progress = shell.progress();
+    let preview_overall_progress_label = shell.overall_progress_label();
+    let preview_progress_label = shell.progress_label();
+    let preview_progress_bar = shell.progress_bar();
+    let preview_stage_progress_bar = shell.stage_progress_bar();
+    preview_progress.set_visible(false);
     selector.update_property(&[gtk::accessible::Property::Label("Color model")]);
     channel_selector.update_property(&[gtk::accessible::Property::Label("Channel")]);
     let inspector_status = shell.inspector_status();
@@ -1116,7 +1289,11 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
         stack,
         picture,
         viewer,
-        preview_spinner,
+        preview_progress,
+        preview_overall_progress_label,
+        preview_progress_label,
+        preview_progress_bar,
+        preview_stage_progress_bar,
         error,
         shell,
         selector,
@@ -1124,6 +1301,10 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
         channel_selector_model,
         inspector_catalog,
         active_pattern: gtk::Label::new(None),
+        pattern_selector: None,
+        apply_pattern_button: None,
+        guide_editor_button: None,
+        mark_editor_button: None,
         inspector_descriptors,
         inspector_status,
         descriptor_components: BTreeMap::new(),
@@ -1133,6 +1314,8 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
         inspector_rebuild_scheduled: false,
         pattern_editor: None,
         draft_epoch: 0,
+        advanced_settings: None,
+        advanced_epoch: 0,
         preview: None,
         preview_target: None,
         presets: PresetRegistry::bundled(),
@@ -1140,6 +1323,14 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
         event_sender,
         preview_bridge_stop: Arc::new(AtomicBool::new(false)),
     }));
+    {
+        let state_for_dismiss = Rc::clone(&state);
+        state
+            .borrow()
+            .shell
+            .banner_dismiss()
+            .connect_clicked(move |_| dismiss_main_message(&state_for_dismiss));
+    }
     let event_state = Rc::clone(&state);
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = event_receiver.recv().await {
@@ -1175,22 +1366,31 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
                 .as_ref()
                 .map(|workspace| authoritative_channel_ids(workspace.document()))
                 .unwrap_or_default();
-            if let Some(channel_id) = channel_id_at_selector_position(selector.selected(), &ids) {
-                {
-                    let mut app_state = state.borrow_mut();
-                    let previous_channel = app_state.inspector_runtime.selected_channel;
-                    app_state.inspector_runtime.selected_channel = Some(channel_id);
-                    // A user-selected channel is a new inspector context.  Never
-                    // carry a control identity from the previously selected
-                    // channel into it.
-                    app_state.inspector_runtime.focus = None;
-                    if previous_channel != Some(channel_id) {
-                        clear_structural_edit_context_for_selection(
-                            &mut app_state.inspector_runtime,
-                        );
-                    }
+            let target = if selector.selected() == 0 {
+                InspectorTarget::DocumentAll
+            } else if let Some(channel_id) =
+                channel_id_at_selector_position(selector.selected(), &ids)
+            {
+                InspectorTarget::Channel(channel_id)
+            } else {
+                return;
+            };
+            {
+                let mut app_state = state.borrow_mut();
+                let previous_target = app_state.inspector_runtime.target;
+                app_state.inspector_runtime.target = target;
+                app_state.inspector_runtime.pattern_candidate = None;
+                // A user-selected target is a new inspector context. Never
+                // carry control identity or structural disclosure into it.
+                app_state.inspector_runtime.focus = None;
+                if previous_target != target {
+                    clear_structural_edit_context_for_selection(&mut app_state.inspector_runtime);
                 }
+            }
+            if let InspectorTarget::Channel(channel_id) = target {
                 dispatch_ui_intent(&state, UiIntent::SelectChannel(channel_id));
+            } else {
+                schedule_inspector_rebuild(&state);
             }
         });
     }
@@ -1269,7 +1469,6 @@ fn dispatch_ui_intent(state: &Rc<RefCell<AppState>>, intent: UiIntent) {
             state.borrow_mut().selected_channel = Some(channel);
             schedule_inspector_rebuild(state);
         }
-        UiIntent::ApplyPreset(id) => apply_selected_preset(state, &id, &id),
         UiIntent::OpenGridPatternEditor => open_pattern_editor(state, PatternEditorPurpose::Grid),
         UiIntent::OpenMarkEditor => open_pattern_editor(state, PatternEditorPurpose::Mark),
         UiIntent::DiscardPatternEditor => request_draft_discard(state),
@@ -1280,15 +1479,30 @@ fn dispatch_ui_intent(state: &Rc<RefCell<AppState>>, intent: UiIntent) {
 /// Bridges the unchanged scheduler receiver into typed main-context events.
 ///
 /// The bridge never touches GTK, document history, or cache acceptance. It
-/// stops when the app coordinator requests shutdown; token/ticket validation
-/// remains in `handle_preview_completion` on the main context.
+/// drains ordered progress before completion and stops when the app coordinator
+/// requests shutdown; ticket validation remains in the main-context progress
+/// and completion handlers.
 fn start_preview_event_bridge(
     scheduler: Arc<EvaluationScheduler>,
     sender: async_channel::Sender<AppEvent>,
     stop: Arc<AtomicBool>,
 ) {
     thread::spawn(move || {
-        while !stop.load(Ordering::Acquire) {
+        'bridge: while !stop.load(Ordering::Acquire) {
+            loop {
+                match scheduler.try_receive_latest_progress() {
+                    Ok(Some(progress)) => {
+                        if sender
+                            .send_blocking(AppEvent::PreviewProgress(progress))
+                            .is_err()
+                        {
+                            break 'bridge;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break 'bridge,
+                }
+            }
             match scheduler.try_receive_latest() {
                 Ok(Some(completion)) => {
                     if sender.send_blocking(AppEvent::Preview(completion)).is_err() {
@@ -1472,12 +1686,100 @@ fn selected_property_values(
         .collect()
 }
 
+/// Projects the capability-valid frequent controls for the current inspector target.
+///
+/// Structural topology, source mapping, paint/color, and output-response controls
+/// are intentionally omitted from the main window. Those belong to Advanced
+/// Settings or the Stage 21B Pattern Wizard. Every returned value retains its
+/// authoritative descriptor and can therefore build a valid domain command.
+fn inline_inspector_values(
+    document: &Document,
+    target: InspectorTarget,
+) -> Vec<PropertyCurrentValue> {
+    let scope = match target {
+        InspectorTarget::DocumentAll => PatternCapabilityScope::DocumentBase,
+        InspectorTarget::Channel(channel_id) => PatternCapabilityScope::Channel(channel_id),
+    };
+    let active = document
+        .pattern_capabilities(scope)
+        .map(|projection| projection.active_controls)
+        .unwrap_or_default();
+    let is_active = |descriptor: &PropertyDescriptor| active.contains(descriptor);
+    document
+        .property_values()
+        .into_iter()
+        .filter(|value| match target {
+            InspectorTarget::DocumentAll => {
+                value.descriptor.target == PropertyTarget::Document
+                    && is_active(&value.descriptor)
+                    && matches!(
+                        value.descriptor.field,
+                        PropertyFieldId::Density
+                            | PropertyFieldId::DensityAspect
+                            | PropertyFieldId::RotationDegrees
+                            | PropertyFieldId::ShapeRotationDegrees
+                    )
+            }
+            InspectorTarget::Channel(channel_id) => {
+                value.descriptor.target == PropertyTarget::Channel(channel_id)
+                    && matches!(
+                        value.descriptor.field,
+                        PropertyFieldId::Density
+                            | PropertyFieldId::DensityAspect
+                            | PropertyFieldId::RotationDegrees
+                            | PropertyFieldId::TranslationX
+                            | PropertyFieldId::TranslationY
+                            | PropertyFieldId::ShapeRotationDegrees
+                            | PropertyFieldId::Opacity
+                            | PropertyFieldId::Visibility
+                    )
+                    && (is_active(&value.descriptor)
+                        || matches!(
+                            value.descriptor.field,
+                            PropertyFieldId::TranslationX
+                                | PropertyFieldId::TranslationY
+                                | PropertyFieldId::Opacity
+                                | PropertyFieldId::Visibility
+                        ))
+            }
+        })
+        .collect()
+}
+
+/// Returns the effective artist-facing pattern name for a document or channel target.
+fn target_pattern_name(document: &Document, target: InspectorTarget) -> String {
+    match target {
+        InspectorTarget::DocumentAll => document
+            .property_values()
+            .into_iter()
+            .find(|value| {
+                value.descriptor.target == PropertyTarget::Document
+                    && value.descriptor.field == PropertyFieldId::DefinitionSelection
+            })
+            .and_then(|value| match value.value {
+                PropertyCurrentValueKind::Reference(PropertyReferenceValue::Definition(
+                    definition_id,
+                )) => document
+                    .pattern_definition_bundles()
+                    .iter()
+                    .find(|bundle| bundle.definition.id == definition_id)
+                    .map(|bundle| bundle.definition.name.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "Custom pattern".to_owned()),
+        InspectorTarget::Channel(channel_id) => {
+            artist_pattern_name(&selected_property_values(document, channel_id))
+        }
+    }
+}
+
 /// Classifies descriptor targets that edit a document-owned pattern definition.
 ///
 /// Channel and document targets remain in the channel inspector; every other
 /// supported target belongs to the transient Pattern Editor. This classification
 /// is presentation-only and never changes descriptor, command, or history
 /// authority.
+#[allow(dead_code)] // Retained for the Stage 21B nested Pattern Wizard integration.
 fn is_structural_descriptor(descriptor: &PropertyDescriptor) -> bool {
     !matches!(
         descriptor.target,
@@ -1489,8 +1791,9 @@ fn is_structural_descriptor(descriptor: &PropertyDescriptor) -> bool {
 /// sidebar inspector. Structural values are deliberately excluded so the
 /// sidebar cannot become an alternate Pattern Editor. Stage 20G also keeps
 /// undisclosed document-base inheritance controls out of this existing
-/// channel workflow; source selection and the document-owned aspect lock are
-/// retained because they are the established controls at those locations.
+/// channel workflow; source selection and authoritative density values are
+/// retained because they are established controls at those locations.
+#[allow(dead_code)] // Retained for the Stage 21B nested Pattern Wizard integration.
 fn channel_inspector_values(values: &[PropertyCurrentValue]) -> Vec<PropertyCurrentValue> {
     values
         .iter()
@@ -1499,7 +1802,9 @@ fn channel_inspector_values(values: &[PropertyCurrentValue]) -> Vec<PropertyCurr
                 && match value.descriptor.target {
                     PropertyTarget::Document => matches!(
                         value.descriptor.field,
-                        PropertyFieldId::SourceReference | PropertyFieldId::DensityAspectLocked
+                        PropertyFieldId::SourceReference
+                            | PropertyFieldId::Density
+                            | PropertyFieldId::DensityAspect
                     ),
                     _ => true,
                 }
@@ -1532,9 +1837,8 @@ fn descriptor_belongs_to_editor(field: &PropertyFieldId, purpose: PatternEditorP
         (purpose, field),
         (
             PatternEditorPurpose::Grid,
-            PropertyFieldId::DensityAcrossX
-                | PropertyFieldId::DensityAcrossY
-                | PropertyFieldId::DensityAspectLocked
+            PropertyFieldId::Density
+                | PropertyFieldId::DensityAspect
                 | PropertyFieldId::RotationDegrees
                 | PropertyFieldId::TranslationX
                 | PropertyFieldId::TranslationY
@@ -1575,6 +1879,11 @@ fn descriptor_belongs_to_editor(field: &PropertyFieldId, purpose: PatternEditorP
     )
 }
 
+/// Resolves the retained descriptor focus through one real selected-channel projection.
+///
+/// A missing or removed channel produces no values and therefore cannot retain
+/// a stale focus identity or fabricate a replacement channel.
+#[allow(dead_code)] // Retained as the tested focus policy for the Stage 21B editor integration.
 fn resolve_focus_after_document_change(
     document: &Document,
     selected_channel: Option<ChannelId>,
@@ -1653,9 +1962,8 @@ fn inspector_group(field: PropertyFieldId) -> &'static str {
         | PropertyFieldId::ColorAlpha
         | PropertyFieldId::Opacity
         | PropertyFieldId::Visibility => "Appearance",
-        PropertyFieldId::DensityAcrossX
-        | PropertyFieldId::DensityAcrossY
-        | PropertyFieldId::DensityAspectLocked
+        PropertyFieldId::Density
+        | PropertyFieldId::DensityAspect
         | PropertyFieldId::RotationDegrees
         | PropertyFieldId::TranslationX
         | PropertyFieldId::TranslationY => "Transform",
@@ -1688,9 +1996,8 @@ fn inspector_group(field: PropertyFieldId) -> &'static str {
 fn inspector_field_label(field: PropertyFieldId) -> String {
     match field {
         PropertyFieldId::SourceReference => "Source artwork".into(),
-        PropertyFieldId::DensityAcrossX => "Density across X".into(),
-        PropertyFieldId::DensityAcrossY => "Density across Y".into(),
-        PropertyFieldId::DensityAspectLocked => "Lock density aspect".into(),
+        PropertyFieldId::Density => "Pattern zoom level".into(),
+        PropertyFieldId::DensityAspect => "Pattern aspect".into(),
         PropertyFieldId::RotationDegrees => "Rotation".into(),
         PropertyFieldId::TranslationX => "X offset".into(),
         PropertyFieldId::TranslationY => "Y offset".into(),
@@ -1747,7 +2054,7 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::RandomClusterStrength => "Cluster strength".into(),
         PropertyFieldId::RandomSeed => "Random seed".into(),
         PropertyFieldId::RandomDensityModulation => "Density modulation".into(),
-        PropertyFieldId::ArtworkWeightMappingComponent => "Artwork weight component".into(),
+        PropertyFieldId::ArtworkWeightMappingComponent => "Site weight component".into(),
         PropertyFieldId::ArtworkWeightMappingPlacement => "Artwork weight placement".into(),
         PropertyFieldId::ArtworkWeightMappingInverted => "Invert artwork weight".into(),
         PropertyFieldId::ArtworkWeightMappingGain => "Artwork weight gain".into(),
@@ -1765,7 +2072,91 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::OutputAuthoredClosedShape => "Closed shape reference".into(),
         PropertyFieldId::OutputOrientation => "Mark orientation".into(),
         PropertyFieldId::OutputOrientationDimension => "Orientation guide dimension".into(),
+        PropertyFieldId::RegionResizeAlgorithm => "Region resize".into(),
+        PropertyFieldId::RegionSampling => "Region source sampling".into(),
+        PropertyFieldId::RegionMinimumFill => "Minimum fill".into(),
+        PropertyFieldId::RegionMaximumFill => "Maximum fill".into(),
         _ => "Advanced pattern setting".into(),
+    }
+}
+
+/// Projects authoritative density into the inverse artist-facing pattern zoom scale.
+///
+/// Zoom `1.0` is the source-size-dependent document default. Values below one
+/// zoom out and therefore request more geometry, while values above one zoom in
+/// and request less. Other finite scalar fields pass through unchanged.
+///
+/// # Errors
+///
+/// Returns domain canvas validation or a finite-positive diagnostic when the
+/// density authority cannot be represented as an artist-facing zoom level.
+fn artist_numeric_value(
+    document: &Document,
+    field: PropertyFieldId,
+    authority_value: f64,
+) -> Result<f64, String> {
+    if field != PropertyFieldId::Density {
+        return Ok(authority_value);
+    }
+    if !authority_value.is_finite() || authority_value <= 0.0 {
+        return Err("Pattern density must be a finite number greater than zero.".to_owned());
+    }
+    let default = DensityMetric2D::default_for_canvas(document.canvas())
+        .map_err(|error| error.to_string())?
+        .density;
+    let zoom = default / authority_value;
+    if !zoom.is_finite() || zoom <= 0.0 {
+        return Err("Pattern zoom level must be a finite number greater than zero.".to_owned());
+    }
+    Ok(zoom)
+}
+
+/// Converts an artist-facing pattern zoom level back into density authority.
+///
+/// Pattern aspect and all unrelated scalar fields pass through unchanged; the
+/// returned density remains the sole value sent through document history and
+/// into canonical evaluation.
+///
+/// # Errors
+///
+/// Returns domain canvas validation or a finite-positive diagnostic when the
+/// requested zoom cannot produce valid density authority.
+fn authority_numeric_value(
+    document: &Document,
+    field: PropertyFieldId,
+    artist_value: f64,
+) -> Result<f64, String> {
+    if field != PropertyFieldId::Density {
+        return Ok(artist_value);
+    }
+    if !artist_value.is_finite() || artist_value <= 0.0 {
+        return Err("Pattern zoom level must be a finite number greater than zero.".to_owned());
+    }
+    let default = DensityMetric2D::default_for_canvas(document.canvas())
+        .map_err(|error| error.to_string())?
+        .density;
+    let density = default / artist_value;
+    if !density.is_finite() || density <= 0.0 {
+        return Err("Pattern zoom level produces an invalid pattern density.".to_owned());
+    }
+    Ok(density)
+}
+
+/// Returns presentation guidance for an authoritative inspector descriptor.
+///
+/// Density receives inverse zoom terminology while aspect preserves its stored
+/// width-to-height ratio semantics. Other fields retain descriptor-owned units
+/// and bounds.
+fn inspector_field_detail(descriptor: &PropertyDescriptor) -> String {
+    match descriptor.field {
+        PropertyFieldId::Density => {
+            "1.0 is the default scale; lower values zoom out for more geometry, and higher values zoom in for less geometry."
+                .to_owned()
+        }
+        PropertyFieldId::DensityAspect => {
+            "1.0 is 1:1, 2.0 is 2:1, and 0.5 is 1:2.".to_owned()
+        }
+        _ => field_detail(descriptor.bounds, descriptor.unit),
     }
 }
 
@@ -1838,6 +2229,18 @@ fn enum_choice_label(choice: PropertyEnumChoice) -> &'static str {
         PropertyEnumChoice::OffsetCleanup(toniator_domain::OffsetCleanup::DissolveCrossings) => {
             "Dissolve crossings"
         }
+        PropertyEnumChoice::RegionResizeAlgorithm(
+            toniator_domain::RegionResizeAlgorithm::Scale,
+        ) => "Scale",
+        PropertyEnumChoice::RegionResizeAlgorithm(
+            toniator_domain::RegionResizeAlgorithm::UniformOffset,
+        ) => "Uniform offset",
+        PropertyEnumChoice::RegionSampling(
+            toniator_domain::RegionSamplingStrategy::ReferencePoint,
+        ) => "Reference point",
+        PropertyEnumChoice::RegionSampling(
+            toniator_domain::RegionSamplingStrategy::AreaAverage,
+        ) => "Area average",
         _ => "Advanced pattern choice",
     }
 }
@@ -1993,32 +2396,33 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
         selector_model,
         channel_ids,
         labels,
-        selected,
+        target,
         values,
         active_pattern_text,
         status_message,
     ) = {
         let mut state = state.borrow_mut();
-        let (labels, values, selected, active_pattern_text) = if let Some(document) = state
+        let (labels, values, target, active_pattern_text) = if let Some(document) = state
             .workspace
             .as_ref()
             .map(|workspace| workspace.document().clone())
         {
             let ids = authoritative_channel_ids(&document);
-            let previous_selected = state.inspector_runtime.selected_channel;
-            state.inspector_runtime.selected_channel =
-                selected_channel_after_transition(previous_selected, &ids);
-            state.selected_channel = state.inspector_runtime.selected_channel;
-            let selected = state.inspector_runtime.selected_channel;
-            if previous_selected.is_some() && previous_selected != selected {
+            let previous_target = state.inspector_runtime.target;
+            state.inspector_runtime.target =
+                inspector_target_after_transition(previous_target, &ids);
+            let target = state.inspector_runtime.target;
+            state.selected_channel = state
+                .selected_channel
+                .filter(|channel_id| ids.contains(channel_id))
+                .or_else(|| ids.first().copied());
+            let values = inline_inspector_values(&document, target);
+            if previous_target != target {
                 state.inspector_runtime.focus = None;
                 clear_structural_edit_context_for_selection(&mut state.inspector_runtime);
             } else {
-                state.inspector_runtime.focus = resolve_focus_after_document_change(
-                    &document,
-                    selected,
-                    state.inspector_runtime.focus.clone(),
-                );
+                state.inspector_runtime.focus =
+                    resolve_descriptor_focus(&values, state.inspector_runtime.focus.clone());
             }
             if disarm_shared_edit_if_stale(&mut state.inspector_runtime, &document) {
                 state.inspector_runtime.status = Some(
@@ -2026,23 +2430,28 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
                         .to_owned(),
                 );
             }
-            let all_values = selected
-                .map(|channel_id| selected_property_values(&document, channel_id))
-                .unwrap_or_default();
-            (
-                ids.iter()
-                    .map(|id| channel_display_name(&document, *id))
-                    .collect(),
-                channel_inspector_values(&all_values),
-                selected,
-                selected
-                    .map(|channel_id| {
-                        artist_pattern_name(&selected_property_values(&document, channel_id))
-                    })
-                    .unwrap_or_else(|| "Simple XY Grid".to_owned()),
-            )
+            let active_pattern_text = target_pattern_name(&document, target);
+            if state.inspector_runtime.pattern_candidate.is_none() {
+                state.inspector_runtime.pattern_candidate = Some(
+                    state
+                        .presets
+                        .entries()
+                        .iter()
+                        .find(|entry| entry.metadata.name == active_pattern_text)
+                        .map(|entry| PatternCandidate::Preset(entry.metadata.id.clone()))
+                        .unwrap_or(PatternCandidate::Custom),
+                );
+            }
+            let mut labels = vec!["ALL".to_owned()];
+            labels.extend(ids.iter().map(|id| channel_display_name(&document, *id)));
+            (labels, values, target, active_pattern_text)
         } else {
-            (Vec::new(), Vec::new(), None, String::new())
+            (
+                Vec::new(),
+                Vec::new(),
+                InspectorTarget::DocumentAll,
+                String::new(),
+            )
         };
         state.syncing_inspector = true;
         let selector = state.channel_selector.clone();
@@ -2059,7 +2468,7 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
                 .map(|workspace| authoritative_channel_ids(workspace.document()))
                 .unwrap_or_default(),
             labels,
-            selected,
+            target,
             values,
             active_pattern_text,
             state.inspector_runtime.status.clone(),
@@ -2071,16 +2480,18 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
         &labels.iter().map(String::as_str).collect::<Vec<_>>(),
     );
     selector.set_sensitive(!labels.is_empty());
-    selector.set_selected(
-        selected
-            .and_then(|id| channel_ids.iter().position(|candidate| *candidate == id))
-            .map(|index| index as u32)
-            .unwrap_or(gtk::INVALID_LIST_POSITION),
-    );
+    selector.set_selected(match target {
+        InspectorTarget::DocumentAll => 0,
+        InspectorTarget::Channel(channel_id) => channel_ids
+            .iter()
+            .position(|candidate| *candidate == channel_id)
+            .map(|index| index as u32 + 1)
+            .unwrap_or(0),
+    });
     state.borrow_mut().syncing_inspector = false;
 
-    if selected.is_none() {
-        status.set_label("No surviving channel is selected.");
+    if labels.is_empty() {
+        status.set_label("Open a source-backed document to inspect settings.");
         catalog.set_visible(false);
         reconcile_descriptor_components(state, &descriptors, Vec::new());
         rebuild_pattern_editor(state);
@@ -2088,16 +2499,19 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
     }
     catalog.set_visible(true);
     active_pattern.set_label(&format!("Current pattern: {active_pattern_text}"));
-    status.set_label(
-        status_message
-            .as_deref()
-            .unwrap_or("Choose a pattern or adjust this channel."),
-    );
+    status.set_label(status_message.as_deref().unwrap_or(match target {
+        InspectorTarget::DocumentAll => {
+            "ALL edits the document base while preserving channel overrides."
+        }
+        InspectorTarget::Channel(_) => "Adjust this channel or reset it to inherit.",
+    }));
     if catalog.first_child().is_none() {
         catalog.append(&active_pattern);
         append_preset_catalog(state, &catalog);
         append_pattern_editor_launch(state, &catalog);
     }
+    sync_pattern_editor_launches(state, target);
+    sync_pattern_candidate_selector(state);
     let descriptor_focuses = values
         .iter()
         .map(|value| {
@@ -2117,6 +2531,36 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
     reconcile_descriptor_components(state, &descriptors, components);
     rebuild_pattern_editor(state);
     submit_draft_preview(state);
+}
+
+/// Synchronizes compact pattern actions from runtime candidate state without applying it.
+fn sync_pattern_candidate_selector(state: &Rc<RefCell<AppState>>) {
+    let (selector, apply, selected) = {
+        let mut app_state = state.borrow_mut();
+        app_state.syncing_inspector = true;
+        let selected = match app_state.inspector_runtime.pattern_candidate.as_ref() {
+            Some(PatternCandidate::Preset(id)) => app_state
+                .presets
+                .entries()
+                .iter()
+                .position(|entry| &entry.metadata.id == id)
+                .map(|index| index as u32 + 1)
+                .unwrap_or(0),
+            Some(PatternCandidate::Custom) | None => 0,
+        };
+        (
+            app_state.pattern_selector.clone(),
+            app_state.apply_pattern_button.clone(),
+            selected,
+        )
+    };
+    if let Some(selector) = selector {
+        selector.set_selected(selected);
+    }
+    if let Some(apply) = apply {
+        apply.set_sensitive(selected > 0);
+    }
+    state.borrow_mut().syncing_inspector = false;
 }
 
 /// Reconciles persistent sidebar rows against immutable channel descriptor VMs.
@@ -2155,13 +2599,14 @@ fn reconcile_descriptor_components(
     for (value, focus) in values {
         let key = inspector_key(&value.descriptor);
         let group = inspector_group(value.descriptor.field);
+        let presented_f64 = presented_inspector_f64(state, &value);
         let replace = {
             let mut app_state = state.borrow_mut();
             app_state.syncing_inspector = true;
             let updated = app_state
                 .descriptor_components
                 .get_mut(&key)
-                .map(|component| update_descriptor_component(component, &value))
+                .map(|component| update_descriptor_component(component, &value, presented_f64))
                 .unwrap_or(false);
             app_state.syncing_inspector = false;
             !updated
@@ -2196,6 +2641,24 @@ fn reconcile_descriptor_components(
     }
 }
 
+/// Resolves the display value for one finite inspector scalar from document authority.
+///
+/// The projection is read-only and exists solely at the GTK boundary. Missing
+/// workspace state, non-scalar values, and invalid document authority return
+/// `None`, causing normal row replacement or raw-value fallback without
+/// inventing a second mutable model.
+fn presented_inspector_f64(
+    state: &Rc<RefCell<AppState>>,
+    value: &PropertyCurrentValue,
+) -> Option<f64> {
+    let PropertyCurrentValueKind::FiniteF64(authority_value) = &value.value else {
+        return None;
+    };
+    let app_state = state.borrow();
+    let document = app_state.workspace.as_ref()?.document();
+    artist_numeric_value(document, value.descriptor.field, *authority_value).ok()
+}
+
 /// Updates a retained scalar descriptor row from its new immutable view value.
 ///
 /// Reference collections intentionally return `false`: their item topology can
@@ -2205,17 +2668,17 @@ fn reconcile_descriptor_components(
 fn update_descriptor_component(
     component: &mut DescriptorComponent,
     value: &PropertyCurrentValue,
+    presented_f64: Option<f64>,
 ) -> bool {
     if component.value.descriptor != value.descriptor {
         return false;
     }
-    match (&component.value.value, &value.value) {
+    let updated = match (&component.value.value, &value.value) {
         (PropertyCurrentValueKind::FiniteF64(_), PropertyCurrentValueKind::FiniteF64(next)) => {
             if let Some(entry) = component.control.downcast_ref::<gtk::Entry>() {
                 if !entry.has_focus() {
-                    entry.set_text(&format!("{next:.4}"));
+                    entry.set_text(&format!("{:.4}", presented_f64.unwrap_or(*next)));
                 }
-                component.value = value.clone();
                 true
             } else {
                 false
@@ -2226,7 +2689,6 @@ fn update_descriptor_component(
                 if !entry.has_focus() {
                     entry.set_text(&next.to_string());
                 }
-                component.value = value.clone();
                 true
             } else {
                 false
@@ -2235,7 +2697,6 @@ fn update_descriptor_component(
         (PropertyCurrentValueKind::Boolean(_), PropertyCurrentValueKind::Boolean(next)) => {
             if let Some(control) = component.control.downcast_ref::<gtk::Switch>() {
                 control.set_active(*next);
-                component.value = value.clone();
                 true
             } else {
                 false
@@ -2250,21 +2711,46 @@ fn update_descriptor_component(
                     .position(|choice| choice == next)
                     .unwrap_or(0);
                 control.set_selected(selected as u32);
-                component.value = value.clone();
                 true
             } else {
                 false
             }
         }
         _ => false,
+    };
+    if updated {
+        component.detail.set_label(&descriptor_detail_text(value));
+        if let Some(reset) = component.reset.as_ref() {
+            reset.set_sensitive(value.inheritance == PropertyInheritance::Explicit);
+        }
+        component.value = value.clone();
     }
+    updated
 }
 
-/// Adds the stable bundled-pattern catalog without exposing preset IDs as UI authority.
+/// Formats the helper line for one authoritative descriptor value.
 ///
-/// Each row immediately asks the headless registry for one selected-channel,
-/// copy-on-edit history transition. The registry remains the only source of
-/// recipe semantics and the catalog never stores a recipe in a GTK widget.
+/// Units remain descriptor-owned and inheritance is reported only from the
+/// current document projection; the returned text carries no mutable UI state.
+fn descriptor_detail_text(current: &PropertyCurrentValue) -> String {
+    let unit_detail = inspector_field_detail(&current.descriptor);
+    let inheritance_detail = match current.inheritance {
+        PropertyInheritance::Inherited => "Inherited from ALL",
+        PropertyInheritance::Explicit => "Override",
+        PropertyInheritance::NotApplicable => "",
+    };
+    [unit_detail.as_str(), inheritance_detail]
+        .into_iter()
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// Adds one compact non-mutating recipe selector and explicit pattern actions.
+///
+/// The dropdown stores runtime candidate selection only. A document transition
+/// occurs exclusively through Apply Pattern; Edit Pattern remains visibly
+/// disabled until the accepted Stage 21B Pattern Wizard checkpoint.
 fn append_preset_catalog(state: &Rc<RefCell<AppState>>, inspector: &gtk::Box) {
     let heading = gtk::Label::new(Some("Pattern"));
     heading.set_xalign(0.0);
@@ -2275,58 +2761,119 @@ fn append_preset_catalog(state: &Rc<RefCell<AppState>>, inspector: &gtk::Box) {
         .presets
         .entries()
         .iter()
-        .map(|entry| {
-            (
-                entry.metadata.id.clone(),
-                PatternCatalogViewModel {
-                    name: entry.metadata.name.clone(),
-                    description: entry.metadata.description.clone(),
-                },
-            )
-        })
+        .map(|entry| (entry.metadata.id.clone(), entry.metadata.name.clone()))
         .collect::<Vec<_>>();
-    for (id, view_model) in entries {
-        let row = components::ToniatorPresetRow::new();
-        row.add_css_class("toniator-preset-row");
-        row.set_preset_name(&view_model.name);
-        row.set_preset_description(&view_model.description);
-        let button = gtk::Button::with_label(&format!("Use {}", view_model.name));
-        let state_for_apply = Rc::clone(state);
-        let name = view_model.name.clone();
-        button.connect_clicked(move |_| {
-            let intent = UiIntent::ApplyPreset(id.clone());
-            if let UiIntent::ApplyPreset(id) = intent {
-                apply_selected_preset(&state_for_apply, &id, &name);
-            }
-        });
-        row.append(&button);
-        inspector.append(&row);
-    }
-    let shared = gtk::Button::with_label("Replace shared pattern…");
-    shared.set_tooltip_text(Some(
-        "Replace the linked channels after reviewing their names",
+    let mut labels = vec!["Custom pattern".to_owned()];
+    labels.extend(entries.iter().map(|(_, name)| name.clone()));
+    let model = gtk::StringList::new(&labels.iter().map(String::as_str).collect::<Vec<_>>());
+    let selector = gtk::DropDown::new(Some(model), gtk::Expression::NONE);
+    selector.set_hexpand(true);
+    selector.set_tooltip_text(Some(
+        "Choose a pattern candidate; selection does not change the artwork",
     ));
-    let state_for_shared = Rc::clone(state);
-    shared.connect_clicked(move |_| choose_shared_preset_choice(&state_for_shared));
-    inspector.append(&shared);
+    let selector_entries = entries.clone();
+    let state_for_selection = Rc::clone(state);
+    selector.connect_selected_notify(move |selector| {
+        if state_for_selection.borrow().syncing_inspector {
+            return;
+        }
+        let candidate = selector
+            .selected()
+            .checked_sub(1)
+            .and_then(|index| selector_entries.get(index as usize))
+            .map(|(id, _)| PatternCandidate::Preset(id.clone()))
+            .unwrap_or(PatternCandidate::Custom);
+        let mut app_state = state_for_selection.borrow_mut();
+        app_state.inspector_runtime.pattern_candidate = Some(candidate.clone());
+        if let Some(button) = app_state.apply_pattern_button.as_ref() {
+            button.set_sensitive(matches!(candidate, PatternCandidate::Preset(_)));
+        }
+        set_inspector_status(
+            &mut app_state,
+            "Pattern candidate selected; artwork unchanged.",
+        );
+    });
+    inspector.append(&selector);
+
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let apply = gtk::Button::with_mnemonic("_Apply Pattern");
+    let state_for_apply = Rc::clone(state);
+    apply.connect_clicked(move |_| apply_pattern_candidate(&state_for_apply));
+    let edit = gtk::Button::with_mnemonic("_Edit Pattern");
+    edit.set_sensitive(false);
+    let edit_explanation = "Pattern Wizard arrives in Stage 21B.";
+    edit.set_tooltip_text(Some(edit_explanation));
+    edit.update_property(&[gtk::accessible::Property::Description(edit_explanation)]);
+    actions.append(&apply);
+    actions.append(&edit);
+    inspector.append(&actions);
+
+    let advanced = gtk::Button::with_mnemonic("_Advanced Settings…");
+    let state_for_advanced = Rc::clone(state);
+    advanced.connect_clicked(move |_| open_advanced_settings(&state_for_advanced));
+    inspector.append(&advanced);
+    let mut app_state = state.borrow_mut();
+    app_state.pattern_selector = Some(selector);
+    app_state.apply_pattern_button = Some(apply);
 }
 
-/// Applies one bundled pattern to only the currently selected channel.
-///
-/// Registry failure leaves the document, history, selection, and last preview
-/// untouched; accepted history transitions schedule exactly one fresh preview.
-fn apply_selected_preset(state: &Rc<RefCell<AppState>>, id: &str, name: &str) {
+/// Applies the current runtime recipe candidate to ALL or one named channel.
+fn apply_pattern_candidate(state: &Rc<RefCell<AppState>>) {
+    let (id, name, target, affected) = {
+        let app_state = state.borrow();
+        let Some(PatternCandidate::Preset(id)) =
+            app_state.inspector_runtime.pattern_candidate.as_ref()
+        else {
+            return;
+        };
+        let Some(entry) = app_state.presets.find(id) else {
+            return;
+        };
+        let affected = app_state
+            .workspace
+            .as_ref()
+            .filter(|_| app_state.inspector_runtime.target == InspectorTarget::DocumentAll)
+            .map(|workspace| {
+                workspace
+                    .document()
+                    .channels_with_pattern_replacement_intent()
+            })
+            .unwrap_or_default();
+        (
+            id.clone(),
+            entry.metadata.name.clone(),
+            app_state.inspector_runtime.target,
+            affected,
+        )
+    };
+    if target == InspectorTarget::DocumentAll && !affected.is_empty() {
+        confirm_all_pattern_apply(state, id, name, affected);
+    } else {
+        perform_pattern_apply(state, &id, &name, target);
+    }
+}
+
+/// Applies one confirmed bundled recipe through the target-aware registry boundary.
+fn perform_pattern_apply(
+    state: &Rc<RefCell<AppState>>,
+    id: &str,
+    name: &str,
+    target: InspectorTarget,
+) {
     let result = {
         let mut app_state = state.borrow_mut();
-        let selected = app_state.inspector_runtime.selected_channel;
         let registry = app_state.presets.clone();
         let Some(workspace) = app_state.workspace.as_mut() else {
             return;
         };
-        let Some(channel) = selected else {
-            return;
-        };
-        registry.apply_to_selected(&mut workspace.history, channel, id)
+        match target {
+            InspectorTarget::DocumentAll => {
+                registry.apply_to_document_base(&mut workspace.history, id)
+            }
+            InspectorTarget::Channel(channel_id) => {
+                registry.apply_to_selected(&mut workspace.history, channel_id, id)
+            }
+        }
     };
     match result {
         Ok(_) => {
@@ -2334,8 +2881,17 @@ fn apply_selected_preset(state: &Rc<RefCell<AppState>>, id: &str, name: &str) {
             set_preview_pending(&mut app_state);
             set_inspector_status(
                 &mut app_state,
-                format!("{name} applied to the selected channel."),
+                match target {
+                    InspectorTarget::DocumentAll => {
+                        format!("{name} applied to ALL as the document base.")
+                    }
+                    InspectorTarget::Channel(_) => {
+                        format!("{name} applied to the selected channel.")
+                    }
+                },
             );
+            app_state.inspector_runtime.pattern_candidate =
+                Some(PatternCandidate::Preset(id.to_owned()));
             emit_automation_state(&mut app_state, "preset_applied", None);
             sync_ui(&mut app_state);
             drop(app_state);
@@ -2349,12 +2905,890 @@ fn apply_selected_preset(state: &Rc<RefCell<AppState>>, id: &str, name: &str) {
     }
 }
 
+/// Discloses channels whose pattern-relative intent will be cleared before ALL applies.
+fn confirm_all_pattern_apply(
+    state: &Rc<RefCell<AppState>>,
+    id: String,
+    name: String,
+    affected: Vec<ChannelId>,
+) {
+    let channel_names = {
+        let app_state = state.borrow();
+        let Some(document) = app_state.workspace.as_ref().map(Workspace::document) else {
+            return;
+        };
+        affected
+            .iter()
+            .map(|channel_id| channel_display_name(document, *channel_id))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let dialog = gtk::Window::builder()
+        .title("Apply pattern to ALL?")
+        .transient_for(&state.borrow().window)
+        .modal(true)
+        .build();
+    let content = components::ToniatorConfirmationContent::new();
+    content.set_detail(&format!(
+        "Applying {name} clears pattern, density/aspect, rotation, shape-rotation, and output-response overrides for: {channel_names}. Translation and appearance/source settings stay unchanged."
+    ));
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    actions.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label("Cancel");
+    let apply = gtk::Button::with_label("Apply to ALL");
+    actions.append(&cancel);
+    actions.append(&apply);
+    content.append(&actions);
+    dialog.set_child(Some(&content));
+    let dialog_for_cancel = dialog.clone();
+    cancel.connect_clicked(move |_| dialog_for_cancel.close());
+    let state_for_apply = Rc::clone(state);
+    let dialog_for_apply = dialog.clone();
+    apply.connect_clicked(move |_| {
+        perform_pattern_apply(&state_for_apply, &id, &name, InspectorTarget::DocumentAll);
+        dialog_for_apply.close();
+    });
+    dialog.present();
+}
+
+/// Returns capability-valid Source and Output values for the private advanced editor.
+fn advanced_settings_values(
+    document: &Document,
+    target: InspectorTarget,
+) -> Vec<PropertyCurrentValue> {
+    let InspectorTarget::Channel(channel_id) = target else {
+        return Vec::new();
+    };
+    let active = document
+        .pattern_capabilities(PatternCapabilityScope::Channel(channel_id))
+        .map(|projection| projection.active_controls)
+        .unwrap_or_default();
+    selected_property_values(document, channel_id)
+        .into_iter()
+        .filter(|value| {
+            let field = value.descriptor.field;
+            let source_or_output = matches!(
+                field,
+                PropertyFieldId::LegacyMappingComponent
+                    | PropertyFieldId::LegacyMappingPlacement
+                    | PropertyFieldId::ModeledMappingComponent
+                    | PropertyFieldId::ModeledMappingPlacement
+                    | PropertyFieldId::ModeledMappingInverted
+                    | PropertyFieldId::ModeledMappingGain
+                    | PropertyFieldId::ModeledMappingBias
+                    | PropertyFieldId::ArtworkWeightMappingComponent
+                    | PropertyFieldId::ArtworkWeightMappingPlacement
+                    | PropertyFieldId::ArtworkWeightMappingInverted
+                    | PropertyFieldId::ArtworkWeightMappingGain
+                    | PropertyFieldId::ArtworkWeightMappingBias
+                    | PropertyFieldId::ArtworkWeightStrength
+                    | PropertyFieldId::ArtworkWeightResponse
+                    | PropertyFieldId::Paint
+                    | PropertyFieldId::ColorRed
+                    | PropertyFieldId::ColorGreen
+                    | PropertyFieldId::ColorBlue
+                    | PropertyFieldId::ColorAlpha
+                    | PropertyFieldId::MarkMinimumFill
+                    | PropertyFieldId::MarkMaximumFill
+                    | PropertyFieldId::ConnectedMinimumThickness
+                    | PropertyFieldId::ConnectedMaximumThickness
+                    | PropertyFieldId::RegionResizeAlgorithm
+                    | PropertyFieldId::RegionSampling
+                    | PropertyFieldId::RegionMinimumFill
+                    | PropertyFieldId::RegionMaximumFill
+            );
+            source_or_output
+                && (matches!(
+                    value.descriptor.target,
+                    PropertyTarget::Channel(_) | PropertyTarget::ChannelOutput(_, _)
+                ) || active.contains(&value.descriptor))
+                && control_route(value).is_some()
+                && !(value.descriptor.value_kind == PropertyValueKind::EnumChoice
+                    && value.descriptor.choices.len() < 2)
+        })
+        .collect()
+}
+
+/// Builds the single bounded source proxy used for the lifetime of one Advanced Settings dialog.
+///
+/// The original `SourcePresentation` remains responsible for the dialog summary and its stable
+/// reference ID is retained in the resolved proxy. Proxy creation failure is represented locally
+/// so field edits and Apply remain available without a hidden full-resolution evaluation.
+fn prepare_advanced_preview_source(
+    sources: &SourceBundle,
+    presentation: Option<&SourcePresentation>,
+) -> AdvancedPreviewSource {
+    let Some(presentation) = presentation else {
+        return AdvancedPreviewSource::Unavailable("no source is available".to_owned());
+    };
+    let Some(source) = sources.get(&presentation.id) else {
+        return AdvancedPreviewSource::Unavailable("the source bundle is incomplete".to_owned());
+    };
+    let proxy = reduced_preview_png(source.bytes(), presentation.format, 128)
+        .map_err(|error| error.to_string())
+        .and_then(|proxy| {
+            ResolvedSource::new(
+                presentation.id.clone(),
+                Arc::<[u8]>::from(proxy.png_bytes),
+                SourceFormatHint::Png,
+            )
+            .map(|source| (source, proxy.width, proxy.height))
+            .map_err(|error| error.to_string())
+        });
+    match proxy {
+        Ok((source, width, height)) => AdvancedPreviewSource::Ready {
+            source,
+            width,
+            height,
+        },
+        Err(error) => AdvancedPreviewSource::Unavailable(error),
+    }
+}
+
+/// Derives a structural selected-copy locator from a currently rendered Advanced Settings descriptor.
+///
+/// Channel-output locators retain the current painter index and realization kind rather than an
+/// allocation ID. A duplicate field therefore remains editable when it belongs to a distinct
+/// structural output, while a changed same-count output order or realization fails resolution.
+fn advanced_descriptor_locator(
+    document: &Document,
+    target: InspectorTarget,
+    descriptor: &PropertyDescriptor,
+) -> Option<AdvancedDescriptorLocator> {
+    let values = advanced_settings_values(document, target);
+    advanced_descriptor_locator_from_values(&values, descriptor, |target| {
+        advanced_output_anchor(document, target)
+    })
+}
+
+/// Derives one locator from descriptor values and caller-provided structural output anchors.
+///
+/// This pure helper keeps route selection widget-independent for tests. The caller must return
+/// the current authoritative output anchor for every `ChannelOutput` target; a missing anchor
+/// rejects that descriptor instead of guessing from an allocation ID or list occurrence.
+fn advanced_descriptor_locator_from_values(
+    values: &[PropertyCurrentValue],
+    descriptor: &PropertyDescriptor,
+    output_anchor_for: impl Fn(PropertyTarget) -> Option<AdvancedOutputAnchor>,
+) -> Option<AdvancedDescriptorLocator> {
+    let target_kind = advanced_descriptor_target_kind(descriptor.target);
+    let output_anchor = match descriptor.target {
+        PropertyTarget::ChannelOutput(_, _) => Some(output_anchor_for(descriptor.target)?),
+        _ => None,
+    };
+    let locator = AdvancedDescriptorLocator {
+        field: descriptor.field,
+        target_kind,
+        output_anchor,
+    };
+    let mut matches = values
+        .iter()
+        .filter(|value| advanced_descriptor_matches(value, locator, &output_anchor_for));
+    let current = matches.next()?;
+    (current.descriptor == *descriptor && matches.next().is_none()).then_some(locator)
+}
+
+/// Resolves one current Advanced Settings value after selected-copy structural edits renew IDs.
+///
+/// This only reads the current draft's active descriptor projection. It verifies the output's
+/// painter path and realization kind before accepting a renewed ID, rejecting a changed topology
+/// or meaningful same-count output reorder rather than guessing a neighboring control.
+///
+/// # Errors
+///
+/// Returns a visible private-editor error when the setting disappeared, became ambiguous, or no
+/// longer retains the recorded structural output route.
+fn resolve_current_advanced_value(
+    document: &Document,
+    target: InspectorTarget,
+    locator: AdvancedDescriptorLocator,
+) -> Result<PropertyCurrentValue, String> {
+    let values = advanced_settings_values(document, target);
+    resolve_advanced_value_from_values(&values, locator, |target| {
+        advanced_output_anchor(document, target)
+    })
+}
+
+/// Resolves one locator from descriptor values and caller-provided structural output anchors.
+///
+/// This pure helper shares production route validation with focused tests. It returns an error
+/// when no current descriptor or more than one structural route matches, never selecting by a
+/// stale output ID or incidental vector order.
+///
+/// # Errors
+///
+/// Returns the established private-editor route error without mutating document/history authority.
+fn resolve_advanced_value_from_values(
+    values: &[PropertyCurrentValue],
+    locator: AdvancedDescriptorLocator,
+    output_anchor_for: impl Fn(PropertyTarget) -> Option<AdvancedOutputAnchor>,
+) -> Result<PropertyCurrentValue, String> {
+    let mut matches = values
+        .iter()
+        .filter(|value| advanced_descriptor_matches(value, locator, &output_anchor_for));
+    let current = matches.next().ok_or_else(|| {
+        "this setting is no longer active in the current private pattern draft".to_owned()
+    })?;
+    matches
+        .next()
+        .is_none()
+        .then_some(current.clone())
+        .ok_or_else(|| {
+            "this repeated output setting cannot be safely resolved after a structural edit"
+                .to_owned()
+        })
+}
+
+/// Reports whether one current descriptor matches a structural selected-copy locator.
+///
+/// Output controls require an exact painter-index and realization-kind match; non-output controls
+/// retain their field/category route. This never treats a renewed output ID or its current list
+/// position alone as identity.
+fn advanced_descriptor_matches(
+    value: &PropertyCurrentValue,
+    locator: AdvancedDescriptorLocator,
+    output_anchor_for: &impl Fn(PropertyTarget) -> Option<AdvancedOutputAnchor>,
+) -> bool {
+    if value.descriptor.field != locator.field
+        || advanced_descriptor_target_kind(value.descriptor.target) != locator.target_kind
+    {
+        return false;
+    }
+    match (locator.output_anchor, value.descriptor.target) {
+        (Some(expected), PropertyTarget::ChannelOutput(_, _)) => {
+            output_anchor_for(value.descriptor.target) == Some(expected)
+        }
+        (None, PropertyTarget::ChannelOutput(_, _)) | (Some(_), _) => false,
+        (None, _) => true,
+    }
+}
+
+/// Resolves one output's stable painter path and structural realization kind from capability authority.
+///
+/// The capability projection owns current output order and realization semantics. Failure means a
+/// stale/missing output cannot be safely routed after a selected-copy transition.
+fn advanced_output_anchor(
+    document: &Document,
+    target: PropertyTarget,
+) -> Option<AdvancedOutputAnchor> {
+    let PropertyTarget::ChannelOutput(channel_id, output_layer_id) = target else {
+        return None;
+    };
+    let output = document
+        .pattern_capabilities(PatternCapabilityScope::Channel(channel_id))
+        .ok()?
+        .outputs
+        .into_iter()
+        .find(|output| output.output_layer_id == output_layer_id)?;
+    let structural_kind = match output.structural {
+        toniator_domain::PatternOutputCapabilityProjection::Marks(_) => {
+            AdvancedOutputStructuralKind::Marks
+        }
+        toniator_domain::PatternOutputCapabilityProjection::GuidePaths(_) => {
+            AdvancedOutputStructuralKind::GuidePaths
+        }
+        toniator_domain::PatternOutputCapabilityProjection::ConnectionPaths(_) => {
+            AdvancedOutputStructuralKind::ConnectionPaths
+        }
+        toniator_domain::PatternOutputCapabilityProjection::MazeWalls(_) => {
+            AdvancedOutputStructuralKind::MazeWalls
+        }
+        toniator_domain::PatternOutputCapabilityProjection::Regions(_) => {
+            AdvancedOutputStructuralKind::Regions
+        }
+    };
+    Some(AdvancedOutputAnchor {
+        painter_index: output.painter_index,
+        structural_kind,
+    })
+}
+
+/// Classifies a descriptor target without retaining selected-copy allocation IDs.
+///
+/// This classification is presentation routing only; the domain validates all command targets
+/// after the current descriptor is resolved.
+const fn advanced_descriptor_target_kind(target: PropertyTarget) -> AdvancedDescriptorTargetKind {
+    match target {
+        PropertyTarget::Channel(_) => AdvancedDescriptorTargetKind::Channel,
+        PropertyTarget::ChannelOutput(_, _) => AdvancedDescriptorTargetKind::ChannelOutput,
+        PropertyTarget::Definition(_) => AdvancedDescriptorTargetKind::Definition,
+        PropertyTarget::Mechanism(_, _) => AdvancedDescriptorTargetKind::Mechanism,
+        PropertyTarget::OutputLayer(_, _) => AdvancedDescriptorTargetKind::OutputLayer,
+        PropertyTarget::GuideDimension(_, _, _) => AdvancedDescriptorTargetKind::GuideDimension,
+        PropertyTarget::Document => AdvancedDescriptorTargetKind::Document,
+    }
+}
+
+/// Opens the Blueprint-owned private Advanced Settings history and canonical preview.
+fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
+    if let Some(window) = state
+        .borrow()
+        .advanced_settings
+        .as_ref()
+        .map(|surface| surface.window.clone())
+    {
+        window.present();
+        return;
+    }
+    let (draft, sources, presentation, display_name, target, parent, epoch) = {
+        let mut app_state = state.borrow_mut();
+        let Some(workspace) = app_state.workspace.as_ref() else {
+            return;
+        };
+        let draft = Rc::new(RefCell::new(DocumentHistory::new_draft(&workspace.history)));
+        let sources = workspace.sources.clone();
+        let presentation = workspace.source_presentation.clone();
+        let display_name = workspace.display_name.clone();
+        let target = app_state.inspector_runtime.target;
+        let parent = app_state.window.clone();
+        app_state.advanced_epoch = app_state.advanced_epoch.saturating_add(1);
+        (
+            draft,
+            sources,
+            presentation,
+            display_name,
+            target,
+            parent,
+            app_state.advanced_epoch,
+        )
+    };
+    let preview_source = prepare_advanced_preview_source(&sources, presentation.as_ref());
+    let window = gtk::Window::builder()
+        .title("Advanced Settings")
+        .transient_for(&parent)
+        .modal(true)
+        .default_width(560)
+        .default_height(680)
+        .build();
+    let shell = components::ToniatorAdvancedSettingsShell::new();
+    let status = shell.status();
+    let picture = shell.preview();
+    let controls = shell.controls();
+
+    let source_heading = gtk::Label::new(Some("Source"));
+    source_heading.set_xalign(0.0);
+    source_heading.add_css_class("heading");
+    controls.append(&source_heading);
+    let source_summary = presentation.as_ref().map_or_else(
+        || "No source artwork is assigned.".to_owned(),
+        |presentation| {
+            format!(
+                "{display_name} — {} × {} — {:?}",
+                presentation.identity.width, presentation.identity.height, presentation.format
+            )
+        },
+    );
+    let summary = gtk::Label::new(Some(&source_summary));
+    summary.set_xalign(0.0);
+    summary.set_wrap(true);
+    summary.add_css_class("dim-label");
+    controls.append(&summary);
+
+    let values = advanced_settings_values(draft.borrow().document(), target);
+    if values.is_empty() {
+        let explanation = gtk::Label::new(Some(match target {
+            InspectorTarget::DocumentAll => {
+                "Select a named channel to edit source mapping, paint/color, and compatible response settings. ALL continues to own pattern and layout authority in the main window."
+            }
+            InspectorTarget::Channel(_) => {
+                "This pattern has no additional capability-valid Source or Output controls."
+            }
+        }));
+        explanation.set_xalign(0.0);
+        explanation.set_wrap(true);
+        controls.append(&explanation);
+    } else {
+        let output_heading = gtk::Label::new(Some("Output"));
+        output_heading.set_xalign(0.0);
+        output_heading.add_css_class("heading");
+        output_heading.set_margin_top(12);
+        for value in values {
+            if matches!(
+                value.descriptor.field,
+                PropertyFieldId::Paint
+                    | PropertyFieldId::ColorRed
+                    | PropertyFieldId::ColorGreen
+                    | PropertyFieldId::ColorBlue
+                    | PropertyFieldId::ColorAlpha
+                    | PropertyFieldId::MarkMinimumFill
+                    | PropertyFieldId::MarkMaximumFill
+                    | PropertyFieldId::ConnectedMinimumThickness
+                    | PropertyFieldId::ConnectedMaximumThickness
+                    | PropertyFieldId::RegionResizeAlgorithm
+                    | PropertyFieldId::RegionSampling
+                    | PropertyFieldId::RegionMinimumFill
+                    | PropertyFieldId::RegionMaximumFill
+            ) && output_heading.parent().is_none()
+            {
+                controls.append(&output_heading);
+            }
+            controls.append(&advanced_descriptor_row(
+                Rc::clone(&draft),
+                Rc::clone(state),
+                epoch,
+                target,
+                value,
+            ));
+        }
+    }
+
+    let cancel = gtk::Button::with_mnemonic("_Cancel");
+    let apply = gtk::Button::with_mnemonic("_Apply");
+    shell.append_action(&cancel);
+    shell.append_action(&apply);
+    let window_for_cancel = window.clone();
+    cancel.connect_clicked(move |_| window_for_cancel.close());
+    let state_for_apply = Rc::clone(state);
+    let draft_for_apply = Rc::clone(&draft);
+    let window_for_apply = window.clone();
+    let status_for_apply = status.clone();
+    apply.connect_clicked(move |_| {
+        let result = {
+            let mut app_state = state_for_apply.borrow_mut();
+            let Some(workspace) = app_state.workspace.as_mut() else {
+                return;
+            };
+            workspace.history.squash_draft(&draft_for_apply.borrow())
+        };
+        match result {
+            Ok(result) => {
+                if !result.unchanged {
+                    let mut app_state = state_for_apply.borrow_mut();
+                    set_preview_pending(&mut app_state);
+                    set_inspector_status(
+                        &mut app_state,
+                        "Advanced Settings applied as one change.",
+                    );
+                    sync_ui(&mut app_state);
+                    drop(app_state);
+                    rebuild_inspector(&state_for_apply);
+                    schedule_main_preview_submission(&state_for_apply);
+                }
+                window_for_apply.close();
+            }
+            Err(error) => {
+                status_for_apply.set_label(&format!("Couldn’t apply this private draft: {error}"))
+            }
+        }
+    });
+    window.set_child(Some(&shell));
+    status.set_label("Preparing private preview…");
+    let scheduler =
+        Arc::new(EvaluationScheduler::new().expect("Advanced Settings private scheduler starts"));
+    let preview_bridge_stop = Arc::new(AtomicBool::new(false));
+    start_advanced_preview_event_bridge(
+        Arc::clone(&scheduler),
+        state.borrow().event_sender.clone(),
+        Arc::clone(&preview_bridge_stop),
+        epoch,
+    );
+    state.borrow_mut().advanced_settings = Some(AdvancedSettingsSurface {
+        epoch,
+        window: window.clone(),
+        draft,
+        preview_source,
+        target,
+        picture,
+        status,
+        scheduler,
+        preview_submission: None,
+        preview_bridge_stop,
+    });
+    let state_for_close = Rc::clone(state);
+    window.connect_close_request(move |_| {
+        let surface = {
+            let mut app_state = state_for_close.borrow_mut();
+            app_state
+                .advanced_settings
+                .as_ref()
+                .is_some_and(|surface| surface.epoch == epoch)
+                .then(|| app_state.advanced_settings.take())
+                .flatten()
+        };
+        if let Some(surface) = surface {
+            surface.preview_bridge_stop.store(true, Ordering::Release);
+        }
+        glib::Propagation::Proceed
+    });
+    window.present();
+    submit_advanced_preview(state, epoch);
+}
+
+/// Builds one private Advanced Settings control from an authoritative descriptor/value pair.
+///
+/// A non-obvious field receives a visible wrapped helper label under its field
+/// name so assistive technology and keyboard users receive the explanation
+/// without relying on hover-only tooltips. The helper only presents the
+/// descriptor's established semantics; it never changes draft command or
+/// property authority.
+fn advanced_descriptor_row(
+    draft: Rc<RefCell<DocumentHistory>>,
+    state: Rc<RefCell<AppState>>,
+    epoch: u64,
+    target: InspectorTarget,
+    current: PropertyCurrentValue,
+) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    if let Some(description) = advanced_descriptor_description(current.descriptor.field) {
+        row.set_tooltip_text(Some(description));
+        row.update_property(&[gtk::accessible::Property::Description(description)]);
+    }
+    let label_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    label_box.set_hexpand(true);
+    let label = gtk::Label::new(Some(&inspector_field_label(current.descriptor.field)));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_wrap(true);
+    label_box.append(&label);
+    if let Some(description) = advanced_descriptor_description(current.descriptor.field) {
+        let helper = gtk::Label::new(Some(description));
+        helper.add_css_class("dim-label");
+        helper.set_xalign(0.0);
+        helper.set_hexpand(true);
+        helper.set_wrap(true);
+        helper.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        helper.set_justify(gtk::Justification::Left);
+        label_box.append(&helper);
+    }
+    row.append(&label_box);
+    let Some(locator) =
+        advanced_descriptor_locator(draft.borrow().document(), target, &current.descriptor)
+    else {
+        let unavailable = gtk::Label::new(Some(
+            "This setting is no longer available in the private pattern draft.",
+        ));
+        unavailable.add_css_class("dim-label");
+        unavailable.set_wrap(true);
+        unavailable.set_xalign(1.0);
+        unavailable.update_property(&[gtk::accessible::Property::Description(
+            "The current private pattern draft does not expose a stable structural route for this setting.",
+        )]);
+        row.append(&unavailable);
+        return row;
+    };
+    let descriptor = current.descriptor.clone();
+    let commit_context = AdvancedCommitContext { state, epoch };
+    match current.value.clone() {
+        PropertyCurrentValueKind::FiniteF64(value) => {
+            let entry = gtk::Entry::new();
+            entry.set_width_chars(12);
+            entry.set_input_purpose(gtk::InputPurpose::Number);
+            entry.set_text(&format!("{value:.4}"));
+            label.set_mnemonic_widget(Some(&entry));
+            let commit_context = commit_context.clone();
+            let commit: Rc<dyn Fn(&gtk::Entry)> = Rc::new(move |entry: &gtk::Entry| {
+                let Ok(value) = entry.text().parse::<f64>() else {
+                    commit_context.set_status("Enter a finite number.");
+                    return;
+                };
+                commit_context.commit(locator, InspectorInput::FiniteF64(value));
+            });
+            let commit_for_activate = Rc::clone(&commit);
+            entry.connect_activate(move |entry| commit_for_activate(entry));
+            let focus = gtk::EventControllerFocus::new();
+            let commit_for_leave = Rc::clone(&commit);
+            let entry_for_leave = entry.clone();
+            focus.connect_leave(move |_| commit_for_leave(&entry_for_leave));
+            entry.add_controller(focus);
+            row.append(&entry);
+        }
+        PropertyCurrentValueKind::U32(value) => {
+            let entry = gtk::Entry::new();
+            entry.set_width_chars(10);
+            entry.set_input_purpose(gtk::InputPurpose::Digits);
+            entry.set_text(&value.to_string());
+            label.set_mnemonic_widget(Some(&entry));
+            let commit_context = commit_context.clone();
+            let commit: Rc<dyn Fn(&gtk::Entry)> = Rc::new(move |entry: &gtk::Entry| {
+                let Ok(value) = entry.text().parse::<u32>() else {
+                    commit_context.set_status("Enter a whole number.");
+                    return;
+                };
+                commit_context.commit(locator, InspectorInput::U32(value));
+            });
+            let commit_for_activate = Rc::clone(&commit);
+            entry.connect_activate(move |entry| commit_for_activate(entry));
+            let focus = gtk::EventControllerFocus::new();
+            let commit_for_leave = Rc::clone(&commit);
+            let entry_for_leave = entry.clone();
+            focus.connect_leave(move |_| commit_for_leave(&entry_for_leave));
+            entry.add_controller(focus);
+            row.append(&entry);
+        }
+        PropertyCurrentValueKind::Boolean(value) => {
+            let toggle = gtk::Switch::new();
+            toggle.set_active(value);
+            label.set_mnemonic_widget(Some(&toggle));
+            let commit_context = commit_context.clone();
+            toggle.connect_state_set(move |_, value| {
+                commit_context.commit(locator, InspectorInput::Boolean(value));
+                glib::Propagation::Proceed
+            });
+            row.append(&toggle);
+        }
+        PropertyCurrentValueKind::EnumChoice(value) => {
+            let choices = descriptor.choices.to_vec();
+            let labels = choices
+                .iter()
+                .copied()
+                .map(enum_choice_label)
+                .collect::<Vec<_>>();
+            let dropdown = gtk::DropDown::from_strings(&labels);
+            dropdown.set_selected(
+                choices
+                    .iter()
+                    .position(|choice| *choice == value)
+                    .unwrap_or(0) as u32,
+            );
+            label.set_mnemonic_widget(Some(&dropdown));
+            let commit_context = commit_context.clone();
+            dropdown.connect_selected_notify(move |dropdown| {
+                if let Some(value) = choices.get(dropdown.selected() as usize).copied() {
+                    commit_context.commit(locator, InspectorInput::EnumChoice(value));
+                }
+            });
+            row.append(&dropdown);
+        }
+        _ => {
+            let value = gtk::Label::new(Some(&current_display(&current.value)));
+            value.set_xalign(1.0);
+            row.append(&value);
+        }
+    }
+    if current.descriptor.reset_capable {
+        let reset = gtk::Button::with_label("Reset to inherit");
+        reset.set_sensitive(current.inheritance == PropertyInheritance::Explicit);
+        reset.set_tooltip_text(Some("Remove this channel override and use the ALL value."));
+        let reset_context = commit_context.clone();
+        reset.connect_clicked(move |_| reset_context.reset(locator));
+        row.append(&reset);
+    }
+    row
+}
+
+/// Returns the persistent accessible explanatory text needed by one non-obvious Advanced Settings control.
+///
+/// This text clarifies the established connected-stroke response without
+/// changing descriptor authority, numeric bounds, evaluation, or command
+/// behavior. Fields without a special clarification retain the generic
+/// descriptor presentation. Callers render a returned value as a visible
+/// helper label as well as optional tooltip text.
+fn advanced_descriptor_description(field: PropertyFieldId) -> Option<&'static str> {
+    match field {
+        PropertyFieldId::ArtworkWeightMappingComponent => Some(
+            "Site weight controls where Voronoi sites cluster. Output color and response come from this channel’s Source component and paint.",
+        ),
+        PropertyFieldId::RegionSampling => Some(
+            "Reference point takes one source sample at the cell site. Area average tests each decoded pixel footprint and includes its full value only at 50% or greater coverage; it is slower.",
+        ),
+        PropertyFieldId::ConnectedMinimumThickness => Some(
+            "Lower bound of source-driven stroke width; setting it to zero only removes strokes where sampled ink is zero.",
+        ),
+        _ => None,
+    }
+}
+
+impl AdvancedCommitContext {
+    /// Returns current private history, target, and status handles only while this context's modal epoch is live.
+    fn surface_handles(
+        &self,
+    ) -> Option<(Rc<RefCell<DocumentHistory>>, InspectorTarget, gtk::Label)> {
+        let app_state = self.state.borrow();
+        let surface = app_state.advanced_settings.as_ref()?;
+        (surface.epoch == self.epoch).then(|| {
+            (
+                Rc::clone(&surface.draft),
+                surface.target,
+                surface.status.clone(),
+            )
+        })
+    }
+
+    /// Replaces private status text only for the still-current modal epoch.
+    fn set_status(&self, message: &str) {
+        if let Some((_, _, status)) = self.surface_handles() {
+            status.set_label(message);
+        }
+    }
+
+    /// Applies one typed private command and refreshes only the canonical draft preview.
+    ///
+    /// A value equal to current draft authority is a no-op. Domain rejection is
+    /// reported in the private window and never mutates main history or preview.
+    fn commit(&self, locator: AdvancedDescriptorLocator, input: InspectorInput) {
+        let Some((draft, target, status)) = self.surface_handles() else {
+            return;
+        };
+        let current =
+            match resolve_current_advanced_value(draft.borrow().document(), target, locator) {
+                Ok(current) => current,
+                Err(error) => {
+                    status.set_label(&format!("Couldn’t apply this setting: {error}"));
+                    return;
+                }
+            };
+        let unchanged = match (&current.value, &input) {
+            (PropertyCurrentValueKind::FiniteF64(current), InspectorInput::FiniteF64(next)) => {
+                current == next
+            }
+            (PropertyCurrentValueKind::U32(current), InspectorInput::U32(next)) => current == next,
+            (PropertyCurrentValueKind::Boolean(current), InspectorInput::Boolean(next)) => {
+                current == next
+            }
+            (PropertyCurrentValueKind::EnumChoice(current), InspectorInput::EnumChoice(next)) => {
+                current == next
+            }
+            _ => false,
+        };
+        if unchanged {
+            return;
+        }
+        let command = command_for_inspector_input(
+            draft.borrow().document(),
+            target.channel_id(),
+            DefinitionEditScope::SelectedCopy,
+            &current.descriptor,
+            input,
+        );
+        match command.and_then(|command| {
+            draft
+                .borrow_mut()
+                .apply(&command)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(()) => submit_advanced_preview(&self.state, self.epoch),
+            Err(error) => status.set_label(&format!("Couldn’t apply this setting: {error}")),
+        }
+    }
+
+    /// Removes one current inherited override and refreshes only the private bounded preview.
+    ///
+    /// The locator resolves after any selected-copy ID replacement before the domain creates a
+    /// reset command. A resolution or validation failure stays in the dialog and never changes
+    /// the main workspace, its source, or its preview.
+    fn reset(&self, locator: AdvancedDescriptorLocator) {
+        let Some((draft, target, status)) = self.surface_handles() else {
+            return;
+        };
+        let current = resolve_current_advanced_value(draft.borrow().document(), target, locator);
+        let result = current.and_then(|current| {
+            reset_command_for_descriptor(draft.borrow().document(), &current.descriptor)
+        });
+        match result.and_then(|command| {
+            draft
+                .borrow_mut()
+                .apply(&command)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(()) => submit_advanced_preview(&self.state, self.epoch),
+            Err(error) => status.set_label(&format!("Couldn’t reset this setting: {error}")),
+        }
+    }
+}
+
+/// Submits the current Advanced Settings draft to its bounded cancelable private scheduler.
+///
+/// The fixed target and source proxy preserve bounded preview work. A newer edit cancels and
+/// supersedes prior work; source, document, and GTK failures remain local to this modal.
+fn submit_advanced_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let mut app_state = state.borrow_mut();
+    let Some(surface) = app_state
+        .advanced_settings
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    else {
+        return;
+    };
+    let AdvancedPreviewSource::Ready { source, .. } = &surface.preview_source else {
+        let AdvancedPreviewSource::Unavailable(error) = &surface.preview_source else {
+            unreachable!("private preview source has two explicit states")
+        };
+        surface
+            .status
+            .set_label(&format!("Private preview unavailable: {error}"));
+        return;
+    };
+    let target = match toniator_engine::PreviewRasterTarget::new(420, 240) {
+        Ok(target) => target,
+        Err(error) => {
+            surface.status.set_label(&error.to_string());
+            return;
+        }
+    };
+    let request = EvaluationRequest::with_preview_target(
+        surface
+            .draft
+            .borrow()
+            .session()
+            .document_evaluation_snapshot(),
+        source.clone(),
+        target,
+    );
+    match surface.scheduler.submit(request) {
+        Ok(ticket) => {
+            surface.preview_submission = Some(ticket.value());
+            surface.status.set_label("Rendering private preview… · 0%");
+            surface
+                .picture
+                .set_tooltip_text(Some("Rendering private preview…"));
+        }
+        Err(error) => surface
+            .status
+            .set_label(&format!("Private preview unavailable: {error}")),
+    }
+}
+
+/// Bridges one Advanced Settings scheduler into GTK events until its modal epoch closes.
+///
+/// The worker owns no GTK handles or mutable history. Main-context handlers reject stale epochs
+/// and tickets before installing progress or a texture.
+fn start_advanced_preview_event_bridge(
+    scheduler: Arc<EvaluationScheduler>,
+    sender: async_channel::Sender<AppEvent>,
+    stop: Arc<AtomicBool>,
+    epoch: u64,
+) {
+    thread::spawn(move || {
+        'bridge: while !stop.load(Ordering::Acquire) {
+            loop {
+                match scheduler.try_receive_latest_progress() {
+                    Ok(Some(progress)) => {
+                        if sender
+                            .send_blocking(AppEvent::AdvancedPreviewProgress { epoch, progress })
+                            .is_err()
+                        {
+                            break 'bridge;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break 'bridge,
+                }
+            }
+            match scheduler.try_receive_latest() {
+                Ok(Some(completion)) => {
+                    if sender
+                        .send_blocking(AppEvent::AdvancedPreview { epoch, completion })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(None) => thread::park_timeout(Duration::from_millis(4)),
+                Err(_) => break,
+            }
+        }
+    });
+}
+
 /// Opens a deliberate shared-replacement disclosure that never combines with copy-on-edit.
 /// Opens an explicit shared-pattern choice before any linked channel is prepared.
 ///
 /// Choosing neither option leaves document/history/preview untouched. Each
 /// choice then opens its own affected-channel disclosure and revalidates on
 /// confirmation through the preset registry.
+#[allow(dead_code)] // Retained for Stage 21B shared-definition publication choices.
 fn choose_shared_preset_choice(state: &Rc<RefCell<AppState>>) {
     let dialog = gtk::Window::builder()
         .title("Choose a shared pattern")
@@ -2398,6 +3832,7 @@ fn choose_shared_preset_choice(state: &Rc<RefCell<AppState>>) {
 }
 
 /// Discloses every affected channel before one explicitly chosen shared replacement.
+#[allow(dead_code)] // Retained for Stage 21B shared-definition publication choices.
 fn choose_shared_preset_replacement(
     state: &Rc<RefCell<AppState>>,
     preset_id: &str,
@@ -2408,7 +3843,7 @@ fn choose_shared_preset_replacement(
         let Some(workspace) = app_state.workspace.as_ref() else {
             return;
         };
-        let Some(selected) = app_state.inspector_runtime.selected_channel else {
+        let Some(selected) = app_state.inspector_runtime.target.channel_id() else {
             return;
         };
         let Some(definition) = workspace.document().pattern_definition_for(selected) else {
@@ -2511,6 +3946,40 @@ fn append_pattern_editor_launch(state: &Rc<RefCell<AppState>>, inspector: &gtk::
     mark.connect_clicked(move |_| dispatch_ui_intent(&state_for_mark, UiIntent::OpenMarkEditor));
     inspector.append(&grid);
     inspector.append(&mark);
+    let mut app_state = state.borrow_mut();
+    app_state.guide_editor_button = Some(grid);
+    app_state.mark_editor_button = Some(mark);
+}
+
+/// Synchronizes provisional nested-editor affordances with the real inspector target.
+///
+/// Stage 21A retains the accepted Stage 20F implementations for their Stage 21B
+/// integration, while preventing ALL from appearing to target a fabricated channel.
+fn sync_pattern_editor_launches(state: &Rc<RefCell<AppState>>, target: InspectorTarget) {
+    let app_state = state.borrow();
+    let enabled = target.channel_id().is_some();
+    for (button, selected_description) in [
+        (
+            app_state.guide_editor_button.as_ref(),
+            "Edit authored guide-path resources used by the selected channel in a private draft.",
+        ),
+        (
+            app_state.mark_editor_button.as_ref(),
+            "Edit authored mark-shape resources used by the selected channel in a private draft.",
+        ),
+    ] {
+        let Some(button) = button else {
+            continue;
+        };
+        let description = if enabled {
+            selected_description
+        } else {
+            "Select a named channel to use this provisional editor; Pattern Wizard integration arrives in Stage 21B."
+        };
+        button.set_sensitive(enabled);
+        button.set_tooltip_text(Some(description));
+        button.update_property(&[gtk::accessible::Property::Description(description)]);
+    }
 }
 
 /// Opens or raises one purpose-specific transient editor for the current stable channel.
@@ -2545,7 +4014,7 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurp
     }
     let (parent, draft) = {
         let mut app_state = state.borrow_mut();
-        let Some(selected_channel) = app_state.inspector_runtime.selected_channel else {
+        let Some(selected_channel) = app_state.inspector_runtime.target.channel_id() else {
             return;
         };
         let (document, presentation, sources, history) = {
@@ -4885,6 +6354,7 @@ fn submit_draft_preview(state: &Rc<RefCell<AppState>>) {
     let _ = request;
     thread::spawn(move || {
         loop {
+            while matches!(scheduler.try_receive_latest_progress(), Ok(Some(_))) {}
             match scheduler.try_receive_latest() {
                 Ok(Some(completion)) => {
                     let _ = sender.send_blocking(AppEvent::DraftPreview { epoch, completion });
@@ -4960,6 +6430,29 @@ fn reject_stale_shared_edit_before_command(_state: &Rc<RefCell<AppState>>) -> bo
     false
 }
 
+/// Resolves one artist-facing finite scalar against the active document canvas.
+///
+/// Only Pattern zoom level is inverted into density authority. The helper is
+/// read-only and does not create history or schedule evaluation.
+///
+/// # Errors
+///
+/// Returns a stable diagnostic when no document is open or when the requested
+/// zoom cannot be represented as finite-positive density authority.
+fn authority_inspector_f64(
+    state: &Rc<RefCell<AppState>>,
+    descriptor: &PropertyDescriptor,
+    artist_value: f64,
+) -> Result<f64, String> {
+    let app_state = state.borrow();
+    let document = app_state
+        .workspace
+        .as_ref()
+        .ok_or_else(|| "Open a document before changing pattern settings.".to_owned())?
+        .document();
+    authority_numeric_value(document, descriptor.field, artist_value)
+}
+
 /// Parses and commits one ordinary numeric descriptor entry through the shared
 /// typed command route. Enter and focus-leave both invoke this helper, preserving identical finite/whole-number parsing, draft retention,
 /// focus, invalidation, and history behavior. Invalid text never mutates the
@@ -4974,10 +6467,17 @@ fn commit_numeric_descriptor_entry(
     match descriptor.value_kind {
         PropertyValueKind::FiniteF64 => match text.parse::<f64>() {
             Ok(value) if value.is_finite() => {
+                let authority_value = match authority_inspector_f64(state, &descriptor, value) {
+                    Ok(value) => value,
+                    Err(message) => {
+                        record_inspector_draft(state, &descriptor, text, &message);
+                        return;
+                    }
+                };
                 if main_numeric_input_matches_current(
                     state,
                     &descriptor,
-                    &InspectorInput::FiniteF64(value),
+                    &InspectorInput::FiniteF64(authority_value),
                 ) {
                     return;
                 }
@@ -4985,7 +6485,7 @@ fn commit_numeric_descriptor_entry(
                 commit_inspector_input_with_focus(
                     state,
                     descriptor,
-                    InspectorInput::FiniteF64(value),
+                    InspectorInput::FiniteF64(authority_value),
                     focus,
                 );
             }
@@ -5027,10 +6527,7 @@ fn main_numeric_input_matches_current(
     let Some(workspace) = state.workspace.as_ref() else {
         return false;
     };
-    let Some(selected) = state.inspector_runtime.selected_channel else {
-        return false;
-    };
-    selected_property_values(workspace.document(), selected)
+    inline_inspector_values(workspace.document(), state.inspector_runtime.target)
         .into_iter()
         .find(|value| value.descriptor == *descriptor)
         .is_some_and(|value| match (&value.value, input) {
@@ -5056,6 +6553,7 @@ fn append_descriptor_control(
     group_heading: Option<&str>,
 ) -> DescriptorComponent {
     debug_assert!(control_route(&current).is_some());
+    let presented_f64 = presented_inspector_f64(state, &current);
     let component = gtk::Box::new(gtk::Orientation::Vertical, 4);
     if let Some(group) = group_heading {
         let heading = gtk::Label::new(Some(group));
@@ -5075,11 +6573,11 @@ fn append_descriptor_control(
     label.set_use_underline(true);
     label.set_xalign(0.0);
     label.set_wrap(true);
-    let detail = gtk::Label::new(Some(&field_detail(
-        current.descriptor.bounds,
-        current.descriptor.unit,
-    )));
+    let detail_text = descriptor_detail_text(&current);
+    let detail = gtk::Label::new(Some(&detail_text));
     detail.set_xalign(0.0);
+    detail.set_wrap(true);
+    detail.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     detail.add_css_class("dim-label");
     labels.append(&label);
     labels.append(&detail);
@@ -5149,14 +6647,15 @@ fn append_descriptor_control(
         }
         (PropertyValueKind::FiniteF64, PropertyCurrentValueKind::FiniteF64(value)) => {
             let control = gtk::Entry::new();
+            let displayed_value = presented_f64.unwrap_or(*value);
             control.set_text(&draft_text(
                 state,
                 &inspector_key(&descriptor),
-                &format!("{value:.4}"),
+                &format!("{displayed_value:.4}"),
             ));
             control.set_input_purpose(gtk::InputPurpose::Number);
-            control.set_width_chars(12);
-            control.set_tooltip_text(Some(&field_detail(descriptor.bounds, descriptor.unit)));
+            control.set_width_chars(8);
+            control.set_tooltip_text(Some(&inspector_field_detail(&descriptor)));
             label.set_mnemonic_widget(Some(&control));
             let state_for_callback = Rc::clone(state);
             let descriptor_for_callback = descriptor.clone();
@@ -5196,8 +6695,8 @@ fn append_descriptor_control(
                 &value.to_string(),
             ));
             control.set_input_purpose(gtk::InputPurpose::Digits);
-            control.set_width_chars(10);
-            control.set_tooltip_text(Some(&field_detail(descriptor.bounds, descriptor.unit)));
+            control.set_width_chars(8);
+            control.set_tooltip_text(Some(&inspector_field_detail(&descriptor)));
             label.set_mnemonic_widget(Some(&control));
             let state_for_callback = Rc::clone(state);
             let descriptor_for_callback = descriptor.clone();
@@ -5327,10 +6826,44 @@ fn append_descriptor_control(
             control.upcast()
         }
     };
+    let reset = if current.descriptor.reset_capable {
+        let reset = gtk::Button::with_label("Reset");
+        reset.set_valign(gtk::Align::Center);
+        reset.set_sensitive(current.inheritance == PropertyInheritance::Explicit);
+        let description = if matches!(
+            current.descriptor.field,
+            PropertyFieldId::Density | PropertyFieldId::DensityAspect
+        ) {
+            "Remove this channel’s atomic density and density-aspect override."
+        } else {
+            "Remove this channel override and use the ALL value."
+        };
+        let accessible_label = format!(
+            "Reset {} to inherit",
+            inspector_field_label(current.descriptor.field)
+        );
+        reset.set_tooltip_text(Some(description));
+        reset.update_property(&[
+            gtk::accessible::Property::Label(&accessible_label),
+            gtk::accessible::Property::Description(description),
+        ]);
+        let state_for_reset = Rc::clone(state);
+        let descriptor_for_reset = current.descriptor.clone();
+        reset.connect_clicked(move |_| {
+            commit_inspector_reset(&state_for_reset, descriptor_for_reset.clone())
+        });
+        row.append(&reset);
+        Some(reset)
+    } else {
+        None
+    };
+    control.set_valign(gtk::Align::Center);
     component.append(&row);
     DescriptorComponent {
         row: component,
         control,
+        detail,
+        reset,
         value: current,
     }
 }
@@ -5466,21 +6999,79 @@ fn remember_inspector_draft(
         .insert(inspector_key(descriptor), text);
 }
 
+/// Invalidates the accepted preview target and records queued work before idle submission.
 fn set_preview_pending(state: &mut AppState) {
     state.preview_target = None;
-    state.preview_coordinator.clear_submission();
+    state.preview_coordinator.queue_refresh();
+    state.preview_progress_bar.set_fraction(0.0);
+    state.preview_progress_bar.set_text(Some("Overall 0%"));
+    state
+        .preview_overall_progress_label
+        .set_label("Overall preview · 0%");
+    state.preview_stage_progress_bar.set_fraction(0.0);
+    state.preview_stage_progress_bar.set_text(Some("Stage 0%"));
+    state
+        .preview_stage_progress_bar
+        .update_property(&[gtk::accessible::Property::Label(
+            "Preparing preview stage progress",
+        )]);
+    state
+        .preview_progress_label
+        .set_label("Preparing preview… · 0%");
+    show_source_diagnostic(state);
     sync_main_preview_pending(state);
     set_page(state, page_while_preview_pending(state.preview.is_some()));
 }
 
-/// Synchronizes the visible main-preview spinner with the coordinator's newest pending ticket only.
+/// Synchronizes canvas pending presentation with queued or submitted coordinator work.
 fn sync_main_preview_pending(state: &AppState) {
-    let pending = state.preview_coordinator.submission().is_some();
-    state.preview_spinner.set_visible(pending);
+    let pending = state.preview_coordinator.is_pending();
+    state.preview_progress.set_visible(pending);
+    state.picture.set_tooltip_text(Some(preview_tooltip(
+        pending,
+        state.preview_coordinator.last_accepted_ticket().is_some(),
+    )));
+}
+
+/// Returns concise artist-facing text for one engine-owned evaluation phase.
+///
+/// The mapping changes presentation only; stage ordering, progress weights,
+/// tickets, cancellation, and cache publication remain engine-owned.
+const fn preview_progress_stage_label(
+    stage: toniator_engine::EvaluationProgressStage,
+) -> &'static str {
+    match stage {
+        toniator_engine::EvaluationProgressStage::Preparing => "Preparing preview…",
+        toniator_engine::EvaluationProgressStage::DecodingSource => "Decoding source artwork…",
+        toniator_engine::EvaluationProgressStage::GeneratingGeometry => {
+            "Generating pattern geometry…"
+        }
+        toniator_engine::EvaluationProgressStage::RealizingOutputs => "Realizing pattern output…",
+        toniator_engine::EvaluationProgressStage::ComposingScene => "Composing preview scene…",
+        toniator_engine::EvaluationProgressStage::RasterizingPreview => "Rasterizing preview…",
+        toniator_engine::EvaluationProgressStage::Finalizing => "Finalizing preview…",
+        toniator_engine::EvaluationProgressStage::Complete => "Preview complete.",
+    }
+}
+
+/// Preserves the stable evaluator diagnostic behind the main preview's artist-facing failure.
+fn main_preview_failure_message(error: Option<&toniator_engine::EvaluationError>) -> String {
+    match error {
+        Some(error) => {
+            format!("Couldn’t render this pattern. Your last preview is still shown. {error}")
+        }
+        None => "Couldn’t render this pattern. Your last preview is still shown.".to_owned(),
+    }
+}
+
+/// Selects the canvas tooltip from queued/submitted work and last-success identity.
+const fn preview_tooltip(pending: bool, has_accepted_preview: bool) -> &'static str {
     if pending {
-        state.preview_spinner.start();
+        "Rendering preview…"
+    } else if has_accepted_preview {
+        "Preview updated."
     } else {
-        state.preview_spinner.stop();
+        "No preview yet"
     }
 }
 
@@ -5508,12 +7099,9 @@ fn schedule_main_preview_submission(state: &Rc<RefCell<AppState>>) {
     });
 }
 
-const fn page_while_preview_pending(has_accepted_preview: bool) -> Page {
-    if has_accepted_preview {
-        Page::Success
-    } else {
-        Page::Loading
-    }
+/// Keeps the canvas surface visible so staged progress is available on first and later renders.
+const fn page_while_preview_pending(_has_accepted_preview: bool) -> Page {
+    Page::Success
 }
 
 const fn page_after_preview_error(has_accepted_preview: bool) -> Page {
@@ -5661,7 +7249,7 @@ fn commit_inspector_input_with_focus(
         };
         command_for_inspector_input(
             workspace.document(),
-            state.inspector_runtime.selected_channel,
+            state.inspector_runtime.target.channel_id(),
             state.inspector_runtime.scope.clone(),
             &descriptor,
             input,
@@ -5677,6 +7265,61 @@ fn commit_inspector_input_with_focus(
             let mut state = state.borrow_mut();
             set_inspector_status(&mut state, error);
         }
+    }
+}
+
+/// Removes one optional named-channel override through its typed domain command.
+///
+/// Density and density aspect intentionally share `ResetChannelDensityDelta`,
+/// preserving their atomic authored-pair invariant. This function performs no
+/// document mutation before `apply_inspector_command` accepts the command.
+fn commit_inspector_reset(state: &Rc<RefCell<AppState>>, descriptor: PropertyDescriptor) {
+    let command = {
+        let app_state = state.borrow();
+        let Some(workspace) = app_state.workspace.as_ref() else {
+            return;
+        };
+        reset_command_for_descriptor(workspace.document(), &descriptor)
+    };
+    match command {
+        Ok(command) => {
+            if apply_inspector_command(state, &command, Some(&descriptor), false, None) {
+                rebuild_inspector(state);
+            }
+        }
+        Err(error) => set_inspector_status(&mut state.borrow_mut(), error),
+    }
+}
+
+/// Builds the stale-aware reset command advertised by one reset-capable descriptor.
+///
+/// # Errors
+///
+/// Returns an artist-facing error if the descriptor is stale, targets document
+/// base or channel-specific state, or advertises a reset for an unsupported field.
+fn reset_command_for_descriptor(
+    document: &Document,
+    descriptor: &PropertyDescriptor,
+) -> Result<DocumentCommand, String> {
+    let base = document.pattern_settings().clone();
+    match (descriptor.target, descriptor.field) {
+        (
+            PropertyTarget::Channel(channel_id),
+            PropertyFieldId::Density | PropertyFieldId::DensityAspect,
+        ) => Ok(DocumentCommand::ResetChannelDensityDelta { base, channel_id }),
+        (PropertyTarget::Channel(channel_id), PropertyFieldId::RotationDegrees) => {
+            Ok(DocumentCommand::ResetChannelPatternRotationDelta { base, channel_id })
+        }
+        (PropertyTarget::Channel(channel_id), PropertyFieldId::ShapeRotationDegrees) => {
+            Ok(DocumentCommand::ResetChannelShapeRotationDelta { base, channel_id })
+        }
+        (PropertyTarget::Channel(channel_id), PropertyFieldId::DefinitionSelection) => {
+            Ok(DocumentCommand::ResetChannelPatternDefinitionOverride { base, channel_id })
+        }
+        (PropertyTarget::ChannelOutput(channel_id, output_layer_id), _) => document
+            .reset_channel_output_response_delta(channel_id, output_layer_id)
+            .map_err(|error| error.to_string()),
+        _ => Err("This setting does not have an inherited override to reset.".to_owned()),
     }
 }
 
@@ -5716,36 +7359,33 @@ fn command_for_inspector_input(
     let channel_id =
         || channel_id.ok_or_else(|| "This field requires a selected channel.".to_owned());
     match descriptor.field {
-        PropertyFieldId::DensityAcrossX | PropertyFieldId::DensityAcrossY => {
-            let axis = if descriptor.field == PropertyFieldId::DensityAcrossX {
-                DensityEditedAxis::AcrossX
+        PropertyFieldId::Density | PropertyFieldId::DensityAspect => {
+            let field = if descriptor.field == PropertyFieldId::Density {
+                DensityEditedField::Density
             } else {
-                DensityEditedAxis::AcrossY
+                DensityEditedField::Aspect
             };
             let value = f64_value(input)?;
             match descriptor.target {
                 PropertyTarget::Document => document
-                    .set_document_density_axis(axis, value)
+                    .set_document_density_field(field, value)
                     .map_err(|error| error.to_string()),
                 PropertyTarget::Channel(channel_id) => {
                     let mut density = document
                         .effective_channel_pattern(channel_id)
                         .map_err(|error| error.to_string())?
                         .density;
-                    match axis {
-                        DensityEditedAxis::AcrossX => density.across_x = value,
-                        DensityEditedAxis::AcrossY => density.across_y = value,
+                    match field {
+                        DensityEditedField::Density => density.density = value,
+                        DensityEditedField::Aspect => density.aspect = value,
                     }
                     document
-                        .set_channel_density_for_effective(channel_id, axis, density)
+                        .set_channel_density_for_effective(channel_id, density)
                         .map_err(|error| error.to_string())
                 }
                 _ => Err("Density requires document or channel authority.".to_owned()),
             }
         }
-        PropertyFieldId::DensityAspectLocked => document
-            .set_document_density_aspect_lock(boolean(input)?)
-            .map_err(|error| error.to_string()),
         PropertyFieldId::RotationDegrees => {
             let value = f64_value(input)?;
             match descriptor.target {
@@ -5830,6 +7470,64 @@ fn command_for_inspector_input(
                 }
                 _ => Err("Connected response requires document or channel authority.".to_owned()),
             }
+        }
+        PropertyFieldId::RegionMinimumFill | PropertyFieldId::RegionMaximumFill => {
+            let value = f64_value(input)?;
+            let edit = if descriptor.field == PropertyFieldId::RegionMinimumFill {
+                RegionGeometryFieldEdit::MinimumFill(value)
+            } else {
+                RegionGeometryFieldEdit::MaximumFill(value)
+            };
+            match descriptor.target {
+                PropertyTarget::ChannelOutput(channel_id, output_layer_id) => document
+                    .set_channel_region_response_field_for_effective(
+                        channel_id,
+                        output_layer_id,
+                        edit,
+                    )
+                    .map_err(|error| error.to_string()),
+                _ => Err("Region fill requires one channel output authority.".to_owned()),
+            }
+        }
+        PropertyFieldId::RegionResizeAlgorithm | PropertyFieldId::RegionSampling => {
+            let channel_id = selected_channel
+                .ok_or_else(|| "Region response requires a selected channel.".to_owned())?;
+            let output_layer_id = target_output_layer_id(descriptor.target)
+                .or(match descriptor.target {
+                    PropertyTarget::ChannelOutput(_, output_layer_id) => Some(output_layer_id),
+                    _ => None,
+                })
+                .ok_or_else(|| "Region response requires an active output layer.".to_owned())?;
+            let effective = document
+                .effective_channel_pattern(channel_id)
+                .map_err(|error| error.to_string())?;
+            let PatternGeometryResponse::Regions(mut response) = effective
+                .output_settings
+                .iter()
+                .find(|setting| setting.output_layer_id == output_layer_id)
+                .ok_or_else(|| "The active region output is missing.".to_owned())?
+                .response
+                .clone()
+            else {
+                return Err("Region controls are inapplicable to this output branch.".to_owned());
+            };
+            match (descriptor.field, choice(input)?) {
+                (
+                    PropertyFieldId::RegionResizeAlgorithm,
+                    PropertyEnumChoice::RegionResizeAlgorithm(algorithm),
+                ) => response.algorithm = algorithm,
+                (PropertyFieldId::RegionSampling, PropertyEnumChoice::RegionSampling(sampling)) => {
+                    response.sampling = sampling
+                }
+                _ => return Err("Expected a compatible region response choice.".to_owned()),
+            }
+            document
+                .set_selected_channel_region_response_for_effective(
+                    channel_id,
+                    output_layer_id,
+                    response,
+                )
+                .map_err(|error| error.to_string())
         }
         PropertyFieldId::ShapeRotationDegrees => {
             let value = f64_value(input)?;
@@ -6381,10 +8079,18 @@ fn request_window_close(
     }
 }
 
+/// Opens the native portal dialog with the combined supported-source filter selected by default.
 fn choose_open(state: &Rc<RefCell<AppState>>) {
     let dialog = gtk::FileDialog::new();
     dialog.set_title("Open document or artwork");
-    dialog.set_filters(Some(&open_filters()));
+    let filters = open_filters();
+    dialog.set_filters(Some(&filters));
+    if let Some(filter) = filters
+        .item(0)
+        .and_then(|item| item.downcast::<gtk::FileFilter>().ok())
+    {
+        dialog.set_default_filter(Some(&filter));
+    }
     let state = Rc::clone(state);
     let window = state.borrow().window.clone();
     dialog.open(Some(&window), None::<&gio::Cancellable>, move |result| {
@@ -6396,23 +8102,69 @@ fn choose_open(state: &Rc<RefCell<AppState>>) {
     });
 }
 
+/// Builds the native Open-dialog filters with the complete still-image set first.
 fn open_filters() -> gio::ListStore {
+    let all = gtk::FileFilter::new();
+    all.set_name(Some(OPEN_FILTER_LABELS[0]));
+    all.add_pattern("*.toniator");
+    for pattern in [
+        "*.png", "*.svg", "*.jpg", "*.jpeg", "*.webp", "*.bmp", "*.tif", "*.tiff", "*.exr",
+        "*.avif",
+    ] {
+        all.add_pattern(pattern);
+    }
+    for mime_type in [
+        "image/png",
+        "image/svg+xml",
+        "image/jpeg",
+        "image/webp",
+        "image/bmp",
+        "image/tiff",
+        "image/x-exr",
+        "image/avif",
+    ] {
+        all.add_mime_type(mime_type);
+    }
     let documents = gtk::FileFilter::new();
-    documents.set_name(Some(OPEN_FILTER_LABELS[0]));
+    documents.set_name(Some(OPEN_FILTER_LABELS[1]));
     documents.add_pattern("*.toniator");
     let png = gtk::FileFilter::new();
-    png.set_name(Some(OPEN_FILTER_LABELS[1]));
+    png.set_name(Some(OPEN_FILTER_LABELS[2]));
     png.add_mime_type("image/png");
     png.add_pattern("*.png");
     let svg = gtk::FileFilter::new();
-    svg.set_name(Some(OPEN_FILTER_LABELS[2]));
+    svg.set_name(Some(OPEN_FILTER_LABELS[3]));
     svg.add_mime_type("image/svg+xml");
     svg.add_pattern("*.svg");
+    let jpeg = image_open_filter(OPEN_FILTER_LABELS[4], "image/jpeg", &["*.jpg", "*.jpeg"]);
+    let webp = image_open_filter(OPEN_FILTER_LABELS[5], "image/webp", &["*.webp"]);
+    let bmp = image_open_filter(OPEN_FILTER_LABELS[6], "image/bmp", &["*.bmp"]);
+    let tiff = image_open_filter(OPEN_FILTER_LABELS[7], "image/tiff", &["*.tif", "*.tiff"]);
+    let exr = image_open_filter(OPEN_FILTER_LABELS[8], "image/x-exr", &["*.exr"]);
+    let avif = image_open_filter(OPEN_FILTER_LABELS[9], "image/avif", &["*.avif"]);
     let filters = gio::ListStore::new::<gtk::FileFilter>();
+    filters.append(&all);
     filters.append(&documents);
     filters.append(&png);
     filters.append(&svg);
+    filters.append(&jpeg);
+    filters.append(&webp);
+    filters.append(&bmp);
+    filters.append(&tiff);
+    filters.append(&exr);
+    filters.append(&avif);
     filters
+}
+
+/// Builds one named native still-image filter from its MIME type and accepted suffixes.
+fn image_open_filter(name: &str, mime_type: &str, patterns: &[&str]) -> gtk::FileFilter {
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some(name));
+    filter.add_mime_type(mime_type);
+    for pattern in patterns {
+        filter.add_pattern(pattern);
+    }
+    filter
 }
 
 fn choose_save_as(state: &Rc<RefCell<AppState>>, after: Option<LifecycleAction>) {
@@ -6425,7 +8177,7 @@ fn choose_save_as(state: &Rc<RefCell<AppState>>, after: Option<LifecycleAction>)
         let mut state = state.borrow_mut();
         show_error(
             &mut state,
-            "Save requires PNG or SVG source artwork.".to_owned(),
+            "Save requires supported source artwork.".to_owned(),
         );
         cancel_window_close_after(&mut state, after);
         return;
@@ -6531,9 +8283,9 @@ fn export_filters() -> gio::ListStore {
     filters
 }
 
-/// Presents PNG-only consumer controls through template-owned static composition.
+/// Presents PNG-only consumer controls with a default backing derived from the current model.
 ///
-/// Runtime selections remain transient GTK state and never mutate document, scene, history,
+/// The selected backing remains runtime dialog state and never mutates document, scene, history,
 /// preview, or cache identity. Invalid output dimensions fail before export submission.
 #[allow(deprecated)] // GTK 4.10's lightweight custom-content dialog remains available on Fedora.
 fn choose_png_export_options(state: &Rc<RefCell<AppState>>, path: PathBuf) {
@@ -6553,6 +8305,12 @@ fn choose_png_export_options(state: &Rc<RefCell<AppState>>, path: PathBuf) {
         "Black",
         "White",
     ])));
+    let default_background = state
+        .borrow()
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.document().channel_model());
+    background.set_selected(png_background_dropdown_position(default_background));
     let antialiasing = options.antialiasing();
     antialiasing.set_model(Some(&gtk::StringList::new(&["On", "Off"])));
     let dimensions = options.dimensions();
@@ -6588,6 +8346,17 @@ fn choose_png_export_options(state: &Rc<RefCell<AppState>>, path: PathBuf) {
         dialog.close();
     });
     dialog.present();
+}
+
+/// Maps one authoritative model to the PNG dialog's stable background option position.
+///
+/// Missing legacy model authority retains transparent rather than inventing modeled semantics.
+const fn png_background_dropdown_position(model: Option<HalftoneChannelModel>) -> u32 {
+    match RasterBackground::default_for_model(model) {
+        RasterBackground::Transparent => 0,
+        RasterBackground::OpaqueBlack => 1,
+        RasterBackground::OpaqueWhite => 2,
+    }
 }
 
 /// Resolves one GTK background position without allowing an invalid position to invent backing.
@@ -6713,11 +8482,22 @@ fn is_container_path(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("toniator"))
 }
 
+/// Resolves a supported source suffix without inspecting or transforming source bytes.
+///
+/// # Errors
+///
+/// Returns a stable source-format error when a path is not one accepted still-image suffix.
 fn format_hint_for_path(path: &Path) -> Result<SourceFormatHint, String> {
     match path.extension().and_then(|extension| extension.to_str()) {
         Some(extension) if extension.eq_ignore_ascii_case("png") => Ok(SourceFormatHint::Png),
         Some(extension) if extension.eq_ignore_ascii_case("svg") => Ok(SourceFormatHint::Svg),
-        _ => Err("source.format: supported inputs are .toniator, PNG, and SVG".to_owned()),
+        Some(extension) if extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg") => Ok(SourceFormatHint::Jpeg),
+        Some(extension) if extension.eq_ignore_ascii_case("webp") => Ok(SourceFormatHint::Webp),
+        Some(extension) if extension.eq_ignore_ascii_case("bmp") => Ok(SourceFormatHint::Bmp),
+        Some(extension) if extension.eq_ignore_ascii_case("tif") || extension.eq_ignore_ascii_case("tiff") => Ok(SourceFormatHint::Tiff),
+        Some(extension) if extension.eq_ignore_ascii_case("exr") => Ok(SourceFormatHint::OpenExr),
+        Some(extension) if extension.eq_ignore_ascii_case("avif") => Ok(SourceFormatHint::Avif),
+        _ => Err("source.format: supported inputs are .toniator, PNG, SVG, JPEG, WebP, BMP, TIFF, OpenEXR, and AVIF".to_owned()),
     }
 }
 
@@ -6728,7 +8508,7 @@ fn start_save(state: &Rc<RefCell<AppState>>, after: Option<LifecycleAction>) {
             let mut state = state.borrow_mut();
             show_error(
                 &mut state,
-                "Save requires PNG or SVG source artwork.".to_owned(),
+                "Save requires supported source artwork.".to_owned(),
             );
             cancel_window_close_after(&mut state, after);
         }
@@ -6929,10 +8709,70 @@ fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
             sync_ui(&mut app_state);
         }
         AppEvent::Preview(completion) => handle_preview_completion(state, completion),
+        AppEvent::PreviewProgress(progress) => handle_preview_progress(state, progress),
         AppEvent::DraftPreview { epoch, completion } => {
             handle_draft_preview_completion(state, epoch, completion)
         }
+        AppEvent::AdvancedPreview { epoch, completion } => {
+            handle_advanced_preview_completion(state, epoch, completion)
+        }
+        AppEvent::AdvancedPreviewProgress { epoch, progress } => {
+            handle_advanced_preview_progress(state, epoch, progress)
+        }
     }
+}
+
+/// Projects ticketed monotonic worker progress onto the main canvas overlay.
+///
+/// Stale workspace generations and superseded scheduler tickets are ignored;
+/// this function never accepts cache state, replaces the last preview, or
+/// changes document history.
+fn handle_preview_progress(
+    state: &Rc<RefCell<AppState>>,
+    progress: toniator_engine::EvaluationProgress,
+) {
+    let app_state = state.borrow();
+    if !accepts_submission(
+        app_state.workspace_generation,
+        app_state.preview_coordinator.submission(),
+        progress.ticket().value(),
+    ) {
+        return;
+    }
+    let fraction = progress.fraction().clamp(0.0, 1.0);
+    let stage_fraction = progress.stage_fraction().clamp(0.0, 1.0);
+    let stage = preview_progress_stage_label(progress.stage());
+    app_state.preview_progress.set_visible(true);
+    app_state
+        .preview_overall_progress_label
+        .set_label(&format!("Overall preview · {:.0}%", fraction * 100.0));
+    app_state.preview_progress_label.set_label(&format!(
+        "{} · {:.0}%",
+        stage.trim_end_matches('…'),
+        stage_fraction * 100.0
+    ));
+    app_state.preview_progress_bar.set_fraction(fraction);
+    app_state
+        .preview_progress_bar
+        .set_text(Some(&format!("Overall {:.0}%", fraction * 100.0)));
+    app_state
+        .preview_progress_bar
+        .update_property(&[gtk::accessible::Property::Label("Overall preview progress")]);
+    app_state
+        .preview_stage_progress_bar
+        .set_fraction(stage_fraction);
+    app_state
+        .preview_stage_progress_bar
+        .set_text(Some(&format!("Stage {:.0}%", stage_fraction * 100.0)));
+    app_state
+        .preview_stage_progress_bar
+        .update_property(&[gtk::accessible::Property::Label(&format!(
+            "{} stage progress",
+            stage.trim_end_matches('…')
+        ))]);
+    app_state
+        .picture
+        .set_tooltip_text(Some(&format!("Rendering preview: {stage}")));
 }
 
 /// Accepts a scheduler completion only for its still-current workspace token.
@@ -6978,14 +8818,12 @@ fn handle_preview_completion(
                 }
             },
             None => {
+                let message = main_preview_failure_message(completion.error());
                 app_state
                     .preview_coordinator
                     .fail(workspace_generation, ticket);
                 sync_main_preview_pending(&app_state);
-                show_error(
-                    &mut app_state,
-                    "Couldn’t render this pattern. Your last preview is still shown.".to_owned(),
-                );
+                show_error(&mut app_state, message);
             }
         },
         Ok(false) => {
@@ -7015,7 +8853,7 @@ fn handle_draft_preview_completion(
         return;
     };
     let mut draft = surface.draft.borrow_mut();
-    if !accepts_draft_preview_terminal(
+    if !accepts_private_preview_terminal(
         draft.epoch,
         draft.preview_submission,
         epoch,
@@ -7058,11 +8896,105 @@ fn handle_draft_preview_completion(
     }
 }
 
+/// Projects current Advanced Settings progress into its modal status and preview tooltip.
+///
+/// Stale modal epochs and superseded scheduler tickets are ignored. This handler never mutates
+/// either the private history or main workspace authority.
+fn handle_advanced_preview_progress(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    progress: toniator_engine::EvaluationProgress,
+) {
+    let app_state = state.borrow();
+    let Some(surface) = app_state.advanced_settings.as_ref().filter(|surface| {
+        accepts_private_preview_terminal(
+            surface.epoch,
+            surface.preview_submission,
+            epoch,
+            progress.ticket().value(),
+        )
+    }) else {
+        return;
+    };
+    let stage = preview_progress_stage_label(progress.stage());
+    let fraction = progress.fraction().clamp(0.0, 1.0);
+    surface.status.set_label(&format!(
+        "Private preview: {} · {:.0}%",
+        stage.trim_end_matches('…'),
+        fraction * 100.0
+    ));
+    surface
+        .picture
+        .set_tooltip_text(Some(&format!("Rendering private preview: {stage}")));
+}
+
+/// Installs one newest Advanced Settings result after modal-epoch, ticket, and document checks.
+///
+/// A failed private evaluation preserves the last private texture and remains confined to the
+/// modal. Main preview, main history, and source bytes are never changed by this handler.
+fn handle_advanced_preview_completion(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    completion: toniator_engine::EvaluationCompletion,
+) {
+    let mut app_state = state.borrow_mut();
+    let Some(surface) = app_state.advanced_settings.as_mut() else {
+        return;
+    };
+    if !accepts_private_preview_terminal(
+        surface.epoch,
+        surface.preview_submission,
+        epoch,
+        completion.ticket().value(),
+    ) {
+        return;
+    }
+    surface.preview_submission = None;
+    let accepted = surface
+        .scheduler
+        .accept_completion(&completion, surface.draft.borrow().session());
+    match accepted {
+        Ok(true) => match completion.result() {
+            Some(result) => match texture_from_surface(result.raster()) {
+                Ok(texture) => {
+                    surface.picture.set_paintable(Some(&texture));
+                    surface
+                        .picture
+                        .set_tooltip_text(Some("Private preview updated."));
+                    let (width, height) = match &surface.preview_source {
+                        AdvancedPreviewSource::Ready { width, height, .. } => (*width, *height),
+                        AdvancedPreviewSource::Unavailable(_) => unreachable!(
+                            "a completed private evaluation requires a ready source proxy"
+                        ),
+                    };
+                    surface.status.set_label(&format!(
+                        "Private preview ({width} × {height} source proxy) updated. Apply publishes one undoable change."
+                    ));
+                }
+                Err(error) => surface
+                    .status
+                    .set_label(&format!("Private preview unavailable: {error}")),
+            },
+            None => surface.status.set_label(&format!(
+                "Private preview unavailable: {}",
+                completion.error().map_or_else(
+                    || "evaluation did not produce a result".to_owned(),
+                    ToString::to_string
+                )
+            )),
+        },
+        Ok(false) => {}
+        Err(error) => surface
+            .status
+            .set_label(&format!("Private preview unavailable: {error}")),
+    }
+}
+
 /// Installs a newly created or loaded workspace and closes any editor surface
 /// bound to the replaced document. The next editor launch starts with fresh
 /// runtime-only selection/draft state and cannot target destroyed widgets.
 fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
-    let (model, pattern_editor_window) = {
+    let (model, pattern_editor_window, advanced_settings_window) = {
         let mut state = state.borrow_mut();
         state.workspace_generation = state.workspace_generation.saturating_add(1);
         state.preview_coordinator.clear_submission();
@@ -7074,6 +9006,11 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
             surface.preview_spinner.set_visible(false);
             surface.window
         });
+        let advanced_settings_window = state.advanced_settings.take().map(|mut surface| {
+            surface.preview_submission = None;
+            surface.preview_bridge_stop.store(true, Ordering::Release);
+            surface.window
+        });
         state.workspace = Some(workspace);
         state.model = state
             .workspace
@@ -7081,11 +9018,14 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
             .and_then(|workspace| workspace.document().channel_model())
             .map(PreviewModel::from_domain)
             .unwrap_or(PreviewModel::Rgb);
-        (state.model, pattern_editor_window)
+        (state.model, pattern_editor_window, advanced_settings_window)
     };
     // The close-request callback borrows AppState, so the detached editor may
     // close only after the workspace-install borrow above has ended.
     if let Some(window) = pattern_editor_window {
+        window.close();
+    }
+    if let Some(window) = advanced_settings_window {
         window.close();
     }
     sync_model_selector(state, model);
@@ -7096,16 +9036,18 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
         clear_preview(&mut app_state);
         app_state.preview_target = None;
         show_source_diagnostic(&mut app_state);
-        let page = if app_state
+        if app_state
             .workspace
             .as_ref()
-            .is_some_and(|workspace| workspace.source_presentation.is_some())
+            .is_some_and(workspace_requires_initial_preview)
         {
-            Page::Loading
+            // Queue before the idle submission so the canvas page exposes the
+            // real pending state immediately. The coordinator owns the later
+            // scheduler ticket; this lifecycle transition invents none.
+            set_preview_pending(&mut app_state);
         } else {
-            Page::Empty
-        };
-        set_page(&mut app_state, page);
+            set_page(&mut app_state, Page::Empty);
+        }
         sync_ui(&mut app_state);
     }
     rebuild_inspector(state);
@@ -7114,6 +9056,15 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
         let mut app_state = state_for_preview.borrow_mut();
         submit_if_viewport_ready(&mut app_state);
     });
+}
+
+/// Reports whether a newly installed workspace has source artwork that requires an initial preview.
+///
+/// This lifecycle projection never schedules work, creates tickets, or changes
+/// document/history authority. New source-less documents deliberately remain
+/// empty until the user supplies artwork.
+fn workspace_requires_initial_preview(workspace: &Workspace) -> bool {
+    workspace.source_presentation.is_some()
 }
 
 /// Synchronize the GTK control without allowing its synchronous notification
@@ -7248,6 +9199,7 @@ fn replace_model_topology(
     Ok(())
 }
 
+/// Transfers queued preview work to the scheduler once a concrete viewport target exists.
 fn submit_if_viewport_ready(state: &mut AppState) {
     let Some(target) = preview_target_for(&state.stack) else {
         return;
@@ -7256,6 +9208,8 @@ fn submit_if_viewport_ready(state: &mut AppState) {
         return;
     }
     if let Err(error) = submit_current_source(state, target) {
+        state.preview_coordinator.clear_submission();
+        sync_main_preview_pending(state);
         show_error(state, error);
     }
 }
@@ -7312,10 +9266,11 @@ fn emit_automation_state(state: &mut AppState, event: &str, ticket: Option<u64>)
             .workspace
             .as_ref()
             .map_or((None, false, false, None, None), |workspace| {
-                let selected = state.inspector_runtime.selected_channel.map(|id| id.0);
+                let selected = state.inspector_runtime.target.channel_id().map(|id| id.0);
                 let family = state
                     .inspector_runtime
-                    .selected_channel
+                    .target
+                    .channel_id()
                     .and_then(|channel| {
                         workspace
                             .document()
@@ -7502,6 +9457,25 @@ fn show_error(state: &mut AppState, message: String) {
     set_page(state, page_after_preview_error(state.preview.is_some()));
 }
 
+/// Dismisses the current main-window message and leaves document authority untouched.
+///
+/// A first-render failure returns to the blank canvas surface instead of
+/// trapping the user on an undismissable error page. Subsequent edits can then
+/// publish fresh progress and preview state normally.
+fn dismiss_main_message(state: &Rc<RefCell<AppState>>) {
+    let mut app_state = state.borrow_mut();
+    app_state.shell.set_banner(None);
+    app_state.error.set_label("");
+    if app_state.stack.visible_child_name().as_deref() == Some(Page::Error.name()) {
+        let page = if app_state.workspace.is_some() {
+            Page::Success
+        } else {
+            Page::Empty
+        };
+        set_page(&mut app_state, page);
+    }
+}
+
 /// Projects immutable application state into persistent GTK widgets.
 ///
 /// The projection updates enabled state, labels, and presentation only; it
@@ -7556,19 +9530,101 @@ fn sync_ui(state: &mut AppState) {
             .as_deref()
             .or(channel_vm.name.as_deref()),
     );
-    state.picture.set_tooltip_text(Some(if preview_vm.pending {
-        "Rendering preview…"
-    } else if preview_vm.accepted_ticket.is_some() {
-        "Preview updated."
-    } else {
-        "No preview yet"
-    }));
+    state.picture.set_tooltip_text(Some(preview_tooltip(
+        preview_vm.pending,
+        preview_vm.accepted_ticket.is_some(),
+    )));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    /// Proves the GTK zoom projection is inverse, finite-positive, and lossless.
+    ///
+    /// The test does not mutate document authority: Density remains the schema
+    /// and evaluator input while the main inspector exposes the requested
+    /// artist-facing zoom direction and Pattern aspect terminology.
+    #[test]
+    fn pattern_zoom_level_projects_density_with_artist_facing_direction() {
+        let document = Document::new_default_document(DEFAULT_CANVAS, SourceReference::Unassigned)
+            .expect("default zoom projection document");
+        let default_density = DensityMetric2D::default_for_canvas(document.canvas())
+            .expect("default density")
+            .density;
+
+        assert_eq!(
+            artist_numeric_value(&document, PropertyFieldId::Density, default_density),
+            Ok(1.0)
+        );
+        assert_eq!(
+            authority_numeric_value(&document, PropertyFieldId::Density, 0.5),
+            Ok(default_density * 2.0)
+        );
+        assert_eq!(
+            authority_numeric_value(&document, PropertyFieldId::Density, 2.0),
+            Ok(default_density / 2.0)
+        );
+        assert_eq!(
+            artist_numeric_value(&document, PropertyFieldId::Density, default_density * 2.0),
+            Ok(0.5)
+        );
+        assert_eq!(
+            authority_numeric_value(&document, PropertyFieldId::DensityAspect, 2.0),
+            Ok(2.0)
+        );
+        assert!(authority_numeric_value(&document, PropertyFieldId::Density, 0.0).is_err());
+        assert_eq!(
+            inspector_field_label(PropertyFieldId::Density),
+            "Pattern zoom level"
+        );
+        assert_eq!(
+            inspector_field_label(PropertyFieldId::DensityAspect),
+            "Pattern aspect"
+        );
+    }
+
+    /// Verifies fresh and direct workspaces use aspect-normalized zoom while loaded documents retain stored density.
+    ///
+    /// # Panics
+    ///
+    /// Panics when source dimensions alter the normalized zoom contract or a
+    /// container open rewrites its already authored density intent.
+    #[test]
+    fn fresh_direct_and_persisted_workspaces_keep_density_authority_distinct() {
+        let fresh = Workspace::from_new().expect("fresh workspace");
+        assert_eq!(
+            artist_numeric_value(
+                fresh.document(),
+                PropertyFieldId::Density,
+                fresh.document().pattern_settings().density.density,
+            ),
+            Ok(1.0)
+        );
+
+        let direct = direct_png_workspace();
+        let direct_density = direct.document().pattern_settings().density.clone();
+        let direct_default = DensityMetric2D::default_for_canvas(direct.document().canvas())
+            .expect("direct default density");
+        assert_eq!(direct_density, direct_default);
+        assert_eq!(
+            artist_numeric_value(
+                direct.document(),
+                PropertyFieldId::Density,
+                direct_density.density,
+            ),
+            Ok(1.0)
+        );
+
+        let persisted_path = asset("raster-sample.toniator");
+        let loaded = load_container(&persisted_path).expect("current persisted asset loads");
+        let reopened = Workspace::from_container(&persisted_path).expect("workspace reopens asset");
+        assert_eq!(
+            reopened.document().pattern_settings().density,
+            loaded.document().pattern_settings().density
+        );
+    }
 
     /// Verifies the build-compiled GTK-only Blueprint templates are registered and loadable.
     ///
@@ -7582,6 +9638,7 @@ mod tests {
             "window.ui",
             "channel-editor.ui",
             "pattern-editor.ui",
+            "advanced-settings.ui",
             "preset-row.ui",
             "confirmation-dialog.ui",
             "png-export-options.ui",
@@ -7608,6 +9665,15 @@ mod tests {
                         && template.contains("type=\"start\"")
                         && template.contains("type=\"end\""),
                     "window must retain named stack-page widgets and valid paned child roles"
+                );
+                assert!(
+                    template.contains("id=\"main_banner_dismiss\"")
+                        && template.contains("id=\"preview_overall_progress_label\"")
+                        && template.contains("id=\"preview_progress_bar\"")
+                        && template.contains("id=\"preview_stage_progress_bar\"")
+                        && template.contains("id=\"preview_progress_label\"")
+                        && !template.contains("id=\"preview_spinner\""),
+                    "main canvas exposes dismissible errors and staged determinate progress"
                 );
             }
         }
@@ -7645,6 +9711,36 @@ mod tests {
         }
     }
 
+    /// Proves the PNG dialog selects modeled defaults and rejects unknown GTK positions safely.
+    #[test]
+    fn png_export_background_positions_follow_channel_model() {
+        assert_eq!(
+            png_background_dropdown_position(Some(HalftoneChannelModel::Rgb)),
+            1
+        );
+        assert_eq!(
+            png_background_dropdown_position(Some(HalftoneChannelModel::Cmyk)),
+            2
+        );
+        assert_eq!(
+            png_background_dropdown_position(Some(HalftoneChannelModel::SourceColorAlpha)),
+            0
+        );
+        assert_eq!(png_background_dropdown_position(None), 0);
+        assert_eq!(
+            png_background_for_dropdown_position(1),
+            RasterBackground::OpaqueBlack
+        );
+        assert_eq!(
+            png_background_for_dropdown_position(2),
+            RasterBackground::OpaqueWhite
+        );
+        assert_eq!(
+            png_background_for_dropdown_position(gtk::INVALID_LIST_POSITION),
+            RasterBackground::Transparent
+        );
+    }
+
     /// Builds an app-owned main history whose private drafts use the Pattern Editor publication boundary.
     fn private_draft_main_history() -> DocumentHistory {
         let document = Document::new_default_document(
@@ -7656,6 +9752,16 @@ mod tests {
         )
         .expect("default app document");
         DocumentHistory::new(DocumentSession::new(document).expect("valid app session"))
+    }
+
+    /// Builds a current-schema source-backed workspace from the immutable PNG input.
+    fn direct_png_workspace() -> Workspace {
+        Workspace::from_direct(
+            Arc::from(fs::read(asset("raster-sample.png")).expect("immutable PNG input reads")),
+            SourceFormatHint::Png,
+            "raster-sample.png".to_owned(),
+        )
+        .expect("immutable PNG input creates a current workspace")
     }
 
     /// Builds one valid modeled ConnectionPaths document for inspector-command authority tests.
@@ -8431,6 +10537,7 @@ mod tests {
             "/com/silentbutdigital/Toniator/window.ui",
             "/com/silentbutdigital/Toniator/channel-editor.ui",
             "/com/silentbutdigital/Toniator/pattern-editor.ui",
+            "/com/silentbutdigital/Toniator/advanced-settings.ui",
             "/com/silentbutdigital/Toniator/preset-row.ui",
             "/com/silentbutdigital/Toniator/confirmation-dialog.ui",
             "/com/silentbutdigital/Toniator/png-export-options.ui",
@@ -8446,6 +10553,19 @@ mod tests {
     fn temporary(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/validation/stage-13a")
+            .join(format!(
+                "{name}-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+    }
+
+    /// Returns one unique Stage 21A validation path without touching historical fixtures.
+    fn stage21a_temporary(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/validation/stage21a-app-tests")
             .join(format!(
                 "{name}-{}",
                 SystemTime::now()
@@ -8476,6 +10596,7 @@ mod tests {
         }
     }
 
+    /// Verifies startup path parsing and the complete current still-source suffix vocabulary.
     #[test]
     fn startup_inputs_and_extensions_are_stable() {
         assert_eq!(parse_args(vec![]).unwrap(), None);
@@ -8485,19 +10606,34 @@ mod tests {
         );
         assert!(parse_args(vec!["one.png".into(), "two.svg".into()]).is_err());
         assert!(is_container_path(Path::new("A.TONIATOR")));
-        assert!(
-            format_hint_for_path(Path::new("x.jpg"))
-                .unwrap_err()
-                .contains(".toniator, PNG, and SVG")
-        );
+        for (path, expected) in [
+            ("x.jpg", SourceFormatHint::Jpeg),
+            ("x.JPEG", SourceFormatHint::Jpeg),
+            ("x.webp", SourceFormatHint::Webp),
+            ("x.bmp", SourceFormatHint::Bmp),
+            ("x.tif", SourceFormatHint::Tiff),
+            ("x.TIFF", SourceFormatHint::Tiff),
+            ("x.exr", SourceFormatHint::OpenExr),
+            ("x.avif", SourceFormatHint::Avif),
+        ] {
+            assert_eq!(format_hint_for_path(Path::new(path)).unwrap(), expected);
+        }
+        assert!(format_hint_for_path(Path::new("x.gif")).is_err());
     }
 
+    /// Verifies new workspaces stay empty while direct artwork requests initial visible progress.
+    ///
+    /// # Panics
+    ///
+    /// Panics when source-backed installation no longer identifies a required
+    /// initial preview or source-less New begins a fabricated submission.
     #[test]
     fn new_and_direct_workspaces_have_revision_zero_and_expected_save_state() {
         let new = Workspace::from_new().unwrap();
         assert_eq!(new.history.revision().0, 0);
         assert!(!new.history.can_undo() && !new.history.can_redo());
         assert!(!new.is_dirty() && !new.can_save());
+        assert!(!workspace_requires_initial_preview(&new));
         let png = Workspace::from_direct(
             Arc::from(fs::read(asset("raster-sample.png")).unwrap()),
             SourceFormatHint::Png,
@@ -8506,6 +10642,7 @@ mod tests {
         .unwrap();
         assert_eq!(png.history.revision().0, 0);
         assert!(png.is_dirty() && png.can_save());
+        assert!(workspace_requires_initial_preview(&png));
         assert_eq!(
             png.document().canvas(),
             &CanvasSpec {
@@ -8755,13 +10892,13 @@ mod tests {
         assert!(!accepts_preview_submission(41, Some(old), 8));
     }
 
-    /// Proves private pending state clears only for the current epoch and newest ticket.
+    /// Proves every private editor clears pending state only for its current epoch and newest ticket.
     #[test]
-    fn draft_preview_terminal_gate_rejects_stale_epoch_and_ticket() {
-        assert!(accepts_draft_preview_terminal(9, Some(14), 9, 14));
-        assert!(!accepts_draft_preview_terminal(9, Some(14), 8, 14));
-        assert!(!accepts_draft_preview_terminal(9, Some(14), 9, 13));
-        assert!(!accepts_draft_preview_terminal(9, None, 9, 14));
+    fn private_preview_terminal_gate_rejects_stale_epoch_and_ticket() {
+        assert!(accepts_private_preview_terminal(9, Some(14), 9, 14));
+        assert!(!accepts_private_preview_terminal(9, Some(14), 8, 14));
+        assert!(!accepts_private_preview_terminal(9, Some(14), 9, 13));
+        assert!(!accepts_private_preview_terminal(9, None, 9, 14));
     }
 
     #[test]
@@ -8942,6 +11079,7 @@ mod tests {
         assert!(Workspace::from_container(Path::new("missing.toniator")).is_err());
     }
 
+    /// Verifies the lifecycle labels and the complete supported-source filter vocabulary.
     #[test]
     fn lifecycle_names_filters_titles_and_raw_presentation_contracts_are_stable() {
         let workspace = Workspace::from_new().unwrap();
@@ -8957,9 +11095,16 @@ mod tests {
         assert_eq!(
             OPEN_FILTER_LABELS,
             [
+                "All supported files",
                 "Toniator documents (.toniator)",
                 "PNG artwork",
-                "SVG artwork"
+                "SVG artwork",
+                "JPEG artwork",
+                "WebP artwork",
+                "BMP artwork",
+                "TIFF artwork",
+                "OpenEXR artwork",
+                "AVIF artwork"
             ]
         );
         assert_eq!(SAVE_FILTER_LABEL, "Toniator documents (.toniator)");
@@ -9037,8 +11182,13 @@ mod tests {
         assert!(parse_output_target("96x64").unwrap().is_some());
         assert!(parse_output_target("96").is_err());
         assert!(matches!(save_route(Some(&direct)), SaveRoute::SaveAs));
-        let mut container = load_workspace(&asset("raster-sample.toniator")).unwrap();
-        assert_eq!(container.title(), "raster-sample.toniator — Toniator");
+        let saved = stage21a_temporary("lifecycle-current").with_extension("toniator");
+        fs::create_dir_all(saved.parent().unwrap()).unwrap();
+        let snapshot = direct.snapshot();
+        save_container(&saved, &snapshot.document, &snapshot.sources).unwrap();
+        let mut container = load_workspace(&saved).unwrap();
+        let saved_name = saved.file_name().unwrap().to_string_lossy();
+        assert_eq!(container.title(), format!("{saved_name} — Toniator"));
         let id = container.document().channel_topology().unwrap().channels()[0].id;
         container
             .history
@@ -9047,7 +11197,7 @@ mod tests {
                 visible: false,
             })
             .unwrap();
-        assert_eq!(container.title(), "raster-sample.toniator* — Toniator");
+        assert_eq!(container.title(), format!("{saved_name}* — Toniator"));
     }
 
     #[test]
@@ -9338,8 +11488,13 @@ mod tests {
         );
         assert_eq!(
             channel_id_at_selector_position(1, &ids),
+            Some(ChannelId(30)),
+            "position zero belongs to ALL and position one starts document order"
+        );
+        assert_eq!(
+            channel_id_at_selector_position(2, &ids),
             Some(ChannelId(10)),
-            "a valid GTK position resolves through authoritative document order"
+            "named channels retain their authoritative stable-ID order"
         );
         assert_eq!(
             channel_id_at_selector_position(gtk::INVALID_LIST_POSITION, &ids),
@@ -9347,10 +11502,546 @@ mod tests {
             "GTK's invalid position cannot alter selected channel state"
         );
         assert_eq!(
-            channel_id_at_selector_position(3, &ids),
+            channel_id_at_selector_position(4, &ids),
             None,
             "out-of-range positions cannot select a stale channel"
         );
+        assert_eq!(
+            inspector_target_after_transition(InspectorTarget::DocumentAll, &ids),
+            InspectorTarget::DocumentAll,
+            "ALL survives every topology change without a fabricated channel"
+        );
+        assert_eq!(
+            inspector_target_after_transition(InspectorTarget::Channel(ChannelId(99)), &ids),
+            InspectorTarget::DocumentAll,
+            "a removed named target falls back to ALL"
+        );
+    }
+
+    /// Verifies ALL projects only capability-valid document controls while named channels retain
+    /// inherited values, explicit reset affordances, and additive density intent across base edits.
+    #[test]
+    fn stage21a_all_and_named_inspectors_preserve_their_authority_boundaries() {
+        let mut workspace = direct_png_workspace();
+        let channel_id = authoritative_channel_ids(workspace.document())[0];
+        let all_values =
+            inline_inspector_values(workspace.document(), InspectorTarget::DocumentAll);
+        assert!(all_values.iter().any(|value| {
+            value.descriptor.target == PropertyTarget::Document
+                && value.descriptor.field == PropertyFieldId::Density
+        }));
+        assert!(all_values.iter().any(|value| {
+            value.descriptor.target == PropertyTarget::Document
+                && value.descriptor.field == PropertyFieldId::DensityAspect
+        }));
+        assert!(all_values.iter().all(|value| {
+            value.descriptor.target == PropertyTarget::Document
+                && workspace
+                    .document()
+                    .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+                    .expect("default base capability projects")
+                    .active_controls
+                    .contains(&value.descriptor)
+        }));
+
+        let inherited =
+            inline_inspector_values(workspace.document(), InspectorTarget::Channel(channel_id));
+        for field in [PropertyFieldId::Density, PropertyFieldId::DensityAspect] {
+            let value = inherited
+                .iter()
+                .find(|value| value.descriptor.field == field)
+                .expect("named channel exposes inherited density pair");
+            assert_eq!(value.inheritance, PropertyInheritance::Inherited);
+            assert!(value.descriptor.reset_capable);
+            assert!(value.authored_value.is_none());
+        }
+
+        let desired = DensityMetric2D {
+            density: workspace.document().pattern_settings().density.density + 7.0,
+            aspect: 2.0,
+        };
+        let command = workspace
+            .document()
+            .set_channel_density_for_effective(channel_id, desired)
+            .expect("positive named-channel density pair forms one command");
+        workspace
+            .history
+            .apply(&command)
+            .expect("named-channel density pair applies atomically");
+        let delta = workspace
+            .document()
+            .channel_pattern_instance(channel_id)
+            .expect("named-channel pattern instance remains authoritative")
+            .layout_delta
+            .density
+            .clone();
+        let next_base_density = workspace.document().pattern_settings().density.density + 11.0;
+        let base_command = workspace
+            .document()
+            .set_document_density_field(DensityEditedField::Density, next_base_density)
+            .expect("positive ALL density edit forms one base command");
+        workspace
+            .history
+            .apply(&base_command)
+            .expect("ordinary ALL density edit applies");
+        assert_eq!(
+            workspace
+                .document()
+                .channel_pattern_instance(channel_id)
+                .expect("channel survives the base edit")
+                .layout_delta
+                .density,
+            delta,
+            "ordinary ALL edits preserve additive channel density/aspect intent"
+        );
+        let explicit_density =
+            inline_inspector_values(workspace.document(), InspectorTarget::Channel(channel_id))
+                .into_iter()
+                .find(|value| value.descriptor.field == PropertyFieldId::Density)
+                .expect("explicit density remains projected after the ALL edit");
+        assert_eq!(explicit_density.inheritance, PropertyInheritance::Explicit);
+        let reset =
+            reset_command_for_descriptor(workspace.document(), &explicit_density.descriptor)
+                .expect("density descriptor advertises its atomic reset command");
+        workspace
+            .history
+            .apply(&reset)
+            .expect("density/aspect reset removes optional intent");
+        for field in [PropertyFieldId::Density, PropertyFieldId::DensityAspect] {
+            let value =
+                inline_inspector_values(workspace.document(), InspectorTarget::Channel(channel_id))
+                    .into_iter()
+                    .find(|value| value.descriptor.field == field)
+                    .expect("reset density pair stays visible as inherited");
+            assert_eq!(value.inheritance, PropertyInheritance::Inherited);
+            assert!(value.authored_value.is_none());
+        }
+    }
+
+    /// Verifies a three-guide recipe exposes the authoritative positive density/aspect pair and
+    /// resolves a 2:1 spacing ratio without any intermediate stored across-X/across-Y state.
+    #[test]
+    fn stage21a_three_guide_recipe_accepts_atomic_density_aspect_layout() {
+        let mut workspace = direct_png_workspace();
+        PresetRegistry::bundled()
+            .apply_to_document_base(&mut workspace.history, "three-guide-cells-scale")
+            .expect("three-guide bundled recipe applies to ALL");
+        let fields = inline_inspector_values(workspace.document(), InspectorTarget::DocumentAll)
+            .into_iter()
+            .map(|value| value.descriptor.field)
+            .collect::<BTreeSet<_>>();
+        assert!(fields.contains(&PropertyFieldId::Density));
+        assert!(fields.contains(&PropertyFieldId::DensityAspect));
+        let command = workspace
+            .document()
+            .set_document_density_field(DensityEditedField::Aspect, 2.0)
+            .expect("2:1 density aspect is positive");
+        workspace
+            .history
+            .apply(&command)
+            .expect("three-guide aspect applies in one document command");
+        let channel_id = authoritative_channel_ids(workspace.document())[0];
+        let resolved = workspace
+            .document()
+            .effective_channel_pattern(channel_id)
+            .expect("three-guide layout resolves")
+            .resolved_density;
+        assert!(resolved.across_x.is_finite() && resolved.across_x > 0.0);
+        assert!(resolved.across_y.is_finite() && resolved.across_y > 0.0);
+        assert!((resolved.across_y / resolved.across_x - 2.0).abs() < 1e-12);
+    }
+
+    /// Keeps Advanced Settings source proxies bounded, source-faithful, and independent of main authority.
+    ///
+    /// This test uses both immutable baselines without writing them. It verifies only the dialog
+    /// preparation helper: the source reference ID is retained, PNG bytes are supported, and the
+    /// full workspace document/source bundle remain unchanged.
+    #[test]
+    fn stage21a_advanced_preview_uses_one_bounded_proxy_for_png_and_svg_sources() {
+        for (name, hint, expected) in [
+            ("raster-sample.png", SourceFormatHint::Png, (128, 128)),
+            ("vector-sample.svg", SourceFormatHint::Svg, (128, 88)),
+        ] {
+            let workspace = Workspace::from_direct(
+                Arc::from(fs::read(asset(name)).expect("immutable source reads")),
+                hint,
+                name.to_owned(),
+            )
+            .expect("immutable source creates a workspace");
+            let before = workspace.document().clone();
+            let presentation = workspace
+                .source_presentation
+                .as_ref()
+                .expect("direct source has presentation");
+            let proxy = prepare_advanced_preview_source(&workspace.sources, Some(presentation));
+            let AdvancedPreviewSource::Ready {
+                source,
+                width,
+                height,
+            } = proxy
+            else {
+                panic!("{name} builds a private preview proxy")
+            };
+            assert_eq!((width, height), expected);
+            assert_eq!(source.reference_id(), &presentation.id);
+            assert_eq!(source.format(), SourceFormatHint::Png);
+            assert_eq!(
+                resolve_source_identity(source.bytes(), source.format())
+                    .expect("proxy bytes remain a supported PNG identity"),
+                resolve_source_identity(source.bytes(), SourceFormatHint::Png)
+                    .expect("proxy keeps deterministic PNG identity")
+            );
+            assert_eq!(workspace.document(), &before);
+        }
+    }
+
+    /// Resolves sequential selected-copy Advanced Settings edits against current structural descriptors.
+    ///
+    /// The test deliberately retains locators made before replacement, applies multiple structural
+    /// edits that allocate fresh IDs, and proves each next command targets the current draft. It
+    /// also returns site weighting to Luminance, guarding against stale-selector no-ops.
+    #[test]
+    fn stage21a_advanced_locators_survive_selected_copy_and_preserve_sequential_edits() {
+        let mut workspace = direct_png_workspace();
+        let channel_id = authoritative_channel_ids(workspace.document())[0];
+        PresetRegistry::bundled()
+            .apply_to_selected(
+                &mut workspace.history,
+                channel_id,
+                "source-weighted-dispersion-voronoi",
+            )
+            .expect("source-weighted preset creates one selected copy");
+        let target = InspectorTarget::Channel(channel_id);
+        let values = advanced_settings_values(workspace.document(), target);
+        let sampling_locator = advanced_descriptor_locator(
+            workspace.document(),
+            target,
+            &values
+                .iter()
+                .find(|value| value.descriptor.field == PropertyFieldId::RegionSampling)
+                .expect("region sampling is active")
+                .descriptor,
+        )
+        .expect("region sampling obtains an unambiguous locator");
+        let minimum_locator = advanced_descriptor_locator(
+            workspace.document(),
+            target,
+            &values
+                .iter()
+                .find(|value| value.descriptor.field == PropertyFieldId::RegionMinimumFill)
+                .expect("region minimum fill is active")
+                .descriptor,
+        )
+        .expect("region minimum obtains an unambiguous locator");
+        let weight_locator = advanced_descriptor_locator(
+            workspace.document(),
+            target,
+            &values
+                .iter()
+                .find(|value| {
+                    value.descriptor.field == PropertyFieldId::ArtworkWeightMappingComponent
+                })
+                .expect("site weight component is active")
+                .descriptor,
+        )
+        .expect("site weight obtains an unambiguous locator");
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        for (locator, input) in [
+            (
+                sampling_locator,
+                InspectorInput::EnumChoice(PropertyEnumChoice::RegionSampling(
+                    toniator_domain::RegionSamplingStrategy::ReferencePoint,
+                )),
+            ),
+            (minimum_locator, InspectorInput::FiniteF64(0.25)),
+            (
+                weight_locator,
+                InspectorInput::EnumChoice(PropertyEnumChoice::SourceMappingComponent(
+                    SourceMappingComponent::Red,
+                )),
+            ),
+            (
+                weight_locator,
+                InspectorInput::EnumChoice(PropertyEnumChoice::SourceMappingComponent(
+                    SourceMappingComponent::Luminance,
+                )),
+            ),
+        ] {
+            let current = resolve_current_advanced_value(draft.document(), target, locator)
+                .expect("selected-copy locator resolves the current draft descriptor");
+            let command = command_for_inspector_input(
+                draft.document(),
+                Some(channel_id),
+                DefinitionEditScope::SelectedCopy,
+                &current.descriptor,
+                input,
+            )
+            .expect("current descriptor creates a selected-copy command");
+            draft
+                .apply(&command)
+                .expect("sequential selected-copy command applies");
+        }
+        let values = advanced_settings_values(draft.document(), target);
+        assert!(matches!(
+            resolve_current_advanced_value(draft.document(), target, sampling_locator)
+                .expect("sampling remains active")
+                .value,
+            PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::RegionSampling(
+                toniator_domain::RegionSamplingStrategy::ReferencePoint
+            ))
+        ));
+        assert!(matches!(
+            resolve_current_advanced_value(draft.document(), target, minimum_locator)
+                .expect("minimum remains active")
+                .value,
+            PropertyCurrentValueKind::FiniteF64(value) if (value - 0.25).abs() < 1e-12
+        ));
+        assert!(matches!(
+            resolve_current_advanced_value(draft.document(), target, weight_locator)
+                .expect("site weight remains active")
+                .value,
+            PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SourceMappingComponent(
+                SourceMappingComponent::Luminance
+            ))
+        ));
+        assert!(values.iter().any(|value| {
+            value.descriptor.field == PropertyFieldId::ArtworkWeightMappingComponent
+        }));
+    }
+
+    /// Routes repeated output fields through structural anchors across ID renewal and rejects a meaningful reorder.
+    ///
+    /// This widget-independent test models two equal field controls on distinct structural output
+    /// paths. Renewed allocation IDs preserve the same painter paths and resolve editable controls;
+    /// a same-count reorder that replaces the expected Regions path with Marks fails safely.
+    #[test]
+    fn stage21a_advanced_locator_routes_repeated_outputs_and_rejects_same_count_reorder() {
+        let mut workspace = direct_png_workspace();
+        let channel_id = authoritative_channel_ids(workspace.document())[0];
+        PresetRegistry::bundled()
+            .apply_to_selected(
+                &mut workspace.history,
+                channel_id,
+                "source-weighted-dispersion-voronoi",
+            )
+            .expect("source-weighted preset creates a selected copy");
+        let value =
+            advanced_settings_values(workspace.document(), InspectorTarget::Channel(channel_id))
+                .into_iter()
+                .find(|value| value.descriptor.field == PropertyFieldId::RegionMinimumFill)
+                .expect("region minimum fill is active");
+        let mut first = value.clone();
+        first.descriptor.target =
+            PropertyTarget::ChannelOutput(channel_id, PatternOutputLayerId(901));
+        let mut second = value;
+        second.descriptor.target =
+            PropertyTarget::ChannelOutput(channel_id, PatternOutputLayerId(902));
+        let original = vec![first.clone(), second.clone()];
+        let original_anchor = |target| match target {
+            PropertyTarget::ChannelOutput(_, PatternOutputLayerId(901)) => {
+                Some(AdvancedOutputAnchor {
+                    painter_index: 0,
+                    structural_kind: AdvancedOutputStructuralKind::Regions,
+                })
+            }
+            PropertyTarget::ChannelOutput(_, PatternOutputLayerId(902)) => {
+                Some(AdvancedOutputAnchor {
+                    painter_index: 1,
+                    structural_kind: AdvancedOutputStructuralKind::Regions,
+                })
+            }
+            _ => None,
+        };
+        let first_locator = advanced_descriptor_locator_from_values(
+            &original,
+            &original[0].descriptor,
+            original_anchor,
+        )
+        .expect("the first repeated output receives its painter-path locator");
+        let second_locator = advanced_descriptor_locator_from_values(
+            &original,
+            &original[1].descriptor,
+            original_anchor,
+        )
+        .expect("the second repeated output receives its painter-path locator");
+        assert_ne!(first_locator, second_locator);
+
+        let mut renewed_first = first;
+        renewed_first.descriptor.target =
+            PropertyTarget::ChannelOutput(channel_id, PatternOutputLayerId(903));
+        let mut renewed_second = second;
+        renewed_second.descriptor.target =
+            PropertyTarget::ChannelOutput(channel_id, PatternOutputLayerId(904));
+        let renewed = vec![renewed_first.clone(), renewed_second.clone()];
+        let renewed_anchor = |target| match target {
+            PropertyTarget::ChannelOutput(_, PatternOutputLayerId(903)) => {
+                Some(AdvancedOutputAnchor {
+                    painter_index: 0,
+                    structural_kind: AdvancedOutputStructuralKind::Regions,
+                })
+            }
+            PropertyTarget::ChannelOutput(_, PatternOutputLayerId(904)) => {
+                Some(AdvancedOutputAnchor {
+                    painter_index: 1,
+                    structural_kind: AdvancedOutputStructuralKind::Regions,
+                })
+            }
+            _ => None,
+        };
+        assert_eq!(
+            resolve_advanced_value_from_values(&renewed, first_locator, renewed_anchor)
+                .expect("renewed first output retains its structural route")
+                .descriptor
+                .target,
+            renewed_first.descriptor.target
+        );
+        assert_eq!(
+            resolve_advanced_value_from_values(&renewed, second_locator, renewed_anchor)
+                .expect("renewed second output retains its structural route")
+                .descriptor
+                .target,
+            renewed_second.descriptor.target
+        );
+
+        let reordered_anchor = |target| match target {
+            PropertyTarget::ChannelOutput(_, PatternOutputLayerId(903)) => {
+                Some(AdvancedOutputAnchor {
+                    painter_index: 0,
+                    structural_kind: AdvancedOutputStructuralKind::Marks,
+                })
+            }
+            PropertyTarget::ChannelOutput(_, PatternOutputLayerId(904)) => {
+                Some(AdvancedOutputAnchor {
+                    painter_index: 1,
+                    structural_kind: AdvancedOutputStructuralKind::Regions,
+                })
+            }
+            _ => None,
+        };
+        assert!(
+            resolve_advanced_value_from_values(&renewed, first_locator, reordered_anchor).is_err(),
+            "a same-count reorder with a changed realization path cannot retarget the first control"
+        );
+    }
+
+    /// Projects explicit region and site-weight vocabulary without changing domain applicability.
+    #[test]
+    fn stage21a_advanced_region_labels_choices_and_help_are_artist_facing() {
+        assert_eq!(
+            inspector_field_label(PropertyFieldId::RegionResizeAlgorithm),
+            "Region resize"
+        );
+        assert_eq!(
+            inspector_field_label(PropertyFieldId::RegionSampling),
+            "Region source sampling"
+        );
+        assert_eq!(
+            inspector_field_label(PropertyFieldId::RegionMinimumFill),
+            "Minimum fill"
+        );
+        assert_eq!(
+            inspector_field_label(PropertyFieldId::RegionMaximumFill),
+            "Maximum fill"
+        );
+        assert_eq!(
+            inspector_field_label(PropertyFieldId::ArtworkWeightMappingComponent),
+            "Site weight component"
+        );
+        assert_eq!(
+            enum_choice_label(PropertyEnumChoice::RegionResizeAlgorithm(
+                toniator_domain::RegionResizeAlgorithm::Scale
+            )),
+            "Scale"
+        );
+        assert_eq!(
+            enum_choice_label(PropertyEnumChoice::RegionResizeAlgorithm(
+                toniator_domain::RegionResizeAlgorithm::UniformOffset
+            )),
+            "Uniform offset"
+        );
+        assert_eq!(
+            enum_choice_label(PropertyEnumChoice::RegionSampling(
+                toniator_domain::RegionSamplingStrategy::ReferencePoint
+            )),
+            "Reference point"
+        );
+        assert_eq!(
+            enum_choice_label(PropertyEnumChoice::RegionSampling(
+                toniator_domain::RegionSamplingStrategy::AreaAverage
+            )),
+            "Area average"
+        );
+        assert!(
+            advanced_descriptor_description(PropertyFieldId::ArtworkWeightMappingComponent)
+                .expect("site weighting has visible helper text")
+                .contains("where Voronoi sites cluster")
+        );
+        assert!(
+            advanced_descriptor_description(PropertyFieldId::RegionSampling)
+                .expect("region sampling has visible helper text")
+                .contains("full value only at 50% or greater coverage")
+        );
+    }
+
+    /// Verifies Advanced Settings edits remain private through cancel and publish as exactly one
+    /// main-history transition whose single Undo restores the exact pre-dialog document.
+    #[test]
+    fn stage21a_advanced_settings_cancel_and_apply_keep_one_atomic_history_boundary() {
+        let mut workspace = direct_png_workspace();
+        let channel_id = authoritative_channel_ids(workspace.document())[0];
+        let base = workspace.document().clone();
+        let color_value =
+            advanced_settings_values(workspace.document(), InspectorTarget::Channel(channel_id))
+                .into_iter()
+                .find(|value| value.descriptor.field == PropertyFieldId::ColorRed)
+                .expect("named RGB channel exposes capability-valid color in Advanced Settings");
+        let next_red = match color_value.value {
+            PropertyCurrentValueKind::FiniteF64(value) if (value - 0.314).abs() < 1e-12 => 0.271,
+            PropertyCurrentValueKind::FiniteF64(_) => 0.314,
+            _ => panic!("color descriptor carries a finite component"),
+        };
+        let color = color_value.descriptor;
+
+        let mut cancelled = DocumentHistory::new_draft(&workspace.history);
+        let command = command_for_inspector_input(
+            cancelled.document(),
+            Some(channel_id),
+            DefinitionEditScope::SelectedCopy,
+            &color,
+            InspectorInput::FiniteF64(next_red),
+        )
+        .expect("private Advanced Settings color input forms a typed command");
+        cancelled
+            .apply(&command)
+            .expect("private Advanced Settings command applies to its draft");
+        assert_ne!(cancelled.document(), &base);
+        drop(cancelled);
+        assert_eq!(
+            workspace.document(),
+            &base,
+            "Cancel discards the private draft"
+        );
+        assert!(!workspace.history.can_undo());
+
+        let mut applied = DocumentHistory::new_draft(&workspace.history);
+        applied
+            .apply(&command)
+            .expect("the same valid edit applies to a fresh private draft");
+        let final_document = applied.document().clone();
+        let revision = workspace.history.revision();
+        let result = workspace
+            .history
+            .squash_draft(&applied)
+            .expect("Apply squashes the private Advanced Settings draft");
+        assert!(!result.unchanged);
+        assert_eq!(workspace.history.revision().0, revision.0 + 1);
+        assert_eq!(workspace.document(), &final_document);
+        workspace
+            .history
+            .undo()
+            .expect("one Undo restores the pre-dialog document");
+        assert_eq!(workspace.document(), &base);
+        assert!(!workspace.history.can_undo());
     }
 
     #[test]
@@ -9440,7 +12131,8 @@ mod tests {
     #[test]
     fn inspector_runtime_resets_document_scoped_transients_but_not_ordinary_selection_logic() {
         let mut runtime = InspectorRuntime {
-            selected_channel: Some(ChannelId(44)),
+            target: InspectorTarget::Channel(ChannelId(44)),
+            pattern_candidate: Some(PatternCandidate::Preset("test-preset".into())),
             scope: DefinitionEditScope::SelectedCopy,
             drafts: BTreeMap::from([("opacity".into(), "1.5".into())]),
             expanded_groups: BTreeSet::from(["Active family".into()]),
@@ -9610,11 +12302,13 @@ mod tests {
         );
     }
 
-    /// Preserves the existing preview-page policy while asserting the bounded
-    /// Pattern Editor disclosure contract: ordinary structural controls are
-    /// primary and only explicit work-limit/tolerance fields are collapsed.
-    /// This pure metadata test does not create GTK widgets, document history,
-    /// preview state, errors, or panics beyond its assertions.
+    /// Preserves preview-page and persistent-help metadata without creating GTK widgets.
+    ///
+    /// This test fixes the bounded Pattern Editor disclosure contract and the
+    /// connected minimum-thickness helper source. Widget construction renders
+    /// any returned helper as an exposed label; fields with no text retain the
+    /// ordinary compact row. The test has no document, history, preview, error,
+    /// or panic side effects beyond its assertions.
     #[test]
     fn inspector_disclosure_metadata_and_preview_pages_preserve_accepted_content() {
         assert!(is_pattern_editor_advanced_safety_descriptor(
@@ -9639,9 +12333,48 @@ mod tests {
             "Count"
         );
         assert_eq!(page_while_preview_pending(true), Page::Success);
-        assert_eq!(page_while_preview_pending(false), Page::Loading);
+        assert_eq!(page_while_preview_pending(false), Page::Success);
         assert_eq!(page_after_preview_error(true), Page::Success);
         assert_eq!(page_after_preview_error(false), Page::Error);
+        assert_eq!(
+            advanced_descriptor_description(PropertyFieldId::ConnectedMinimumThickness),
+            Some(
+                "Lower bound of source-driven stroke width; setting it to zero only removes strokes where sampled ink is zero."
+            )
+        );
+        assert_eq!(
+            advanced_descriptor_description(PropertyFieldId::ConnectedMaximumThickness),
+            None
+        );
+    }
+
+    /// Keeps queued work artist-visible and preserves stable evaluator diagnostics on failure.
+    #[test]
+    fn preview_status_text_tracks_queued_work_and_specific_failures() {
+        assert_eq!(preview_tooltip(true, true), "Rendering preview…");
+        assert_eq!(preview_tooltip(true, false), "Rendering preview…");
+        assert_eq!(preview_tooltip(false, true), "Preview updated.");
+        assert_eq!(preview_tooltip(false, false), "No preview yet");
+        assert_eq!(
+            preview_progress_stage_label(
+                toniator_engine::EvaluationProgressStage::GeneratingGeometry
+            ),
+            "Generating pattern geometry…"
+        );
+        assert_eq!(
+            preview_progress_stage_label(
+                toniator_engine::EvaluationProgressStage::RasterizingPreview
+            ),
+            "Rasterizing preview…"
+        );
+        let error = toniator_engine::EvaluationError::new(
+            "pattern.family.geometry",
+            "generated geometry is invalid",
+        );
+        assert_eq!(
+            main_preview_failure_message(Some(&error)),
+            "Couldn’t render this pattern. Your last preview is still shown. pattern.family.geometry: generated geometry is invalid"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelGeometryResponseDelta, ChannelId, ChannelPatternInstance,
     ChannelPatternLayoutDelta, ChannelSourceMapping, ChannelState, ColorValue, CoveragePolicy,
-    DensityEditedAxis, DensityMetric2D, DensityMetricDelta2D, Document, DocumentCommand,
+    DensityEditedField, DensityMetric2D, DensityMetricDelta2D, Document, DocumentCommand,
     DocumentHistory, DocumentId, DocumentSession, DocumentSessionError, InvalidationLevel,
     MarkGeometryFieldEdit, MarkGeometryResponse, MarkGeometryResponseDelta, PatternDefinition,
     PatternDefinitionDraft, PatternDefinitionId, PatternDefinitionRecipe, PatternGeometryResponse,
@@ -100,14 +100,12 @@ fn effective_pattern_composes_typed_channel_deltas() {
     let density = document
         .set_channel_density_for_effective(
             ChannelId(2),
-            DensityEditedAxis::AcrossY,
             DensityMetric2D {
-                across_x: 20.0,
-                across_y: 16.0,
-                aspect_locked: false,
+                density: 16.0,
+                aspect: 1.25,
             },
         )
-        .expect("domain derives a locked pair");
+        .expect("domain derives additive density and aspect intent");
     let (document, _) = document.apply_command(&density).expect("density applies");
     let rotation = document
         .set_channel_pattern_rotation_for_effective(ChannelId(2), 33.0)
@@ -131,7 +129,8 @@ fn effective_pattern_composes_typed_channel_deltas() {
     let effective = document
         .effective_channel_pattern(ChannelId(2))
         .expect("channel resolves");
-    assert_eq!(effective.density.across_y, 16.0);
+    assert_eq!(effective.density.density, 16.0);
+    assert_eq!(effective.density.aspect, 1.25);
     assert_eq!(effective.pattern_rotation_degrees, 33.0);
     assert_eq!(effective.shape_rotation_degrees, -12.0);
     let PatternGeometryResponse::Marks(response) = &effective.output_settings[0].response else {
@@ -149,7 +148,7 @@ fn channel_delta_rejects_stale_document_base() {
         .set_channel_pattern_rotation_for_effective(ChannelId(1), 10.0)
         .expect("command builds");
     let new_base = document
-        .set_document_density_aspect_lock(false)
+        .set_document_density_field(DensityEditedField::Aspect, 1.25)
         .expect("base command builds");
     let (document, _) = document.apply_command(&new_base).expect("base applies");
     assert!(document.apply_command(&command).is_err());
@@ -230,10 +229,14 @@ fn partial_mark_delta_keeps_companion_inherited_and_base_not_resettable() {
     assert_eq!(minimum.inheritance, PropertyInheritance::Explicit);
     assert_eq!(maximum.inheritance, PropertyInheritance::Inherited);
     assert!(minimum.descriptor.reset_capable);
-    assert!(!values.iter().any(|value| {
-        matches!(value.descriptor.target, PropertyTarget::Channel(_))
-            && value.descriptor.field == PropertyFieldId::DensityAspectLocked
-    }));
+    let aspect = values
+        .iter()
+        .find(|value| {
+            value.descriptor.target == PropertyTarget::Channel(ChannelId(1))
+                && value.descriptor.field == PropertyFieldId::DensityAspect
+        })
+        .expect("channel density aspect descriptor");
+    assert!(aspect.descriptor.reset_capable);
 }
 
 /// Resolves both retained channel configurations through the same domain-only projection.
@@ -293,35 +296,38 @@ fn rotations_are_additive_without_normalization_and_overflow_is_rejected() {
     assert!(document.apply_command(&overflow).is_err());
 }
 
-/// Derives the locked companion density axis for edits originating on either axis.
+/// Stores density and aspect atomically and resolves the requested rectangular spacing ratio.
 #[test]
-fn aspect_lock_derives_both_document_and_channel_companion_axes() {
+fn density_and_aspect_resolve_without_intermediate_axis_state() {
     let document = document();
     let command = document
-        .set_document_density_axis(DensityEditedAxis::AcrossY, 25.0)
-        .expect("document Y edit builds");
+        .set_document_density_field(DensityEditedField::Density, 25.0)
+        .expect("document density edit builds");
     let document = apply(document, command);
-    assert_eq!(document.pattern_settings().density.across_x, 50.0);
-    assert_eq!(document.pattern_settings().density.across_y, 25.0);
+    assert_eq!(document.pattern_settings().density.density, 25.0);
+    assert_eq!(document.pattern_settings().density.aspect, 1.0);
 
     let command = document
         .set_channel_density_for_effective(
             ChannelId(1),
-            DensityEditedAxis::AcrossX,
             DensityMetric2D {
-                across_x: 32.0,
-                across_y: 999.0,
-                aspect_locked: false,
+                density: 32.0,
+                aspect: 2.0,
             },
         )
-        .expect("channel X edit builds");
+        .expect("channel density/aspect edit builds");
     let document = apply(document, command);
     let effective = document
         .effective_channel_pattern(ChannelId(1))
         .expect("density resolves");
-    assert_eq!(effective.density.across_x, 32.0);
-    assert_eq!(effective.density.across_y, 16.0);
-    assert!(effective.density.aspect_locked);
+    assert_eq!(effective.density.density, 32.0);
+    assert_eq!(effective.density.aspect, 2.0);
+    let resolved = effective
+        .density
+        .resolve(document.canvas())
+        .expect("effective density resolves for evaluation");
+    assert!((resolved.across_x - 32.0).abs() < 1.0e-12);
+    assert!((resolved.across_y - 32.0).abs() < 1.0e-12);
 }
 
 /// Rejects missing definitions, invalid density, and every accepted mark-response bound atomically.
@@ -343,8 +349,8 @@ fn invalid_effective_values_never_publish_a_candidate() {
                 base: document.pattern_settings().clone(),
                 channel_id: ChannelId(1),
                 density: DensityMetricDelta2D {
-                    across_x_delta: -document.pattern_settings().density.across_x,
-                    across_y_delta: 0.0,
+                    density_delta: -document.pattern_settings().density.density,
+                    aspect_delta: 0.0,
                 },
             })
             .is_err()
@@ -387,15 +393,15 @@ fn document_base_edit_revalidates_every_existing_channel_atomically() {
         base: document.pattern_settings().clone(),
         channel_id: ChannelId(1),
         density: DensityMetricDelta2D {
-            across_x_delta: -19.0,
-            across_y_delta: -9.0,
+            density_delta: -10.0,
+            aspect_delta: -0.5,
         },
     };
     let document = apply(document, command);
     let before = document.clone();
     let mut settings = document.pattern_settings().clone();
-    settings.density.across_x = 10.0;
-    settings.density.across_y = 5.0;
+    settings.density.density = 10.0;
+    settings.density.aspect = 0.5;
     assert!(
         document
             .apply_command(&DocumentCommand::SetDocumentPatternSettings {
@@ -491,11 +497,9 @@ fn resets_remove_intent_and_follow_later_document_base_changes() {
     let density = document
         .set_channel_density_for_effective(
             ChannelId(1),
-            DensityEditedAxis::AcrossX,
             DensityMetric2D {
-                across_x: 30.0,
-                across_y: 15.0,
-                aspect_locked: true,
+                density: 30.0,
+                aspect: 1.0,
             },
         )
         .expect("density builds");
@@ -550,8 +554,8 @@ fn resets_remove_intent_and_follow_later_document_base_changes() {
 
     let mut settings = document.pattern_settings().clone();
     settings.definition_id = PatternDefinitionId(2);
-    settings.density.across_x = 40.0;
-    settings.density.across_y = 20.0;
+    settings.density.density = 40.0;
+    settings.density.aspect = 1.0;
     settings.pattern_rotation_degrees = 10.0;
     settings.shape_rotation_degrees = -10.0;
     let document = apply(
@@ -565,7 +569,7 @@ fn resets_remove_intent_and_follow_later_document_base_changes() {
         .effective_channel_pattern(ChannelId(1))
         .expect("reset channel inherits later base");
     assert_eq!(effective.definition_id, PatternDefinitionId(2));
-    assert_eq!(effective.density.across_x, 40.0);
+    assert_eq!(effective.density.density, 40.0);
     assert_eq!(effective.pattern_rotation_degrees, 10.0);
     assert_eq!(effective.shape_rotation_degrees, -10.0);
 }

@@ -1,9 +1,9 @@
 use std::fs;
 
 use toniator_domain::{
-    ArtworkWeightResponse, CanvasSpec, CoveragePolicy, DensityMetric2D, PatternDefinition,
-    PatternDefinitionId, PatternMechanism, PatternMechanismId, PatternOutputLayerId,
-    RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceMapping,
+    ArtworkWeightResponse, CanvasSpec, CoveragePolicy, PatternDefinition, PatternDefinitionId,
+    PatternMechanism, PatternMechanismId, PatternOutputLayerId, RandomSiteCharacter,
+    ResolvedDensityMetric2D, SiteDensityModulation, SiteExclusionPolicy, SourceMapping,
     SourceMappingComponent, SourcePlacement, validate_pattern_definition,
 };
 use toniator_patterns::{
@@ -20,10 +20,9 @@ fn request() -> GridInspectRequest {
             width: 120.0,
             height: 80.0,
         },
-        density: DensityMetric2D {
+        density: ResolvedDensityMetric2D {
             across_x: 10.0,
             across_y: 6.0,
-            aspect_locked: false,
         },
         rotation_degrees: 17.0,
         translation_x: 3.25,
@@ -40,10 +39,9 @@ fn natural_request() -> GridInspectRequest {
             width: 1024.0,
             height: 1024.0,
         },
-        density: DensityMetric2D {
+        density: ResolvedDensityMetric2D {
             across_x: 102.0,
             across_y: 102.0,
-            aspect_locked: true,
         },
         rotation_degrees: 0.0,
         translation_x: 0.0,
@@ -153,11 +151,13 @@ fn raw_even_and_clustered_are_seeded_distinct_and_even_is_not_an_alias() {
     assert!(pairwise_minimum(&raw) < 8.0);
 }
 
-/// Locks random-family geometry and identity outside the centered grid-local transform contract.
+/// Locks random-family geometry and policy-independent identity outside the centered grid-local transform contract.
 ///
 /// # Panics
 ///
-/// Panics when a straight-grid origin correction changes random-site distribution authority.
+/// Panics when a straight-grid origin correction changes random-site positions,
+/// or when inactive reserved attempt/neighbor policy values re-enter the
+/// current normal-evaluation identity.
 #[test]
 fn random_family_geometry_and_identity_ignore_grid_local_origin_corrections() {
     let raw = output(&definition(
@@ -168,7 +168,7 @@ fn random_family_geometry_and_identity_ignore_grid_local_origin_corrections() {
     ));
     assert_eq!(
         raw.family_fingerprint(),
-        "fnv1a64:17bc903a56a17094:nominal-cell-basis:fnv1a64:196b26aef625706e"
+        "fnv1a64:910474772e8bef7e:nominal-cell-basis:fnv1a64:9d2faa73a3482df4"
     );
     assert_eq!(
         raw.site_set()
@@ -670,8 +670,10 @@ fn validation_rejects_random_chain_order_nonfinite_and_bad_limits_before_evaluat
     );
 }
 
+/// Proves cancellation, fallible extreme-density handling, deterministic
+/// progress, and explicit evaluator limits remain while recipe caps are inactive.
 #[test]
-fn random_candidate_and_spatial_exclusion_work_obey_cancellation_and_limits() {
+fn random_work_obeys_cancellation_and_explicit_evaluator_limits_only() {
     let constrained_definition = definition(
         RandomSiteCharacter::Even {
             minimum_center_distance: 4.0,
@@ -694,6 +696,16 @@ fn random_candidate_and_spatial_exclusion_work_obey_cancellation_and_limits() {
     let error =
         evaluate_typed_family_product_cancellable(&plan.family, &limited, &|| false).unwrap_err();
     assert_eq!(error.path(), "coverage.candidate_limit");
+    let mut extreme = request();
+    let extreme_axis = (usize::MAX as f64).sqrt() * 0.99;
+    extreme.density = ResolvedDensityMetric2D {
+        across_x: extreme_axis,
+        across_y: extreme_axis,
+    };
+    extreme.max_family_candidates = usize::MAX;
+    let error = evaluate_typed_family_product_cancellable(&plan.family, &extreme, &|| false)
+        .expect_err("machine-unrepresentable padded work fails before allocation");
+    assert_eq!(error.path(), "channel.pattern.layout.density");
     let mut neighbor_limited = definition(
         RandomSiteCharacter::RawUniform,
         SiteDensityModulation::Uniform,
@@ -709,7 +721,36 @@ fn random_candidate_and_spatial_exclusion_work_obey_cancellation_and_limits() {
     };
     *maximum_neighbor_checks = 1;
     let plan = resolve_pattern_pipeline(&neighbor_limited).unwrap();
-    let error =
-        evaluate_typed_family_product_cancellable(&plan.family, &request(), &|| false).unwrap_err();
-    assert_eq!(error.path(), "coverage.random_sites.neighbor_limit");
+    let progress = std::sync::Mutex::new(Vec::new());
+    let output = toniator_patterns::evaluate_typed_family_product_with_source_progress_cancellable(
+        &plan.family,
+        &request(),
+        None,
+        &|| false,
+        &|completed, total| progress.lock().unwrap().push((completed, total)),
+    )
+    .expect("recipe neighbor caps do not limit normal creative evaluation");
+    assert!(!output.site_set().is_empty());
+    let progress = progress.into_inner().unwrap();
+    assert!(
+        progress.len() > 1,
+        "candidate work reports intermediate progress"
+    );
+    assert!(progress.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+    let &(completed, total) = progress.last().expect("progress completes");
+    assert_eq!(completed, total);
+    let repeated_progress = std::sync::Mutex::new(Vec::new());
+    let repeated =
+        toniator_patterns::evaluate_typed_family_product_with_source_progress_cancellable(
+            &plan.family,
+            &request(),
+            None,
+            &|| false,
+            &|completed, total| {
+                repeated_progress.lock().unwrap().push((completed, total));
+            },
+        )
+        .expect("repeated random evaluation succeeds");
+    assert_eq!(repeated.site_set(), output.site_set());
+    assert_eq!(repeated_progress.into_inner().unwrap(), progress);
 }

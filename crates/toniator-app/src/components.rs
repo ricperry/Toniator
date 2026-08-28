@@ -15,9 +15,13 @@ mod main_shell {
     #[template(resource = "/com/silentbutdigital/Toniator/window.ui")]
     pub struct ToniatorMainShell {
         #[template_child]
+        pub header: gtk::TemplateChild<gtk::HeaderBar>,
+        #[template_child]
         pub main_banner_revealer: gtk::TemplateChild<gtk::Revealer>,
         #[template_child]
         pub main_banner: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub main_banner_dismiss: gtk::TemplateChild<gtk::Button>,
         #[template_child]
         pub workspace_split: gtk::TemplateChild<gtk::Paned>,
         #[template_child]
@@ -33,7 +37,15 @@ mod main_shell {
         #[template_child]
         pub viewer: gtk::TemplateChild<gtk::Overlay>,
         #[template_child]
-        pub preview_spinner: gtk::TemplateChild<gtk::Spinner>,
+        pub preview_progress: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub preview_overall_progress_label: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub preview_progress_label: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub preview_progress_bar: gtk::TemplateChild<gtk::ProgressBar>,
+        #[template_child]
+        pub preview_stage_progress_bar: gtk::TemplateChild<gtk::ProgressBar>,
         #[template_child]
         pub error_label: gtk::TemplateChild<gtk::Label>,
         #[template_child]
@@ -56,10 +68,12 @@ mod main_shell {
         type Type = super::ToniatorMainShell;
         type ParentType = gtk::Box;
 
+        /// Binds the compiled main-window template once for this widget class.
         fn class_init(class: &mut Self::Class) {
             Self::bind_template(class);
         }
 
+        /// Initializes one main-window shell from the bound resource template.
         fn instance_init(object: &glib::subclass::InitializingObject<Self>) {
             object.init_template();
         }
@@ -93,6 +107,11 @@ impl ToniatorMainShell {
             .set_reveal_child(message.is_some());
     }
 
+    /// Returns the explicit control that hides the currently presented banner message.
+    pub fn banner_dismiss(&self) -> gtk::Button {
+        self.imp().main_banner_dismiss.get()
+    }
+
     /// Returns the template-owned conventional GTK split container.
     pub fn split(&self) -> gtk::Paned {
         self.imp().workspace_split.get()
@@ -106,6 +125,14 @@ impl ToniatorMainShell {
     /// Returns the static channel-settings visibility control.
     pub fn drawer(&self) -> gtk::ToggleButton {
         self.imp().channel_settings_drawer.get()
+    }
+
+    /// Transfers the Blueprint-owned header out of the content box so the
+    /// application window can register it as its sole client-side titlebar.
+    pub fn detach_titlebar(&self) -> gtk::HeaderBar {
+        let header = self.imp().header.get();
+        self.remove(&header);
+        header
     }
 
     /// Returns the template-owned window title label.
@@ -128,9 +155,29 @@ impl ToniatorMainShell {
         self.imp().viewer.get()
     }
 
-    /// Returns the template-owned preview pending indicator.
-    pub fn spinner(&self) -> gtk::Spinner {
-        self.imp().preview_spinner.get()
+    /// Returns the template-owned main-preview progress overlay.
+    pub fn progress(&self) -> gtk::Box {
+        self.imp().preview_progress.get()
+    }
+
+    /// Returns the visible overall-preview progress label.
+    pub fn overall_progress_label(&self) -> gtk::Label {
+        self.imp().preview_overall_progress_label.get()
+    }
+
+    /// Returns the current main-preview phase label.
+    pub fn progress_label(&self) -> gtk::Label {
+        self.imp().preview_progress_label.get()
+    }
+
+    /// Returns the determinate main-preview progress bar.
+    pub fn progress_bar(&self) -> gtk::ProgressBar {
+        self.imp().preview_progress_bar.get()
+    }
+
+    /// Returns determinate completion within the currently named preview stage.
+    pub fn stage_progress_bar(&self) -> gtk::ProgressBar {
+        self.imp().preview_stage_progress_bar.get()
     }
 
     /// Returns the template-owned error presentation label.
@@ -464,6 +511,86 @@ impl ToniatorPresetRow {
 }
 
 impl Default for ToniatorPresetRow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+mod advanced_settings_shell {
+    use super::*;
+
+    /// Installs the Blueprint-owned private Advanced Settings composition.
+    #[derive(Default, gtk::CompositeTemplate)]
+    #[template(resource = "/com/silentbutdigital/Toniator/advanced-settings.ui")]
+    pub struct ToniatorAdvancedSettingsShell {
+        #[template_child]
+        pub advanced_status: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub advanced_preview: gtk::TemplateChild<gtk::Picture>,
+        #[template_child]
+        pub advanced_controls: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub advanced_actions: gtk::TemplateChild<gtk::Box>,
+    }
+
+    #[glib::object_subclass]
+    impl glib::subclass::types::ObjectSubclass for ToniatorAdvancedSettingsShell {
+        const NAME: &'static str = "ToniatorAdvancedSettingsShell";
+        type Type = super::ToniatorAdvancedSettingsShell;
+        type ParentType = gtk::Box;
+
+        /// Binds the compiled Advanced Settings template once for this widget class.
+        fn class_init(class: &mut Self::Class) {
+            Self::bind_template(class);
+        }
+
+        /// Initializes one private-settings shell from the bound resource template.
+        fn instance_init(object: &glib::subclass::InitializingObject<Self>) {
+            object.init_template();
+        }
+    }
+
+    impl glib::subclass::object::ObjectImpl for ToniatorAdvancedSettingsShell {}
+    impl gtk::subclass::widget::WidgetImpl for ToniatorAdvancedSettingsShell {}
+    impl gtk::subclass::box_::BoxImpl for ToniatorAdvancedSettingsShell {}
+}
+
+glib::wrapper! {
+    /// Provides the stable private Advanced Settings layout and dynamic slots.
+    pub struct ToniatorAdvancedSettingsShell(ObjectSubclass<advanced_settings_shell::ToniatorAdvancedSettingsShell>)
+        @extends gtk::Widget, gtk::Box,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget, gtk::Orientable;
+}
+
+impl ToniatorAdvancedSettingsShell {
+    /// Creates the resource-owned modal shell before private controls attach.
+    pub fn new() -> Self {
+        glib::Object::builder().build()
+    }
+
+    /// Returns the private draft status presentation.
+    pub fn status(&self) -> gtk::Label {
+        self.imp().advanced_status.get()
+    }
+
+    /// Returns the canonical private-preview picture.
+    pub fn preview(&self) -> gtk::Picture {
+        self.imp().advanced_preview.get()
+    }
+
+    /// Returns the dynamic Source and Output controls container.
+    pub fn controls(&self) -> gtk::Box {
+        self.imp().advanced_controls.get()
+    }
+
+    /// Appends one explicit modal action without transferring history authority.
+    pub fn append_action(&self, action: &impl IsA<gtk::Widget>) {
+        self.imp().advanced_actions.append(action);
+    }
+}
+
+impl Default for ToniatorAdvancedSettingsShell {
+    /// Creates the same empty private-settings shell as [`Self::new`].
     fn default() -> Self {
         Self::new()
     }

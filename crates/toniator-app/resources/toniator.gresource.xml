@@ -4,6 +4,7 @@
     <file preprocess="xml-stripblanks">window.ui</file>
     <file preprocess="xml-stripblanks">channel-editor.ui</file>
     <file preprocess="xml-stripblanks">pattern-editor.ui</file>
+    <file preprocess="xml-stripblanks">advanced-settings.ui</file>
     <file preprocess="xml-stripblanks">preset-row.ui</file>
     <file preprocess="xml-stripblanks">confirmation-dialog.ui</file>
     <file preprocess="xml-stripblanks">png-export-options.ui</file>

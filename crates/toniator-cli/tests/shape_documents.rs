@@ -110,9 +110,8 @@ fn shape_document(source_id: SourceReferenceId, width: u32, height: u32) -> Docu
     response.maximum_fill = 1.0;
     let mut settings = base.pattern_settings().clone();
     settings.density = DensityMetric2D {
-        across_x: 12.0,
-        across_y: 12.0,
-        aspect_locked: true,
+        density: 12.0,
+        aspect: 1.0,
     };
     settings.pattern_rotation_degrees = 7.0;
     settings.shape_rotation_degrees = 15.0;
@@ -189,7 +188,7 @@ fn shape_documents_validate_inspect_and_render_both_immutable_sources_intrinsica
         let svg = case_root.join("editable.svg");
         save(&container, &document, &sources).unwrap();
         let validate = run(&["validate", "--input", container.to_str().unwrap()]);
-        assert!(validate.contains("document v5"));
+        assert!(validate.contains("document v6"));
         fs::write(case_root.join("validate.txt"), &validate).unwrap();
         let capabilities = run(&["capabilities", "--input", container.to_str().unwrap()]);
         assert!(capabilities.contains("OutputAuthoredClosedShape"));

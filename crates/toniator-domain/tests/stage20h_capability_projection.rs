@@ -1,17 +1,17 @@
 use toniator_domain::{
     ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure,
     AuthoredStructureId, AuthoredStructureKind, CanvasSpec, ChannelId, CoveragePolicy,
-    DensityEditedAxis, DensityMetric2D, Document, DocumentCommand, DocumentId,
-    GeneralizedSiteProduct, GuideCapabilities, GuideDimension, GuideDimensionId, GuidePrototype,
-    GuidePrototypeKind, GuideRepetition, GuideSiteProductCapability, MarkGeometryResponse,
-    MarkOrientation, MarkOrientationKind, MarkOutputCapabilityProjection, MarkPrototype,
-    MarkPrototypeKind, PatternCapabilityScope, PatternDefinition, PatternDefinitionBundle,
-    PatternDefinitionId, PatternFamilyCapabilityProjection, PatternGeometryResponse,
+    DensityMetric2D, Document, DocumentCommand, DocumentId, GeneralizedSiteProduct,
+    GuideCapabilities, GuideDimension, GuideDimensionId, GuidePrototype, GuidePrototypeKind,
+    GuideRepetition, GuideSiteProductCapability, MarkGeometryResponse, MarkOrientation,
+    MarkOrientationKind, MarkOutputCapabilityProjection, MarkPrototype, MarkPrototypeKind,
+    PatternCapabilityScope, PatternDefinition, PatternDefinitionBundle, PatternDefinitionEdit,
+    PatternDefinitionId, PatternFamily, PatternFamilyCapabilityProjection, PatternGeometryResponse,
     PatternMechanismId, PatternOutputCapabilityProjection, PatternOutputLayerId,
     PatternOutputRealization, PatternOutputSettings, PropertyFieldId, PropertyTarget,
     RandomCharacterKind, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
     SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference,
-    StructuralSupportConstraint,
+    StructuralSupportConstraint, TranslationEditedAxis,
 };
 
 /// Builds the current modeled document used to verify base and effective authority scopes.
@@ -57,6 +57,17 @@ fn document_for(definition: PatternDefinition, structures: Vec<AuthoredStructure
     .expect("recipe fixture validates")
 }
 
+/// Returns one public bundle definition by stable ID for stale-aware command construction.
+fn definition_by_id(document: &Document, id: PatternDefinitionId) -> PatternDefinition {
+    document
+        .pattern_definition_bundles()
+        .iter()
+        .find(|bundle| bundle.definition.id == id)
+        .expect("fixture definition resolves")
+        .definition
+        .clone()
+}
+
 /// Builds one valid typed random recipe with explicit active mechanism discriminants.
 fn random_definition(
     character: RandomSiteCharacter,
@@ -82,6 +93,21 @@ fn random_definition(
             additional_margin: 0.0,
         },
     )
+}
+
+/// Returns the validated source-weighted placement selected by structural transition tests.
+fn artwork_weighted_density_modulation() -> SiteDensityModulation {
+    SiteDensityModulation::ArtworkWeighted {
+        mapping: SourceMapping {
+            component: SourceMappingComponent::Luminance,
+            placement: SourcePlacement::StretchToCanvas,
+            inverted: false,
+            gain: 1.0,
+            bias: 0.0,
+        },
+        strength: 0.5,
+        response: ArtworkWeightResponse::Linear,
+    }
 }
 
 /// Builds an authored line used only as a validated generic-guide resource reference.
@@ -218,11 +244,9 @@ fn override_and_scalar_deltas_preserve_scope_and_structure_authority() {
     let density = document
         .set_channel_density_for_effective(
             ChannelId(2),
-            DensityEditedAxis::AcrossX,
             DensityMetric2D {
-                across_x: 20.0,
-                across_y: 12.0,
-                aspect_locked: false,
+                density: 20.0,
+                aspect: 1.2,
             },
         )
         .expect("density command builds");
@@ -401,7 +425,8 @@ fn typed_and_generic_guides_project_counts_products_and_active_resources() {
     ));
 }
 
-/// Proves every accepted random discriminant projects without name dispatch or future branches.
+/// Proves every accepted random discriminant projects without name dispatch, while source-weighted
+/// placement omits only the incompatible pattern-rotation command from each active scope.
 #[test]
 fn dispersion_variants_are_deterministic_and_missing_scope_is_an_error() {
     let variants = [
@@ -462,6 +487,32 @@ fn dispersion_variants_are_deterministic_and_missing_scope_is_an_error() {
             .pattern_capabilities(PatternCapabilityScope::DocumentBase)
             .expect("random projection repeats");
         assert_eq!(first, second);
+        assert!(first.active_controls.iter().all(|descriptor| {
+            !matches!(
+                descriptor.field,
+                PropertyFieldId::RandomMaximumAttempts
+                    | PropertyFieldId::RandomMaximumNeighborChecks
+            )
+        }));
+        assert_eq!(
+            first
+                .active_controls
+                .iter()
+                .any(|descriptor| descriptor.field == PropertyFieldId::RotationDegrees),
+            expected_modulation != toniator_domain::DensityModulationKind::ArtworkWeighted,
+            "base rotation availability follows source-weighted placement"
+        );
+        let channel = document
+            .pattern_capabilities(PatternCapabilityScope::Channel(ChannelId(1)))
+            .expect("random channel projection resolves");
+        assert_eq!(
+            channel
+                .active_controls
+                .iter()
+                .any(|descriptor| descriptor.field == PropertyFieldId::RotationDegrees),
+            expected_modulation != toniator_domain::DensityModulationKind::ArtworkWeighted,
+            "channel rotation availability follows source-weighted placement"
+        );
         if expected_exclusion == toniator_domain::ExclusionKind::VisibleMarkMargin {
             let descriptors = document.property_descriptors();
             let selector = descriptors
@@ -499,5 +550,327 @@ fn dispersion_variants_are_deterministic_and_missing_scope_is_an_error() {
             .expect_err("missing channel rejects")
             .path(),
         "channel.id"
+    );
+}
+
+/// Proves source-weighted placement resolves dormant document-base rotation to zero while
+/// retaining its independent shape-rotation authority.
+#[test]
+fn source_weighted_sites_keep_pattern_rotation_dormant() {
+    let weighted = random_definition(
+        RandomSiteCharacter::RawUniform,
+        SiteDensityModulation::ArtworkWeighted {
+            mapping: SourceMapping {
+                component: SourceMappingComponent::Luminance,
+                placement: SourcePlacement::StretchToCanvas,
+                inverted: false,
+                gain: 1.0,
+                bias: 0.0,
+            },
+            strength: 0.5,
+            response: ArtworkWeightResponse::Linear,
+        },
+        SiteExclusionPolicy::None,
+    );
+    let document = document_for(weighted, Vec::new());
+    let mut settings = document.pattern_settings().clone();
+    settings.pattern_rotation_degrees = 11.0;
+    settings.shape_rotation_degrees = 7.0;
+    let (document, _) = document
+        .apply_command(&DocumentCommand::SetDocumentPatternSettings {
+            base: document.pattern_settings().clone(),
+            settings,
+        })
+        .expect("stored base rotation validates");
+    let effective = document
+        .effective_channel_pattern(ChannelId(1))
+        .expect("weighted effective pattern resolves");
+    assert_eq!(effective.pattern_rotation_degrees, 0.0);
+    assert_eq!(effective.shape_rotation_degrees, 7.0);
+    assert!(
+        !document
+            .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+            .expect("weighted base projection resolves")
+            .active_controls
+            .iter()
+            .any(|descriptor| descriptor.field == PropertyFieldId::RotationDegrees)
+    );
+    assert!(
+        !document
+            .pattern_capabilities(PatternCapabilityScope::Channel(ChannelId(1)))
+            .expect("weighted channel projection resolves")
+            .active_controls
+            .iter()
+            .any(|descriptor| descriptor.field == PropertyFieldId::RotationDegrees)
+    );
+}
+
+/// Proves artwork-weighted placement rejects both public and direct channel rotation commands.
+#[test]
+fn source_weighted_sites_reject_channel_pattern_rotation_commands() {
+    let document = document_for(
+        random_definition(
+            RandomSiteCharacter::RawUniform,
+            artwork_weighted_density_modulation(),
+            SiteExclusionPolicy::None,
+        ),
+        Vec::new(),
+    );
+    assert_eq!(
+        document
+            .set_channel_pattern_rotation_for_effective(ChannelId(1), 33.0)
+            .expect_err("weighted channel builder rejects rotation")
+            .path(),
+        "channel.pattern.rotation"
+    );
+    assert_eq!(
+        document
+            .apply_command(&DocumentCommand::SetChannelPatternRotationDelta {
+                base: document.pattern_settings().clone(),
+                channel_id: ChannelId(1),
+                rotation_degrees: 22.0,
+            })
+            .expect_err("weighted direct command rejects rotation")
+            .path(),
+        "channel.pattern.rotation"
+    );
+}
+
+/// Proves a copy-on-edit transition to artwork-weighted placement prunes only the selected
+/// channel's incompatible rotation while retaining base and unrelated channel intent.
+#[test]
+fn selected_shared_weighted_edit_prunes_only_the_selected_channel_rotation() {
+    let document = document_for(
+        random_definition(
+            RandomSiteCharacter::RawUniform,
+            SiteDensityModulation::Uniform,
+            SiteExclusionPolicy::None,
+        ),
+        Vec::new(),
+    );
+    let mut settings = document.pattern_settings().clone();
+    settings.pattern_rotation_degrees = 11.0;
+    let (document, _) = document
+        .apply_command(&DocumentCommand::SetDocumentPatternSettings {
+            base: document.pattern_settings().clone(),
+            settings,
+        })
+        .expect("base rotation applies");
+    let channel_one_rotation = document
+        .set_channel_pattern_rotation_for_effective(ChannelId(1), 37.0)
+        .expect("selected rotation command builds");
+    let (document, _) = document
+        .apply_command(&channel_one_rotation)
+        .expect("selected rotation applies");
+    let channel_two_rotation = document
+        .set_channel_pattern_rotation_for_effective(ChannelId(2), 19.0)
+        .expect("unrelated rotation command builds");
+    let (document, _) = document
+        .apply_command(&channel_two_rotation)
+        .expect("unrelated rotation applies");
+    let base_definition = definition_by_id(&document, PatternDefinitionId(44));
+    let (document, _) = document
+        .apply_command(&DocumentCommand::EditSelectedChannelPatternDefinition {
+            channel_id: ChannelId(1),
+            base_definition,
+            edit: PatternDefinitionEdit::SetDensityModulationVariant {
+                mechanism_id: PatternMechanismId(42),
+                modulation: artwork_weighted_density_modulation(),
+            },
+        })
+        .expect("selected weighted transition applies");
+    assert_eq!(document.pattern_settings().pattern_rotation_degrees, 11.0);
+    assert_eq!(
+        document
+            .channel_pattern_instance(ChannelId(1))
+            .expect("selected channel persists")
+            .layout_delta
+            .rotation_degrees,
+        None
+    );
+    assert_eq!(
+        document
+            .channel_pattern_instance(ChannelId(2))
+            .expect("unrelated channel persists")
+            .layout_delta
+            .rotation_degrees,
+        Some(8.0)
+    );
+    assert_eq!(
+        document
+            .effective_channel_pattern(ChannelId(1))
+            .expect("weighted selected channel resolves")
+            .pattern_rotation_degrees,
+        0.0
+    );
+    assert_eq!(
+        document
+            .effective_channel_pattern(ChannelId(2))
+            .expect("unrelated uniform channel resolves")
+            .pattern_rotation_degrees,
+        19.0
+    );
+}
+
+/// Proves an unshared selected definition transition prunes its now-incompatible rotation
+/// without changing the shared document-base rotation or another channel's retained delta.
+#[test]
+fn selected_unshared_weighted_edit_prunes_only_the_selected_channel_rotation() {
+    let document = document_for(
+        random_definition(
+            RandomSiteCharacter::RawUniform,
+            SiteDensityModulation::Uniform,
+            SiteExclusionPolicy::None,
+        ),
+        Vec::new(),
+    );
+    let mut settings = document.pattern_settings().clone();
+    settings.pattern_rotation_degrees = 11.0;
+    let (document, _) = document
+        .apply_command(&DocumentCommand::SetDocumentPatternSettings {
+            base: document.pattern_settings().clone(),
+            settings,
+        })
+        .expect("base rotation applies");
+    let channel_one_rotation = document
+        .set_channel_pattern_rotation_for_effective(ChannelId(1), 37.0)
+        .expect("selected rotation command builds");
+    let (document, _) = document
+        .apply_command(&channel_one_rotation)
+        .expect("selected rotation applies");
+    let channel_two_rotation = document
+        .set_channel_pattern_rotation_for_effective(ChannelId(2), 19.0)
+        .expect("unrelated rotation command builds");
+    let (document, _) = document
+        .apply_command(&channel_two_rotation)
+        .expect("unrelated rotation applies");
+    let base_definition = definition_by_id(&document, PatternDefinitionId(44));
+    let (document, _) = document
+        .apply_command(&DocumentCommand::EditSelectedChannelPatternDefinition {
+            channel_id: ChannelId(1),
+            base_definition,
+            edit: PatternDefinitionEdit::SetRandomSeed {
+                mechanism_id: PatternMechanismId(41),
+                seed: 5678,
+            },
+        })
+        .expect("selected clone transition applies");
+    let selected_definition = document
+        .effective_channel_pattern(ChannelId(1))
+        .expect("selected clone resolves")
+        .definition_id;
+    let base_definition = definition_by_id(&document, selected_definition);
+    let density_modulation_id = match &base_definition.family {
+        PatternFamily::RandomSites {
+            density_modulation_id,
+            ..
+        } => *density_modulation_id,
+        _ => panic!("selected clone remains a random-site definition"),
+    };
+    let (document, _) = document
+        .apply_command(&DocumentCommand::EditSelectedChannelPatternDefinition {
+            channel_id: ChannelId(1),
+            base_definition,
+            edit: PatternDefinitionEdit::SetDensityModulationVariant {
+                mechanism_id: density_modulation_id,
+                modulation: artwork_weighted_density_modulation(),
+            },
+        })
+        .expect("unshared weighted transition applies");
+    assert_eq!(document.pattern_settings().pattern_rotation_degrees, 11.0);
+    assert_eq!(
+        document
+            .channel_pattern_instance(ChannelId(1))
+            .expect("selected channel persists")
+            .layout_delta
+            .rotation_degrees,
+        None
+    );
+    assert_eq!(
+        document
+            .channel_pattern_instance(ChannelId(2))
+            .expect("unrelated channel persists")
+            .layout_delta
+            .rotation_degrees,
+        Some(8.0)
+    );
+}
+
+/// Proves a shared structural transition clears every linked rotation delta while preserving
+/// the dormant base rotation and unrelated compatible translation intent.
+#[test]
+fn shared_weighted_edit_prunes_linked_rotation_deltas_only() {
+    let document = document_for(
+        random_definition(
+            RandomSiteCharacter::RawUniform,
+            SiteDensityModulation::Uniform,
+            SiteExclusionPolicy::None,
+        ),
+        Vec::new(),
+    );
+    let mut settings = document.pattern_settings().clone();
+    settings.pattern_rotation_degrees = 11.0;
+    let (document, _) = document
+        .apply_command(&DocumentCommand::SetDocumentPatternSettings {
+            base: document.pattern_settings().clone(),
+            settings,
+        })
+        .expect("base rotation applies");
+    let mut document = document;
+    for (channel_id, rotation_degrees) in [
+        (ChannelId(1), 37.0),
+        (ChannelId(2), 19.0),
+        (ChannelId(3), 13.0),
+    ] {
+        let rotation = document
+            .set_channel_pattern_rotation_for_effective(channel_id, rotation_degrees)
+            .expect("linked rotation command builds");
+        (document, _) = document
+            .apply_command(&rotation)
+            .expect("linked rotation applies");
+    }
+    let (document, _) = document
+        .apply_command(&DocumentCommand::SetTranslationAxis {
+            channel_id: ChannelId(3),
+            edited_axis: TranslationEditedAxis::X,
+            value: 16.0,
+        })
+        .expect("compatible translation applies");
+    let base_definition = definition_by_id(&document, PatternDefinitionId(44));
+    let (document, _) = document
+        .apply_command(&DocumentCommand::EditSharedPatternDefinition {
+            definition_id: PatternDefinitionId(44),
+            base_definition,
+            edit: PatternDefinitionEdit::SetDensityModulationVariant {
+                mechanism_id: PatternMechanismId(42),
+                modulation: artwork_weighted_density_modulation(),
+            },
+        })
+        .expect("shared weighted transition applies");
+    assert_eq!(document.pattern_settings().pattern_rotation_degrees, 11.0);
+    for channel_id in [ChannelId(1), ChannelId(2), ChannelId(3)] {
+        assert_eq!(
+            document
+                .channel_pattern_instance(channel_id)
+                .expect("linked channel persists")
+                .layout_delta
+                .rotation_degrees,
+            None
+        );
+        assert_eq!(
+            document
+                .effective_channel_pattern(channel_id)
+                .expect("weighted linked channel resolves")
+                .pattern_rotation_degrees,
+            0.0
+        );
+    }
+    assert_eq!(
+        document
+            .channel_pattern_instance(ChannelId(3))
+            .expect("translated channel persists")
+            .layout_delta
+            .translation_x,
+        16.0
     );
 }

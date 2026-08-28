@@ -1,0 +1,45 @@
+using Gtk 4.0;
+
+template $ToniatorAdvancedSettingsShell : Gtk.Box {
+  orientation: vertical;
+  spacing: 12;
+  vexpand: true;
+  margin-top: 12;
+  margin-bottom: 12;
+  margin-start: 12;
+  margin-end: 12;
+
+  Gtk.Label advanced_status {
+    label: "Changes stay private until Apply.";
+    xalign: 0;
+    wrap: true;
+    styles [ "dim-label" ]
+  }
+
+  Gtk.Picture advanced_preview {
+    content-fit: contain;
+    can-shrink: true;
+    hexpand: true;
+    height-request: 180;
+    styles [ "toniator-draft-preview" ]
+  }
+
+  Gtk.ScrolledWindow {
+    hscrollbar-policy: never;
+    vscrollbar-policy: automatic;
+    vexpand: true;
+    min-content-height: 220;
+
+    Gtk.Box advanced_controls {
+      orientation: vertical;
+      spacing: 10;
+      valign: start;
+    }
+  }
+
+  Gtk.Box advanced_actions {
+    orientation: horizontal;
+    spacing: 8;
+    halign: end;
+  }
+}

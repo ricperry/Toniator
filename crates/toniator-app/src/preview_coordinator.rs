@@ -13,29 +13,43 @@ pub(crate) struct PreviewSubmission {
     pub(crate) ticket: u64,
 }
 
-/// Tracks the current request and the last result accepted by the application.
+/// Tracks queued/submitted work and the last result accepted by the application.
 ///
 /// The coordinator preserves a last accepted preview while a newer request is
 /// pending or rejected. It never owns pixels, GTK paintables, a document, or
 /// scheduler cache; callers install those only after engine acceptance.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PreviewCoordinator {
+    refresh_queued: bool,
     submission: Option<PreviewSubmission>,
     last_accepted_ticket: Option<u64>,
 }
 
 impl PreviewCoordinator {
+    /// Records invalidated preview intent before GTK's idle boundary can submit a scheduler ticket.
+    pub(crate) fn queue_refresh(&mut self) {
+        self.refresh_queued = true;
+        self.submission = None;
+    }
+
     /// Records one submitted scheduler ticket for the current workspace.
     pub(crate) fn submit(&mut self, workspace_generation: u64, ticket: u64) {
+        self.refresh_queued = false;
         self.submission = Some(PreviewSubmission {
             workspace_generation,
             ticket,
         });
     }
 
-    /// Clears only the pending identity when a workspace is replaced or closed.
+    /// Clears queued and submitted identity when a workspace is replaced or closed.
     pub(crate) fn clear_submission(&mut self) {
+        self.refresh_queued = false;
         self.submission = None;
+    }
+
+    /// Reports queued or submitted work without treating the last accepted image as pending.
+    pub(crate) const fn is_pending(&self) -> bool {
+        self.refresh_queued || self.submission.is_some()
     }
 
     /// Returns the current request identity for observational event evidence.
@@ -118,5 +132,19 @@ mod tests {
         coordinator.clear_submission();
         assert_eq!(coordinator.submission(), None);
         assert_eq!(coordinator.last_accepted_ticket(), Some(10));
+    }
+
+    /// Proves invalidation is pending before scheduler submission and transfers atomically to a ticket.
+    #[test]
+    fn queued_refresh_remains_pending_until_submission_or_clear() {
+        let mut coordinator = PreviewCoordinator::default();
+        coordinator.queue_refresh();
+        assert!(coordinator.is_pending());
+        assert_eq!(coordinator.submission(), None);
+        coordinator.submit(7, 21);
+        assert!(coordinator.is_pending());
+        assert_eq!(coordinator.submission().map(|value| value.ticket), Some(21));
+        coordinator.clear_submission();
+        assert!(!coordinator.is_pending());
     }
 }

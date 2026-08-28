@@ -11,8 +11,8 @@ use std::{
 };
 
 use toniator_domain::{
-    CanvasSpec, ChannelId, DensityMetricDelta2D, Document, DocumentCommand, DocumentHistory,
-    DocumentSession, SourceReference, SourceReferenceId,
+    CanvasSpec, ChannelId, DensityEditedField, DensityMetricDelta2D, Document, DocumentCommand,
+    DocumentHistory, DocumentSession, SourceReference, SourceReferenceId,
 };
 use toniator_engine::{
     CacheDisposition, EvaluationCompletion, EvaluationExecutionClass, EvaluationLimits,
@@ -20,6 +20,8 @@ use toniator_engine::{
     EvaluationWorkloadKind, ResolvedSource, SourceFormatHint, evaluate,
     evaluate_profiled_cached_with_limits, evaluate_profiled_with_limits,
 };
+use toniator_patterns::PresetRegistry;
+use toniator_render::GeometryOutput;
 
 /// Builds one current modeled history with a caller-selected assigned source identity.
 fn history(source_id: &str, width: f64, height: f64) -> DocumentHistory {
@@ -69,6 +71,45 @@ fn wait_for_latest(scheduler: &EvaluationScheduler) -> EvaluationCompletion {
     }
 }
 
+/// Returns the bounds aspect of the retained region whose bounds center is nearest the canvas center.
+///
+/// # Panics
+///
+/// Panics when an expected region recipe publishes no positive finite canonical region.
+fn center_region_bounds_aspect(result: &toniator_engine::EvaluationResult) -> f64 {
+    let center = (
+        result.scene().canvas().width / 2.0,
+        result.scene().canvas().height / 2.0,
+    );
+    result
+        .scene()
+        .layers()
+        .iter()
+        .flat_map(|layer| layer.outputs())
+        .filter_map(|output| match output.geometry() {
+            GeometryOutput::CanonicalRegions(regions) => Some(regions.regions()),
+            _ => None,
+        })
+        .flatten()
+        .min_by(|left, right| {
+            let left_x = (left.bounds.min.x + left.bounds.max.x) / 2.0 - center.0;
+            let left_y = (left.bounds.min.y + left.bounds.max.y) / 2.0 - center.1;
+            let right_x = (right.bounds.min.x + right.bounds.max.x) / 2.0 - center.0;
+            let right_y = (right.bounds.min.y + right.bounds.max.y) / 2.0 - center.1;
+            left_x
+                .mul_add(left_x, left_y * left_y)
+                .total_cmp(&right_x.mul_add(right_x, right_y * right_y))
+        })
+        .map(|region| {
+            let width = region.bounds.max.x - region.bounds.min.x;
+            let height = region.bounds.max.y - region.bounds.min.y;
+            assert!(width.is_finite() && width > 0.0);
+            assert!(height.is_finite() && height > 0.0);
+            width / height
+        })
+        .expect("region recipe publishes a center-near canonical region")
+}
+
 /// Proves both immutable source formats produce deterministic complete current-authority results.
 #[test]
 fn immutable_png_and_svg_inputs_evaluate_deterministically() {
@@ -88,6 +129,226 @@ fn immutable_png_and_svg_inputs_evaluate_deterministically() {
             (180, 120)
         );
     }
+}
+
+/// Proves the bundled connection recipe selected by the Stage 21A dropdown
+/// evaluates at the immutable PNG's intrinsic default density after applying to ALL.
+#[test]
+fn clustered_connections_evaluate_at_intrinsic_png_default_density() {
+    let mut history = history("stage21a-clustered", 1024.0, 1024.0);
+    PresetRegistry::bundled()
+        .apply_to_document_base(&mut history, "clustered-dispersion-random-links")
+        .expect("clustered connection recipe applies to document base");
+    let result = evaluate(request(
+        &history,
+        "stage21a-clustered",
+        "raster-sample.png",
+        SourceFormatHint::Png,
+    ))
+    .expect("clustered connections evaluate at the intrinsic PNG default density");
+    assert_eq!(result.channels().len(), 3);
+    assert!(result.scene().layers().iter().any(|layer| {
+        layer
+            .outputs()
+            .iter()
+            .any(|output| matches!(output.geometry(), GeometryOutput::CanonicalStrokes(_)))
+    }));
+}
+
+/// Applies one bundled recipe at density 128 and requires complete canonical evaluation.
+///
+/// The helper uses the immutable intrinsic PNG and ordinary default limits so
+/// failures reproduce the main-window recomputation boundary without a
+/// frontend runtime, custom limits, cache reuse, or partial output publication.
+fn assert_bundled_recipe_evaluates_after_density_increase(record: &toniator_domain::PresetRecord) {
+    let registry = PresetRegistry::bundled();
+    let source_id = format!("stage21a-density-{}", record.metadata.id);
+    let mut history = history(&source_id, 1024.0, 1024.0);
+    registry
+        .apply_to_document_base(&mut history, &record.metadata.id)
+        .unwrap_or_else(|error| {
+            panic!(
+                "{} applies before density editing: {error}",
+                record.metadata.id
+            )
+        });
+    let command = history
+        .document()
+        .set_document_density_field(DensityEditedField::Density, 128.0)
+        .unwrap_or_else(|error| {
+            panic!("{} accepts increased density: {error}", record.metadata.id)
+        });
+    history.apply(&command).unwrap_or_else(|error| {
+        panic!(
+            "{} publishes increased density: {error}",
+            record.metadata.id
+        )
+    });
+    let result = evaluate(request(
+        &history,
+        &source_id,
+        "raster-sample.png",
+        SourceFormatHint::Png,
+    ))
+    .unwrap_or_else(|error| {
+        panic!(
+            "{} evaluates after density increase: {error}",
+            record.metadata.id
+        )
+    });
+    assert_eq!(result.channels().len(), 3, "{}", record.metadata.id);
+    assert!(
+        result
+            .scene()
+            .layers()
+            .iter()
+            .any(|layer| !layer.outputs().is_empty()),
+        "{} publishes canonical output",
+        record.metadata.id
+    );
+}
+
+/// Proves every bundled Stage 21A recipe recomputes canonical output after a
+/// document-base density increase on the immutable intrinsic PNG.
+#[test]
+fn every_bundled_recipe_evaluates_after_density_increase() {
+    let registry = PresetRegistry::bundled();
+    assert_eq!(registry.entries().len(), 16);
+    for record in registry.entries() {
+        assert_bundled_recipe_evaluates_after_density_increase(record);
+    }
+}
+
+/// Reproduces the dense three-guide cells acceptance case with default limits.
+#[test]
+fn three_guide_cells_evaluate_after_density_increase() {
+    let registry = PresetRegistry::bundled();
+    let record = registry
+        .entries()
+        .iter()
+        .find(|record| record.metadata.id == "three-guide-cells-scale")
+        .expect("bundled three-guide cells preset");
+    assert_bundled_recipe_evaluates_after_density_increase(record);
+}
+
+/// Proves both Guide Faces presets publish canonical regions after ordinary pattern rotation.
+///
+/// The test crosses both immutable source decoders with non-cardinal angles and includes the
+/// intrinsic PNG's combined zoom-out/rotation regression. It exercises the engine-owned structural
+/// path handoff, face traversal, sampling, and canonical scene boundary; no frontend preview state
+/// participates in this correctness authority.
+#[test]
+fn rotated_guide_face_presets_publish_regions_for_png_and_svg_sources() {
+    let registry = PresetRegistry::bundled();
+    for (source_id, asset, format, preset, rotation, density, canvas) in [
+        (
+            "rotated-guide-faces-png",
+            "raster-sample.png",
+            SourceFormatHint::Png,
+            "three-guide-cells-scale",
+            17.0,
+            100.0,
+            256.0,
+        ),
+        (
+            "rotated-guide-faces-svg",
+            "vector-sample.svg",
+            SourceFormatHint::Svg,
+            "two-guide-cells-uniform-offset",
+            89.5,
+            100.0,
+            256.0,
+        ),
+        (
+            "zoomed-rotated-guide-faces-png",
+            "raster-sample.png",
+            SourceFormatHint::Png,
+            "three-guide-cells-scale",
+            17.0,
+            125.0,
+            1024.0,
+        ),
+    ] {
+        let mut history = history(source_id, canvas, canvas);
+        registry
+            .apply_to_document_base(&mut history, preset)
+            .expect("Guide Faces preset applies to the document base");
+        if density != 100.0 {
+            let command = history
+                .document()
+                .set_document_density_field(DensityEditedField::Density, density)
+                .expect("combined Guide Faces density applies atomically");
+            history
+                .apply(&command)
+                .expect("combined Guide Faces density publishes");
+        }
+        let base = history.document().pattern_settings().clone();
+        let mut settings = base.clone();
+        settings.pattern_rotation_degrees = rotation;
+        history
+            .apply(&DocumentCommand::SetDocumentPatternSettings { base, settings })
+            .expect("ordinary Guide Faces rotation applies atomically");
+        let result = evaluate(request(&history, source_id, asset, format))
+            .expect("rotated Guide Faces evaluation publishes a complete result");
+        assert!(result.scene().layers().iter().any(|layer| {
+            layer.outputs().iter().any(|output| {
+                matches!(
+                    output.geometry(),
+                    GeometryOutput::CanonicalRegions(regions) if !regions.regions().is_empty()
+                )
+            })
+        }));
+    }
+}
+
+/// Reproduces the dense even-dispersion acceptance case without treating
+/// physical packing saturation as a render failure.
+#[test]
+fn even_dispersion_evaluates_after_density_increase() {
+    let registry = PresetRegistry::bundled();
+    let record = registry
+        .entries()
+        .iter()
+        .find(|record| record.metadata.id == "even-random-circles")
+        .expect("bundled even-dispersion preset");
+    assert_bundled_recipe_evaluates_after_density_increase(record);
+}
+
+/// Proves density-aspect changes stretch region geometry through source sites and canonical output.
+#[test]
+fn density_aspect_stretches_canonical_regions_instead_of_postprocessing_pixels() {
+    let mut history = history("region-aspect", 256.0, 256.0);
+    PresetRegistry::bundled()
+        .apply_to_document_base(&mut history, "two-guide-cells-uniform-offset")
+        .expect("two-guide region recipe applies to document base");
+    let square = evaluate(request(
+        &history,
+        "region-aspect",
+        "raster-sample.png",
+        SourceFormatHint::Png,
+    ))
+    .expect("1:1 region layout evaluates");
+    let command = history
+        .document()
+        .set_document_density_field(DensityEditedField::Aspect, 2.0)
+        .expect("2:1 density aspect forms one base command");
+    history
+        .apply(&command)
+        .expect("2:1 density aspect applies atomically");
+    let stretched = evaluate(request(
+        &history,
+        "region-aspect",
+        "raster-sample.png",
+        SourceFormatHint::Png,
+    ))
+    .expect("2:1 region layout evaluates");
+    let square_aspect = center_region_bounds_aspect(&square);
+    let stretched_aspect = center_region_bounds_aspect(&stretched);
+    assert!(
+        (square_aspect - stretched_aspect).abs() > 0.2,
+        "canonical region bounds respond materially to site/baseline stretching: {square_aspect} vs {stretched_aspect}"
+    );
+    assert_ne!(square.scene(), stretched.scene());
 }
 
 /// Proves accepted warm replay reports hits without rewriting local-family diagnostic origin.
@@ -228,8 +489,8 @@ fn profiled_cache_distinguishes_computation_accepted_hits_and_local_reuse() {
             base: history.document().pattern_settings().clone(),
             channel_id: ChannelId(1),
             density: DensityMetricDelta2D {
-                across_x_delta: 1.0,
-                across_y_delta: 0.0,
+                density_delta: 1.0,
+                aspect_delta: 0.0,
             },
         })
         .expect("red density edit publishes");

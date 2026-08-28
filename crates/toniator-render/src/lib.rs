@@ -6,7 +6,7 @@
 //! pattern settings. Raster compositing happens in linear premultiplied RGBA;
 //! `RasterSurface` exposes only straight sRGBA bytes at the output boundary.
 
-use std::{collections::HashSet, error::Error, fmt};
+use std::{collections::HashSet, error::Error, fmt, sync::Arc};
 
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 use rayon::prelude::*;
@@ -43,24 +43,26 @@ mod stage20r_composite_tests {
     fn composite_scene(output_ids: [u64; 2]) -> RenderScene {
         let outputs = output_ids
             .into_iter()
-            .map(|id| RenderOutputLayer {
-                output_layer_id: toniator_domain::PatternOutputLayerId(id),
-                geometry: GeometryOutput::CanonicalMarks(vec![CanonicalMark::Circle {
-                    source_site_id: FamilySiteId {
-                        mechanism_id: PatternMechanismId(3),
-                        ordinal: usize::try_from(id).expect("small fixture ID"),
-                    },
-                    center: Point2::new(id as f64, 12.0),
-                    radius: 1.0,
-                    scope: SiteScope::Canvas,
-                    provenance: FamilySiteProvenance::Random {
-                        candidate_ordinal: usize::try_from(id).expect("small fixture ID"),
-                        accepted_ordinal: usize::try_from(id).expect("small fixture ID"),
-                        exclusion_neighbor_ordinal: None,
-                    },
-                    fill_rule: CanonicalFillRule::EvenOdd,
-                }]),
-                primitive_paints: None,
+            .map(|id| {
+                RenderOutputLayer::new(
+                    toniator_domain::PatternOutputLayerId(id),
+                    GeometryOutput::CanonicalMarks(vec![CanonicalMark::Circle {
+                        source_site_id: FamilySiteId {
+                            mechanism_id: PatternMechanismId(3),
+                            ordinal: usize::try_from(id).expect("small fixture ID"),
+                        },
+                        center: Point2::new(id as f64, 12.0),
+                        radius: 1.0,
+                        scope: SiteScope::Canvas,
+                        provenance: FamilySiteProvenance::Random {
+                            candidate_ordinal: usize::try_from(id).expect("small fixture ID"),
+                            accepted_ordinal: usize::try_from(id).expect("small fixture ID"),
+                            exclusion_neighbor_ordinal: None,
+                        },
+                        fill_rule: CanonicalFillRule::EvenOdd,
+                    }]),
+                    None,
+                )
             })
             .collect();
         RenderScene::new(
@@ -117,17 +119,101 @@ mod stage20r_composite_tests {
         );
     }
 
+    /// Proves the legacy geometry accessor borrows the first ordered output without a backing clone.
+    ///
+    /// This focused ownership witness keeps the ordered-output contract intact:
+    /// it projects output zero only, counts every output in the diagnostic
+    /// total, and performs no rasterization, I/O, or unsafe pointer operation.
+    #[test]
+    fn legacy_geometry_projects_first_ordered_output_without_duplicate_backing_storage() {
+        let marks = (0..4_096)
+            .map(|ordinal| CanonicalMark::Circle {
+                source_site_id: FamilySiteId {
+                    mechanism_id: PatternMechanismId(3),
+                    ordinal,
+                },
+                center: Point2::new(ordinal as f64, 12.0),
+                radius: 1.0,
+                scope: SiteScope::Canvas,
+                provenance: FamilySiteProvenance::Random {
+                    candidate_ordinal: ordinal,
+                    accepted_ordinal: ordinal,
+                    exclusion_neighbor_ordinal: None,
+                },
+                fill_rule: CanonicalFillRule::EvenOdd,
+            })
+            .collect::<Vec<_>>();
+        let backing = marks.as_ptr();
+        let layer = RenderLayer::new_outputs(
+            ChannelId(1),
+            true,
+            ColorValue {
+                red: 0.1,
+                green: 0.2,
+                blue: 0.3,
+                alpha: 1.0,
+            },
+            0.75,
+            vec![
+                RenderOutputLayer::new(
+                    toniator_domain::PatternOutputLayerId(9),
+                    GeometryOutput::CanonicalMarks(marks),
+                    None,
+                ),
+                RenderOutputLayer::new(
+                    toniator_domain::PatternOutputLayerId(7),
+                    GeometryOutput::CanonicalMarks(vec![CanonicalMark::Circle {
+                        source_site_id: FamilySiteId {
+                            mechanism_id: PatternMechanismId(3),
+                            ordinal: 4_096,
+                        },
+                        center: Point2::new(4_096.0, 12.0),
+                        radius: 1.0,
+                        scope: SiteScope::Canvas,
+                        provenance: FamilySiteProvenance::Random {
+                            candidate_ordinal: 4_096,
+                            accepted_ordinal: 4_096,
+                            exclusion_neighbor_ordinal: None,
+                        },
+                        fill_rule: CanonicalFillRule::EvenOdd,
+                    }]),
+                    None,
+                ),
+            ],
+        )
+        .expect("ordered ownership witness validates");
+        let GeometryOutput::CanonicalMarks(projected) = layer.geometry() else {
+            panic!("legacy projection must remain the first canonical-mark output");
+        };
+        let GeometryOutput::CanonicalMarks(first) = layer.outputs()[0].geometry() else {
+            panic!("first ordered output remains canonical marks");
+        };
+        assert_eq!(projected.as_ptr(), backing);
+        assert_eq!(projected.as_ptr(), first.as_ptr());
+        let scene = RenderScene::new(
+            CanvasSpec {
+                width: 8_192.0,
+                height: 24.0,
+            },
+            "legacy-projection-family".into(),
+            "legacy-projection-realization".into(),
+            vec![layer],
+        )
+        .expect("legacy projection scene validates");
+        assert_eq!(scene.circular_mark_count(), 4_097);
+    }
+
     /// Proves sampled channel authority rejects a partially solid ordered output collection.
     #[test]
     fn sampled_composite_requires_paint_for_every_output() {
         let base = composite_scene([9, 7]);
         let mut layer = base.layers()[0].clone();
-        layer.outputs[0].primitive_paints = Some(vec![ColorValue {
+        layer.outputs[0].primitive_paints = Some(Arc::new(vec![ColorValue {
             red: 1.0,
             green: 0.0,
             blue: 0.0,
             alpha: 1.0,
-        }]);
+        }]));
         let error = RenderScene::new_modeled(
             CanvasSpec {
                 width: 32.0,
@@ -176,19 +262,19 @@ mod stage20r_composite_tests {
         )
         .expect("region canonicalizes")
         .0;
-        let region_output = RenderOutputLayer {
-            output_layer_id: toniator_domain::PatternOutputLayerId(9),
-            geometry: GeometryOutput::CanonicalRegions(regions),
-            primitive_paints: Some(vec![ColorValue {
+        let region_output = RenderOutputLayer::new(
+            toniator_domain::PatternOutputLayerId(9),
+            GeometryOutput::CanonicalRegions(regions),
+            Some(vec![ColorValue {
                 red: 1.0,
                 green: 0.0,
                 blue: 0.0,
                 alpha: 1.0,
             }]),
-        };
-        let mark_output = RenderOutputLayer {
-            output_layer_id: toniator_domain::PatternOutputLayerId(7),
-            geometry: GeometryOutput::CanonicalMarks(vec![CanonicalMark::Circle {
+        );
+        let mark_output = RenderOutputLayer::new(
+            toniator_domain::PatternOutputLayerId(7),
+            GeometryOutput::CanonicalMarks(vec![CanonicalMark::Circle {
                 source_site_id: site_id,
                 center: Point2::new(16.0, 12.0),
                 radius: 6.0,
@@ -200,18 +286,18 @@ mod stage20r_composite_tests {
                 },
                 fill_rule: CanonicalFillRule::EvenOdd,
             }]),
-            primitive_paints: Some(vec![ColorValue {
+            Some(vec![ColorValue {
                 red: 0.0,
                 green: 0.0,
                 blue: 1.0,
                 alpha: 1.0,
             }]),
-        };
-        let empty_output = RenderOutputLayer {
-            output_layer_id: toniator_domain::PatternOutputLayerId(8),
-            geometry: GeometryOutput::CanonicalRegions(CanonicalRegionSet::empty()),
-            primitive_paints: Some(Vec::new()),
-        };
+        );
+        let empty_output = RenderOutputLayer::new(
+            toniator_domain::PatternOutputLayerId(8),
+            GeometryOutput::CanonicalRegions(CanonicalRegionSet::empty()),
+            Some(Vec::new()),
+        );
         let build = |outputs| {
             RenderScene::new_modeled(
                 CanvasSpec {
@@ -328,10 +414,6 @@ pub struct RenderLayer {
     color: ColorValue,
     opacity: f64,
     outputs: Vec<RenderOutputLayer>,
-    /// Retained first-output projection for legacy read-only consumers of the normalized collection.
-    geometry: GeometryOutput,
-    /// Retained first-output sampled-paint projection for legacy read-only consumers.
-    mark_paints: Option<Vec<ColorValue>>,
 }
 
 /// One output-owned canonical geometry payload in painter order within a channel.
@@ -340,9 +422,57 @@ pub struct RenderOutputLayer {
     /// Stable structural output identity supplied by the domain/pattern pipeline.
     pub output_layer_id: toniator_domain::PatternOutputLayerId,
     /// Canonical geometry consumed only by raster and SVG final consumers.
-    pub geometry: GeometryOutput,
+    pub geometry: Arc<GeometryOutput>,
     /// Optional sampled paint, cardinally aligned to canonical marks or canonical regions.
-    pub primitive_paints: Option<Vec<ColorValue>>,
+    pub primitive_paints: Option<Arc<Vec<ColorValue>>>,
+}
+
+impl RenderOutputLayer {
+    /// Wraps one renderer-owned geometry and optional paint payload for immutable scene sharing.
+    pub fn new(
+        output_layer_id: toniator_domain::PatternOutputLayerId,
+        geometry: GeometryOutput,
+        primitive_paints: Option<Vec<ColorValue>>,
+    ) -> Self {
+        Self {
+            output_layer_id,
+            geometry: Arc::new(geometry),
+            primitive_paints: primitive_paints.map(Arc::new),
+        }
+    }
+
+    /// Retains already shared cache payloads without cloning canonical geometry or sampled paint.
+    pub fn from_shared(
+        output_layer_id: toniator_domain::PatternOutputLayerId,
+        geometry: Arc<GeometryOutput>,
+        primitive_paints: Option<Arc<Vec<ColorValue>>>,
+    ) -> Self {
+        Self {
+            output_layer_id,
+            geometry,
+            primitive_paints,
+        }
+    }
+
+    /// Returns the immutable canonical geometry behind this painter-ordered output.
+    pub fn geometry(&self) -> &GeometryOutput {
+        self.geometry.as_ref()
+    }
+
+    /// Returns sampled primitive paint without exposing shared-storage mutation.
+    pub fn primitive_paints(&self) -> Option<&[ColorValue]> {
+        self.primitive_paints.as_deref().map(Vec::as_slice)
+    }
+
+    /// Clones only the immutable geometry handle for cache/scene publication.
+    pub fn shared_geometry(&self) -> Arc<GeometryOutput> {
+        Arc::clone(&self.geometry)
+    }
+
+    /// Clones only the optional immutable paint handle for cache/scene publication.
+    pub fn shared_primitive_paints(&self) -> Option<Arc<Vec<ColorValue>>> {
+        self.primitive_paints.as_ref().map(Arc::clone)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -527,11 +657,15 @@ impl RenderScene {
         })
     }
 
-    /// Counts every filled mark across retained-circle and generalized canonical geometry.
+    /// Counts every retained primitive across every ordered channel output.
+    ///
+    /// The count is a diagnostic projection only: it neither merges ordered
+    /// outputs nor changes their painter order or canonical geometry.
     pub fn circular_mark_count(&self) -> usize {
         self.layers
             .iter()
-            .map(|layer| match &layer.geometry {
+            .flat_map(|layer| layer.outputs())
+            .map(|output| match output.geometry() {
                 GeometryOutput::CircularMarks(marks) => marks.len(),
                 GeometryOutput::CanonicalMarks(marks) => marks.len(),
                 GeometryOutput::CanonicalStrokes(strokes) => strokes.len(),
@@ -585,14 +719,17 @@ impl RenderLayer {
             visible,
             color,
             opacity,
-            vec![RenderOutputLayer {
-                output_layer_id,
-                geometry,
-                primitive_paints: None,
-            }],
+            vec![RenderOutputLayer::new(output_layer_id, geometry, None)],
         )
     }
 
+    /// Builds one legacy single-output layer without retaining a duplicate geometry projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable presentation or geometry diagnostics before scene
+    /// construction. The legacy [`Self::geometry`] accessor projects the sole
+    /// normalized output by reference.
     pub fn new(
         channel_id: ChannelId,
         visible: bool,
@@ -605,13 +742,11 @@ impl RenderLayer {
             visible,
             color,
             opacity,
-            outputs: vec![RenderOutputLayer {
-                output_layer_id: toniator_domain::PatternOutputLayerId(0),
-                geometry: geometry.clone(),
-                primitive_paints: None,
-            }],
-            geometry,
-            mark_paints: None,
+            outputs: vec![RenderOutputLayer::new(
+                toniator_domain::PatternOutputLayerId(0),
+                geometry,
+                None,
+            )],
         };
         validate_layer(&layer)?;
         Ok(layer)
@@ -651,13 +786,11 @@ impl RenderLayer {
                 alpha: 1.0,
             },
             opacity,
-            outputs: vec![RenderOutputLayer {
-                output_layer_id: toniator_domain::PatternOutputLayerId(0),
-                geometry: geometry.clone(),
-                primitive_paints: Some(mark_paints.clone()),
-            }],
-            geometry,
-            mark_paints: Some(mark_paints),
+            outputs: vec![RenderOutputLayer::new(
+                toniator_domain::PatternOutputLayerId(0),
+                geometry,
+                Some(mark_paints),
+            )],
         };
         validate_layer(&layer)?;
         Ok(layer)
@@ -685,13 +818,11 @@ impl RenderLayer {
                 alpha: 1.0,
             },
             opacity,
-            outputs: vec![RenderOutputLayer {
-                output_layer_id: toniator_domain::PatternOutputLayerId(0),
-                geometry: GeometryOutput::CanonicalMarks(marks.clone()),
-                primitive_paints: Some(paints.clone()),
-            }],
-            geometry: GeometryOutput::CanonicalMarks(marks),
-            mark_paints: Some(paints),
+            outputs: vec![RenderOutputLayer::new(
+                toniator_domain::PatternOutputLayerId(0),
+                GeometryOutput::CanonicalMarks(marks),
+                Some(paints),
+            )],
         };
         validate_layer(&layer)?;
         Ok(layer)
@@ -713,9 +844,12 @@ impl RenderLayer {
     pub fn outputs(&self) -> &[RenderOutputLayer] {
         &self.outputs
     }
-    /// Returns the preserved legacy sole-output geometry projection.
+    /// Returns the first ordered output geometry as the legacy read-only projection.
+    ///
+    /// The reference aliases the canonical first output; this compatibility
+    /// accessor never retains or clones a second geometry payload.
     pub fn geometry(&self) -> &GeometryOutput {
-        &self.outputs[0].geometry
+        self.outputs[0].geometry()
     }
 
     /// Builds an ordered output layer with channel-owned presentation authority.
@@ -730,17 +864,17 @@ impl RenderLayer {
         opacity: f64,
         outputs: Vec<RenderOutputLayer>,
     ) -> Result<Self, RenderError> {
-        let first = outputs.first().ok_or(RenderError::new(
-            "scene.layer.outputs",
-            "at least one ordered output is required",
-        ))?;
+        if outputs.is_empty() {
+            return Err(RenderError::new(
+                "scene.layer.outputs",
+                "at least one ordered output is required",
+            ));
+        }
         let layer = Self {
             channel_id,
             visible,
             color,
             opacity,
-            geometry: first.geometry.clone(),
-            mark_paints: first.primitive_paints.clone(),
             outputs,
         };
         validate_layer(&layer)?;
@@ -821,7 +955,7 @@ fn validate_layer(layer: &RenderLayer) -> Result<(), RenderError> {
 ///
 /// Returns stable geometry or sampled-paint diagnostics before scene construction.
 fn validate_output_geometry(output: &RenderOutputLayer) -> Result<(), RenderError> {
-    match &output.geometry {
+    match output.geometry() {
         GeometryOutput::CircularMarks(marks) => {
             if marks.iter().any(|mark| {
                 !mark.center.is_finite() || !mark.radius.is_finite() || mark.radius < 0.0
@@ -891,13 +1025,13 @@ fn validate_output_geometry(output: &RenderOutputLayer) -> Result<(), RenderErro
         }
     }
     if let Some(paints) = &output.primitive_paints {
-        if matches!(output.geometry, GeometryOutput::CanonicalStrokes(_)) {
+        if matches!(output.geometry(), GeometryOutput::CanonicalStrokes(_)) {
             return Err(RenderError::new(
                 "scene.layer.source_color",
                 "canonical strokes require solid channel paint",
             ));
         }
-        let primitives = match &output.geometry {
+        let primitives = match output.geometry() {
             GeometryOutput::CircularMarks(marks) => marks.len(),
             GeometryOutput::CanonicalMarks(marks) => marks.len(),
             GeometryOutput::CanonicalRegions(regions) => regions.regions().len(),
@@ -909,7 +1043,7 @@ fn validate_output_geometry(output: &RenderOutputLayer) -> Result<(), RenderErro
                 "source-colored paint count must match canonical primitive count",
             ));
         }
-        for paint in paints {
+        for paint in paints.iter() {
             for value in [paint.red, paint.green, paint.blue, paint.alpha] {
                 if !value.is_finite() || !(0.0..=1.0).contains(&value) {
                     return Err(RenderError::new(
@@ -918,7 +1052,8 @@ fn validate_output_geometry(output: &RenderOutputLayer) -> Result<(), RenderErro
                     ));
                 }
             }
-            if !matches!(output.geometry, GeometryOutput::CanonicalRegions(_)) && paint.alpha != 1.0
+            if !matches!(output.geometry(), GeometryOutput::CanonicalRegions(_))
+                && paint.alpha != 1.0
             {
                 return Err(RenderError::new(
                     "scene.layer.source_color",
@@ -979,7 +1114,7 @@ fn scene_fingerprint(
             if layer.outputs.len() > 1 {
                 add_scene_bytes(&mut hash, output.output_layer_id.0.to_le_bytes());
             }
-            match &output.geometry {
+            match output.geometry() {
                 GeometryOutput::CircularMarks(marks) => {
                     add_scene_bytes(&mut hash, (marks.len() as u64).to_le_bytes());
                     for mark in marks {
@@ -1230,7 +1365,7 @@ fn scene_fingerprint(
             if model.is_some() {
                 if let Some(paints) = &output.primitive_paints {
                     add_scene_bytes(&mut hash, [1]);
-                    for paint in paints {
+                    for paint in paints.iter() {
                         add_scene_bytes(&mut hash, paint.red.to_bits().to_le_bytes());
                         add_scene_bytes(&mut hash, paint.green.to_bits().to_le_bytes());
                         add_scene_bytes(&mut hash, paint.blue.to_bits().to_le_bytes());
@@ -1471,6 +1606,21 @@ pub enum RasterBackground {
     Transparent,
 }
 
+impl RasterBackground {
+    /// Selects the final-consumer PNG backing used when the caller supplies no override.
+    ///
+    /// This policy reads only the authoritative channel model and never enters document,
+    /// canonical-scene, renderer-geometry, or cache identity. Unmodeled legacy scenes retain
+    /// their historical transparent default.
+    pub const fn default_for_model(model: Option<HalftoneChannelModel>) -> Self {
+        match model {
+            Some(HalftoneChannelModel::Rgb) => Self::OpaqueBlack,
+            Some(HalftoneChannelModel::Cmyk) => Self::OpaqueWhite,
+            Some(HalftoneChannelModel::SourceColorAlpha) | None => Self::Transparent,
+        }
+    }
+}
+
 /// Final-consumer raster edge policy. This is deliberately absent from the
 /// canonical scene: it affects only PNG consumption.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1484,7 +1634,13 @@ struct RasterWork<'a> {
     remaining_edges: usize,
     antialiasing: RasterAntialiasing,
     is_cancelled: &'a (dyn Fn() -> bool + Sync),
+    completed_units: usize,
+    total_units: usize,
+    report_progress: &'a (dyn Fn(usize, usize) + Sync),
 }
+
+/// Discards optional raster progress for compatibility entry points.
+fn ignore_raster_progress(_completed: usize, _total: usize) {}
 
 impl<'a> RasterWork<'a> {
     /// Initializes one nonzero request-wide edge budget and caller-selected sampling policy.
@@ -1493,10 +1649,30 @@ impl<'a> RasterWork<'a> {
         antialiasing: RasterAntialiasing,
         is_cancelled: &'a (dyn Fn() -> bool + Sync),
     ) -> Self {
+        Self::with_progress(
+            limits,
+            antialiasing,
+            is_cancelled,
+            0,
+            &ignore_raster_progress,
+        )
+    }
+
+    /// Initializes request-wide edge and primitive-progress accounting.
+    fn with_progress(
+        limits: RasterizationLimits,
+        antialiasing: RasterAntialiasing,
+        is_cancelled: &'a (dyn Fn() -> bool + Sync),
+        total_units: usize,
+        report_progress: &'a (dyn Fn(usize, usize) + Sync),
+    ) -> Self {
         Self {
             remaining_edges: limits.max_flattened_edges(),
             antialiasing,
             is_cancelled,
+            completed_units: 0,
+            total_units,
+            report_progress,
         }
     }
 
@@ -1518,6 +1694,17 @@ impl<'a> RasterWork<'a> {
             "flattened raster edge limit exceeded",
         ))?;
         Ok(())
+    }
+
+    /// Reports completion of one canonical primitive after its pixels are fully composited.
+    fn primitive(&mut self) {
+        self.completed_units = self.completed_units.saturating_add(1);
+        (self.report_progress)(self.completed_units.min(self.total_units), self.total_units);
+    }
+
+    /// Reports completion of one parallel composition, background, or quantization phase.
+    fn parallel_phase(&mut self) {
+        self.primitive();
     }
 }
 
@@ -1595,6 +1782,13 @@ pub struct RasterSurface {
 }
 
 impl RasterSurface {
+    /// Builds one validated straight-sRGBA raster surface from an already allocated byte buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `raster.surface` when dimensions are invalid or their checked
+    /// byte count does not match the supplied buffer. This constructor never
+    /// reallocates or changes caller-owned pixel bytes.
     pub fn new(width: u32, height: u32, pixels: Vec<u8>) -> Result<Self, RenderError> {
         if width == 0 || height == 0 {
             return Err(RenderError::new(
@@ -1602,7 +1796,8 @@ impl RasterSurface {
                 "dimensions must be positive",
             ));
         }
-        if pixels.len() != width as usize * height as usize * 4 {
+        let expected_byte_count = raster_byte_count(width, height)?;
+        if pixels.len() != expected_byte_count {
             return Err(RenderError::new(
                 "raster.surface",
                 "straight sRGBA buffer length does not match dimensions",
@@ -1657,7 +1852,40 @@ pub fn rasterize_cancellable(
     limits: RasterizationLimits,
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<RasterSurface, RenderError> {
-    let mut work = RasterWork::new(limits, RasterAntialiasing::On, is_cancelled);
+    rasterize_cancellable_with_progress(
+        scene,
+        background,
+        limits,
+        is_cancelled,
+        &ignore_raster_progress,
+    )
+}
+
+/// Rasterizes canonical geometry while reporting completed primitive units.
+///
+/// Progress is consumer-only and excluded from pixels, scene identity, cache
+/// identity, edge policy, and cancellation. A primitive is reported only after
+/// all of its pixels have been composited into private layer storage.
+///
+/// # Errors
+///
+/// Returns the same cancellation, target, flattening, edge-limit, or surface
+/// diagnostics as [`rasterize_cancellable`] without publishing partial pixels.
+pub fn rasterize_cancellable_with_progress(
+    scene: &RenderScene,
+    background: RasterBackground,
+    limits: RasterizationLimits,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+    report_progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<RasterSurface, RenderError> {
+    let total_primitives = raster_progress_unit_count(scene);
+    let mut work = RasterWork::with_progress(
+        limits,
+        RasterAntialiasing::On,
+        is_cancelled,
+        total_primitives,
+        report_progress,
+    );
     // All native document-canvas rasterization crosses the same checked final
     // consumer boundary as an explicit output target before allocation.
     let native_target = native_output_target(scene)?;
@@ -1667,18 +1895,19 @@ pub fn rasterize_cancellable(
 
     let width = native_target.width;
     let height = native_target.height;
-    let layer_pixels = scene
-        .layers
-        .iter()
-        .map(|layer| rasterize_layer(layer, width, height, &mut work))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut linear_pixels = compose_model(
-        scene.model.expect("modeled scene"),
-        &layer_pixels,
-        is_cancelled,
-    )?;
+    let model = scene.model.expect("modeled scene");
+    let mut linear_pixels = begin_model_composition(model, width, height)?;
+    for layer in &scene.layers {
+        let layer_pixels = rasterize_layer(layer, width, height, &mut work)?;
+        compose_model_layer(model, &mut linear_pixels, &layer_pixels, is_cancelled)?;
+    }
+    finish_model_composition(model, &mut linear_pixels, is_cancelled)?;
+    work.parallel_phase();
     apply_background(&mut linear_pixels, background, is_cancelled)?;
-    pixels_from_linear(width, height, linear_pixels, is_cancelled)
+    work.parallel_phase();
+    let surface = pixels_from_linear(width, height, linear_pixels, is_cancelled)?;
+    work.parallel_phase();
+    Ok(surface)
 }
 
 /// Rerasterizes immutable canonical geometry for a PNG consumer. The
@@ -1726,15 +1955,22 @@ pub fn rasterize_output_cancellable(
     };
     let transform = OutputTransform::for_scene(scene, target);
     let mut work = RasterWork::new(limits, antialiasing, is_cancelled);
-    let layers = scene
-        .layers
-        .iter()
-        .map(|layer| rasterize_layer_for_output(layer, target, transform, antialiasing, &mut work))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut pixels = match scene.model {
-        Some(model) => compose_model(model, &layers, is_cancelled)?,
-        None => compose_source_over_layers(&layers, is_cancelled)?,
+    let model = scene.model;
+    let mut pixels = match model {
+        Some(model) => begin_model_composition(model, target.width, target.height)?,
+        None => begin_source_over_composition(target.width, target.height)?,
     };
+    for layer in &scene.layers {
+        let layer_pixels =
+            rasterize_layer_for_output(layer, target, transform, antialiasing, &mut work)?;
+        match model {
+            Some(model) => compose_model_layer(model, &mut pixels, &layer_pixels, is_cancelled)?,
+            None => compose_source_over_layer(&mut pixels, &layer_pixels, is_cancelled)?,
+        }
+    }
+    if let Some(model) = model {
+        finish_model_composition(model, &mut pixels, is_cancelled)?;
+    }
     apply_background(&mut pixels, background, is_cancelled)?;
     pixels_from_linear(target.width, target.height, pixels, is_cancelled)
 }
@@ -1791,21 +2027,63 @@ pub fn rasterize_preview_cancellable(
     limits: RasterizationLimits,
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<RasterSurface, RenderError> {
+    rasterize_preview_cancellable_with_progress(
+        scene,
+        target,
+        limits,
+        is_cancelled,
+        &ignore_raster_progress,
+    )
+}
+
+/// Rasterizes a fitted preview while reporting completed canonical primitives.
+///
+/// Progress is non-authoritative and may be emitted from worker-owned raster
+/// work; it never changes target fitting, pixels, scene identity, or caching.
+///
+/// # Errors
+///
+/// Returns the same cancellation, target, flattening, edge-limit, or surface
+/// diagnostics as [`rasterize_preview_cancellable`] without partial output.
+pub fn rasterize_preview_cancellable_with_progress(
+    scene: &RenderScene,
+    target: PreviewRasterTarget,
+    limits: RasterizationLimits,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+    report_progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<RasterSurface, RenderError> {
     let transform = PreviewTransform::for_scene(scene, target);
     let width = target.width;
     let height = target.height;
-    let mut work = RasterWork::new(limits, RasterAntialiasing::On, is_cancelled);
-    let layers = scene
-        .layers
-        .iter()
-        .map(|layer| rasterize_layer_with_transform(layer, width, height, transform, &mut work))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut pixels = match scene.model {
-        Some(model) => compose_model(model, &layers, is_cancelled)?,
-        None => compose_source_over_layers(&layers, is_cancelled)?,
+    let mut work = RasterWork::with_progress(
+        limits,
+        RasterAntialiasing::On,
+        is_cancelled,
+        raster_progress_unit_count(scene),
+        report_progress,
+    );
+    let model = scene.model;
+    let mut pixels = match model {
+        Some(model) => begin_model_composition(model, width, height)?,
+        None => begin_source_over_composition(width, height)?,
     };
+    for layer in &scene.layers {
+        let layer_pixels =
+            rasterize_layer_with_transform(layer, width, height, transform, &mut work)?;
+        match model {
+            Some(model) => compose_model_layer(model, &mut pixels, &layer_pixels, is_cancelled)?,
+            None => compose_source_over_layer(&mut pixels, &layer_pixels, is_cancelled)?,
+        }
+    }
+    if let Some(model) = model {
+        finish_model_composition(model, &mut pixels, is_cancelled)?;
+    }
+    work.parallel_phase();
     apply_background(&mut pixels, RasterBackground::Transparent, is_cancelled)?;
-    pixels_from_linear(width, height, pixels, is_cancelled)
+    work.parallel_phase();
+    let surface = pixels_from_linear(width, height, pixels, is_cancelled)?;
+    work.parallel_phase();
+    Ok(surface)
 }
 
 #[derive(Clone, Copy)]
@@ -1853,7 +2131,7 @@ fn rasterize_stage5(
             continue;
         }
         for output in &layer.outputs {
-            match &output.geometry {
+            match output.geometry() {
                 GeometryOutput::CircularMarks(marks) => {
                     for (index, mark) in marks.iter().enumerate() {
                         composite_circle(
@@ -1869,6 +2147,7 @@ fn rasterize_stage5(
                             layer.opacity,
                             work,
                         )?;
+                        work.primitive();
                     }
                 }
                 GeometryOutput::CanonicalMarks(marks) => {
@@ -1887,6 +2166,7 @@ fn rasterize_stage5(
                             CanonicalRasterTransform::native(),
                             work,
                         )?;
+                        work.primitive();
                     }
                 }
                 GeometryOutput::CanonicalStrokes(strokes) => {
@@ -1901,6 +2181,7 @@ fn rasterize_stage5(
                             CanonicalRasterTransform::native(),
                             work,
                         )?;
+                        work.primitive();
                     }
                 }
                 GeometryOutput::CanonicalRegions(regions) => {
@@ -1915,14 +2196,42 @@ fn rasterize_stage5(
                             CanonicalRasterTransform::native(),
                             work,
                         )?;
+                        work.primitive();
                     }
                 }
             }
         }
     }
-    pixels_from_linear(width, height, linear_pixels, work.is_cancelled)
+    let surface = pixels_from_linear(width, height, linear_pixels, work.is_cancelled)?;
+    work.parallel_phase();
+    Ok(surface)
 }
 
+/// Counts canonical primitives and final parallel phases for raster progress.
+fn raster_progress_unit_count(scene: &RenderScene) -> usize {
+    let primitives = scene
+        .layers
+        .iter()
+        .filter(|layer| layer.visible)
+        .flat_map(|layer| &layer.outputs)
+        .fold(0_usize, |total, output| {
+            let count = match output.geometry() {
+                GeometryOutput::CircularMarks(marks) => marks.len(),
+                GeometryOutput::CanonicalMarks(marks) => marks.len(),
+                GeometryOutput::CanonicalStrokes(strokes) => strokes.len(),
+                GeometryOutput::CanonicalRegions(regions) => regions.regions().len(),
+            };
+            total.saturating_add(count)
+        });
+    primitives.saturating_add(3)
+}
+
+/// Resolves integral native output dimensions without changing scene geometry.
+///
+/// # Errors
+///
+/// Returns the stable output-target diagnostic when either finite canvas
+/// dimension is not representable as a positive integral raster dimension.
 fn native_output_target(scene: &RenderScene) -> Result<OutputRasterTarget, RenderError> {
     OutputRasterTarget::new(
         integral_dimension(scene.canvas.width)?,
@@ -1954,6 +2263,77 @@ fn background_pixel(background: RasterBackground) -> PremultipliedLinearPixel {
     }
 }
 
+/// Returns the checked count of complete pixels in one raster target.
+///
+/// # Errors
+///
+/// Returns `raster.allocation` when the dimensions cannot be represented by a
+/// `usize` count on the current target. It imposes no product-size ceiling.
+fn raster_pixel_count(width: u32, height: u32) -> Result<usize, RenderError> {
+    usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or(RenderError::new(
+            "raster.allocation",
+            "raster pixel count overflows",
+        ))
+}
+
+/// Returns the checked byte count for one straight-sRGBA raster target.
+///
+/// # Errors
+///
+/// Returns `raster.allocation` when the target pixel count or four-byte
+/// conversion overflows; it never allocates storage itself.
+fn raster_byte_count(width: u32, height: u32) -> Result<usize, RenderError> {
+    raster_pixel_count(width, height)?
+        .checked_mul(4)
+        .ok_or(RenderError::new(
+            "raster.allocation",
+            "raster byte count overflows",
+        ))
+}
+
+/// Allocates one complete premultiplied linear pixel buffer through fallible reservation.
+///
+/// # Errors
+///
+/// Returns `raster.allocation` for a non-representable target or failed
+/// allocation before publishing any partial raster storage.
+fn allocate_linear_pixels(
+    width: u32,
+    height: u32,
+    initial: PremultipliedLinearPixel,
+) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
+    let count = raster_pixel_count(width, height)?;
+    let mut pixels = Vec::new();
+    pixels.try_reserve_exact(count).map_err(|_| {
+        RenderError::new("raster.allocation", "raster linear pixel allocation failed")
+    })?;
+    pixels.resize(count, initial);
+    Ok(pixels)
+}
+
+/// Allocates one final straight-sRGBA byte buffer through fallible reservation.
+///
+/// # Errors
+///
+/// Returns `raster.allocation` for a non-representable target or failed byte
+/// allocation before quantization begins.
+fn allocate_raster_bytes(width: u32, height: u32) -> Result<Vec<u8>, RenderError> {
+    let count = raster_byte_count(width, height)?;
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(count)
+        .map_err(|_| RenderError::new("raster.allocation", "raster byte allocation failed"))?;
+    pixels.resize(count, 0);
+    Ok(pixels)
+}
+
 /// Rasterizes one native-coordinate layer into private premultiplied linear storage.
 ///
 /// # Errors
@@ -1965,13 +2345,16 @@ fn rasterize_layer(
     height: u32,
     work: &mut RasterWork<'_>,
 ) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
-    let mut pixels =
-        vec![background_pixel(RasterBackground::Transparent); width as usize * height as usize];
+    let mut pixels = allocate_linear_pixels(
+        width,
+        height,
+        background_pixel(RasterBackground::Transparent),
+    )?;
     if !layer.visible {
         return Ok(pixels);
     }
     for output in &layer.outputs {
-        match &output.geometry {
+        match output.geometry() {
             GeometryOutput::CircularMarks(marks) => {
                 for (index, mark) in marks.iter().enumerate() {
                     composite_circle(
@@ -1987,6 +2370,7 @@ fn rasterize_layer(
                         layer.opacity,
                         work,
                     )?;
+                    work.primitive();
                 }
             }
             GeometryOutput::CanonicalMarks(marks) => {
@@ -2005,6 +2389,7 @@ fn rasterize_layer(
                         CanonicalRasterTransform::native(),
                         work,
                     )?;
+                    work.primitive();
                 }
             }
             GeometryOutput::CanonicalStrokes(strokes) => {
@@ -2019,6 +2404,7 @@ fn rasterize_layer(
                         CanonicalRasterTransform::native(),
                         work,
                     )?;
+                    work.primitive();
                 }
             }
             GeometryOutput::CanonicalRegions(regions) => {
@@ -2033,6 +2419,7 @@ fn rasterize_layer(
                         CanonicalRasterTransform::native(),
                         work,
                     )?;
+                    work.primitive();
                 }
             }
         }
@@ -2052,13 +2439,16 @@ fn rasterize_layer_with_transform(
     transform: PreviewTransform,
     work: &mut RasterWork<'_>,
 ) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
-    let mut pixels =
-        vec![background_pixel(RasterBackground::Transparent); width as usize * height as usize];
+    let mut pixels = allocate_linear_pixels(
+        width,
+        height,
+        background_pixel(RasterBackground::Transparent),
+    )?;
     if !layer.visible {
         return Ok(pixels);
     }
     for output in &layer.outputs {
-        match &output.geometry {
+        match output.geometry() {
             GeometryOutput::CircularMarks(marks) => {
                 for (index, mark) in marks.iter().enumerate() {
                     composite_circle_transformed(
@@ -2075,6 +2465,7 @@ fn rasterize_layer_with_transform(
                         transform,
                         work,
                     )?;
+                    work.primitive();
                 }
             }
             GeometryOutput::CanonicalMarks(marks) => {
@@ -2093,6 +2484,7 @@ fn rasterize_layer_with_transform(
                         CanonicalRasterTransform::preview(transform),
                         work,
                     )?;
+                    work.primitive();
                 }
             }
             GeometryOutput::CanonicalStrokes(strokes) => {
@@ -2107,6 +2499,7 @@ fn rasterize_layer_with_transform(
                         CanonicalRasterTransform::preview(transform),
                         work,
                     )?;
+                    work.primitive();
                 }
             }
             GeometryOutput::CanonicalRegions(regions) => {
@@ -2121,6 +2514,7 @@ fn rasterize_layer_with_transform(
                         CanonicalRasterTransform::preview(transform),
                         work,
                     )?;
+                    work.primitive();
                 }
             }
         }
@@ -2205,15 +2599,16 @@ fn rasterize_layer_for_output(
     antialiasing: RasterAntialiasing,
     work: &mut RasterWork<'_>,
 ) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
-    let mut pixels = vec![
-        background_pixel(RasterBackground::Transparent);
-        target.width as usize * target.height as usize
-    ];
+    let mut pixels = allocate_linear_pixels(
+        target.width,
+        target.height,
+        background_pixel(RasterBackground::Transparent),
+    )?;
     if !layer.visible {
         return Ok(pixels);
     }
     for output in &layer.outputs {
-        match &output.geometry {
+        match output.geometry() {
             GeometryOutput::CircularMarks(marks) => {
                 for (index, mark) in marks.iter().enumerate() {
                     composite_ellipse(
@@ -2286,98 +2681,178 @@ fn rasterize_layer_for_output(
     Ok(pixels)
 }
 
-/// Composes modeled channel pixels independently while preserving layer order within each pixel.
+/// Allocates the single streaming accumulator for one modeled rasterization.
+///
+/// CMYK uses the same storage while layers stream, but retains transmittance
+/// in RGB and uncovered coverage in alpha until finalization. The other models
+/// retain their final premultiplied meaning throughout.
 ///
 /// # Errors
 ///
-/// Returns canonical cancellation without publishing a partial pixel buffer.
+/// Returns `raster.allocation` before layer rasterization if the accumulator
+/// cannot be represented or reserved.
+fn begin_model_composition(
+    model: HalftoneChannelModel,
+    width: u32,
+    height: u32,
+) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
+    let initial = match model {
+        HalftoneChannelModel::Cmyk => PremultipliedLinearPixel {
+            red: 1.0,
+            green: 1.0,
+            blue: 1.0,
+            alpha: 1.0,
+        },
+        HalftoneChannelModel::Rgb | HalftoneChannelModel::SourceColorAlpha => {
+            background_pixel(RasterBackground::Transparent)
+        }
+    };
+    allocate_linear_pixels(width, height, initial)
+}
+
+/// Allocates the single ordinary source-over accumulator for an unmodeled scene.
+///
+/// # Errors
+///
+/// Returns `raster.allocation` before layer rasterization if the accumulator
+/// cannot be represented or reserved.
+fn begin_source_over_composition(
+    width: u32,
+    height: u32,
+) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
+    allocate_linear_pixels(
+        width,
+        height,
+        background_pixel(RasterBackground::Transparent),
+    )
+}
+
+/// Folds one just-rasterized layer into the modeled accumulator in authored order.
+///
+/// # Errors
+///
+/// Returns cancellation or an internal raster-shape diagnostic without
+/// accepting a partially composited final surface.
+fn compose_model_layer(
+    model: HalftoneChannelModel,
+    accumulator: &mut [PremultipliedLinearPixel],
+    layer: &[PremultipliedLinearPixel],
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(), RenderError> {
+    if accumulator.len() != layer.len() {
+        return Err(RenderError::new(
+            "raster.composition",
+            "layer dimensions do not match the composition accumulator",
+        ));
+    }
+    accumulator
+        .par_iter_mut()
+        .zip(layer.par_iter())
+        .try_for_each(|(destination, source)| {
+            check_parallel_raster_cancellation(is_cancelled)?;
+            match model {
+                HalftoneChannelModel::Rgb => {
+                    destination.red = (destination.red + source.red).clamp(0.0, 1.0);
+                    destination.green = (destination.green + source.green).clamp(0.0, 1.0);
+                    destination.blue = (destination.blue + source.blue).clamp(0.0, 1.0);
+                    destination.alpha = (destination.alpha + source.alpha).clamp(0.0, 1.0);
+                }
+                HalftoneChannelModel::Cmyk if source.alpha > 0.0 => {
+                    let straight = [
+                        source.red / source.alpha,
+                        source.green / source.alpha,
+                        source.blue / source.alpha,
+                    ];
+                    destination.red *= 1.0 - source.alpha * (1.0 - straight[0]);
+                    destination.green *= 1.0 - source.alpha * (1.0 - straight[1]);
+                    destination.blue *= 1.0 - source.alpha * (1.0 - straight[2]);
+                    destination.alpha *= 1.0 - source.alpha;
+                }
+                HalftoneChannelModel::Cmyk => {}
+                HalftoneChannelModel::SourceColorAlpha => source_over(destination, *source),
+            }
+            Ok(())
+        })
+}
+
+/// Finalizes a modeled streaming accumulator into premultiplied linear output.
+///
+/// # Errors
+///
+/// Returns cancellation before mutating a further independent accumulator
+/// pixel. RGB and SourceColorAlpha require no conversion but still poll the
+/// canonical cancellation authority.
+fn finish_model_composition(
+    model: HalftoneChannelModel,
+    accumulator: &mut [PremultipliedLinearPixel],
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(), RenderError> {
+    if model != HalftoneChannelModel::Cmyk {
+        return check_parallel_raster_cancellation(is_cancelled);
+    }
+    accumulator.par_iter_mut().try_for_each(|pixel| {
+        check_parallel_raster_cancellation(is_cancelled)?;
+        let alpha = (1.0 - pixel.alpha).clamp(0.0, 1.0);
+        pixel.red = boundary_clamp(pixel.red - (1.0 - alpha));
+        pixel.green = boundary_clamp(pixel.green - (1.0 - alpha));
+        pixel.blue = boundary_clamp(pixel.blue - (1.0 - alpha));
+        pixel.alpha = alpha;
+        Ok(())
+    })
+}
+
+/// Folds one just-rasterized layer into an ordinary source-over accumulator.
+///
+/// # Errors
+///
+/// Returns cancellation or an internal raster-shape diagnostic without
+/// accepting a partially composited final surface.
+fn compose_source_over_layer(
+    accumulator: &mut [PremultipliedLinearPixel],
+    layer: &[PremultipliedLinearPixel],
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(), RenderError> {
+    if accumulator.len() != layer.len() {
+        return Err(RenderError::new(
+            "raster.composition",
+            "layer dimensions do not match the composition accumulator",
+        ));
+    }
+    accumulator
+        .par_iter_mut()
+        .zip(layer.par_iter())
+        .try_for_each(|(destination, source)| {
+            check_parallel_raster_cancellation(is_cancelled)?;
+            source_over(destination, *source);
+            Ok(())
+        })
+}
+
+/// Composes supplied test layers through the same streaming model accumulator.
+///
+/// # Errors
+///
+/// Returns the same cancellation and composition diagnostics as production
+/// streaming rasterization without retaining a second composed buffer.
+#[cfg(test)]
 fn compose_model(
     model: HalftoneChannelModel,
     layers: &[Vec<PremultipliedLinearPixel>],
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
     let count = layers.first().map_or(0, Vec::len);
-    match model {
-        HalftoneChannelModel::Rgb => (0..count)
-            .into_par_iter()
-            .map(|index| {
-                check_parallel_raster_cancellation(is_cancelled)?;
-                let mut pixel = background_pixel(RasterBackground::Transparent);
-                for layer in layers {
-                    let source = layer[index];
-                    pixel.red = (pixel.red + source.red).clamp(0.0, 1.0);
-                    pixel.green = (pixel.green + source.green).clamp(0.0, 1.0);
-                    pixel.blue = (pixel.blue + source.blue).clamp(0.0, 1.0);
-                    pixel.alpha = (pixel.alpha + source.alpha).clamp(0.0, 1.0);
-                }
-                Ok(pixel)
-            })
-            .collect(),
-        HalftoneChannelModel::Cmyk => (0..count)
-            .into_par_iter()
-            .map(|index| {
-                check_parallel_raster_cancellation(is_cancelled)?;
-                let mut transmittance = [1.0; 3];
-                let mut uncovered = 1.0;
-                for layer in layers {
-                    let source = layer[index];
-                    if source.alpha > 0.0 {
-                        let straight = [
-                            source.red / source.alpha,
-                            source.green / source.alpha,
-                            source.blue / source.alpha,
-                        ];
-                        for component in 0..3 {
-                            transmittance[component] *=
-                                1.0 - source.alpha * (1.0 - straight[component]);
-                        }
-                        uncovered *= 1.0 - source.alpha;
-                    }
-                }
-                let alpha = (1.0 - uncovered).clamp(0.0, 1.0);
-                Ok(PremultipliedLinearPixel {
-                    red: boundary_clamp(transmittance[0] - (1.0 - alpha)),
-                    green: boundary_clamp(transmittance[1] - (1.0 - alpha)),
-                    blue: boundary_clamp(transmittance[2] - (1.0 - alpha)),
-                    alpha,
-                })
-            })
-            .collect(),
-        HalftoneChannelModel::SourceColorAlpha => (0..count)
-            .into_par_iter()
-            .map(|index| {
-                check_parallel_raster_cancellation(is_cancelled)?;
-                let mut destination = background_pixel(RasterBackground::Transparent);
-                for layer in layers {
-                    source_over(&mut destination, layer[index]);
-                }
-                Ok(destination)
-            })
-            .collect(),
+    let width = u32::try_from(count).map_err(|_| {
+        RenderError::new(
+            "raster.allocation",
+            "test composition width is not representable",
+        )
+    })?;
+    let mut accumulator = begin_model_composition(model, width, 1)?;
+    for layer in layers {
+        compose_model_layer(model, &mut accumulator, layer, is_cancelled)?;
     }
-}
-
-/// Composes ordinary source-over layers in indexed pixel order without mutating shared state.
-///
-/// # Errors
-///
-/// Returns canonical cancellation without publishing a partial pixel buffer.
-fn compose_source_over_layers(
-    layers: &[Vec<PremultipliedLinearPixel>],
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
-    let count = layers.first().map_or(0, Vec::len);
-    (0..count)
-        .into_par_iter()
-        .map(|index| {
-            check_parallel_raster_cancellation(is_cancelled)?;
-            let mut destination = background_pixel(RasterBackground::Transparent);
-            for layer in layers {
-                source_over(&mut destination, layer[index]);
-            }
-            Ok(destination)
-        })
-        .collect()
+    finish_model_composition(model, &mut accumulator, is_cancelled)?;
+    Ok(accumulator)
 }
 
 fn boundary_clamp(value: f64) -> f64 {
@@ -2435,11 +2910,14 @@ fn pixels_from_linear(
     linear_pixels: Vec<PremultipliedLinearPixel>,
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<RasterSurface, RenderError> {
-    let byte_count = linear_pixels.len().checked_mul(4).ok_or(RenderError::new(
-        "raster.allocation",
-        "raster byte count overflows",
-    ))?;
-    let mut pixels = vec![0_u8; byte_count];
+    let expected_linear_count = raster_pixel_count(width, height)?;
+    if linear_pixels.len() != expected_linear_count {
+        return Err(RenderError::new(
+            "raster.composition",
+            "linear pixel count does not match raster dimensions",
+        ));
+    }
+    let mut pixels = allocate_raster_bytes(width, height)?;
     pixels
         .par_chunks_mut(4)
         .zip(linear_pixels.par_iter())
@@ -2678,30 +3156,57 @@ fn composite_canonical_stroke(
     if edges.is_empty() {
         return Ok(());
     }
+    let row_starts = outline_row_edge_starts(&edges, min_y, max_y, work)?;
+    if row_starts.is_empty() {
+        return Ok(());
+    }
+    let mut covered = Vec::new();
+    let mut crossings = Vec::new();
+    crossings
+        .try_reserve_exact(edges.len().min(256))
+        .map_err(|_| {
+            RenderError::new(
+                "raster.allocation",
+                "stroke scanline crossing allocation failed",
+            )
+        })?;
+    let mut row_edges = Vec::new();
+    row_edges
+        .try_reserve_exact(row_starts.len())
+        .map_err(|_| RenderError::new("raster.allocation", "stroke row-edge allocation failed"))?;
+    let mut row_edge_end_rows = Vec::new();
+    row_edge_end_rows
+        .try_reserve_exact(row_starts.len())
+        .map_err(|_| RenderError::new("raster.allocation", "stroke row-end allocation failed"))?;
+    let samples = if matches!(work.antialiasing, RasterAntialiasing::On) {
+        SUBPIXEL_GRID
+    } else {
+        1
+    };
+    let mut next_row_start = 0_usize;
     for y in min_y..max_y {
         work.check()?;
-        let row_edges = outline_edges_for_pixel_row(&edges, y);
+        advance_outline_edges_for_pixel_row(
+            &row_starts,
+            &mut next_row_start,
+            y,
+            &mut row_edges,
+            &mut row_edge_end_rows,
+        );
         if row_edges.is_empty() {
             continue;
         }
-        for x in min_x..max_x {
-            let mut covered = 0_u32;
-            let samples = if matches!(work.antialiasing, RasterAntialiasing::On) {
-                SUBPIXEL_GRID
-            } else {
-                1
-            };
-            for sy in 0..samples {
-                for sx in 0..samples {
-                    let point = Point2::new(
-                        f64::from(x) + (f64::from(sx) + 0.5) / f64::from(samples),
-                        f64::from(y) + (f64::from(sy) + 0.5) / f64::from(samples),
-                    );
-                    if point_in_nonzero_outline(&row_edges, point) {
-                        covered += 1;
-                    }
-                }
-            }
+        let _scanline_work = accumulate_nonzero_scanline_coverage(
+            &row_edges,
+            y,
+            min_x,
+            max_x,
+            samples,
+            &mut covered,
+            &mut crossings,
+            work,
+        )?;
+        for (x, covered) in covered.iter().copied() {
             let coverage = f64::from(covered) / f64::from(samples * samples);
             if coverage > 0.0 {
                 let source = PremultipliedLinearPixel {
@@ -2720,15 +3225,290 @@ fn composite_canonical_stroke(
     Ok(())
 }
 
-/// Retains only flattened outline edges that can cross a subpixel sample in one output row.
-fn outline_edges_for_pixel_row(edges: &[(Point2, Point2)], row: u32) -> Vec<(Point2, Point2)> {
-    let row_start = f64::from(row);
-    let row_end = row_start + 1.0;
-    edges
-        .iter()
-        .copied()
-        .filter(|(start, end)| start.y.min(end.y) < row_end && start.y.max(end.y) > row_start)
-        .collect()
+/// One flattened outline edge scheduled for the bounded pixel-row interval it can sample.
+///
+/// The interval is half-open and derives only from finite flattened geometry. It is request-local
+/// traversal state, never canonical geometry, clipping authority, or cache identity.
+#[derive(Clone, Copy, Debug)]
+struct OutlineRowEdgeStart {
+    start_row: u32,
+    end_row: u32,
+    ordinal: usize,
+    edge: (Point2, Point2),
+}
+
+/// Carries test-only traversal counts while resolving active nonzero scanline spans.
+///
+/// In test builds the counter describes raster traversal; production builds retain no counter
+/// field or increment cost. It never changes canonical outline coverage or forms part of scene,
+/// raster, or cache identity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ScanlineCoverageWork {
+    #[cfg(test)]
+    visited_subpixel_samples: usize,
+    #[cfg(test)]
+    visited_active_edges: usize,
+}
+
+/// Bins each flattened outline edge at the first pixel row that can contain one of its samples.
+///
+/// The returned half-open row interval exactly satisfies the existing sample predicate
+/// `edge_min_y < row + 1 && edge_max_y > row`. This turns per-row traversal into edge-row overlap
+/// work while preserving deterministic activation order (source order for equal start rows) and
+/// strict half-open crossing behavior.
+///
+/// # Errors
+///
+/// Returns cancellation or `raster.allocation` without mutating canonical geometry or a raster.
+fn outline_row_edge_starts(
+    edges: &[(Point2, Point2)],
+    min_row: u32,
+    max_row: u32,
+    work: &RasterWork<'_>,
+) -> Result<Vec<OutlineRowEdgeStart>, RenderError> {
+    let mut starts = Vec::new();
+    starts
+        .try_reserve_exact(edges.len())
+        .map_err(|_| RenderError::new("raster.allocation", "stroke row-edge allocation failed"))?;
+    for (index, edge) in edges.iter().copied().enumerate() {
+        if index % 128 == 0 {
+            work.check()?;
+        }
+        let edge_min_y = edge.0.y.min(edge.1.y);
+        let edge_max_y = edge.0.y.max(edge.1.y);
+        let start_row = edge_min_y
+            .floor()
+            .max(f64::from(min_row))
+            .min(f64::from(max_row)) as u32;
+        let end_row = edge_max_y
+            .ceil()
+            .max(f64::from(min_row))
+            .min(f64::from(max_row)) as u32;
+        if start_row < end_row {
+            starts.push(OutlineRowEdgeStart {
+                start_row,
+                end_row,
+                ordinal: index,
+                edge,
+            });
+        }
+    }
+    starts.sort_unstable_by_key(|entry| (entry.start_row, entry.ordinal));
+    Ok(starts)
+}
+
+/// Advances one reusable row-active edge set without scanning inactive flattened edges.
+///
+/// `row_starts` stays sorted by row and both mutable vectors retain one entry per currently active
+/// edge in identical order. The caller reserves their maximum possible capacity before calling, so
+/// this hot path performs no allocation and does not alter nonzero-winding authority.
+fn advance_outline_edges_for_pixel_row(
+    row_starts: &[OutlineRowEdgeStart],
+    next_row_start: &mut usize,
+    row: u32,
+    row_edges: &mut Vec<(Point2, Point2)>,
+    row_edge_end_rows: &mut Vec<u32>,
+) {
+    while *next_row_start < row_starts.len() && row_starts[*next_row_start].start_row <= row {
+        let entry = row_starts[*next_row_start];
+        row_edges.push(entry.edge);
+        row_edge_end_rows.push(entry.end_row);
+        *next_row_start += 1;
+    }
+    let mut retained = 0_usize;
+    for index in 0..row_edges.len() {
+        if row_edge_end_rows[index] > row {
+            if retained != index {
+                row_edges[retained] = row_edges[index];
+                row_edge_end_rows[retained] = row_edge_end_rows[index];
+            }
+            retained += 1;
+        }
+    }
+    row_edges.truncate(retained);
+    row_edge_end_rows.truncate(retained);
+}
+
+/// Accumulates exact nonzero 8x8 sample coverage for one pixel row from sorted crossings.
+///
+/// This preserves strict half-open winding tests at every sample center while visiting only the
+/// active spans between nonzero crossings. The sparse caller-owned coverage buffer is reused and
+/// contains only pixels that receive one or more samples; no geometry, clipping, or antialiasing
+/// authority changes.
+///
+/// # Errors
+///
+/// Returns cancellation or fallible sparse-buffer allocation errors without publishing a partial
+/// surface.
+#[allow(clippy::too_many_arguments)]
+fn accumulate_nonzero_scanline_coverage(
+    edges: &[(Point2, Point2)],
+    row: u32,
+    min_x: u32,
+    max_x: u32,
+    samples: u32,
+    covered: &mut Vec<(u32, u16)>,
+    crossings: &mut Vec<(f64, i32)>,
+    work: &RasterWork<'_>,
+) -> Result<ScanlineCoverageWork, RenderError> {
+    covered.clear();
+    let mut coverage_work = ScanlineCoverageWork::default();
+    for sub_y in 0..samples {
+        work.check()?;
+        crossings.clear();
+        let sample_y = f64::from(row) + (f64::from(sub_y) + 0.5) / f64::from(samples);
+        #[cfg(test)]
+        {
+            coverage_work.visited_active_edges = coverage_work
+                .visited_active_edges
+                .saturating_add(edges.len());
+        }
+        for (start, end) in edges {
+            let contribution = if start.y <= sample_y && end.y > sample_y {
+                1
+            } else if start.y > sample_y && end.y <= sample_y {
+                -1
+            } else {
+                continue;
+            };
+            let intersection_x =
+                start.x + (end.x - start.x) * (sample_y - start.y) / (end.y - start.y);
+            if crossings.len() == crossings.capacity() {
+                crossings
+                    .try_reserve(edges.len().saturating_sub(crossings.len()).clamp(1, 256))
+                    .map_err(|_| {
+                        RenderError::new(
+                            "raster.allocation",
+                            "stroke scanline crossing allocation failed",
+                        )
+                    })?;
+            }
+            crossings.push((intersection_x, contribution));
+        }
+        if crossings.is_empty() {
+            continue;
+        }
+        crossings.sort_unstable_by(|first, second| first.0.total_cmp(&second.0));
+        let mut winding = crossings
+            .iter()
+            .map(|(_, contribution)| *contribution)
+            .sum::<i32>();
+        let mut span_start = (winding != 0).then_some(f64::from(min_x));
+        let mut crossing_index = 0_usize;
+        while crossing_index < crossings.len() {
+            let crossing_x = crossings[crossing_index].0;
+            let prior_winding = winding;
+            while crossing_index < crossings.len() && crossings[crossing_index].0 == crossing_x {
+                winding -= crossings[crossing_index].1;
+                crossing_index += 1;
+            }
+            match (prior_winding == 0, winding == 0) {
+                (true, false) => span_start = Some(crossing_x),
+                (false, true) => {
+                    accumulate_nonzero_span_coverage(
+                        span_start.unwrap_or(f64::from(min_x)),
+                        crossing_x,
+                        min_x,
+                        max_x,
+                        samples,
+                        covered,
+                        &mut coverage_work,
+                        work,
+                    )?;
+                    span_start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(span_start) = span_start {
+            accumulate_nonzero_span_coverage(
+                span_start,
+                f64::from(max_x),
+                min_x,
+                max_x,
+                samples,
+                covered,
+                &mut coverage_work,
+                work,
+            )?;
+        }
+    }
+    Ok(coverage_work)
+}
+
+/// Adds the exact subpixel samples in one active nonzero span to sparse row coverage.
+///
+/// The span remains half-open (`start <= sample < end`) so its ownership matches the historical
+/// crossing rule. Iteration is clipped only at the final raster row bounds; canonical outline
+/// geometry is not clipped or rewritten.
+///
+/// # Errors
+///
+/// Returns cancellation during bounded active-span traversal or `raster.allocation` when a newly
+/// active pixel cannot be appended to the reusable sparse coverage collection.
+#[allow(clippy::too_many_arguments)]
+fn accumulate_nonzero_span_coverage(
+    start: f64,
+    end: f64,
+    min_x: u32,
+    max_x: u32,
+    samples: u32,
+    covered: &mut Vec<(u32, u16)>,
+    coverage_work: &mut ScanlineCoverageWork,
+    work: &RasterWork<'_>,
+) -> Result<(), RenderError> {
+    #[cfg(not(test))]
+    let _ = coverage_work;
+    let clipped_start = start.max(f64::from(min_x));
+    let clipped_end = end.min(f64::from(max_x));
+    if clipped_end <= clipped_start {
+        return Ok(());
+    }
+    let first_pixel = clipped_start.floor().max(f64::from(min_x)) as u32;
+    let end_pixel = clipped_end.ceil().min(f64::from(max_x)) as u32;
+    for (offset, x) in (first_pixel..end_pixel).enumerate() {
+        if offset % 64 == 0 {
+            work.check()?;
+        }
+        for sub_x in 0..samples {
+            #[cfg(test)]
+            {
+                coverage_work.visited_subpixel_samples =
+                    coverage_work.visited_subpixel_samples.saturating_add(1);
+            }
+            let sample_x = f64::from(x) + (f64::from(sub_x) + 0.5) / f64::from(samples);
+            if sample_x >= clipped_start && sample_x < clipped_end {
+                record_sparse_coverage(covered, x)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Increments one active output pixel in a sparse, X-sorted row-coverage collection.
+///
+/// The collection stores only sampled pixels and preserves stable X order for deterministic
+/// source-over compositing. Per-pixel coverage is bounded by the fixed antialiasing grid.
+///
+/// # Errors
+///
+/// Returns `raster.allocation` if adding a newly covered pixel cannot grow the reusable vector.
+fn record_sparse_coverage(covered: &mut Vec<(u32, u16)>, x: u32) -> Result<(), RenderError> {
+    match covered.binary_search_by_key(&x, |(covered_x, _)| *covered_x) {
+        Ok(index) => covered[index].1 += 1,
+        Err(index) => {
+            if covered.len() == covered.capacity() {
+                covered.try_reserve(1).map_err(|_| {
+                    RenderError::new(
+                        "raster.allocation",
+                        "stroke sparse scanline coverage allocation failed",
+                    )
+                })?;
+            }
+            covered.insert(index, (x, 1));
+        }
+    }
+    Ok(())
 }
 
 /// Flattens stored line and cubic geometry in authored order under the caller's checked edge bound.
@@ -3287,7 +4067,7 @@ fn write_stage5_svg(scene: &RenderScene) -> String {
         for output in &layer.outputs {
             write_svg_geometry(
                 &mut document,
-                &output.geometry,
+                output.geometry(),
                 layer.channel_id.0,
                 None,
                 None,
@@ -3353,7 +4133,7 @@ fn write_svg_channel_group(
     for output in &layer.outputs {
         write_svg_geometry(
             document,
-            &output.geometry,
+            output.geometry(),
             layer.channel_id.0,
             Some(layer),
             Some(output),
@@ -3679,6 +4459,27 @@ mod stage20e2_limit_tests {
         FamilySiteProvenance, PathClosure,
     };
 
+    /// Proves omitted PNG backing follows only modeled output authority and preserves legacy transparency.
+    #[test]
+    fn omitted_png_background_follows_channel_model() {
+        assert_eq!(
+            RasterBackground::default_for_model(Some(HalftoneChannelModel::Rgb)),
+            RasterBackground::OpaqueBlack
+        );
+        assert_eq!(
+            RasterBackground::default_for_model(Some(HalftoneChannelModel::Cmyk)),
+            RasterBackground::OpaqueWhite
+        );
+        assert_eq!(
+            RasterBackground::default_for_model(Some(HalftoneChannelModel::SourceColorAlpha)),
+            RasterBackground::Transparent
+        );
+        assert_eq!(
+            RasterBackground::default_for_model(None),
+            RasterBackground::Transparent
+        );
+    }
+
     /// Builds one truthful even-odd canonical path mark from exact closed construction geometry.
     fn path_mark(ordinal: usize, path: CurvePath) -> CanonicalMark {
         CanonicalMark::ClosedPath(
@@ -3826,6 +4627,51 @@ mod stage20e2_limit_tests {
         assert_eq!(error.path(), "raster.limits.flattened_edges");
     }
 
+    /// Proves observed preview rasterization reports primitives and parallel phases without changing pixels.
+    #[test]
+    fn preview_raster_progress_is_complete_and_pixel_neutral() {
+        let square = CurvePath::polyline(
+            vec![
+                Point2::new(1.0, 1.0),
+                Point2::new(4.0, 1.0),
+                Point2::new(4.0, 4.0),
+                Point2::new(1.0, 4.0),
+            ],
+            PathClosure::Closed,
+        )
+        .expect("square fixture is closed");
+        let legacy = canonical_scene(vec![path_mark(0, square)]);
+        let scene = RenderScene::new_modeled(
+            legacy.canvas.clone(),
+            "progress-family".into(),
+            "progress-realization".into(),
+            HalftoneChannelModel::Rgb,
+            legacy.layers,
+        )
+        .expect("modeled progress scene validates");
+        let target = PreviewRasterTarget::new(40, 40).expect("preview target is bounded");
+        let expected =
+            rasterize_preview_cancellable(&scene, target, RasterizationLimits::default(), &|| {
+                false
+            })
+            .expect("ordinary preview rasterizes");
+        let progress = std::sync::Mutex::new(Vec::new());
+        let observed = rasterize_preview_cancellable_with_progress(
+            &scene,
+            target,
+            RasterizationLimits::default(),
+            &|| false,
+            &|completed, total| progress.lock().unwrap().push((completed, total)),
+        )
+        .expect("observed preview rasterizes");
+        assert_eq!(observed, expected);
+        let progress = progress.into_inner().unwrap();
+        assert_eq!(progress.len(), 4);
+        assert!(progress.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        let &(completed, total) = progress.last().expect("progress completes");
+        assert_eq!(completed, total);
+    }
+
     /// Proves anisotropic target flattening stays within 1/64 output pixel and AA-off is binary.
     #[test]
     fn anisotropic_output_flattening_and_antialiasing_use_concrete_pixels() {
@@ -3899,32 +4745,295 @@ mod stage20e2_limit_tests {
         );
     }
 
-    /// Proves row-local winding candidates preserve full-outline membership at every subpixel sample.
+    /// Proves scanline winding coverage matches full-outline membership at every subpixel sample.
     #[test]
-    fn outline_row_filter_preserves_nonzero_winding_coverage() {
+    fn scanline_nonzero_coverage_preserves_exact_subpixel_membership() {
         let edges = vec![
             (Point2::new(1.0, 1.0), Point2::new(7.0, 2.0)),
             (Point2::new(7.0, 2.0), Point2::new(6.0, 7.0)),
             (Point2::new(6.0, 7.0), Point2::new(2.0, 6.0)),
             (Point2::new(2.0, 6.0), Point2::new(1.0, 1.0)),
         ];
+        let is_cancelled = || false;
+        let work = RasterWork::new(
+            RasterizationLimits::new(100).expect("focused edge budget is nonzero"),
+            RasterAntialiasing::On,
+            &is_cancelled,
+        );
+        let mut covered = Vec::new();
+        let mut crossings = Vec::with_capacity(edges.len());
         for row in 0..8 {
-            let row_edges = outline_edges_for_pixel_row(&edges, row);
-            for sub_y in 0..SUBPIXEL_GRID {
-                for x in 0..8 {
+            accumulate_nonzero_scanline_coverage(
+                &edges,
+                row,
+                0,
+                8,
+                SUBPIXEL_GRID,
+                &mut covered,
+                &mut crossings,
+                &work,
+            )
+            .expect("finite scanline coverage succeeds");
+            for x in 0..8 {
+                let mut direct = 0_u16;
+                for sub_y in 0..SUBPIXEL_GRID {
                     for sub_x in 0..SUBPIXEL_GRID {
                         let point = Point2::new(
                             f64::from(x) + (f64::from(sub_x) + 0.5) / f64::from(SUBPIXEL_GRID),
                             f64::from(row) + (f64::from(sub_y) + 0.5) / f64::from(SUBPIXEL_GRID),
                         );
-                        assert_eq!(
-                            point_in_nonzero_outline(&edges, point),
-                            point_in_nonzero_outline(&row_edges, point)
-                        );
+                        direct += u16::from(point_in_nonzero_outline(&edges, point));
                     }
                 }
+                assert_eq!(
+                    covered
+                        .iter()
+                        .find_map(|(covered_x, coverage)| (*covered_x == x).then_some(*coverage))
+                        .unwrap_or(0),
+                    direct
+                );
             }
         }
+    }
+
+    /// Builds one explicitly oriented rectangular contour for nonzero-winding scanline fixtures.
+    fn rectangle_outline(
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+        clockwise: bool,
+    ) -> Vec<(Point2, Point2)> {
+        let points = if clockwise {
+            vec![
+                Point2::new(min_x, min_y),
+                Point2::new(min_x, max_y),
+                Point2::new(max_x, max_y),
+                Point2::new(max_x, min_y),
+                Point2::new(min_x, min_y),
+            ]
+        } else {
+            vec![
+                Point2::new(min_x, min_y),
+                Point2::new(max_x, min_y),
+                Point2::new(max_x, max_y),
+                Point2::new(min_x, max_y),
+                Point2::new(min_x, min_y),
+            ]
+        };
+        points
+            .windows(2)
+            .map(|points| (points[0], points[1]))
+            .collect()
+    }
+
+    /// Verifies row-active sparse coverage against the retained point-membership winding authority.
+    ///
+    /// The bounded input range is interpreted as final raster clipping only; direct membership
+    /// always receives the complete unmodified outline. The returned test-only work counts expose
+    /// edge-row traversal without affecting production pixels or identities.
+    #[allow(clippy::too_many_arguments)]
+    fn assert_row_active_coverage_matches_point_membership(
+        edges: &[(Point2, Point2)],
+        min_row: u32,
+        max_row: u32,
+        min_x: u32,
+        max_x: u32,
+        samples: u32,
+    ) -> ScanlineCoverageWork {
+        let is_cancelled = || false;
+        let work = RasterWork::new(
+            RasterizationLimits::new(100_000).expect("focused edge budget is bounded"),
+            if samples == 1 {
+                RasterAntialiasing::Off
+            } else {
+                RasterAntialiasing::On
+            },
+            &is_cancelled,
+        );
+        let row_starts = outline_row_edge_starts(edges, min_row, max_row, &work)
+            .expect("finite fixture schedules rows");
+        let mut covered = Vec::new();
+        let mut crossings = Vec::with_capacity(edges.len());
+        let mut active_edges = Vec::with_capacity(row_starts.len());
+        let mut active_edge_end_rows = Vec::with_capacity(row_starts.len());
+        let mut next_row_start = 0_usize;
+        let mut total_work = ScanlineCoverageWork::default();
+        for row in min_row..max_row {
+            advance_outline_edges_for_pixel_row(
+                &row_starts,
+                &mut next_row_start,
+                row,
+                &mut active_edges,
+                &mut active_edge_end_rows,
+            );
+            let scanline_work = accumulate_nonzero_scanline_coverage(
+                &active_edges,
+                row,
+                min_x,
+                max_x,
+                samples,
+                &mut covered,
+                &mut crossings,
+                &work,
+            )
+            .expect("finite row coverage succeeds");
+            total_work.visited_subpixel_samples = total_work
+                .visited_subpixel_samples
+                .saturating_add(scanline_work.visited_subpixel_samples);
+            total_work.visited_active_edges = total_work
+                .visited_active_edges
+                .saturating_add(scanline_work.visited_active_edges);
+            assert!(
+                covered
+                    .iter()
+                    .all(|(covered_x, _)| *covered_x >= min_x && *covered_x < max_x),
+                "sparse coverage remains final-raster clipped"
+            );
+            for x in min_x..max_x {
+                let mut direct = 0_u16;
+                for sub_y in 0..samples {
+                    for sub_x in 0..samples {
+                        let point = Point2::new(
+                            f64::from(x) + (f64::from(sub_x) + 0.5) / f64::from(samples),
+                            f64::from(row) + (f64::from(sub_y) + 0.5) / f64::from(samples),
+                        );
+                        direct += u16::from(point_in_nonzero_outline(edges, point));
+                    }
+                }
+                assert_eq!(
+                    covered
+                        .iter()
+                        .find_map(|(covered_x, coverage)| (*covered_x == x).then_some(*coverage))
+                        .unwrap_or(0),
+                    direct,
+                    "row={row}, x={x}, samples={samples}"
+                );
+            }
+        }
+        total_work
+    }
+
+    /// Proves row-active coverage preserves disjoint, nested, coincident, binary-AA, and clipped
+    /// nonzero-winding cases against the existing point-membership authority.
+    #[test]
+    fn row_active_scanlines_preserve_nonzero_winding_parity_at_boundary_cases() {
+        let mut disjoint = rectangle_outline(1.0, 1.0, 3.0, 4.0, false);
+        disjoint.extend(rectangle_outline(5.0, 1.0, 7.0, 4.0, false));
+        assert_row_active_coverage_matches_point_membership(&disjoint, 0, 6, 0, 8, SUBPIXEL_GRID);
+
+        let mut nested_same = rectangle_outline(1.0, 1.0, 7.0, 7.0, false);
+        nested_same.extend(rectangle_outline(3.0, 3.0, 5.0, 5.0, false));
+        assert_row_active_coverage_matches_point_membership(
+            &nested_same,
+            0,
+            8,
+            0,
+            8,
+            SUBPIXEL_GRID,
+        );
+
+        let mut nested_opposite = rectangle_outline(1.0, 1.0, 7.0, 7.0, false);
+        nested_opposite.extend(rectangle_outline(3.0, 3.0, 5.0, 5.0, true));
+        assert_row_active_coverage_matches_point_membership(
+            &nested_opposite,
+            0,
+            8,
+            0,
+            8,
+            SUBPIXEL_GRID,
+        );
+
+        let mut coincident_opposite = rectangle_outline(1.0, 1.0, 7.0, 7.0, false);
+        coincident_opposite.extend(rectangle_outline(1.0, 1.0, 7.0, 7.0, true));
+        assert_row_active_coverage_matches_point_membership(&coincident_opposite, 0, 8, 0, 8, 1);
+
+        let mut clipped = rectangle_outline(-3.0, 1.0, 3.0, 5.0, false);
+        clipped.extend(rectangle_outline(7.0, 1.0, 12.0, 5.0, false));
+        assert_row_active_coverage_matches_point_membership(&clipped, 0, 6, 0, 10, 1);
+    }
+
+    /// Proves a rotated thin multi-contour outline performs active edge-row traversal rather than
+    /// rescanning every flattened edge for every row while retaining exact sparse coverage.
+    #[test]
+    fn row_active_sweep_avoids_full_edge_scans_for_rotated_thin_multisegment_outline() {
+        let mut edges = Vec::new();
+        for band in 0..96_u32 {
+            let y = f64::from(band * 4);
+            edges.extend_from_slice(&[
+                (Point2::new(0.0, y), Point2::new(2.0, y)),
+                (Point2::new(2.0, y), Point2::new(62.0, y + 2.0)),
+                (Point2::new(62.0, y + 2.0), Point2::new(60.0, y + 2.0)),
+                (Point2::new(60.0, y + 2.0), Point2::new(0.0, y)),
+            ]);
+        }
+        let work = assert_row_active_coverage_matches_point_membership(&edges, 0, 384, 0, 64, 1);
+        let full_edge_scans = 384_usize * edges.len();
+        assert!(
+            work.visited_active_edges < full_edge_scans / 32,
+            "row-active sweep visited {} of {full_edge_scans} full edge scans",
+            work.visited_active_edges
+        );
+    }
+
+    /// Proves a rotated thin outline visits only crossing-derived spans while retaining exact
+    /// nonzero 8x8 coverage across its much wider axis-aligned raster bounding box.
+    #[test]
+    fn rotated_thin_stroke_scanline_visits_only_active_crossing_spans() {
+        let edges = vec![
+            (Point2::new(0.0, 0.0), Point2::new(2.0, 0.0)),
+            (Point2::new(2.0, 0.0), Point2::new(202.0, 200.0)),
+            (Point2::new(202.0, 200.0), Point2::new(200.0, 200.0)),
+            (Point2::new(200.0, 200.0), Point2::new(0.0, 0.0)),
+        ];
+        let is_cancelled = || false;
+        let work = RasterWork::new(
+            RasterizationLimits::new(1_000).expect("focused edge budget is nonzero"),
+            RasterAntialiasing::On,
+            &is_cancelled,
+        );
+        let mut covered = Vec::new();
+        let mut crossings = Vec::with_capacity(edges.len());
+        let scanline_work = accumulate_nonzero_scanline_coverage(
+            &edges,
+            100,
+            0,
+            202,
+            SUBPIXEL_GRID,
+            &mut covered,
+            &mut crossings,
+            &work,
+        )
+        .expect("finite diagonal outline scanline succeeds");
+
+        for x in 0..202 {
+            let mut direct = 0_u16;
+            for sub_y in 0..SUBPIXEL_GRID {
+                for sub_x in 0..SUBPIXEL_GRID {
+                    let point = Point2::new(
+                        f64::from(x) + (f64::from(sub_x) + 0.5) / f64::from(SUBPIXEL_GRID),
+                        100.0 + (f64::from(sub_y) + 0.5) / f64::from(SUBPIXEL_GRID),
+                    );
+                    direct += u16::from(point_in_nonzero_outline(&edges, point));
+                }
+            }
+            assert_eq!(
+                covered
+                    .iter()
+                    .find_map(|(covered_x, coverage)| (*covered_x == x).then_some(*coverage))
+                    .unwrap_or(0),
+                direct,
+                "x={x}"
+            );
+        }
+        let full_aabb_subpixel_tests = 202_usize
+            * usize::try_from(SUBPIXEL_GRID).expect("fixed grid fits usize")
+            * usize::try_from(SUBPIXEL_GRID).expect("fixed grid fits usize");
+        assert!(
+            scanline_work.visited_subpixel_samples < full_aabb_subpixel_tests / 10,
+            "rotated thin stroke visited {} of {full_aabb_subpixel_tests} full-AABB samples",
+            scanline_work.visited_subpixel_samples
+        );
     }
 
     /// Proves complete cubic construction bits affect scene identity while SVG retains one editable
@@ -4103,6 +5212,100 @@ mod stage20e2_limit_tests {
                 assert_eq!(one.pixels(), many.pixels());
             }
         }
+    }
+
+    /// Proves the streaming accumulator preserves the former per-pixel modeled equations byte-for-byte.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a modeled RGB, CMYK, or source-over layer order changes its
+    /// transparent final raster bytes.
+    #[test]
+    fn streaming_modeled_composition_matches_reference_layer_equations() {
+        let layers = modeled_linear_layers();
+        let count = layers[0].len();
+        for model in [
+            HalftoneChannelModel::Rgb,
+            HalftoneChannelModel::Cmyk,
+            HalftoneChannelModel::SourceColorAlpha,
+        ] {
+            let expected = (0..count)
+                .map(|index| match model {
+                    HalftoneChannelModel::Rgb => {
+                        let mut pixel = background_pixel(RasterBackground::Transparent);
+                        for layer in &layers {
+                            let source = layer[index];
+                            pixel.red = (pixel.red + source.red).clamp(0.0, 1.0);
+                            pixel.green = (pixel.green + source.green).clamp(0.0, 1.0);
+                            pixel.blue = (pixel.blue + source.blue).clamp(0.0, 1.0);
+                            pixel.alpha = (pixel.alpha + source.alpha).clamp(0.0, 1.0);
+                        }
+                        pixel
+                    }
+                    HalftoneChannelModel::Cmyk => {
+                        let mut transmittance = [1.0; 3];
+                        let mut uncovered = 1.0;
+                        for layer in &layers {
+                            let source = layer[index];
+                            if source.alpha > 0.0 {
+                                let straight = [
+                                    source.red / source.alpha,
+                                    source.green / source.alpha,
+                                    source.blue / source.alpha,
+                                ];
+                                for component in 0..3 {
+                                    transmittance[component] *=
+                                        1.0 - source.alpha * (1.0 - straight[component]);
+                                }
+                                uncovered *= 1.0 - source.alpha;
+                            }
+                        }
+                        let alpha = (1.0 - uncovered).clamp(0.0, 1.0);
+                        PremultipliedLinearPixel {
+                            red: boundary_clamp(transmittance[0] - (1.0 - alpha)),
+                            green: boundary_clamp(transmittance[1] - (1.0 - alpha)),
+                            blue: boundary_clamp(transmittance[2] - (1.0 - alpha)),
+                            alpha,
+                        }
+                    }
+                    HalftoneChannelModel::SourceColorAlpha => {
+                        let mut pixel = background_pixel(RasterBackground::Transparent);
+                        for layer in &layers {
+                            source_over(&mut pixel, layer[index]);
+                        }
+                        pixel
+                    }
+                })
+                .collect::<Vec<_>>();
+            let actual = compose_model(model, &layers, &|| false)
+                .expect("streaming modeled composition completes");
+            let expected_surface = pixels_from_linear(64, 64, expected, &|| false)
+                .expect("reference composition quantizes");
+            let actual_surface = pixels_from_linear(64, 64, actual, &|| false)
+                .expect("streaming composition quantizes");
+            assert_eq!(actual_surface.pixels(), expected_surface.pixels());
+        }
+    }
+
+    /// Proves checked raster allocation helpers retain valid sizes and report impossible dimensions safely.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a small valid buffer cannot be allocated through the
+    /// fallible path or an overflowing surface bypasses `raster.allocation`.
+    #[test]
+    fn raster_allocation_helpers_are_checked_and_fallible() {
+        assert_eq!(raster_pixel_count(2, 3).expect("small pixel count"), 6);
+        assert_eq!(raster_byte_count(2, 3).expect("small byte count"), 24);
+        assert_eq!(
+            allocate_raster_bytes(2, 3)
+                .expect("small byte allocation")
+                .len(),
+            24
+        );
+        let error = RasterSurface::new(u32::MAX, u32::MAX, Vec::new())
+            .expect_err("overflowing dimensions do not attempt allocation");
+        assert_eq!(error.path(), "raster.allocation");
     }
 
     /// Proves cancellation can be isolated inside composition, background, and quantization workers.

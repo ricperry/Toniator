@@ -190,10 +190,20 @@ pub struct AffineTransform2D {
     center: Point2,
     cos: f64,
     sin: f64,
+    scale_x: f64,
+    scale_y: f64,
     translation: Vector2,
 }
 
 impl AffineTransform2D {
+    /// Builds a finite rotation followed by a document-axis translation.
+    ///
+    /// This shorthand retains unit local scale; callers needing aspect-owned layout deformation
+    /// use [`Self::scale_then_rotate_about_then_translate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` when any construction coordinate is non-finite.
     pub fn rotate_about_then_translate(
         center: Point2,
         degrees: f64,
@@ -211,36 +221,84 @@ impl AffineTransform2D {
             center,
             cos: radians.cos(),
             sin: radians.sin(),
+            scale_x: 1.0,
+            scale_y: 1.0,
             translation,
         })
     }
 
+    /// Builds a positive anisotropic local scale followed by rotation and document translation.
+    ///
+    /// The scale is applied around `center` before rotation, so a pattern layout can stretch
+    /// without changing authored path or mark coordinates outside that layout transform.
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` when a coordinate is non-finite or either scale is nonpositive; no
+    /// noninvertible transform is constructed.
+    pub fn scale_then_rotate_about_then_translate(
+        center: Point2,
+        scale_x: f64,
+        scale_y: f64,
+        degrees: f64,
+        translation: Vector2,
+    ) -> Option<Self> {
+        if !center.is_finite()
+            || !scale_x.is_finite()
+            || !scale_y.is_finite()
+            || scale_x <= 0.0
+            || scale_y <= 0.0
+            || !degrees.is_finite()
+            || !translation.x.is_finite()
+            || !translation.y.is_finite()
+        {
+            return None;
+        }
+        let radians = degrees.to_radians();
+        Some(Self {
+            center,
+            cos: radians.cos(),
+            sin: radians.sin(),
+            scale_x,
+            scale_y,
+            translation,
+        })
+    }
+
+    /// Applies the complete local-scale, rotation, and translation transform to one point.
     pub fn apply_point(self, point: Point2) -> Point2 {
-        let centered = Vector2::new(point.x - self.center.x, point.y - self.center.y);
+        let centered = Vector2::new(
+            (point.x - self.center.x) * self.scale_x,
+            (point.y - self.center.y) * self.scale_y,
+        );
         Point2::new(
             self.center.x + self.cos * centered.x - self.sin * centered.y + self.translation.x,
             self.center.y + self.sin * centered.x + self.cos * centered.y + self.translation.y,
         )
     }
 
+    /// Applies the exact inverse of this finite positive-scale transform to one point.
     pub fn inverse_point(self, point: Point2) -> Point2 {
         let translated = Vector2::new(
             point.x - self.translation.x - self.center.x,
             point.y - self.translation.y - self.center.y,
         );
         Point2::new(
-            self.center.x + self.cos * translated.x + self.sin * translated.y,
-            self.center.y - self.sin * translated.x + self.cos * translated.y,
+            self.center.x + (self.cos * translated.x + self.sin * translated.y) / self.scale_x,
+            self.center.y + (-self.sin * translated.x + self.cos * translated.y) / self.scale_y,
         )
     }
 
+    /// Applies this transform's linear scale-and-rotation component to one vector.
     pub fn apply_vector(self, vector: Vector2) -> Vector2 {
+        let scaled = Vector2::new(vector.x * self.scale_x, vector.y * self.scale_y);
         Vector2::new(
-            self.cos * vector.x - self.sin * vector.y,
-            self.sin * vector.x + self.cos * vector.y,
+            self.cos * scaled.x - self.sin * scaled.y,
+            self.sin * scaled.x + self.cos * scaled.y,
         )
     }
 
+    /// Maps all finite bounds corners through the inverse transform and encloses the result.
     pub fn inverse_bounds(self, bounds: Bounds) -> Option<Bounds> {
         Bounds::from_points(
             bounds
@@ -613,15 +671,6 @@ impl FamilySiteSet {
                 "family_sites.product_mechanism_id",
                 "product mechanism ID must be nonzero",
             ));
-        }
-        let mut ids = BTreeSet::new();
-        for site in &sites {
-            if !ids.insert(site.id) {
-                return Err(FamilySiteError::new(
-                    "family_sites.id.duplicate",
-                    "family site IDs must be unique",
-                ));
-            }
         }
         for (ordinal, site) in sites.iter().enumerate() {
             if site.id.mechanism_id != product_mechanism_id {

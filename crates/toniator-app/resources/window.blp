@@ -46,13 +46,27 @@ template $ToniatorMainShell : Gtk.Box {
   Gtk.Revealer main_banner_revealer {
     transition-type: slide_down;
 
-    Gtk.Label main_banner {
+    Gtk.Box {
       margin-top: 6;
       margin-bottom: 6;
       margin-start: 12;
       margin-end: 12;
-      xalign: 0;
-      wrap: true;
+
+      Gtk.Label main_banner {
+        hexpand: true;
+        xalign: 0;
+        wrap: true;
+      }
+
+      Gtk.Button main_banner_dismiss {
+        icon-name: "window-close-symbolic";
+        tooltip-text: "Dismiss this message";
+        valign: center;
+        styles [ "flat" ]
+        accessibility {
+          label: "Dismiss message";
+        }
+      }
     }
   }
 
@@ -128,10 +142,44 @@ template $ToniatorMainShell : Gtk.Box {
           }
 
           [overlay]
-          Gtk.Spinner preview_spinner {
+          Gtk.Box preview_progress {
+            orientation: vertical;
+            spacing: 6;
             halign: center;
             valign: center;
-            tooltip-text: "Preview updating";
+            width-request: 360;
+            styles [ "osd" ]
+
+            Gtk.Label preview_overall_progress_label {
+              label: "Overall preview · 0%";
+              xalign: 0.0;
+              styles [ "caption" ]
+            }
+
+            Gtk.ProgressBar preview_progress_bar {
+              show-text: true;
+              text: "Overall 0%";
+              tooltip-text: "Overall preview progress";
+              accessibility {
+                label: "Overall preview progress";
+              }
+            }
+
+            Gtk.Label preview_progress_label {
+              label: "Preparing preview… · 0%";
+              wrap: true;
+              justify: center;
+              styles [ "heading" ]
+            }
+
+            Gtk.ProgressBar preview_stage_progress_bar {
+              show-text: true;
+              text: "Stage 0%";
+              tooltip-text: "Current preview stage progress";
+              accessibility {
+                label: "Preparing preview stage progress";
+              }
+            }
           }
         };
       }

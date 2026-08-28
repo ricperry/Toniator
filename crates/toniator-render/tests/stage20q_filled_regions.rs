@@ -50,11 +50,11 @@ fn sampled_region_scene(
     paints: Vec<ColorValue>,
     opacity: f64,
 ) -> RenderScene {
-    let output = RenderOutputLayer {
-        output_layer_id: PatternOutputLayerId(20),
-        geometry: GeometryOutput::CanonicalRegions(regions),
-        primitive_paints: Some(paints),
-    };
+    let output = RenderOutputLayer::new(
+        PatternOutputLayerId(20),
+        GeometryOutput::CanonicalRegions(regions),
+        Some(paints),
+    );
     let layer = RenderLayer::new_outputs(
         ChannelId(20),
         true,
@@ -121,13 +121,11 @@ fn sampled_region_paint_cardinality_is_exact() {
             alpha: 1.0,
         },
         1.0,
-        vec![RenderOutputLayer {
-            output_layer_id: PatternOutputLayerId(20),
-            geometry: GeometryOutput::CanonicalRegions(region_set(vec![rectangle(
-                0.0, 0.0, 4.0, 4.0,
-            )])),
-            primitive_paints: Some(Vec::new()),
-        }],
+        vec![RenderOutputLayer::new(
+            PatternOutputLayerId(20),
+            GeometryOutput::CanonicalRegions(region_set(vec![rectangle(0.0, 0.0, 4.0, 4.0)])),
+            Some(Vec::new()),
+        )],
     )
     .expect_err("one canonical region requires one sampled paint");
     assert_eq!(error.path(), "scene.layer.source_color");
@@ -150,11 +148,11 @@ fn strokes_reject_sampled_paint_even_for_empty_geometry() {
             alpha: 1.0,
         },
         1.0,
-        vec![RenderOutputLayer {
-            output_layer_id: PatternOutputLayerId(20),
-            geometry: GeometryOutput::CanonicalStrokes(Vec::new()),
-            primitive_paints: Some(Vec::new()),
-        }],
+        vec![RenderOutputLayer::new(
+            PatternOutputLayerId(20),
+            GeometryOutput::CanonicalStrokes(Vec::new()),
+            Some(Vec::new()),
+        )],
     )
     .expect_err("canonical strokes never accept sampled region paint");
     assert_eq!(error.path(), "scene.layer.source_color");

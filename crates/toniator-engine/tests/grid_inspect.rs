@@ -1,4 +1,4 @@
-use toniator_domain::{CanvasSpec, DensityMetric2D};
+use toniator_domain::{CanvasSpec, ResolvedDensityMetric2D};
 use toniator_engine::{GridInspectRequest, inspect_straight_grid};
 
 #[test]
@@ -8,10 +8,9 @@ fn inspect_orchestration_preserves_family_output_without_document_mutation() {
             width: 900.0,
             height: 600.0,
         },
-        density: DensityMetric2D {
+        density: ResolvedDensityMetric2D {
             across_x: 90.0,
             across_y: 60.0,
-            aspect_locked: true,
         },
         rotation_degrees: 17.0,
         translation_x: 3.25,

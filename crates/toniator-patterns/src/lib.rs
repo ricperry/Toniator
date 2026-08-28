@@ -3,9 +3,10 @@
 //! Deterministic straight-guide family evaluation.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     error::Error,
     fmt,
+    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 
@@ -22,22 +23,24 @@ use toniator_domain::{
     PatternFamily, PatternGeometryResponse, PatternMechanism, PatternMechanismId,
     PatternModulation, PatternOutputLayerId, PatternOutputRealization, PatternStructureRecipe,
     PresetMetadata, PresetRecord, RandomSiteCharacter, RegionResizeAlgorithm, RegionSourceIntent,
-    SiteDensityModulation, SiteExclusionPolicy, SiteUseFilter, SourceMapping, SourceReference,
-    SpiralCurve, SpiralShape, StraightGuideDimension, pattern_output_evaluation_order,
+    ResolvedDensityMetric2D, SiteDensityModulation, SiteExclusionPolicy, SiteUseFilter,
+    SourceMapping, SourceReference, SpiralCurve, SpiralShape, StraightGuideDimension,
+    pattern_output_evaluation_order,
 };
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID,
     CanonicalCircleMark, CanonicalFillRule, CanonicalMark, CanonicalPathMark,
     CanonicalRegionLimits, CanonicalRegionProposal, CanonicalRegionSet, CanonicalRegionSourceGroup,
-    CanonicalRegionSourceId, CanonicalStroke, CanonicalStrokeSourceId, ConnectionPathLimits,
-    ConnectionPathSet, CubicBezierSegment, CurveError, CurvePath, CurveSegment, FamilySite,
-    FamilySiteError, FamilySiteId, FamilySiteProvenance, FamilySiteSet, GUIDE_FACE_CONTRACT_ID,
-    GuideFaceLimits, GuideFaceRequest, GuideInstanceId, GuideIntersectionProvenance,
-    IntersectionSite, MAZE_WALL_CONTRACT_ID, MazeGuideAxis, MazeLimits, MazeProgramResult,
-    NominalCellBasis, PATH_OFFSET_ALGORITHM_CONTRACT_ID, PathClosure, PathLocation,
-    PathOffsetCleanup, PathOffsetEndpointPolicy, PathOffsetLimits, PathOffsetRequest,
-    PathOffsetResult, Point2, REGION_TREATMENT_CONTRACT_ID, RegionReference, RegionTreatment,
-    RegionTreatmentError, RegionTreatmentLimits, RegionTreatmentProvenance, RegionTreatmentRequest,
+    CanonicalRegionSourceId, CanonicalStroke, CanonicalStrokeSourceId, ConnectionPathId,
+    ConnectionPathLimits, ConnectionPathSet, CubicBezierSegment, CurveError, CurvePath,
+    CurveSegment, FamilySite, FamilySiteError, FamilySiteId, FamilySiteProvenance, FamilySiteSet,
+    GUIDE_FACE_CONTRACT_ID, GuideFaceLimits, GuideFaceRequest, GuideInstanceId,
+    GuideIntersectionProvenance, IntersectionSite, MAZE_WALL_CONTRACT_ID, MazeGuideAxis,
+    MazeLimits, MazeProgramResult, MazeWallPathId, NominalCellBasis,
+    PATH_OFFSET_ALGORITHM_CONTRACT_ID, PathClosure, PathLocation, PathOffsetCleanup,
+    PathOffsetEndpointPolicy, PathOffsetLimits, PathOffsetRequest, PathOffsetResult, Point2,
+    REGION_TREATMENT_CONTRACT_ID, RegionReference, RegionTreatment, RegionTreatmentError,
+    RegionTreatmentLimits, RegionTreatmentProvenance, RegionTreatmentRequest,
     RegionTreatmentResult, SITE_ADJACENCY_CONTRACT_ID, SiteAdjacencyError, SiteAdjacencyGraph,
     SiteAdjacencyLimits, SiteAdjacencyPolicy, SiteId, SiteScope, StraightGuide,
     StrokeProfileSample, StructuralPathInstance, StructuralPathInstanceId,
@@ -54,7 +57,8 @@ pub use toniator_geometry::{
 use toniator_sampling::{
     RegionSamplingDiagnostics, RegionSamplingLimits, RegionSourceSample, SampledSourcePaint,
     SamplingError, SourceComponent, SourceField, SourceMappingComponent, SourcePlacement,
-    sample_region_area_average_batch_with_diagnostics, sample_region_reference,
+    sample_region_area_average_batch_with_diagnostics,
+    sample_region_area_average_batch_with_diagnostics_and_progress, sample_region_reference,
 };
 
 /// The finite antialiasing envelope included in every Stage 3 generation plan.
@@ -66,6 +70,13 @@ pub const SECOND_DIMENSION_ID: GuideDimensionId = GuideDimensionId(2);
 
 /// The stable version of the built-in registry ordering and metadata contract.
 pub const BUNDLED_PRESET_REGISTRY_VERSION: u32 = 2;
+
+/// Versioned cache-identity contract for typed filled-region realization.
+///
+/// The digest encodes the complete ordered realization inputs without retaining debug-rendered
+/// canonical IDs, whose Guide Face boundary provenance can otherwise grow with every region.
+const REGION_REALIZER_FINGERPRINT_CONTRACT_ID: &str =
+    "toniator-stage-21a-region-realizer-v2-typed-streaming";
 
 /// Immutable, deterministic preset registry owned by the pattern/schema layer.
 #[derive(Clone, Debug, PartialEq)]
@@ -471,7 +482,7 @@ impl PresetRegistry {
                         grid("Grid Voronoi", &[0.0, 90.0], false),
                         toniator_domain::RegionGeometryResponse {
                             algorithm: RegionResizeAlgorithm::Scale,
-                            sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+                            sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
                             minimum_fill: 0.0,
                             maximum_fill: 1.0,
                         },
@@ -563,7 +574,7 @@ impl PresetRegistry {
                         "source-weighted-dispersion-voronoi",
                         "Source-Weighted Voronoi",
                         "Regions",
-                        "Luminance-weighted dispersed Voronoi regions.",
+                        "Luminance weights where Voronoi sites cluster; each channel's source mapping and paint supply its color and response.",
                     ),
                     recipe: voronoi_recipe(
                         PatternStructureRecipe::RandomSites {
@@ -585,8 +596,8 @@ impl PresetRegistry {
                         toniator_domain::RegionGeometryResponse {
                             algorithm: RegionResizeAlgorithm::Scale,
                             sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
-                            minimum_fill: 0.65,
-                            maximum_fill: 0.90,
+                            minimum_fill: 0.0,
+                            maximum_fill: 1.0,
                         },
                     ),
                 },
@@ -1673,6 +1684,49 @@ pub fn realize_region_output_cancellable(
         treatment_limits,
         cancelled,
         None,
+        None,
+        #[cfg(feature = "test-evidence")]
+        None,
+    )
+}
+
+/// Realizes one typed Region output with observational sampling progress.
+///
+/// The callback reports completed sampling work only and cannot publish partial regions, alter
+/// identity, or replace cancellation and cache authority.
+///
+/// # Errors
+///
+/// Returns the same stable failures as [`realize_region_output_cancellable`] atomically.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_region_output_with_progress_cancellable(
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    untreated: &CanonicalRegionSet,
+    references: &[RegionReference],
+    source: Option<&SourceField>,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    paint: &ChannelPaint,
+    sampling_limits: RegionSamplingLimits,
+    treatment_limits: RegionTreatmentLimits,
+    cancelled: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<TypedRegionOutputRealization, RegionOutputRealizationError> {
+    realize_region_output_cancellable_impl(
+        capability,
+        setting,
+        untreated,
+        references,
+        source,
+        canvas,
+        mapping,
+        paint,
+        sampling_limits,
+        treatment_limits,
+        cancelled,
+        Some(progress),
+        None,
         #[cfg(feature = "test-evidence")]
         None,
     )
@@ -1720,6 +1774,7 @@ pub fn realize_region_output_profiled_cancellable(
         sampling_limits,
         treatment_limits,
         cancelled,
+        None,
         Some(&mut performance),
         #[cfg(feature = "test-evidence")]
         None,
@@ -1765,6 +1820,7 @@ pub fn realize_region_output_with_evidence_cancellable(
         treatment_limits,
         cancelled,
         None,
+        None,
         Some(&mut evidence),
     )?;
     let evidence = evidence.expect("successful test evidence realization records one snapshot");
@@ -1792,6 +1848,7 @@ fn realize_region_output_cancellable_impl(
     sampling_limits: RegionSamplingLimits,
     treatment_limits: RegionTreatmentLimits,
     cancelled: &(dyn Fn() -> bool + Sync),
+    progress: Option<&(dyn Fn(usize, usize) + Sync)>,
     mut performance: Option<&mut RegionOutputPerformanceMetrics>,
     #[cfg(feature = "test-evidence")] evidence: Option<&mut Option<RegionEvaluationEvidence>>,
 ) -> Result<TypedRegionOutputRealization, RegionOutputRealizationError> {
@@ -1809,6 +1866,11 @@ fn realize_region_output_cancellable_impl(
         "region sampling requires a decoded source field",
     ))?;
     let sampling_started = Instant::now();
+    let report_sampling_progress = |completed: usize, total: usize| {
+        if let Some(progress) = progress {
+            progress(completed.saturating_mul(800) / total.max(1), 1_000);
+        }
+    };
     let (samples, sampling_diagnostics) = sample_untreated_regions(
         source,
         untreated,
@@ -1818,7 +1880,11 @@ fn realize_region_output_cancellable_impl(
         response,
         sampling_limits,
         cancelled,
+        progress.map(|_| &report_sampling_progress as &(dyn Fn(usize, usize) + Sync)),
     )?;
+    if let Some(progress) = progress {
+        progress(800, 1_000);
+    }
     if let Some(performance) = performance.as_deref_mut() {
         performance.sampling_duration = sampling_started.elapsed();
         performance.sampled_bases = samples.len();
@@ -1847,6 +1913,9 @@ fn realize_region_output_cancellable_impl(
             treatment,
         });
     }
+    if let Some(progress) = progress {
+        progress(850, 1_000);
+    }
     let treatment_started = Instant::now();
     let treated = treat_region_requests_cancellable(
         capability.layer_id,
@@ -1856,6 +1925,9 @@ fn realize_region_output_cancellable_impl(
         cancelled,
     )
     .map_err(|error| region_realization_error(error.path(), error.message()))?;
+    if let Some(progress) = progress {
+        progress(1_000, 1_000);
+    }
     if let Some(performance) = performance {
         performance.treatment_duration = treatment_started.elapsed();
         performance.retained_regions = treated.regions.regions().len();
@@ -2010,16 +2082,27 @@ fn sample_untreated_regions(
     response: &toniator_domain::RegionGeometryResponse,
     limits: RegionSamplingLimits,
     cancelled: &(dyn Fn() -> bool + Sync),
+    progress: Option<&(dyn Fn(usize, usize) + Sync)>,
 ) -> Result<(Vec<RegionSourceSample>, RegionSamplingDiagnostics), RegionOutputRealizationError> {
     match response.sampling {
         toniator_domain::RegionSamplingStrategy::ReferencePoint => {
+            let completed = AtomicUsize::new(0);
+            let total = untreated.regions().len().max(1);
             let samples = untreated
                 .regions()
                 .par_iter()
                 .map(|region| {
                     poll_region_realizer(cancelled)?;
-                    sample_region_reference(source, references[&region.id], canvas, mapping)
-                        .map_err(|error| region_realization_error(error.path(), error.message()))
+                    let sample =
+                        sample_region_reference(source, references[&region.id], canvas, mapping)
+                            .map_err(|error| {
+                                region_realization_error(error.path(), error.message())
+                            })?;
+                    let count = completed.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+                    if let Some(progress) = progress {
+                        progress(count.min(total), total);
+                    }
+                    Ok(sample)
                 })
                 .collect::<Vec<_>>()
                 .into_iter()
@@ -2032,9 +2115,15 @@ fn sample_untreated_regions(
                 .iter()
                 .map(|region| region.ring.clone())
                 .collect();
-            sample_region_area_average_batch_with_diagnostics(
-                source, &rings, canvas, mapping, limits, cancelled,
-            )
+            if let Some(progress) = progress {
+                sample_region_area_average_batch_with_diagnostics_and_progress(
+                    source, &rings, canvas, mapping, limits, cancelled, progress,
+                )
+            } else {
+                sample_region_area_average_batch_with_diagnostics(
+                    source, &rings, canvas, mapping, limits, cancelled,
+                )
+            }
             .map_err(|error| region_realization_error(error.path(), error.message()))
         }
     }
@@ -2092,7 +2181,11 @@ fn align_treated_region_paints(
         .collect()
 }
 
-/// Builds the cacheable region-realization identity from ordered base inputs and final public products.
+/// Builds the fixed-width cacheable region-realization identity from ordered base inputs and final products.
+///
+/// Every typed field, canonical-ID variant, and variable-length payload is written in its
+/// authoritative order. The digest deliberately does not retain debug text for each region, so
+/// Guide Face boundary provenance cannot multiply a cached fingerprint's allocation footprint.
 fn region_realization_fingerprint(
     untreated: &CanonicalRegionSet,
     references: &BTreeMap<toniator_geometry::CanonicalRegionId, Point2>,
@@ -2100,41 +2193,123 @@ fn region_realization_fingerprint(
     treated: &RegionTreatmentResult,
     paints: Option<&[SampledSourcePaint]>,
 ) -> String {
-    let mut fingerprint = format!("toniator.region-realizer.v1:{}", untreated.fingerprint());
+    let mut fingerprint = Fnv1a64State::new();
+    append_region_realizer_text(&mut fingerprint, REGION_REALIZER_FINGERPRINT_CONTRACT_ID);
+    append_region_realizer_text(&mut fingerprint, untreated.fingerprint());
+    fingerprint.write(
+        u64::try_from(untreated.regions().len())
+            .expect("region count fits u64")
+            .to_le_bytes(),
+    );
     for (base, sample) in untreated.regions().iter().zip(samples) {
         let reference = references[&base.id];
-        fingerprint.push_str(&format!(
-            ":{:?}:{:016x}:{:016x}:{:016x}",
-            base.id,
-            reference.x.to_bits(),
-            reference.y.to_bits(),
-            sample.response.to_bits(),
-        ));
+        append_canonical_region_id_identity(&mut fingerprint, &base.id);
+        fingerprint.write(reference.x.to_bits().to_le_bytes());
+        fingerprint.write(reference.y.to_bits().to_le_bytes());
+        fingerprint.write(sample.response.to_bits().to_le_bytes());
         if let Some(paint) = sample.paint {
-            fingerprint.push_str(&format!(
-                ":{:016x}:{:016x}:{:016x}:{:016x}",
-                paint.red.to_bits(),
-                paint.green.to_bits(),
-                paint.blue.to_bits(),
-                paint.alpha.to_bits()
-            ));
+            fingerprint.write([1]);
+            append_sampled_source_paint_identity(&mut fingerprint, paint);
         } else {
-            fingerprint.push_str(":transparent");
+            fingerprint.write([0]);
         }
     }
-    fingerprint.push_str(&format!(":{}", treated.regions.fingerprint()));
+    append_region_realizer_text(&mut fingerprint, treated.regions.fingerprint());
     if let Some(paints) = paints {
+        fingerprint.write([1]);
+        fingerprint.write(
+            u64::try_from(paints.len())
+                .expect("sampled paint count fits u64")
+                .to_le_bytes(),
+        );
         for paint in paints {
-            fingerprint.push_str(&format!(
-                ":{:016x}:{:016x}:{:016x}:{:016x}",
-                paint.red.to_bits(),
-                paint.green.to_bits(),
-                paint.blue.to_bits(),
-                paint.alpha.to_bits()
-            ));
+            append_sampled_source_paint_identity(&mut fingerprint, *paint);
+        }
+    } else {
+        fingerprint.write([0]);
+    }
+    fingerprint.finish()
+}
+
+/// Appends one length-delimited textual sub-identity to the typed region-realizer digest.
+fn append_region_realizer_text(fingerprint: &mut Fnv1a64State, value: &str) {
+    fingerprint.write(
+        u64::try_from(value.len())
+            .expect("region identity text length fits u64")
+            .to_le_bytes(),
+    );
+    fingerprint.write(value.bytes());
+}
+
+/// Appends one fully typed canonical-region identity with explicit source variant and payload length.
+fn append_canonical_region_id_identity(
+    fingerprint: &mut Fnv1a64State,
+    region_id: &toniator_geometry::CanonicalRegionId,
+) {
+    fingerprint.write(region_id.output_layer_id.0.to_le_bytes());
+    match &region_id.source_id {
+        CanonicalRegionSourceId::SiteOwners(owners) => {
+            fingerprint.write([1]);
+            fingerprint.write(
+                u64::try_from(owners.len())
+                    .expect("canonical site-owner count fits u64")
+                    .to_le_bytes(),
+            );
+            for owner in owners {
+                fingerprint.write(owner.mechanism_id.0.to_le_bytes());
+                fingerprint.write(
+                    u64::try_from(owner.ordinal)
+                        .expect("family-site ordinal fits u64")
+                        .to_le_bytes(),
+                );
+            }
+        }
+        CanonicalRegionSourceId::GuideBoundary(boundary) => {
+            fingerprint.write([2]);
+            fingerprint.write(
+                u64::try_from(boundary.len())
+                    .expect("canonical Guide Face boundary count fits u64")
+                    .to_le_bytes(),
+            );
+            for location in boundary {
+                append_region_realizer_path_location_identity(fingerprint, location);
+            }
         }
     }
-    fingerprint
+    fingerprint.write(region_id.component_ordinal.to_le_bytes());
+}
+
+/// Appends one complete Guide Face structural location without allocating a debug representation.
+fn append_region_realizer_path_location_identity(
+    fingerprint: &mut Fnv1a64State,
+    location: &StructuralPathLocationProvenance,
+) {
+    match location.path.source {
+        StructuralPathSourceId::GuideDimension(id) => {
+            fingerprint.write([1]);
+            fingerprint.write(id.0.to_le_bytes());
+        }
+        StructuralPathSourceId::ParametricCurve(id) => {
+            fingerprint.write([2]);
+            fingerprint.write(id.0.to_le_bytes());
+        }
+    }
+    fingerprint.write(location.path.repetition_index.to_le_bytes());
+    fingerprint.write(location.path.component_ordinal.to_le_bytes());
+    fingerprint.write(
+        u64::try_from(location.segment_index)
+            .expect("structural path segment index fits u64")
+            .to_le_bytes(),
+    );
+    fingerprint.write(location.parameter_bits.to_le_bytes());
+}
+
+/// Appends one sampled source color in exact component-bit order.
+fn append_sampled_source_paint_identity(fingerprint: &mut Fnv1a64State, paint: SampledSourcePaint) {
+    fingerprint.write(paint.red.to_bits().to_le_bytes());
+    fingerprint.write(paint.green.to_bits().to_le_bytes());
+    fingerprint.write(paint.blue.to_bits().to_le_bytes());
+    fingerprint.write(paint.alpha.to_bits().to_le_bytes());
 }
 
 /// Polls cancellation at the typed output boundary before allocating or publishing a candidate.
@@ -2225,6 +2400,139 @@ mod stage20q_region_realizer_tests {
             point: Point2::new(0.0, 0.0),
         }];
         (regions, references)
+    }
+
+    /// Builds two ordered canonical bases and matching direct-realizer identity inputs.
+    fn stage21a_fingerprint_inputs() -> (
+        CanonicalRegionSet,
+        BTreeMap<toniator_geometry::CanonicalRegionId, Point2>,
+        Vec<RegionSourceSample>,
+        RegionTreatmentResult,
+    ) {
+        let untreated = toniator_geometry::build_canonical_regions(
+            toniator_geometry::CanonicalRegionProposal {
+                output_layer_id: PatternOutputLayerId(81),
+                source_groups: vec![toniator_geometry::CanonicalRegionSourceGroup {
+                    source_id: toniator_geometry::CanonicalRegionSourceId::SiteOwners(vec![
+                        toniator_geometry::FamilySiteId {
+                            mechanism_id: PatternMechanismId(7),
+                            ordinal: 10,
+                        },
+                    ]),
+                    components: vec![
+                        CurvePath::polyline(
+                            vec![
+                                Point2::new(0.0, 0.0),
+                                Point2::new(2.0, 0.0),
+                                Point2::new(0.0, 2.0),
+                            ],
+                            PathClosure::Closed,
+                        )
+                        .expect("first fingerprint triangle closes"),
+                        CurvePath::polyline(
+                            vec![
+                                Point2::new(4.0, 0.0),
+                                Point2::new(6.0, 0.0),
+                                Point2::new(4.0, 2.0),
+                            ],
+                            PathClosure::Closed,
+                        )
+                        .expect("second fingerprint triangle closes"),
+                    ],
+                }],
+            },
+        )
+        .expect("two fingerprint bases canonicalize");
+        let references = untreated
+            .regions()
+            .iter()
+            .enumerate()
+            .map(|(ordinal, region)| (region.id.clone(), Point2::new(ordinal as f64, 0.0)))
+            .collect();
+        let samples = vec![
+            RegionSourceSample {
+                response: 0.125,
+                paint: None,
+            },
+            RegionSourceSample {
+                response: 0.875,
+                paint: None,
+            },
+        ];
+        let treated = RegionTreatmentResult {
+            regions: untreated.clone(),
+            provenance: Vec::new(),
+        };
+        (untreated, references, samples, treated)
+    }
+
+    /// Proves the typed digest is fixed-width, deterministic, and sensitive to authoritative order.
+    #[test]
+    fn stage21a_region_realizer_fingerprint_is_fixed_width_and_order_sensitive() {
+        let (untreated, references, samples, treated) = stage21a_fingerprint_inputs();
+        let first =
+            region_realization_fingerprint(&untreated, &references, &samples, &treated, None);
+        let repeated =
+            region_realization_fingerprint(&untreated, &references, &samples, &treated, None);
+        let reversed_samples = samples.iter().copied().rev().collect::<Vec<_>>();
+        let reordered = region_realization_fingerprint(
+            &untreated,
+            &references,
+            &reversed_samples,
+            &treated,
+            None,
+        );
+        assert_eq!(first, repeated);
+        assert_eq!(first.len(), "fnv1a64:".len() + 16);
+        assert_ne!(first, reordered);
+    }
+
+    /// Proves canonical-region identity encoding distinguishes variants and length-delimited payloads.
+    #[test]
+    fn stage21a_region_realizer_fingerprint_distinguishes_canonical_id_variants_and_lengths() {
+        let output = PatternOutputLayerId(81);
+        let site_owner = toniator_geometry::FamilySiteId {
+            mechanism_id: PatternMechanismId(7),
+            ordinal: 10,
+        };
+        let guide_location = StructuralPathLocationProvenance {
+            path: StructuralPathInstanceId::guide_dimension(GuideDimensionId(9), -2, 3),
+            segment_index: 4,
+            parameter_bits: 0.25_f64.to_bits(),
+        };
+        let ids = [
+            toniator_geometry::CanonicalRegionId {
+                output_layer_id: output,
+                source_id: CanonicalRegionSourceId::SiteOwners(vec![site_owner]),
+                component_ordinal: 0,
+            },
+            toniator_geometry::CanonicalRegionId {
+                output_layer_id: output,
+                source_id: CanonicalRegionSourceId::SiteOwners(vec![site_owner, site_owner]),
+                component_ordinal: 0,
+            },
+            toniator_geometry::CanonicalRegionId {
+                output_layer_id: output,
+                source_id: CanonicalRegionSourceId::GuideBoundary(vec![guide_location]),
+                component_ordinal: 0,
+            },
+            toniator_geometry::CanonicalRegionId {
+                output_layer_id: output,
+                source_id: CanonicalRegionSourceId::GuideBoundary(vec![
+                    guide_location,
+                    guide_location,
+                ]),
+                component_ordinal: 0,
+            },
+        ];
+        let fingerprints = ids.map(|id| {
+            let mut state = Fnv1a64State::new();
+            append_canonical_region_id_identity(&mut state, &id);
+            state.finish()
+        });
+        assert_ne!(fingerprints[0], fingerprints[1]);
+        assert_ne!(fingerprints[0], fingerprints[2]);
+        assert_ne!(fingerprints[2], fingerprints[3]);
     }
 
     /// Verifies normalized unit fill still requires its source-sampling authority.
@@ -3190,14 +3498,57 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
     source: Option<&SourceField>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<TypedFamilyOutput, PatternPipelineError> {
+    evaluate_typed_family_product_with_source_progress_cancellable(
+        family,
+        request,
+        source,
+        is_cancelled,
+        &|_, _| {},
+    )
+}
+
+/// Evaluates a family while reporting completed units within expensive site-generation phases.
+///
+/// Progress is non-authoritative, excluded from family identity, and may be
+/// called from evaluator work without retaining the callback. Existing callers
+/// that do not need progress use [`evaluate_typed_family_product_with_source_cancellable`].
+///
+/// # Errors
+///
+/// Returns the same resolver, coverage, geometry, limit, or cancellation
+/// diagnostics as the non-observed entry point, without publishing partial
+/// family output.
+pub fn evaluate_typed_family_product_with_source_progress_cancellable(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+    source: Option<&SourceField>,
+    is_cancelled: &dyn Fn() -> bool,
+    report_progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<TypedFamilyOutput, PatternPipelineError> {
     if family.parametric_curve.is_some() {
-        return evaluate_parametric_curve_cancellable(family, request, is_cancelled);
+        return evaluate_parametric_curve_with_progress_cancellable(
+            family,
+            request,
+            is_cancelled,
+            report_progress,
+        );
     }
     if family.generic_guides.is_some() {
-        return evaluate_generic_curve_guides_cancellable(family, request, is_cancelled);
+        return evaluate_generic_curve_guides_with_progress_cancellable(
+            family,
+            request,
+            is_cancelled,
+            report_progress,
+        );
     }
     if family.product == StructuralProductCapability::RandomSites {
-        let output = evaluate_random_sites_cancellable(family, request, source, is_cancelled)?;
+        let output = evaluate_random_sites_with_progress_cancellable(
+            family,
+            request,
+            source,
+            is_cancelled,
+            report_progress,
+        )?;
         let fingerprint = family_site_fingerprint(&output.family_fingerprint, &output.sites);
         let site_set = FamilySiteSet::new(
             fingerprint,
@@ -3242,11 +3593,11 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
         ]
         && family.product == StructuralProductCapability::GuideIntersections;
     if !legacy_dimensions {
-        let output = evaluate_generalized_straight_guides_cancellable(
+        let output = evaluate_generalized_straight_guides_with_progress_cancellable(
             family,
             &StraightGuideInspectRequest {
                 canvas: request.canvas.clone(),
-                density: request.density.clone(),
+                density: request.density,
                 rotation_degrees: request.rotation_degrees,
                 translation_x: request.translation_x,
                 translation_y: request.translation_y,
@@ -3255,6 +3606,7 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
                 max_family_candidates: request.max_family_candidates,
             },
             is_cancelled,
+            report_progress,
         )
         .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
         let site_set = family_sites_from_generalized(
@@ -3337,6 +3689,25 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
         diagnostics: None,
         structure: TypedFamilyStructure::from_grid(&output, family.provenance.mechanism_ids[0]),
     })
+}
+
+/// Maps completed local work into one fixed per-mille portion of family progress.
+///
+/// Zero totals remain at the portion start; callers publish their phase end only
+/// after the corresponding private result is complete.
+fn report_family_progress_portion(
+    report_progress: &(dyn Fn(usize, usize) + Sync),
+    start_per_mille: usize,
+    weight_per_mille: usize,
+    completed: usize,
+    total: usize,
+) {
+    let local = if total == 0 {
+        0
+    } else {
+        (weight_per_mille as u128 * completed.min(total) as u128 / total as u128) as usize
+    };
+    report_progress(start_per_mille.saturating_add(local).min(1_000), 1_000);
 }
 
 /// Evaluates a complete topology-supporting family envelope, then derives caller-supplied site adjacency.
@@ -3614,7 +3985,7 @@ pub fn evaluate_typed_maze_walls_from_family_cancellable(
         &family.family,
         &StraightGuideInspectRequest {
             canvas: request.canvas.clone(),
-            density: request.density.clone(),
+            density: request.density,
             rotation_degrees: request.rotation_degrees,
             translation_x: request.translation_x,
             translation_y: request.translation_y,
@@ -3772,10 +4143,11 @@ fn site_adjacency_error(error: SiteAdjacencyError) -> PatternPipelineError {
 /// # Errors
 ///
 /// Returns construction, cancellation, coverage, offset, or site-product errors without partial output.
-fn evaluate_parametric_curve_cancellable(
+fn evaluate_parametric_curve_with_progress_cancellable(
     family: &FamilyCapability,
     request: &GridInspectRequest,
     is_cancelled: &dyn Fn() -> bool,
+    report_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<TypedFamilyOutput, PatternPipelineError> {
     let parametric = family
         .parametric_curve
@@ -3786,6 +4158,7 @@ fn evaluate_parametric_curve_cancellable(
         Point2::new(0.0, 0.0),
         is_cancelled,
     )?;
+    report_progress(50, 1_000);
     let origin_at_canvas_center = AffineTransform2D::rotate_about_then_translate(
         Point2::new(0.0, 0.0),
         0.0,
@@ -3825,8 +4198,18 @@ fn evaluate_parametric_curve_cancellable(
     } else {
         Vec::new()
     };
-    let mut output = evaluate_generic_curve_guides_cancellable(&reusable, request, is_cancelled)?;
+    report_progress(100, 1_000);
+    let nested_progress = |completed, total| {
+        report_family_progress_portion(report_progress, 100, 900, completed, total);
+    };
+    let mut output = evaluate_generic_curve_guides_with_progress_cancellable(
+        &reusable,
+        request,
+        is_cancelled,
+        &nested_progress,
+    )?;
     output.family = family.clone();
+    report_progress(1_000, 1_000);
     Ok(output)
 }
 
@@ -3936,10 +4319,11 @@ fn source_location_order(left: PathLocation, right: PathLocation) -> std::cmp::O
 ///
 /// Returns bounded coverage, numeric, path, or cancellation errors without publishing a partial
 /// typed family.
-fn evaluate_generic_curve_guides_cancellable(
+fn evaluate_generic_curve_guides_with_progress_cancellable(
     family: &FamilyCapability,
     request: &GridInspectRequest,
     is_cancelled: &dyn Fn() -> bool,
+    report_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<TypedFamilyOutput, PatternPipelineError> {
     #[derive(Clone, Copy)]
     struct NormalOffsetCoveragePlan {
@@ -4030,8 +4414,12 @@ fn evaluate_generic_curve_guides_cancellable(
     let mut guides = Vec::new();
     let mut guide_nominal_bases = BTreeMap::new();
     let mut grouped = Vec::<Vec<StructuralPathInstance>>::new();
-    for (dimension, (source_structure_id, prototype)) in
-        generic.dimensions.iter().zip(&generic.resolved_paths)
+    let dimension_total = generic.dimensions.len().max(1);
+    for (dimension_index, (dimension, (source_structure_id, prototype))) in generic
+        .dimensions
+        .iter()
+        .zip(&generic.resolved_paths)
+        .enumerate()
     {
         if is_cancelled() {
             return Err(PatternPipelineError::new(
@@ -4270,6 +4658,7 @@ fn evaluate_generic_curve_guides_cancellable(
                     .then_with(|| left.cmp(right))
             });
         }
+        let planned_attempts = evaluation_indices.len().max(1);
         for index in evaluation_indices {
             attempts += 1;
             let barriers = if normal_offset_coverage.is_some() {
@@ -4279,6 +4668,15 @@ fn evaluate_generic_curve_guides_cancellable(
             };
             let paths = evaluate_index(index, &barriers)?;
             paths_by_index.insert(index, paths);
+            let dimension_start = 400 * dimension_index / dimension_total;
+            let dimension_end = 400 * (dimension_index + 1) / dimension_total;
+            report_family_progress_portion(
+                report_progress,
+                dimension_start,
+                dimension_end - dimension_start,
+                attempts,
+                planned_attempts,
+            );
         }
         if let Some(coverage) = normal_offset_coverage {
             if paths_by_index.get(&0).is_none_or(Vec::is_empty) {
@@ -4387,6 +4785,7 @@ fn evaluate_generic_curve_guides_cancellable(
             }
         }
         grouped.push(this_dimension);
+        report_progress(400 * (dimension_index + 1) / dimension_total, 1_000);
     }
     let fingerprint = generic_curve_fingerprint(family, request, generic);
     let path_set = StructuralPathSet::new(
@@ -4416,7 +4815,14 @@ fn evaluate_generic_curve_guides_cancellable(
         .collect::<Result<Vec<_>, _>>()?;
     let sites = match family.product {
         StructuralProductCapability::GuideIntersections => {
-            preflight_curve_intersection_work(&grouped, &selected, request.max_family_candidates)?;
+            let guide_pairs = preflight_curve_intersection_work(
+                &grouped,
+                &selected,
+                request.max_family_candidates,
+            )?;
+            let site_progress = |completed, total| {
+                report_family_progress_portion(report_progress, 400, 600, completed, total);
+            };
             curve_intersection_sites(
                 &grouped,
                 &selected,
@@ -4428,11 +4834,13 @@ fn evaluate_generic_curve_guides_cancellable(
                 family.provenance.mechanism_ids[1],
                 request.max_family_candidates,
                 is_cancelled,
+                guide_pairs,
+                &site_progress,
             )?
         }
         StructuralProductCapability::AlongGuideSites => {
             let multiplier = family.along_interval_multiplier.unwrap_or(1.0);
-            preflight_curve_along_work(
+            let predicted_sites = preflight_curve_along_work(
                 &grouped,
                 &selected,
                 multiplier,
@@ -4442,6 +4850,9 @@ fn evaluate_generic_curve_guides_cancellable(
                 request.max_family_candidates,
                 is_cancelled,
             )?;
+            let site_progress = |completed, total| {
+                report_family_progress_portion(report_progress, 400, 600, completed, total);
+            };
             curve_along_sites(
                 &grouped,
                 &selected,
@@ -4456,6 +4867,8 @@ fn evaluate_generic_curve_guides_cancellable(
                 family.provenance.mechanism_ids[1],
                 request.max_family_candidates,
                 is_cancelled,
+                predicted_sites,
+                &site_progress,
             )?
         }
         StructuralProductCapability::ParametricPaths => Vec::new(),
@@ -4471,6 +4884,7 @@ fn evaluate_generic_curve_guides_cancellable(
         sites,
     )
     .map_err(family_site_error)?;
+    report_progress(1_000, 1_000);
     Ok(TypedFamilyOutput {
         family: family.clone(),
         sites: site_set,
@@ -4501,10 +4915,10 @@ fn preflight_curve_along_work(
     multiplier: f64,
     absolute_interval: Option<f64>,
     canvas: &CanvasSpec,
-    density: &DensityMetric2D,
+    density: &ResolvedDensityMetric2D,
     limit: usize,
     cancelled: &dyn Fn() -> bool,
-) -> Result<(), PatternPipelineError> {
+) -> Result<usize, PatternPipelineError> {
     let minimum_interval = absolute_interval.unwrap_or(
         (canvas.width / density.across_x).min(canvas.height / density.across_y) * multiplier,
     );
@@ -4541,7 +4955,7 @@ fn preflight_curve_along_work(
             }
         }
     }
-    Ok(())
+    Ok(predicted.max(1))
 }
 
 /// Bounds selected guide pairs, segment products, and merge candidates before curve allocation.
@@ -4549,7 +4963,7 @@ fn preflight_curve_intersection_work(
     grouped: &[Vec<StructuralPathInstance>],
     selected: &[usize],
     limit: usize,
-) -> Result<(), PatternPipelineError> {
+) -> Result<usize, PatternPipelineError> {
     let mut guide_pairs = 0_usize;
     let mut segment_pairs = 0_usize;
     for (offset, &left) in selected.iter().enumerate() {
@@ -4611,7 +5025,7 @@ fn preflight_curve_intersection_work(
             "curved-guide merge work exceeds the configured family limit",
         ));
     }
-    Ok(())
+    Ok(guide_pairs.max(1))
 }
 
 /// Builds bounded curve-intersection sites in selected-dimension and guide-instance order.
@@ -4623,16 +5037,19 @@ fn curve_intersection_sites(
     canvas: Bounds,
     generation_domain: Bounds,
     canvas_spec: &CanvasSpec,
-    density: &DensityMetric2D,
+    density: &ResolvedDensityMetric2D,
     product_id: PatternMechanismId,
     limit: usize,
     cancelled: &dyn Fn() -> bool,
+    guide_pair_total: usize,
+    report_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<Vec<FamilySite>, PatternPipelineError> {
     let mut raw = Vec::<(
         Point2,
         Vec<StructuralPathLocationProvenance>,
         NominalCellBasis,
     )>::new();
+    let mut completed_guide_pairs = 0_usize;
     for (offset, &left) in selected.iter().enumerate() {
         for &right in &selected[offset + 1..] {
             for first in &grouped[left] {
@@ -4711,12 +5128,21 @@ fn curve_intersection_sites(
                             ));
                         }
                     }
+                    completed_guide_pairs = completed_guide_pairs.saturating_add(1);
+                    report_family_progress_portion(
+                        report_progress,
+                        0,
+                        500,
+                        completed_guide_pairs,
+                        guide_pair_total,
+                    );
                 }
             }
         }
     }
     let mut output: Vec<FamilySite> = Vec::new();
-    for (point, mut contributors, basis) in raw {
+    let raw_total = raw.len().max(1);
+    for (raw_index, (point, mut contributors, basis)) in raw.into_iter().enumerate() {
         if let Some(existing) = output
             .iter_mut()
             .find(|site| ((site.position.x - point.x).hypot(site.position.y - point.y)) <= epsilon)
@@ -4738,6 +5164,7 @@ fn curve_intersection_sites(
             {
                 existing.nominal_cell_basis = basis;
             }
+            report_family_progress_portion(report_progress, 500, 500, raw_index + 1, raw_total);
             continue;
         }
         contributors.dedup();
@@ -4753,7 +5180,9 @@ fn curve_intersection_sites(
             scope: site_scope(point, canvas, generation_domain).expect("filtered envelope"),
             provenance: FamilySiteProvenance::CurveGuideIntersection { contributors },
         });
+        report_family_progress_portion(report_progress, 500, 500, raw_index + 1, raw_total);
     }
+    report_progress(1_000, 1_000);
     Ok(output)
 }
 
@@ -4767,14 +5196,17 @@ fn curve_along_sites(
     absolute_interval: Option<f64>,
     nominal_bases: &BTreeMap<StructuralPathInstanceId, f64>,
     canvas_spec: &CanvasSpec,
-    density: &DensityMetric2D,
+    density: &ResolvedDensityMetric2D,
     canvas: Bounds,
     generation_domain: Bounds,
     product_id: PatternMechanismId,
     limit: usize,
     cancelled: &dyn Fn() -> bool,
+    predicted_sites: usize,
+    report_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<Vec<FamilySite>, PatternPipelineError> {
     let mut output = Vec::new();
+    let mut completed_samples = 0_usize;
     let mut guide_order = 0;
     for &dimension in selected {
         let mut active_repetition: Option<(StructuralPathSourceId, i64)> = None;
@@ -4832,6 +5264,10 @@ fn curve_along_sites(
                     ));
                 }
                 let local_position = (next_position - component_origin).max(0.0);
+                completed_samples = completed_samples.saturating_add(1);
+                if completed_samples == 1 || completed_samples.is_multiple_of(64) {
+                    report_progress(completed_samples.min(predicted_sites), predicted_sites);
+                }
                 let location = measure.location_at_length(local_position)?;
                 let tangent = guide.path.unit_tangent_at(location).map_err(|_| {
                     PatternPipelineError::new(
@@ -4928,6 +5364,7 @@ fn curve_along_sites(
             }
         }
     }
+    report_progress(predicted_sites, predicted_sites);
     Ok(output)
 }
 
@@ -4978,16 +5415,17 @@ mod parametric_component_sampling_tests {
                 width: 40.0,
                 height: 20.0,
             },
-            &DensityMetric2D {
+            &ResolvedDensityMetric2D {
                 across_x: 4.0,
                 across_y: 2.0,
-                aspect_locked: false,
             },
             Bounds::new(Point2::new(0.0, 0.0), Point2::new(40.0, 20.0)).expect("finite canvas"),
             Bounds::new(Point2::new(0.0, 0.0), Point2::new(40.0, 20.0)).expect("finite domain"),
             PatternMechanismId(702),
             32,
             &|| false,
+            32,
+            &|_, _| {},
         )
         .expect("component sampler succeeds");
         let samples = sites
@@ -5035,7 +5473,7 @@ fn site_scope(point: Point2, canvas: Bounds, generation_domain: Bounds) -> Optio
 /// Derives a deterministic square-equivalent basis from the active document density.
 fn density_cell_basis(
     canvas: &CanvasSpec,
-    density: &DensityMetric2D,
+    density: &ResolvedDensityMetric2D,
 ) -> Result<NominalCellBasis, PatternPipelineError> {
     let area = (canvas.width / density.across_x) * (canvas.height / density.across_y);
     let side = area.sqrt();
@@ -5109,7 +5547,7 @@ fn straight_intersection_basis(
 pub fn maximum_nominal_cell_diameter(
     family: &FamilyCapability,
     canvas: &CanvasSpec,
-    density: &DensityMetric2D,
+    density: &ResolvedDensityMetric2D,
 ) -> Result<f64, PatternPipelineError> {
     if let Some(parametric) = &family.parametric_curve {
         let radial_spacing = match &parametric.curve {
@@ -5228,7 +5666,7 @@ pub fn maximum_nominal_cell_diameter(
 pub fn maximum_emitted_guide_spacing(
     family: &FamilyCapability,
     canvas: &CanvasSpec,
-    density: &DensityMetric2D,
+    density: &ResolvedDensityMetric2D,
 ) -> Result<f64, PatternPipelineError> {
     if let Some(parametric) = &family.parametric_curve {
         let spacing = match (&parametric.curve, &parametric.repetition) {
@@ -5467,7 +5905,6 @@ fn generic_curve_fingerprint(
     ] {
         bytes.extend(value.to_bits().to_le_bytes());
     }
-    bytes.push(u8::from(request.density.aspect_locked));
     bytes.extend(request.guard_steps.to_le_bytes());
     bytes.extend(
         u64::try_from(request.max_family_candidates)
@@ -5681,14 +6118,6 @@ pub struct RandomSiteDiagnostics {
     pub guard_sites: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct RandomSiteProvenance {
-    pub candidate_ordinal: usize,
-    pub accepted_ordinal: usize,
-    pub scope: SiteScope,
-    pub exclusion_neighbor_ordinal: Option<usize>,
-}
-
 struct RandomSiteEvaluation {
     family_fingerprint: String,
     generation_domain: Bounds,
@@ -5698,13 +6127,19 @@ struct RandomSiteEvaluation {
 
 struct SpatialIndex {
     cell_size: f64,
-    cells: BTreeMap<(i64, i64), Vec<usize>>,
+    cells: HashMap<(i64, i64), Vec<usize>>,
     neighbor_work: usize,
-    neighbor_limit: usize,
 }
 
 impl SpatialIndex {
-    fn new(cell_size: f64, neighbor_limit: usize) -> Result<Self, PatternPipelineError> {
+    /// Creates an exclusion lookup without an application-authored work ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable spatial-index diagnostic when cell size is not
+    /// finite-positive; allocation, arithmetic, and cancellation remain checked
+    /// during use.
+    fn new(cell_size: f64) -> Result<Self, PatternPipelineError> {
         if !cell_size.is_finite() || cell_size <= 0.0 {
             return Err(PatternPipelineError::new(
                 "coverage.random_sites.spatial_index",
@@ -5713,9 +6148,8 @@ impl SpatialIndex {
         }
         Ok(Self {
             cell_size,
-            cells: BTreeMap::new(),
+            cells: HashMap::new(),
             neighbor_work: 0,
-            neighbor_limit,
         })
     }
     fn cell(&self, point: Point2) -> Result<(i64, i64), PatternPipelineError> {
@@ -5735,10 +6169,20 @@ impl SpatialIndex {
         }
         Ok((x as i64, y as i64))
     }
+    /// Returns the first accepted-site ordinal within the configured exclusion distance.
+    ///
+    /// The spatial index stores only ordinals, while positions remain in the
+    /// final `FamilySite` population. This avoids a second accepted-point
+    /// buffer and preserves deterministic ordinal/provenance identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns canonical cancellation, coordinate, or neighbor-work failures
+    /// without changing the index or accepted-site population.
     fn find_conflict(
         &mut self,
         point: Point2,
-        accepted: &[(Point2, usize, SiteScope)],
+        accepted: &[FamilySite],
         distance: f64,
         is_cancelled: &dyn Fn() -> bool,
     ) -> Result<Option<usize>, PatternPipelineError> {
@@ -5771,12 +6215,6 @@ impl SpatialIndex {
                             "exclusion neighbor work overflowed",
                         ),
                     )?;
-                    if self.neighbor_work > self.neighbor_limit {
-                        return Err(PatternPipelineError::new(
-                            "coverage.random_sites.neighbor_limit",
-                            "exclusion neighbor work exceeds configured limit",
-                        ));
-                    }
                     for &index in indices {
                         // A populated cell can contain bounded-but-large work.
                         // Poll every deterministic index so cancellation cannot
@@ -5787,7 +6225,7 @@ impl SpatialIndex {
                                 "evaluation was cancelled",
                             ));
                         }
-                        if point_distance(point, accepted[index].0) < distance {
+                        if point_distance(point, accepted[index].position) < distance {
                             return Ok(Some(index));
                         }
                     }
@@ -5796,9 +6234,30 @@ impl SpatialIndex {
         }
         Ok(None)
     }
+    /// Inserts one accepted-site ordinal through fallible cell and bucket growth.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable coordinate or allocation diagnostics without appending
+    /// the ordinal when its cell cannot be represented or reserved.
     fn insert(&mut self, point: Point2, index: usize) -> Result<(), PatternPipelineError> {
         let key = self.cell(point)?;
-        self.cells.entry(key).or_default().push(index);
+        if !self.cells.contains_key(&key) {
+            self.cells.try_reserve(1).map_err(|_| {
+                PatternPipelineError::new(
+                    "coverage.random_sites.allocation",
+                    "random-site spatial index could not reserve another cell",
+                )
+            })?;
+        }
+        let indices = self.cells.entry(key).or_default();
+        indices.try_reserve(1).map_err(|_| {
+            PatternPipelineError::new(
+                "coverage.random_sites.allocation",
+                "random-site spatial index cell could not reserve another site",
+            )
+        })?;
+        indices.push(index);
         Ok(())
     }
 }
@@ -5840,12 +6299,20 @@ impl StablePrng {
     }
 }
 
-/// Evaluates bounded random sites and publishes only truthful random provenance.
-fn evaluate_random_sites_cancellable(
+/// Evaluates random sites until deterministic geometry-derived convergence and
+/// publishes completed candidate work without imposing an app-authored count
+/// ceiling.
+///
+/// # Errors
+///
+/// Returns stable validation, source, cancellation, arithmetic, allocation, or
+/// explicit caller-limit diagnostics without publishing a partial family.
+fn evaluate_random_sites_with_progress_cancellable(
     family: &FamilyCapability,
     request: &GridInspectRequest,
     source: Option<&SourceField>,
     is_cancelled: &dyn Fn() -> bool,
+    report_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<RandomSiteEvaluation, PatternPipelineError> {
     if is_cancelled() {
         return Err(PatternPipelineError::new(
@@ -5855,7 +6322,7 @@ fn evaluate_random_sites_cancellable(
     }
     validate_straight_request(&StraightGuideInspectRequest {
         canvas: request.canvas.clone(),
-        density: request.density.clone(),
+        density: request.density,
         rotation_degrees: request.rotation_degrees,
         translation_x: request.translation_x,
         translation_y: request.translation_y,
@@ -5919,44 +6386,54 @@ fn evaluate_random_sites_cancellable(
     let padded_area = (padded.max.x - padded.min.x) * (padded.max.y - padded.min.y);
     let requested = (expected_visible as f64 * padded_area / visible_area)
         .ceil()
-        .max(1.0) as usize;
+        .max(1.0);
+    if !requested.is_finite() || requested > usize::MAX as f64 {
+        return Err(PatternPipelineError::new(
+            "channel.pattern.layout.density",
+            "random-site padded count is not machine-representable",
+        ));
+    }
+    let requested = requested as usize;
     if requested > request.max_family_candidates {
         return Err(PatternPipelineError::new(
             "coverage.candidate_limit",
             "random-site requested count exceeds the configured candidate limit",
         ));
     }
-    let candidate_budget = usize::try_from(random.maximum_attempts)
-        .ok()
-        .and_then(|attempts| attempts.checked_mul(requested))
-        .ok_or(PatternPipelineError::new(
-            "coverage.random_sites.attempts",
-            "random-site attempt budget overflowed",
-        ))?
-        .min(request.max_family_candidates);
+    let candidate_budget = request.max_family_candidates;
     if candidate_budget == 0 {
         return Err(PatternPipelineError::new(
             "coverage.random_sites.attempts",
             "random-site attempt budget must be nonzero",
         ));
     }
-    let mut prng = StablePrng::new(random.seed);
-    let parents = cluster_parents(&random.character, local, requested, &mut prng);
-    let mut accepted: Vec<(Point2, usize, SiteScope)> = Vec::with_capacity(requested);
     let exclusion_distance = required_exclusion_distance(random, request.support_radius);
+    let settled_rejection_span = random_settled_rejection_span(random, local, requested)?;
+    let parent_count = cluster_parent_count(&random.character, requested);
+    let estimated_work = parent_count
+        .saturating_add(requested)
+        .saturating_add(settled_rejection_span)
+        .max(1);
+    let mut prng = StablePrng::new(random.seed);
+    let parents = cluster_parents(
+        &random.character,
+        local,
+        parent_count,
+        &mut prng,
+        is_cancelled,
+        report_progress,
+        estimated_work,
+    )?;
+    let nominal_cell_basis = density_cell_basis(&request.canvas, &request.density)?;
+    let mut sites = Vec::new();
     let mut spatial_index = (exclusion_distance > 0.0)
-        .then(|| {
-            SpatialIndex::new(
-                exclusion_distance,
-                usize::try_from(random.maximum_neighbor_checks).expect("u32 fits usize"),
-            )
-        })
+        .then(|| SpatialIndex::new(exclusion_distance))
         .transpose()?;
-    let mut provenance = Vec::with_capacity(requested);
     let mut rejected_by_density = 0;
     let mut rejected_by_exclusion = 0;
     let mut rejected_outside_envelope = 0;
     let mut candidates_considered = 0;
+    let mut consecutive_rejections = 0_usize;
     for candidate_ordinal in 0..candidate_budget {
         if is_cancelled() {
             return Err(PatternPipelineError::new(
@@ -5964,14 +6441,32 @@ fn evaluate_random_sites_cancellable(
                 "evaluation was cancelled",
             ));
         }
-        if accepted.len() == requested {
+        if sites.len() == requested {
             break;
         }
         candidates_considered = candidate_ordinal + 1;
+        if candidates_considered == 1 || candidates_considered.is_multiple_of(64) {
+            report_progress(
+                parent_count
+                    .saturating_add(candidates_considered)
+                    .min(estimated_work),
+                estimated_work,
+            );
+        }
         let local_point = random_candidate(&random.character, local, &parents, &mut prng);
         let point = transform.apply_point(local_point);
         if !padded.contains(point) {
             rejected_outside_envelope += 1;
+            consecutive_rejections =
+                consecutive_rejections
+                    .checked_add(1)
+                    .ok_or(PatternPipelineError::new(
+                        "coverage.random_sites.attempts",
+                        "random-site convergence counter overflowed",
+                    ))?;
+            if consecutive_rejections >= settled_rejection_span {
+                break;
+            }
             continue;
         }
         let density_weight = match (&random.density_modulation, weighted_source) {
@@ -5994,19 +6489,37 @@ fn evaluate_random_sites_cancellable(
         };
         if prng.unit() > density_weight {
             rejected_by_density += 1;
+            consecutive_rejections =
+                consecutive_rejections
+                    .checked_add(1)
+                    .ok_or(PatternPipelineError::new(
+                        "coverage.random_sites.attempts",
+                        "random-site convergence counter overflowed",
+                    ))?;
+            if consecutive_rejections >= settled_rejection_span {
+                break;
+            }
             continue;
         }
         // `Option::transpose` here would retain the fact that an index exists
         // as `Some(None)`.  That is not a collision: only an actual accepted
         // ordinal rejects the candidate.
         let conflict = match spatial_index.as_mut() {
-            Some(index) => {
-                index.find_conflict(point, &accepted, exclusion_distance, is_cancelled)?
-            }
+            Some(index) => index.find_conflict(point, &sites, exclusion_distance, is_cancelled)?,
             None => None,
         };
         if conflict.is_some() {
             rejected_by_exclusion += 1;
+            consecutive_rejections =
+                consecutive_rejections
+                    .checked_add(1)
+                    .ok_or(PatternPipelineError::new(
+                        "coverage.random_sites.attempts",
+                        "random-site convergence counter overflowed",
+                    ))?;
+            if consecutive_rejections >= settled_rejection_span {
+                break;
+            }
             // Rejected candidates are aggregated rather than retained.  The
             // accepted record remains bounded and identifies its own ordinal.
             continue;
@@ -6016,37 +6529,36 @@ fn evaluate_random_sites_cancellable(
         } else {
             SiteScope::Guard
         };
-        let accepted_ordinal = accepted.len();
-        accepted.push((point, candidate_ordinal, scope));
+        let accepted_ordinal = sites.len();
+        try_push_family_value(
+            &mut sites,
+            FamilySite {
+                id: FamilySiteId {
+                    mechanism_id: family.provenance.mechanism_ids[3],
+                    ordinal: accepted_ordinal,
+                },
+                position: point,
+                nominal_cell_basis,
+                scope,
+                provenance: FamilySiteProvenance::Random {
+                    candidate_ordinal,
+                    accepted_ordinal,
+                    exclusion_neighbor_ordinal: None,
+                },
+            },
+            "coverage.random_sites.allocation",
+            "random-site family output could not reserve another site",
+        )?;
+        consecutive_rejections = 0;
         if let Some(index) = &mut spatial_index {
             index.insert(point, accepted_ordinal)?;
         }
-        provenance.push(RandomSiteProvenance {
-            candidate_ordinal,
-            accepted_ordinal,
-            scope,
-            exclusion_neighbor_ordinal: None,
-        });
     }
-    let nominal_cell_basis = density_cell_basis(&request.canvas, &request.density)?;
-    let sites: Vec<_> = accepted
-        .iter()
-        .enumerate()
-        .map(|(index, (point, _, scope))| FamilySite {
-            id: FamilySiteId {
-                mechanism_id: family.provenance.mechanism_ids[3],
-                ordinal: index,
-            },
-            position: *point,
-            nominal_cell_basis,
-            scope: *scope,
-            provenance: FamilySiteProvenance::Random {
-                candidate_ordinal: provenance[index].candidate_ordinal,
-                accepted_ordinal: provenance[index].accepted_ordinal,
-                exclusion_neighbor_ordinal: provenance[index].exclusion_neighbor_ordinal,
-            },
-        })
-        .collect();
+    // These working populations are not part of the published family result;
+    // release them before diagnostics and fingerprint assembly retain only the
+    // completed `FamilySite` values.
+    drop(spatial_index);
+    drop(parents);
     let canvas_sites = sites
         .iter()
         .filter(|site| site.scope == SiteScope::Canvas)
@@ -6061,12 +6573,58 @@ fn evaluate_random_sites_cancellable(
         canvas_sites,
         guard_sites: sites.len() - canvas_sites,
     };
+    report_progress(estimated_work, estimated_work);
     Ok(RandomSiteEvaluation {
         family_fingerprint: random_family_fingerprint(family, request, weighted_source),
         generation_domain: padded,
         sites,
         diagnostics,
     })
+}
+
+/// Derives a finite convergence sweep for random placement that stops making progress.
+///
+/// The baseline span is the requested padded-domain population. Even dispersion
+/// expands it to the number of exclusion-sized cells covering the complete
+/// local domain. The rule therefore scales with canvas, zoom, and authored
+/// spacing rather than imposing an application-authored geometry or work
+/// ceiling. Reaching it publishes the best deterministic placement attained,
+/// including physically saturated or zero-weight source cases.
+///
+/// # Errors
+///
+/// Returns a stable coverage diagnostic if the finite validated bounds cannot
+/// be represented as a machine-sized cell count.
+fn random_settled_rejection_span(
+    random: &RandomSiteCapability,
+    local: Bounds,
+    requested: usize,
+) -> Result<usize, PatternPipelineError> {
+    let RandomSiteCharacter::Even {
+        minimum_center_distance,
+    } = random.character
+    else {
+        return Ok(requested.max(1));
+    };
+    let columns = ((local.max.x - local.min.x) / minimum_center_distance)
+        .ceil()
+        .max(1.0);
+    let rows = ((local.max.y - local.min.y) / minimum_center_distance)
+        .ceil()
+        .max(1.0);
+    if columns > usize::MAX as f64 || rows > usize::MAX as f64 {
+        return Err(PatternPipelineError::new(
+            "coverage.random_sites.spatial_index",
+            "even-dispersion convergence sweep is not representable",
+        ));
+    }
+    let span = (columns as usize)
+        .checked_mul(rows as usize)
+        .ok_or(PatternPipelineError::new(
+            "coverage.random_sites.spatial_index",
+            "even-dispersion convergence sweep overflowed",
+        ))?;
+    Ok(span.max(requested).max(1))
 }
 
 fn checked_requested_count(request: &GridInspectRequest) -> Result<usize, PatternPipelineError> {
@@ -6094,6 +6652,25 @@ fn required_exclusion_distance(random: &RandomSiteCapability, support: f64) -> f
     random_neighborhood(random, support)
 }
 
+/// Pushes one family value only after a fallible incremental reservation.
+///
+/// # Errors
+///
+/// Returns the caller-selected stable allocation diagnostic without mutating
+/// the vector when its next element cannot be reserved.
+fn try_push_family_value<T>(
+    values: &mut Vec<T>,
+    value: T,
+    path: &'static str,
+    message: &'static str,
+) -> Result<(), PatternPipelineError> {
+    values
+        .try_reserve(1)
+        .map_err(|_| PatternPipelineError::new(path, message))?;
+    values.push(value);
+    Ok(())
+}
+
 /// Resolves an exclusion policy against the evaluator-supplied active maximum mark support.
 fn exclusion_distance(policy: &SiteExclusionPolicy, support: f64) -> f64 {
     match policy {
@@ -6103,27 +6680,59 @@ fn exclusion_distance(policy: &SiteExclusionPolicy, support: f64) -> f64 {
     }
 }
 
-fn cluster_parents(
-    character: &RandomSiteCharacter,
-    bounds: Bounds,
-    requested: usize,
-    prng: &mut StablePrng,
-) -> Vec<Point2> {
+/// Resolves the deterministic clustered-parent population without allocating it.
+fn cluster_parent_count(character: &RandomSiteCharacter, requested: usize) -> usize {
     let RandomSiteCharacter::Clustered {
         cluster_density, ..
     } = character
     else {
-        return Vec::new();
+        return 0;
     };
-    let count = ((requested as f64 * cluster_density).round() as usize).clamp(1, requested.max(1));
-    (0..count)
-        .map(|_| {
+    ((requested as f64 * cluster_density).round() as usize).clamp(1, requested.max(1))
+}
+
+/// Builds clustered parents incrementally with cancellation and family progress.
+///
+/// # Errors
+///
+/// Returns cancellation or a stable allocation diagnostic before returning a
+/// partial parent population.
+#[allow(clippy::too_many_arguments)]
+fn cluster_parents(
+    character: &RandomSiteCharacter,
+    bounds: Bounds,
+    count: usize,
+    prng: &mut StablePrng,
+    is_cancelled: &dyn Fn() -> bool,
+    report_progress: &(dyn Fn(usize, usize) + Sync),
+    estimated_work: usize,
+) -> Result<Vec<Point2>, PatternPipelineError> {
+    if !matches!(character, RandomSiteCharacter::Clustered { .. }) {
+        return Ok(Vec::new());
+    }
+    let mut parents = Vec::new();
+    for index in 0..count {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        try_push_family_value(
+            &mut parents,
             Point2::new(
                 bounds.min.x + prng.unit() * (bounds.max.x - bounds.min.x),
                 bounds.min.y + prng.unit() * (bounds.max.y - bounds.min.y),
-            )
-        })
-        .collect()
+            ),
+            "coverage.random_sites.allocation",
+            "clustered random sites could not reserve another parent",
+        )?;
+        let completed = index + 1;
+        if completed == 1 || completed.is_multiple_of(64) || completed == count {
+            report_progress(completed.min(estimated_work), estimated_work);
+        }
+    }
+    Ok(parents)
 }
 
 fn random_candidate(
@@ -6240,13 +6849,10 @@ fn random_family_fingerprint(
             bytes.extend(margin.to_bits().to_le_bytes());
         }
     }
-    bytes.extend(random.maximum_attempts.to_le_bytes());
-    bytes.extend(random.maximum_neighbor_checks.to_le_bytes());
     bytes.extend(request.canvas.width.to_bits().to_le_bytes());
     bytes.extend(request.canvas.height.to_bits().to_le_bytes());
     bytes.extend(request.density.across_x.to_bits().to_le_bytes());
     bytes.extend(request.density.across_y.to_bits().to_le_bytes());
-    bytes.push(u8::from(request.density.aspect_locked));
     bytes.extend(request.rotation_degrees.to_bits().to_le_bytes());
     bytes.extend(request.translation_x.to_bits().to_le_bytes());
     bytes.extend(request.translation_y.to_bits().to_le_bytes());
@@ -7443,7 +8049,7 @@ fn legacy_grid_sites_for_circular_marks(
 #[derive(Clone, Debug, PartialEq)]
 pub struct GridInspectRequest {
     pub canvas: CanvasSpec,
-    pub density: DensityMetric2D,
+    pub density: ResolvedDensityMetric2D,
     pub rotation_degrees: f64,
     /// Authored document-axis translation; it is never replaced by phase.
     pub translation_x: f64,
@@ -7486,7 +8092,7 @@ pub struct GridFamilyOutput {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StraightGuideInspectRequest {
     pub canvas: CanvasSpec,
-    pub density: DensityMetric2D,
+    pub density: ResolvedDensityMetric2D,
     pub rotation_degrees: f64,
     pub translation_x: f64,
     pub translation_y: f64,
@@ -7541,6 +8147,29 @@ pub fn evaluate_generalized_straight_guides_cancellable(
     request: &StraightGuideInspectRequest,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<GeneralizedStraightGuideOutput, GridError> {
+    evaluate_generalized_straight_guides_with_progress_cancellable(
+        family,
+        request,
+        is_cancelled,
+        &|_, _| {},
+    )
+}
+
+/// Evaluates a generalized straight-guide product with deterministic work progress.
+///
+/// Progress covers pairwise intersection generation and coincident-site merge
+/// work, is excluded from family identity, and never exposes partial geometry.
+///
+/// # Errors
+///
+/// Returns validation, coverage, numeric, explicit-limit, or cancellation
+/// diagnostics before exposing a structural output.
+pub fn evaluate_generalized_straight_guides_with_progress_cancellable(
+    family: &FamilyCapability,
+    request: &StraightGuideInspectRequest,
+    is_cancelled: &dyn Fn() -> bool,
+    report_progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<GeneralizedStraightGuideOutput, GridError> {
     if is_cancelled() {
         return Err(GridError::new(
             "evaluation.cancelled",
@@ -7554,10 +8183,17 @@ pub fn evaluate_generalized_straight_guides_cancellable(
             "straight-guide family requires one through four dimensions",
         ));
     }
-    let transform = grid_prototype_local_to_document_transform(
-        &request.canvas,
+    let (layout_density, aspect_scale_x, aspect_scale_y) =
+        aspect_normalized_straight_layout(&request.canvas, request.density)?;
+    let transform = AffineTransform2D::scale_then_rotate_about_then_translate(
+        Point2::new(0.0, 0.0),
+        aspect_scale_x,
+        aspect_scale_y,
         request.rotation_degrees,
-        Vector2::new(request.translation_x, request.translation_y),
+        Vector2::new(
+            request.canvas.width * 0.5 + request.translation_x,
+            request.canvas.height * 0.5 + request.translation_y,
+        ),
     )
     .ok_or(GridError::new(
         "channel.pattern.layout",
@@ -7613,7 +8249,7 @@ pub fn evaluate_generalized_straight_guides_cancellable(
         }
         let radians = dimension.baseline_angle_degrees.to_radians();
         let normal = Vector2::new(radians.cos(), radians.sin());
-        let spacing = directional_spacing(&request.canvas, &request.density, normal)?
+        let spacing = directional_spacing(&request.canvas, &layout_density, normal)?
             * dimension.repetition.spacing_multiplier;
         let plan = DimensionPlan::new(dimension.id, normal, spacing, dimension.phase);
         let item = plan.coverage(domain, transform)?;
@@ -7704,7 +8340,7 @@ pub fn evaluate_generalized_straight_guides_cancellable(
             ));
         }
     }
-    let extension = margin;
+    let extension = margin / aspect_scale_x.min(aspect_scale_y);
     let mut guides = Vec::with_capacity(guide_total);
     let mut grouped = Vec::with_capacity(plans.len());
     for (plan, item) in plans.iter().zip(&coverage) {
@@ -7726,7 +8362,10 @@ pub fn evaluate_generalized_straight_guides_cancellable(
             canvas,
             margin,
             request.max_family_candidates,
-            is_cancelled,
+            GeneralizedWorkObserver {
+                is_cancelled,
+                report_progress,
+            },
         )?,
         StructuralProductCapability::AlongGuideSites => generalized_along_guides(
             &grouped,
@@ -7766,6 +8405,12 @@ pub fn evaluate_generalized_straight_guides_cancellable(
     })
 }
 
+/// Borrows cancellation and progress observations for one generalized-family operation.
+struct GeneralizedWorkObserver<'a> {
+    is_cancelled: &'a dyn Fn() -> bool,
+    report_progress: &'a (dyn Fn(usize, usize) + Sync),
+}
+
 /// Produces bounded pairwise guide intersections and merges every epsilon-coincident contributor set.
 ///
 /// # Errors
@@ -7778,7 +8423,7 @@ fn generalized_intersections(
     canvas: Bounds,
     margin: f64,
     limit: usize,
-    cancelled: &dyn Fn() -> bool,
+    observer: GeneralizedWorkObserver<'_>,
 ) -> Result<Vec<GeneralizedSite>, GridError> {
     if selected.len() < 2 {
         return Err(GridError::new(
@@ -7792,10 +8437,30 @@ fn generalized_intersections(
             "merge epsilon must be finite and nonnegative",
         ));
     }
+    let pair_work_total =
+        selected
+            .iter()
+            .enumerate()
+            .try_fold(0_usize, |total, (offset, &left)| {
+                selected[offset + 1..]
+                    .iter()
+                    .try_fold(total, |total, &right| {
+                        grouped[left]
+                            .len()
+                            .checked_mul(grouped[right].len())
+                            .and_then(|pairs| total.checked_add(pairs))
+                            .ok_or(GridError::new(
+                                "coverage.intersections.pairwise_limit",
+                                "pairwise intersection progress count overflowed",
+                            ))
+                    })
+            })?;
+    let estimated_work = pair_work_total.saturating_mul(2).max(1);
+    let mut inspected_pairs = 0_usize;
     let mut raw: Vec<(Point2, Vec<GuideInstanceId>)> = Vec::new();
     for (left_offset, &left) in selected.iter().enumerate() {
         for &right in &selected[left_offset + 1..] {
-            if cancelled() {
+            if (observer.is_cancelled)() {
                 return Err(GridError::new(
                     "evaluation.cancelled",
                     "evaluation was cancelled",
@@ -7834,13 +8499,23 @@ fn generalized_intersections(
                 ));
             }
             for guide_a in &grouped[left] {
-                if cancelled() {
+                if (observer.is_cancelled)() {
                     return Err(GridError::new(
                         "evaluation.cancelled",
                         "evaluation was cancelled",
                     ));
                 }
                 for guide_b in &grouped[right] {
+                    inspected_pairs = inspected_pairs.checked_add(1).ok_or(GridError::new(
+                        "coverage.intersections.pairwise_limit",
+                        "pairwise intersection progress count overflowed",
+                    ))?;
+                    if inspected_pairs == 1 || inspected_pairs.is_multiple_of(64) {
+                        (observer.report_progress)(
+                            inspected_pairs.min(estimated_work),
+                            estimated_work,
+                        );
+                    }
                     if let Some(point) = line_intersection(guide_a, guide_b)
                         .map(|point| snap_intersection_to_canvas_boundary(point, canvas))
                         && distance_to_canvas(point, canvas) <= margin
@@ -7864,38 +8539,60 @@ fn generalized_intersections(
             .then(a.1.cmp(&b.1))
     });
     let mut sites: Vec<GeneralizedSite> = Vec::with_capacity(raw.len());
+    let mut merge_buckets: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
     let mut merge_comparisons = 0_usize;
-    for (point, contributors) in raw {
-        if cancelled() {
+    let raw_count = raw.len();
+    for (raw_index, (point, contributors)) in raw.into_iter().enumerate() {
+        if (observer.is_cancelled)() {
             return Err(GridError::new(
                 "evaluation.cancelled",
                 "evaluation was cancelled",
             ));
         }
+        let completed = pair_work_total.saturating_add(raw_index + 1);
+        if raw_index == 0 || completed.is_multiple_of(64) || raw_index + 1 == raw_count {
+            (observer.report_progress)(completed.min(estimated_work), estimated_work);
+        }
         let mut existing_index = None;
-        for index in (0..sites.len()).rev() {
-            if cancelled() {
-                return Err(GridError::new(
-                    "evaluation.cancelled",
-                    "evaluation was cancelled",
-                ));
-            }
-            if point.x - sites[index].position.x > epsilon {
-                break;
-            }
-            merge_comparisons = merge_comparisons.checked_add(1).ok_or(GridError::new(
-                "coverage.intersections.merge_limit",
-                "coincident merge work overflowed",
-            ))?;
-            if merge_comparisons > limit {
-                return Err(GridError::new(
+        let bucket = if epsilon == 0.0 {
+            None
+        } else {
+            Some((point.y / epsilon).floor() as i64)
+        };
+        let bucket_start = bucket.map_or(0, |key| key.saturating_sub(1));
+        let bucket_end = bucket.map_or(0, |key| key.saturating_add(1));
+        for key in bucket_start..=bucket_end {
+            let candidate_indices = if epsilon == 0.0 {
+                sites.last().map(|_| vec![sites.len() - 1])
+            } else {
+                merge_buckets.get(&key).cloned()
+            };
+            for index in candidate_indices.into_iter().flatten().rev() {
+                if (observer.is_cancelled)() {
+                    return Err(GridError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                if point.x - sites[index].position.x > epsilon {
+                    break;
+                }
+                merge_comparisons = merge_comparisons.checked_add(1).ok_or(GridError::new(
                     "coverage.intersections.merge_limit",
-                    "coincident merge work exceeds the configured limit",
-                ));
-            }
-            if distance(sites[index].position, point) <= epsilon {
-                existing_index = Some(index);
-                break;
+                    "coincident merge work overflowed",
+                ))?;
+                if merge_comparisons > limit {
+                    return Err(GridError::new(
+                        "coverage.intersections.merge_limit",
+                        "coincident merge work exceeds the configured limit",
+                    ));
+                }
+                if (point.y - sites[index].position.y).abs() <= epsilon
+                    && distance(sites[index].position, point) <= epsilon
+                    && existing_index.is_none_or(|existing| index > existing)
+                {
+                    existing_index = Some(index);
+                }
             }
         }
         if let Some(index) = existing_index {
@@ -7919,13 +8616,18 @@ fn generalized_intersections(
         } else {
             SiteScope::Guard
         };
+        let site_index = sites.len();
         sites.push(GeneralizedSite {
             sequence: sites.len(),
             position: point,
             scope,
             provenance: GeneralizedSiteProvenance::Intersection { contributors },
         });
+        if let Some(bucket) = bucket {
+            merge_buckets.entry(bucket).or_default().push(site_index);
+        }
     }
+    (observer.report_progress)(estimated_work, estimated_work);
     Ok(sites)
 }
 
@@ -8099,7 +8801,7 @@ fn distance(a: Point2, b: Point2) -> f64 {
 fn validate_straight_request(request: &StraightGuideInspectRequest) -> Result<(), GridError> {
     validate(&GridInspectRequest {
         canvas: request.canvas.clone(),
-        density: request.density.clone(),
+        density: request.density,
         rotation_degrees: request.rotation_degrees,
         translation_x: request.translation_x,
         translation_y: request.translation_y,
@@ -8114,7 +8816,7 @@ fn generalized_fingerprint(
     family: &FamilyCapability,
     request: &StraightGuideInspectRequest,
 ) -> String {
-    let mut bytes = b"toniator-stage-16a-straight-guide-family-v2-centered-local-origin".to_vec();
+    let mut bytes = b"toniator-stage-21a-straight-guide-family-v3-aspect-affine-layout".to_vec();
     bytes.extend(family.provenance.definition_id.to_le_bytes());
     for mechanism_id in &family.provenance.mechanism_ids {
         bytes.extend(mechanism_id.0.to_le_bytes());
@@ -8153,7 +8855,6 @@ fn generalized_fingerprint(
     bytes.extend(request.canvas.height.to_bits().to_le_bytes());
     bytes.extend(request.density.across_x.to_bits().to_le_bytes());
     bytes.extend(request.density.across_y.to_bits().to_le_bytes());
-    bytes.push(u8::from(request.density.aspect_locked));
     bytes.extend(request.rotation_degrees.to_bits().to_le_bytes());
     bytes.extend(request.translation_x.to_bits().to_le_bytes());
     bytes.extend(request.translation_y.to_bits().to_le_bytes());
@@ -8211,7 +8912,7 @@ pub struct CanonicalStrokeRealization {
 }
 
 /// Stable canonical sweep contract included in all stroke realization identity.
-pub const CANONICAL_STROKE_OUTLINE_CONTRACT_ID: &str = "toniator-stage-20i-filled-outline-v3";
+pub const CANONICAL_STROKE_OUTLINE_CONTRACT_ID: &str = "toniator-stage-21a-filled-outline-v4";
 /// Bounds adaptive samples per evaluation request before profile allocation.
 pub const MAX_STROKE_PROFILE_SAMPLES: usize = 262_144;
 /// Bounds derived filled-outline segments per evaluation request.
@@ -8219,7 +8920,6 @@ pub const MAX_STROKE_OUTLINE_SEGMENTS: usize = 524_288;
 /// Caps adaptive centerline/width subdivision deterministically.
 pub const MAX_STROKE_SUBDIVISION_DEPTH: u8 = 48;
 const STROKE_CENTERLINE_TOLERANCE: f64 = 1.0 / 64.0;
-const STROKE_WIDTH_TOLERANCE: f64 = 1.0 / 64.0;
 
 /// Realizes ordered guide paths into reusable finite filled outlines.
 ///
@@ -8278,6 +8978,7 @@ pub fn realize_typed_canonical_strokes_cancellable(
                 ))?;
         let pixel_footprint = (canvas.width / f64::from(source.identity().width))
             .min(canvas.height / f64::from(source.identity().height));
+        let profile_sample_interval = nominal_basis.max(pixel_footprint);
         let mut profile: Vec<StrokeProfileSample> =
             Vec::with_capacity(guide.path.segments().len() * 2);
         for (segment_index, segment) in guide.path.segments().iter().enumerate() {
@@ -8322,7 +9023,7 @@ pub fn realize_typed_canonical_strokes_cancellable(
                 1.0,
                 end,
                 0,
-                pixel_footprint,
+                profile_sample_interval,
                 source,
                 canvas,
                 mapping,
@@ -8519,16 +9220,107 @@ pub fn realize_connection_canonical_strokes_cancellable(
     max_outline_segments: usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+    realize_connection_canonical_strokes_from_paths(
+        paths.fingerprint().to_owned(),
+        paths.paths.len(),
+        paths.paths.iter().map(|connection| {
+            (
+                connection.id.clone(),
+                connection.path.clone(),
+                connection.nominal_basis,
+            )
+        }),
+        source,
+        canvas,
+        mapping,
+        response,
+        style,
+        max_profile_samples,
+        max_outline_segments,
+        is_cancelled,
+    )
+}
+
+/// Consumes selected connection paths while realizing their canonical round strokes.
+///
+/// This output-only boundary releases graph-selection diagnostics and moves each centerline into
+/// its stroke. It is intended for orchestration that has already derived any required usage facts;
+/// the borrowed variant remains available when callers must retain the complete path result.
+///
+/// # Errors
+///
+/// Returns stable sampling, geometry, allocation, or cancellation diagnostics without publishing
+/// a partial realization.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_owned_connection_canonical_strokes_cancellable(
+    mut paths: ConnectionPathSet,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    style: toniator_domain::PathStrokeStyle,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+    let family_fingerprint = paths.fingerprint().to_owned();
+    let connections = std::mem::take(&mut paths.paths);
+    let path_count = connections.len();
+    drop(paths);
+    realize_connection_canonical_strokes_from_paths(
+        family_fingerprint,
+        path_count,
+        connections
+            .into_iter()
+            .map(|connection| (connection.id, connection.path, connection.nominal_basis)),
+        source,
+        canvas,
+        mapping,
+        response,
+        style,
+        max_profile_samples,
+        max_outline_segments,
+        is_cancelled,
+    )
+}
+
+/// Realizes owned connection centerlines and streams their fingerprint without a byte mirror.
+///
+/// # Errors
+///
+/// Returns stable sampling, geometry, allocation, configured-limit, or cancellation diagnostics.
+#[allow(clippy::too_many_arguments)]
+fn realize_connection_canonical_strokes_from_paths<I>(
+    family_fingerprint: String,
+    path_count: usize,
+    connections: I,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    style: toniator_domain::PathStrokeStyle,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CanonicalStrokeRealization, PatternPipelineError>
+where
+    I: IntoIterator<Item = (ConnectionPathId, CurvePath, f64)>,
+{
     let mut strokes = Vec::new();
     reserve_stage20m(
         &mut strokes,
-        paths.paths.len(),
+        path_count,
         "connection.allocation",
         "connection canonical-stroke allocation failed",
     )?;
+    let mut identity = Fnv1a64State::new();
+    identity.write(family_fingerprint.bytes());
+    identity.write(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.bytes());
+    identity.write(response.minimum_thickness.to_bits().to_le_bytes());
+    identity.write(response.maximum_thickness.to_bits().to_le_bytes());
     let mut profile_samples = 0_usize;
     let mut outline_segments = 0_usize;
-    for connection in &paths.paths {
+    for (connection_id, path, nominal_basis) in connections {
         if is_cancelled() {
             return Err(PatternPipelineError::new(
                 "evaluation.cancelled",
@@ -8537,9 +9329,7 @@ pub fn realize_connection_canonical_strokes_cancellable(
         }
         let mut profile = Vec::new();
         let profile_capacity =
-            connection
-                .path
-                .segments()
+            path.segments()
                 .len()
                 .checked_mul(2)
                 .ok_or(PatternPipelineError::new(
@@ -8552,7 +9342,7 @@ pub fn realize_connection_canonical_strokes_cancellable(
             "connection.allocation",
             "connection stroke-profile allocation failed",
         )?;
-        for (segment_index, segment) in connection.path.segments().iter().enumerate() {
+        for (segment_index, segment) in path.segments().iter().enumerate() {
             for parameter in [0.0, 1.0] {
                 if is_cancelled() {
                     return Err(PatternPipelineError::new(
@@ -8568,7 +9358,7 @@ pub fn realize_connection_canonical_strokes_cancellable(
                     canvas,
                     mapping,
                     response,
-                    connection.nominal_basis,
+                    nominal_basis,
                 )?;
                 // Preserve both segment-local locations at a shared graph vertex. The outline
                 // authority consumes that same-center tangent discontinuity to construct its
@@ -8613,7 +9403,7 @@ pub fn realize_connection_canonical_strokes_cancellable(
             });
         }
         let outline = build_variable_width_outline_cancellable(
-            &connection.path,
+            &path,
             &outline_input,
             style,
             1.0 / 8.0,
@@ -8656,11 +9446,25 @@ pub fn realize_connection_canonical_strokes_cancellable(
                 "connection stroke outline exceeds the segment limit",
             ));
         }
+        identity.write(connection_id.output_layer_id.0.to_le_bytes());
+        identity.write(connection_id.component_minimum.mechanism_id.0.to_le_bytes());
+        identity.write((connection_id.component_minimum.ordinal as u64).to_le_bytes());
+        identity.write(connection_id.component_ordinal.to_le_bytes());
+        identity.write(connection_id.first_endpoint.mechanism_id.0.to_le_bytes());
+        identity.write((connection_id.first_endpoint.ordinal as u64).to_le_bytes());
+        identity.write(connection_id.last_endpoint.mechanism_id.0.to_le_bytes());
+        identity.write((connection_id.last_endpoint.ordinal as u64).to_le_bytes());
+        identity.write(connection_id.ordinal.to_le_bytes());
+        for sample in &profile {
+            identity.write(sample.center.x.to_bits().to_le_bytes());
+            identity.write(sample.center.y.to_bits().to_le_bytes());
+            identity.write(sample.normalized_thickness.to_bits().to_le_bytes());
+        }
         strokes.push(
             CanonicalStroke::new_connection(
-                connection.id.clone(),
-                connection.path.clone(),
-                connection.nominal_basis,
+                connection_id,
+                path,
+                nominal_basis,
                 style,
                 profile,
                 outline,
@@ -8673,78 +9477,9 @@ pub fn realize_connection_canonical_strokes_cancellable(
             })?,
         );
     }
-    let mut identity_capacity = paths
-        .fingerprint()
-        .len()
-        .checked_add(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.len())
-        .and_then(|value| value.checked_add(16))
-        .ok_or(PatternPipelineError::new(
-            "connection.allocation",
-            "connection identity allocation size overflows",
-        ))?;
-    for stroke in &strokes {
-        if is_cancelled() {
-            return Err(PatternPipelineError::new(
-                "evaluation.cancelled",
-                "evaluation was cancelled",
-            ));
-        }
-        let profile_bytes =
-            stroke
-                .profile
-                .len()
-                .checked_mul(24)
-                .ok_or(PatternPipelineError::new(
-                    "connection.allocation",
-                    "connection identity profile allocation size overflows",
-                ))?;
-        identity_capacity = identity_capacity
-            .checked_add(72)
-            .and_then(|value| value.checked_add(profile_bytes))
-            .ok_or(PatternPipelineError::new(
-                "connection.allocation",
-                "connection identity allocation size overflows",
-            ))?;
-    }
-    let mut bytes = Vec::new();
-    reserve_stage20m(
-        &mut bytes,
-        identity_capacity,
-        "connection.allocation",
-        "connection identity allocation failed",
-    )?;
-    bytes.extend(paths.fingerprint().as_bytes());
-    bytes.extend(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.as_bytes());
-    bytes.extend(response.minimum_thickness.to_bits().to_le_bytes());
-    bytes.extend(response.maximum_thickness.to_bits().to_le_bytes());
-    for stroke in &strokes {
-        if is_cancelled() {
-            return Err(PatternPipelineError::new(
-                "evaluation.cancelled",
-                "evaluation was cancelled",
-            ));
-        }
-        let toniator_geometry::CanonicalStrokeSourceId::Connection(id) = &stroke.source_id else {
-            unreachable!("connection realizer sets connection provenance");
-        };
-        bytes.extend(id.output_layer_id.0.to_le_bytes());
-        bytes.extend(id.component_minimum.mechanism_id.0.to_le_bytes());
-        bytes.extend((id.component_minimum.ordinal as u64).to_le_bytes());
-        bytes.extend(id.component_ordinal.to_le_bytes());
-        bytes.extend(id.first_endpoint.mechanism_id.0.to_le_bytes());
-        bytes.extend((id.first_endpoint.ordinal as u64).to_le_bytes());
-        bytes.extend(id.last_endpoint.mechanism_id.0.to_le_bytes());
-        bytes.extend((id.last_endpoint.ordinal as u64).to_le_bytes());
-        bytes.extend(id.ordinal.to_le_bytes());
-        for sample in &stroke.profile {
-            bytes.extend(sample.center.x.to_bits().to_le_bytes());
-            bytes.extend(sample.center.y.to_bits().to_le_bytes());
-            bytes.extend(sample.normalized_thickness.to_bits().to_le_bytes());
-        }
-    }
     Ok(CanonicalStrokeRealization {
-        family_fingerprint: paths.fingerprint().to_owned(),
-        realization_fingerprint: fnv1a64(bytes),
+        family_fingerprint,
+        realization_fingerprint: identity.finish(),
         source_identity: source.identity().clone(),
         response,
         strokes,
@@ -8769,16 +9504,103 @@ pub fn realize_maze_canonical_strokes_cancellable(
     max_outline_segments: usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+    realize_maze_canonical_strokes_from_paths(
+        maze.fingerprint().to_owned(),
+        maze.wall_paths.len(),
+        maze.wall_paths
+            .iter()
+            .map(|wall| (wall.id, wall.path.clone(), wall.nominal_basis)),
+        source,
+        canvas,
+        mapping,
+        response,
+        style,
+        max_profile_samples,
+        max_outline_segments,
+        is_cancelled,
+    )
+}
+
+/// Consumes a completed maze while realizing its retained wall paths as canonical strokes.
+///
+/// The caller must derive usage or diagnostics before this boundary. Consuming the maze releases
+/// its arrangement, dual graph, and solution storage before variable-width outlines are built.
+///
+/// # Errors
+///
+/// Returns stable sampling, outline, geometry, allocation, or cancellation diagnostics without
+/// publishing a partial realization.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_owned_maze_canonical_strokes_cancellable(
+    mut maze: MazeProgramResult,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    style: toniator_domain::PathStrokeStyle,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+    let family_fingerprint = maze.fingerprint().to_owned();
+    let walls = std::mem::take(&mut maze.wall_paths);
+    let wall_count = walls.len();
+    drop(maze);
+    realize_maze_canonical_strokes_from_paths(
+        family_fingerprint,
+        wall_count,
+        walls
+            .into_iter()
+            .map(|wall| (wall.id, wall.path, wall.nominal_basis)),
+        source,
+        canvas,
+        mapping,
+        response,
+        style,
+        max_profile_samples,
+        max_outline_segments,
+        is_cancelled,
+    )
+}
+
+/// Realizes owned maze wall centerlines and streams their fingerprint without a byte mirror.
+///
+/// # Errors
+///
+/// Returns stable sampling, outline, geometry, allocation, configured-limit, or cancellation
+/// diagnostics.
+#[allow(clippy::too_many_arguments)]
+fn realize_maze_canonical_strokes_from_paths<I>(
+    family_fingerprint: String,
+    wall_count: usize,
+    walls: I,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    style: toniator_domain::PathStrokeStyle,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CanonicalStrokeRealization, PatternPipelineError>
+where
+    I: IntoIterator<Item = (MazeWallPathId, CurvePath, f64)>,
+{
     let mut strokes = Vec::new();
     reserve_stage20m(
         &mut strokes,
-        maze.wall_paths.len(),
+        wall_count,
         "maze.allocation",
         "maze canonical-stroke allocation failed",
     )?;
+    let mut identity = Fnv1a64State::new();
+    identity.write(family_fingerprint.bytes());
+    identity.write(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.bytes());
+    identity.write(response.minimum_thickness.to_bits().to_le_bytes());
+    identity.write(response.maximum_thickness.to_bits().to_le_bytes());
     let mut profile_samples = 0_usize;
     let mut outline_segments = 0_usize;
-    for wall in &maze.wall_paths {
+    for (wall_id, path, nominal_basis) in walls {
         if is_cancelled() {
             return Err(PatternPipelineError::new(
                 "evaluation.cancelled",
@@ -8787,8 +9609,7 @@ pub fn realize_maze_canonical_strokes_cancellable(
         }
         let mut profile = Vec::new();
         let profile_capacity =
-            wall.path
-                .segments()
+            path.segments()
                 .len()
                 .checked_mul(2)
                 .ok_or(PatternPipelineError::new(
@@ -8801,7 +9622,7 @@ pub fn realize_maze_canonical_strokes_cancellable(
             "maze.allocation",
             "maze stroke-profile allocation failed",
         )?;
-        for (segment_index, segment) in wall.path.segments().iter().enumerate() {
+        for (segment_index, segment) in path.segments().iter().enumerate() {
             for parameter in [0.0, 1.0] {
                 if is_cancelled() {
                     return Err(PatternPipelineError::new(
@@ -8817,7 +9638,7 @@ pub fn realize_maze_canonical_strokes_cancellable(
                     canvas,
                     mapping,
                     response,
-                    wall.nominal_basis,
+                    nominal_basis,
                 )?;
                 if profile.last().is_none_or(|previous: &StrokeProfileSample| {
                     previous.location != sample.location
@@ -8859,7 +9680,7 @@ pub fn realize_maze_canonical_strokes_cancellable(
             });
         }
         let outline = build_variable_width_outline_cancellable(
-            &wall.path,
+            &path,
             &outline_input,
             style,
             1.0 / 8.0,
@@ -8902,89 +9723,27 @@ pub fn realize_maze_canonical_strokes_cancellable(
                 "maze stroke outline exceeds the segment limit",
             ));
         }
+        identity.write(wall_id.output_layer_id.0.to_le_bytes());
+        identity.write(wall_id.wall.first.0.to_le_bytes());
+        identity.write(wall_id.wall.second.0.to_le_bytes());
+        for sample in &profile {
+            identity.write(sample.center.x.to_bits().to_le_bytes());
+            identity.write(sample.center.y.to_bits().to_le_bytes());
+            identity.write(sample.normalized_thickness.to_bits().to_le_bytes());
+        }
         strokes.push(
-            CanonicalStroke::new_maze(
-                wall.id,
-                wall.path.clone(),
-                wall.nominal_basis,
-                style,
-                profile,
-                outline,
-            )
-            .map_err(|_| {
-                PatternPipelineError::new(
-                    "maze.stroke.geometry",
-                    "maze canonical stroke geometry must remain finite",
-                )
-            })?,
+            CanonicalStroke::new_maze(wall_id, path, nominal_basis, style, profile, outline)
+                .map_err(|_| {
+                    PatternPipelineError::new(
+                        "maze.stroke.geometry",
+                        "maze canonical stroke geometry must remain finite",
+                    )
+                })?,
         );
     }
-    let mut identity_capacity = maze
-        .fingerprint()
-        .len()
-        .checked_add(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.len())
-        .and_then(|value| value.checked_add(16))
-        .ok_or(PatternPipelineError::new(
-            "maze.allocation",
-            "maze identity allocation size overflows",
-        ))?;
-    for stroke in &strokes {
-        if is_cancelled() {
-            return Err(PatternPipelineError::new(
-                "evaluation.cancelled",
-                "evaluation was cancelled",
-            ));
-        }
-        let profile_bytes =
-            stroke
-                .profile
-                .len()
-                .checked_mul(24)
-                .ok_or(PatternPipelineError::new(
-                    "maze.allocation",
-                    "maze identity profile allocation size overflows",
-                ))?;
-        identity_capacity = identity_capacity
-            .checked_add(16)
-            .and_then(|value| value.checked_add(profile_bytes))
-            .ok_or(PatternPipelineError::new(
-                "maze.allocation",
-                "maze identity allocation size overflows",
-            ))?;
-    }
-    let mut bytes = Vec::new();
-    reserve_stage20m(
-        &mut bytes,
-        identity_capacity,
-        "maze.allocation",
-        "maze identity allocation failed",
-    )?;
-    bytes.extend(maze.fingerprint().as_bytes());
-    bytes.extend(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.as_bytes());
-    bytes.extend(response.minimum_thickness.to_bits().to_le_bytes());
-    bytes.extend(response.maximum_thickness.to_bits().to_le_bytes());
-    for stroke in &strokes {
-        if is_cancelled() {
-            return Err(PatternPipelineError::new(
-                "evaluation.cancelled",
-                "evaluation was cancelled",
-            ));
-        }
-        let toniator_geometry::CanonicalStrokeSourceId::Maze(id) = stroke.source_id else {
-            unreachable!("maze realizer sets maze-wall provenance");
-        };
-        bytes.extend(id.output_layer_id.0.to_le_bytes());
-        bytes.extend(id.wall.first.0.to_le_bytes());
-        bytes.extend(id.wall.second.0.to_le_bytes());
-        for sample in &stroke.profile {
-            bytes.extend(sample.center.x.to_bits().to_le_bytes());
-            bytes.extend(sample.center.y.to_bits().to_le_bytes());
-            bytes.extend(sample.normalized_thickness.to_bits().to_le_bytes());
-        }
-    }
     Ok(CanonicalStrokeRealization {
-        family_fingerprint: maze.fingerprint().to_owned(),
-        realization_fingerprint: fnv1a64(bytes),
+        family_fingerprint,
+        realization_fingerprint: identity.finish(),
         source_identity: source.identity().clone(),
         response,
         strokes,
@@ -9215,7 +9974,12 @@ fn stroke_sample(
     })
 }
 
-/// Adaptively appends the right endpoint of one interval once its centerline and width meet Stage 20I bounds.
+/// Appends the right endpoint once centerline shape and pattern-scale response spacing are resolved.
+///
+/// Source response is sampled no more densely than once per nominal pattern-spacing basis (or
+/// once per source-pixel footprint for denser patterns). This retains thickness variation at the
+/// pattern's own useful resolution without turning each long guide into a source-pixel supersample.
+/// Curved centerlines retain their independent geometric flatness refinement.
 ///
 /// # Errors
 ///
@@ -9229,7 +9993,7 @@ fn append_adaptive_stroke_interval(
     right_t: f64,
     right: StrokeProfileSample,
     depth: u8,
-    pixel_footprint: f64,
+    profile_sample_interval: f64,
     source: &SourceField,
     canvas: &CanvasSpec,
     mapping: SourceMapping,
@@ -9268,10 +10032,8 @@ fn append_adaptive_stroke_interval(
     let interval = ((right.center.x - left.center.x).powi(2)
         + (right.center.y - left.center.y).powi(2))
     .sqrt();
-    let width_error = (middle.width - (left.width + right.width) * 0.5).abs();
-    let refine = centerline_error > STROKE_CENTERLINE_TOLERANCE
-        || interval > pixel_footprint * 0.5
-        || width_error > STROKE_WIDTH_TOLERANCE;
+    let refine =
+        centerline_error > STROKE_CENTERLINE_TOLERANCE || interval > profile_sample_interval;
     if refine {
         if depth >= MAX_STROKE_SUBDIVISION_DEPTH {
             return Err(PatternPipelineError::new(
@@ -9287,7 +10049,7 @@ fn append_adaptive_stroke_interval(
             middle_t,
             middle,
             depth + 1,
-            pixel_footprint,
+            profile_sample_interval,
             source,
             canvas,
             mapping,
@@ -9306,7 +10068,7 @@ fn append_adaptive_stroke_interval(
             right_t,
             right,
             depth + 1,
-            pixel_footprint,
+            profile_sample_interval,
             source,
             canvas,
             mapping,
@@ -9856,6 +10618,7 @@ fn validate_response_basic(response: MarkResponse) -> Result<(), RealizationErro
     Ok(())
 }
 
+/// Computes the legacy circular-realization identity from every decoder-owned source discriminator.
 fn realization_fingerprint(
     family: &GridFamilyOutput,
     source: &SourceField,
@@ -9871,10 +10634,7 @@ fn realization_fingerprint(
         SourceComponent::Luminance => 1_u8,
         SourceComponent::Alpha => 2_u8,
     };
-    let format = match source.identity().format {
-        toniator_sampling::SourceFormat::Png => 1_u8,
-        toniator_sampling::SourceFormat::Svg => 2_u8,
-    };
+    let format = source_format_identity_code(source.identity().format);
     for byte in b"toniator-stage-4-circular-realization-v2-alpha-associated"
         .iter()
         .copied()
@@ -9938,6 +10698,7 @@ fn source_color_realization_fingerprint(
     fnv1a64(bytes)
 }
 
+/// Builds the stable prefix shared by mapped-mark realization identities.
 fn realization_identity_prefix(
     contract: &[u8],
     family: &GridFamilyOutput,
@@ -9950,10 +10711,7 @@ fn realization_identity_prefix(
     bytes.extend(family.family_fingerprint.bytes());
     bytes.extend(source.identity().content_hash.bytes());
     bytes.extend(source.identity().decoded_pixel_hash.bytes());
-    bytes.push(match source.identity().format {
-        toniator_sampling::SourceFormat::Png => 1,
-        toniator_sampling::SourceFormat::Svg => 2,
-    });
+    bytes.push(source_format_identity_code(source.identity().format));
     bytes.extend(source.identity().width.to_le_bytes());
     bytes.extend(source.identity().height.to_le_bytes());
     bytes.push(match mapping.placement {
@@ -9986,14 +10744,29 @@ fn mapping_component_code(component: SourceMappingComponent) -> u8 {
 /// Appends every source identity discriminator used to derive canonical geometry or sampled paint.
 fn append_source_identity(bytes: &mut Vec<u8>, source: &SourceField) {
     let identity = source.identity();
-    bytes.push(match identity.format {
-        toniator_sampling::SourceFormat::Png => 1,
-        toniator_sampling::SourceFormat::Svg => 2,
-    });
+    bytes.push(source_format_identity_code(identity.format));
     append_identity_text(bytes, identity.content_hash.as_str());
     append_identity_text(bytes, identity.decoded_pixel_hash.as_str());
     bytes.extend(identity.width.to_le_bytes());
     bytes.extend(identity.height.to_le_bytes());
+}
+
+/// Assigns every persisted decoder format a stable distinct byte for derived identity hashing.
+///
+/// The code is not a file-format contract; the decoder contract ID and decoded pixel hash remain
+/// the source authority. Adding a format must assign a new byte rather than aliasing an existing
+/// format and accidentally reusing a realization cache key.
+const fn source_format_identity_code(format: toniator_sampling::SourceFormat) -> u8 {
+    match format {
+        toniator_sampling::SourceFormat::Png => 1,
+        toniator_sampling::SourceFormat::Svg => 2,
+        toniator_sampling::SourceFormat::Jpeg => 3,
+        toniator_sampling::SourceFormat::Webp => 4,
+        toniator_sampling::SourceFormat::Bmp => 5,
+        toniator_sampling::SourceFormat::Tiff => 6,
+        toniator_sampling::SourceFormat::OpenExr => 7,
+        toniator_sampling::SourceFormat::Avif => 8,
+    }
 }
 
 /// Delimits one textual identity field so adjacent variable-length values remain unambiguous.
@@ -10388,13 +11161,34 @@ fn append_mark_identity(bytes: &mut Vec<u8>, mark: &CanonicalCircleMark) {
     bytes.extend(mark.radius.to_bits().to_le_bytes());
 }
 
-fn fnv1a64(bytes: impl IntoIterator<Item = u8>) -> String {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+/// Incremental FNV-1a state used when identity inputs are already retained as geometry.
+struct Fnv1a64State(u64);
+
+impl Fnv1a64State {
+    /// Creates the canonical 64-bit FNV-1a offset-basis state.
+    const fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325_u64)
     }
-    format!("fnv1a64:{hash:016x}")
+
+    /// Extends the identity with bytes in their authoritative authored order.
+    fn write(&mut self, bytes: impl IntoIterator<Item = u8>) {
+        for byte in bytes {
+            self.0 ^= u64::from(byte);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    /// Formats the completed state with the existing stable fingerprint prefix.
+    fn finish(self) -> String {
+        format!("fnv1a64:{:016x}", self.0)
+    }
+}
+
+/// Hashes one finite byte sequence with the stable 64-bit FNV-1a contract.
+fn fnv1a64(bytes: impl IntoIterator<Item = u8>) -> String {
+    let mut state = Fnv1a64State::new();
+    state.write(bytes);
+    state.finish()
 }
 
 #[cfg(test)]
@@ -10448,11 +11242,29 @@ mod random_prng_contract_tests {
         assert_ne!(zero_a.next_u32(), seeded.next_u32());
     }
 
+    /// Proves populated-cell cancellation remains per-index without a recipe work ceiling.
     #[test]
     fn populated_spatial_cell_cancels_at_the_per_index_boundary() {
-        let mut index = SpatialIndex::new(10.0, 100).unwrap();
-        let accepted = vec![(Point2::new(1.0, 1.0), 0, SiteScope::Canvas)];
-        index.insert(accepted[0].0, 0).unwrap();
+        let mut index = SpatialIndex::new(10.0).unwrap();
+        let accepted = vec![FamilySite {
+            id: FamilySiteId {
+                mechanism_id: PatternMechanismId(1),
+                ordinal: 0,
+            },
+            position: Point2::new(1.0, 1.0),
+            nominal_cell_basis: NominalCellBasis::new(
+                Vector2::new(1.0, 0.0),
+                Vector2::new(0.0, 1.0),
+            )
+            .expect("finite spatial-index test basis"),
+            scope: SiteScope::Canvas,
+            provenance: FamilySiteProvenance::Random {
+                candidate_ordinal: 0,
+                accepted_ordinal: 0,
+                exclusion_neighbor_ordinal: None,
+            },
+        }];
+        index.insert(accepted[0].position, 0).unwrap();
         let polls = Cell::new(0_u32);
         let error = index
             .find_conflict(Point2::new(1.5, 1.5), &accepted, 10.0, &|| {
@@ -10521,17 +11333,16 @@ mod random_prng_contract_tests {
         );
         let plan = resolve_pattern_pipeline(&definition).expect("random pipeline resolves");
         let evaluate = |support_radius| {
-            evaluate_random_sites_cancellable(
+            evaluate_random_sites_with_progress_cancellable(
                 &plan.family,
                 &GridInspectRequest {
                     canvas: CanvasSpec {
                         width: 100.0,
                         height: 100.0,
                     },
-                    density: DensityMetric2D {
+                    density: ResolvedDensityMetric2D {
                         across_x: 5.0,
                         across_y: 5.0,
-                        aspect_locked: true,
                     },
                     rotation_degrees: 0.0,
                     translation_x: 0.0,
@@ -10542,6 +11353,7 @@ mod random_prng_contract_tests {
                 },
                 None,
                 &|| false,
+                &|_, _| {},
             )
             .expect("bounded random sites evaluate")
         };
@@ -10585,10 +11397,9 @@ mod realization_tests {
                 width: 90.0,
                 height: 60.0,
             },
-            density: DensityMetric2D {
+            density: ResolvedDensityMetric2D {
                 across_x: 9.0,
                 across_y: 6.0,
-                aspect_locked: true,
             },
             rotation_degrees: 17.0,
             translation_x: 3.25,
@@ -11051,6 +11862,57 @@ mod realization_tests {
                 })
             }),
             "connection profiles retain segment-local samples for a round join"
+        );
+        let source_driven = realize_connection_canonical_strokes_cancellable(
+            &paths,
+            &source,
+            &CanvasSpec {
+                width: 10.0,
+                height: 10.0,
+            },
+            SourceMapping::canonical(SourceMappingComponent::Luminance),
+            StrokeResponse {
+                minimum_thickness: 0.0,
+                maximum_thickness: 0.6,
+            },
+            toniator_domain::PathStrokeStyle::default(),
+            MAX_STROKE_PROFILE_SAMPLES,
+            MAX_STROKE_OUTLINE_SEGMENTS,
+            &|| false,
+        )
+        .expect("nonzero source preserves source-driven contours at zero minimum");
+        assert!(
+            source_driven
+                .strokes
+                .iter()
+                .any(|stroke| !stroke.outline.contours.is_empty()),
+            "zero is a lower interpolation bound, not a global stroke visibility toggle"
+        );
+        let black_source = source_from_rgba(11, [0, 0, 0, 255].repeat(11));
+        let zero_response = realize_connection_canonical_strokes_cancellable(
+            &paths,
+            &black_source,
+            &CanvasSpec {
+                width: 10.0,
+                height: 10.0,
+            },
+            SourceMapping::canonical(SourceMappingComponent::Luminance),
+            StrokeResponse {
+                minimum_thickness: 0.0,
+                maximum_thickness: 0.6,
+            },
+            toniator_domain::PathStrokeStyle::default(),
+            MAX_STROKE_PROFILE_SAMPLES,
+            MAX_STROKE_OUTLINE_SEGMENTS,
+            &|| false,
+        )
+        .expect("all-zero source keeps the valid empty contour result");
+        assert!(
+            zero_response
+                .strokes
+                .iter()
+                .all(|stroke| stroke.outline.contours.is_empty()),
+            "all-zero source response produces no visible stroke contours"
         );
     }
 
@@ -11744,18 +12606,49 @@ impl DimensionPlan {
             .ok_or(GridError::new("coverage", "could not project local domain"))?;
         let first_index = checked_index(((minimum - self.phase) / self.spacing).floor())?;
         let last_index = checked_index(((maximum - self.phase) / self.spacing).ceil())?;
-        let document_normal = transform.apply_vector(self.normal);
+        let transformed_tangent = transform.apply_vector(self.tangent);
+        let tangent_length = transformed_tangent.x.hypot(transformed_tangent.y);
+        if !tangent_length.is_finite() || tangent_length <= 0.0 {
+            return Err(GridError::new(
+                "channel.pattern.layout",
+                "transformed guide tangent must remain finite and nonzero",
+            ));
+        }
+        // Pure rotation preserves a unit tangent exactly by authority even though `sin`/`cos`
+        // arithmetic can land a few ulps from one. Stabilizing only that machine-epsilon window
+        // retains exact authored spacing and cache identity without masking a real aspect scale.
+        let tangent_length = if (tangent_length - 1.0).abs() <= 8.0 * f64::EPSILON {
+            1.0
+        } else {
+            tangent_length
+        };
+        let document_normal = Vector2::new(
+            transformed_tangent.y / tangent_length,
+            -transformed_tangent.x / tangent_length,
+        );
         let placed_origin = transform.apply_point(Point2::new(0.0, 0.0));
         let placed_phase = placed_origin.dot(document_normal);
+        let physical_spacing = self.spacing / tangent_length;
+        if !physical_spacing.is_finite() || physical_spacing <= 0.0 {
+            return Err(GridError::new(
+                "channel.pattern.layout",
+                "transformed guide spacing must remain finite and positive",
+            ));
+        }
         Ok(GuideCoverage {
             dimension_id: self.id.0,
-            spacing: self.spacing,
-            normalized_phase: (self.phase + placed_phase).rem_euclid(self.spacing),
+            spacing: physical_spacing,
+            normalized_phase: (self.phase + placed_phase).rem_euclid(physical_spacing),
             first_index,
             last_index,
         })
     }
 
+    /// Emits finite presentation segments for this locally indexed guide plan.
+    ///
+    /// The returned anchors, tangent, and normal are document-space layout values. The pattern
+    /// aspect transform may stretch the local lattice, but the tangent and normal remain unit
+    /// directions so downstream arc-length and nominal-basis authorities retain physical units.
     fn guides(
         self,
         coverage: GuideCoverage,
@@ -11780,10 +12673,13 @@ impl DimensionPlan {
                     offset,
                     maximum_tangent + extension,
                 );
+                let transformed_tangent = transform.apply_vector(self.tangent);
+                let tangent_length = transformed_tangent.x.hypot(transformed_tangent.y);
+                let tangent = transformed_tangent.scale(tangent_length.recip());
                 StraightGuide {
                     id: GuideInstanceId::new(self.id, index),
-                    normal: transform.apply_vector(self.normal),
-                    tangent: transform.apply_vector(self.tangent),
+                    normal: Vector2::new(tangent.y, -tangent.x),
+                    tangent,
                     offset,
                     anchor: transform.apply_point(point_on_line(
                         self.normal,
@@ -11891,10 +12787,48 @@ fn validate_positive(value: f64, path: &'static str) -> Result<(), GridError> {
         .ok_or(GridError::new(path, "value must be greater than zero"))
 }
 
+/// Converts resolved density authority into an aspect-neutral guide lattice and its layout scale.
+///
+/// Generalized straight guides first construct their complete topology from the same density-only
+/// lattice at every pattern aspect, then apply this positive area-preserving affine transform.
+/// That preserves coincident multiway intersections for fixed-direction Triagrid while still
+/// stretching all site and baseline positions by the requested pattern aspect.
+///
+/// # Errors
+///
+/// Returns the existing finite-positive density diagnostics if a caller bypasses document
+/// validation with an invalid resolved layout; no noninvertible layout transform is returned.
+fn aspect_normalized_straight_layout(
+    canvas: &CanvasSpec,
+    resolved: ResolvedDensityMetric2D,
+) -> Result<(ResolvedDensityMetric2D, f64, f64), GridError> {
+    let metric = DensityMetric2D::from_resolved(canvas, &resolved)
+        .map_err(|error| GridError::new(error.path(), error.message()))?;
+    let normalized = DensityMetric2D {
+        density: metric.density,
+        aspect: 1.0,
+    }
+    .resolve(canvas)
+    .map_err(|error| GridError::new(error.path(), error.message()))?;
+    let horizontal_scale = metric.aspect.sqrt();
+    let vertical_scale = horizontal_scale.recip();
+    if !horizontal_scale.is_finite()
+        || !vertical_scale.is_finite()
+        || horizontal_scale <= 0.0
+        || vertical_scale <= 0.0
+    {
+        return Err(GridError::new(
+            "channel.pattern.layout.density_aspect",
+            "pattern aspect must resolve to a finite positive layout scale",
+        ));
+    }
+    Ok((normalized, horizontal_scale, vertical_scale))
+}
+
 /// Resolves the guide spacing from the documented directional-frequency metric.
 pub fn directional_spacing(
     canvas: &CanvasSpec,
-    density: &DensityMetric2D,
+    density: &ResolvedDensityMetric2D,
     unit_normal: Vector2,
 ) -> Result<f64, GridError> {
     validate_positive(canvas.width, "canvas.width")?;
@@ -12139,10 +13073,9 @@ mod coverage_tests {
                 width: 137.0,
                 height: 83.0,
             },
-            density: DensityMetric2D {
+            density: ResolvedDensityMetric2D {
                 across_x: 13.7,
                 across_y: 8.3,
-                aspect_locked: false,
             },
             rotation_degrees: 47.0,
             translation_x: 0.0,
@@ -12275,10 +13208,9 @@ mod typed_pipeline_tests {
                 width: 90.0,
                 height: 60.0,
             },
-            density: DensityMetric2D {
+            density: ResolvedDensityMetric2D {
                 across_x: 9.0,
                 across_y: 6.0,
-                aspect_locked: true,
             },
             rotation_degrees: 17.0,
             translation_x: 3.25,
@@ -12460,8 +13392,8 @@ mod typed_pipeline_tests {
 mod generalized_straight_guide_tests {
     use super::*;
     use toniator_domain::{
-        CoveragePolicy, GeneralizedSiteProduct, MarkOrientation, PatternDefinitionId,
-        PatternMechanismId, PatternOutputLayerId, StraightGuideRepetition,
+        CoveragePolicy, DocumentSession, GeneralizedSiteProduct, MarkOrientation,
+        PatternDefinitionId, PatternMechanismId, PatternOutputLayerId, StraightGuideRepetition,
     };
     use toniator_sampling::{SourceFormatHint, decode_source};
 
@@ -12482,10 +13414,9 @@ mod generalized_straight_guide_tests {
                 width: 120.0,
                 height: 80.0,
             },
-            density: DensityMetric2D {
+            density: ResolvedDensityMetric2D {
                 across_x: 12.0,
                 across_y: 8.0,
-                aspect_locked: true,
             },
             rotation_degrees: 17.0,
             translation_x: 3.25,
@@ -12569,10 +13500,9 @@ mod generalized_straight_guide_tests {
             width: 137.0,
             height: 83.0,
         };
-        request.density = DensityMetric2D {
+        request.density = ResolvedDensityMetric2D {
             across_x: 13.7,
             across_y: 8.3,
-            aspect_locked: false,
         };
         request.rotation_degrees = 47.0;
         request.translation_x = 0.0;
@@ -12634,10 +13564,9 @@ mod generalized_straight_guide_tests {
             width: 900.0,
             height: 620.0,
         };
-        request.density = DensityMetric2D {
+        request.density = ResolvedDensityMetric2D {
             across_x: 5.0,
             across_y: 5.0 * request.canvas.height / request.canvas.width,
-            aspect_locked: false,
         };
         request.rotation_degrees = 0.0;
         request.translation_x = 0.0;
@@ -12673,6 +13602,233 @@ mod generalized_straight_guide_tests {
                         if contributors.len() == 3
                 )
         }));
+    }
+
+    /// Proves pattern aspect affinely stretches fixed-direction Triagrid without multiplying its topology.
+    ///
+    /// The finite canvas edge may add or remove one guard row, so this witnesses a narrow count
+    /// envelope rather than an impossible exact equality. It specifically rejects the former
+    /// independent-direction-spacing behavior that broke three-way concurrence and produced a
+    /// roughly threefold site expansion.
+    #[test]
+    fn triagrid_pattern_aspect_preserves_multiway_topology_and_site_count_scale() {
+        let definition = intersections(
+            vec![dimension(1, 0.0), dimension(2, 60.0), dimension(3, 120.0)],
+            vec![
+                GuideDimensionId(1),
+                GuideDimensionId(2),
+                GuideDimensionId(3),
+            ],
+        );
+        let plan = resolve_pattern_pipeline(&definition).expect("triagrid plan resolves");
+        let canvas = CanvasSpec {
+            width: 1024.0,
+            height: 1024.0,
+        };
+        let mut counts = Vec::new();
+        for aspect in [1.0, 2.0, 0.5] {
+            let density = DensityMetric2D {
+                density: 100.0,
+                aspect,
+            }
+            .resolve(&canvas)
+            .expect("finite pattern aspect resolves");
+            let output = evaluate_generalized_straight_guides_cancellable(
+                &plan.family,
+                &StraightGuideInspectRequest {
+                    canvas: canvas.clone(),
+                    density,
+                    rotation_degrees: 17.0,
+                    translation_x: 0.0,
+                    translation_y: 0.0,
+                    guard_steps: 2,
+                    support_radius: 4.5,
+                    max_family_candidates: usize::MAX,
+                },
+                &|| false,
+            )
+            .expect("aspect-stretched Triagrid evaluates");
+            assert!(output.sites.iter().any(|site| matches!(
+                &site.provenance,
+                GeneralizedSiteProvenance::Intersection { contributors } if contributors.len() == 3
+            )));
+            counts.push(output.sites.len());
+        }
+        let baseline = counts[0];
+        for (aspect, count) in [2.0, 0.5].into_iter().zip(counts.into_iter().skip(1)) {
+            assert!(
+                count.abs_diff(baseline) * 100 <= baseline * 6,
+                "aspect {aspect} changed Triagrid site count from {baseline} to {count}",
+            );
+        }
+    }
+
+    /// Proves zoomed and rotated fixed-direction triangular guides remain pairwise discrete.
+    ///
+    /// The Guide Faces consumer requires distinct straight-guide paths to intersect only at
+    /// discrete crossings. This reproduces the Stage 21A combined zoom/rotation case before any
+    /// canonical region construction, so a duplicate or numerically coincident guide reports its
+    /// stable dimension/index identity at the producer boundary.
+    #[test]
+    fn zoomed_rotated_triangular_guides_have_no_positive_overlap() {
+        let definition = intersections(
+            vec![dimension(1, 0.0), dimension(2, 60.0), dimension(3, 120.0)],
+            vec![
+                GuideDimensionId(1),
+                GuideDimensionId(2),
+                GuideDimensionId(3),
+            ],
+        );
+        let plan = resolve_pattern_pipeline(&definition).expect("triangular plan resolves");
+        let canvas = CanvasSpec {
+            width: 1024.0,
+            height: 1024.0,
+        };
+        let output = evaluate_generalized_straight_guides_cancellable(
+            &plan.family,
+            &StraightGuideInspectRequest {
+                canvas: canvas.clone(),
+                density: DensityMetric2D {
+                    density: 125.0,
+                    aspect: 1.0,
+                }
+                .resolve(&canvas)
+                .expect("zoomed density resolves"),
+                rotation_degrees: 17.0,
+                translation_x: 0.0,
+                translation_y: 0.0,
+                guard_steps: 2,
+                support_radius: 12.692,
+                max_family_candidates: usize::MAX,
+            },
+            &|| false,
+        )
+        .expect("zoomed rotated triangular family evaluates");
+        for (first_index, first) in output.guides.iter().enumerate() {
+            let first_path = CurvePath::line(first.start, first.end)
+                .expect("validated first guide rebuilds a line path");
+            for second in output.guides.iter().skip(first_index + 1) {
+                let second_path = CurvePath::line(second.start, second.end)
+                    .expect("validated second guide rebuilds a line path");
+                first_path
+                    .intersections(&second_path)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "guide {:?} {:?}->{:?} against {:?} {:?}->{:?}: {error}",
+                            first.id, first.start, first.end, second.id, second.start, second.end,
+                        )
+                    });
+            }
+        }
+    }
+
+    /// Proves the bundled authored-guide recipe emits no coincident path interval after zoom and rotation.
+    ///
+    /// This crosses the document-owned guide-resource adapter used by the production engine. Every
+    /// selected structural path pair must remain a set of discrete intersections suitable for Guide
+    /// Faces; the assertion reports stable path identity and endpoints if that adapter duplicates an
+    /// interval.
+    #[test]
+    fn zoomed_rotated_three_guide_preset_paths_have_no_positive_overlap() {
+        let canvas = CanvasSpec {
+            width: 1024.0,
+            height: 1024.0,
+        };
+        let document = Document::new_default_document(canvas.clone(), SourceReference::Unassigned)
+            .expect("default document is valid");
+        let mut history = DocumentHistory::new(
+            DocumentSession::new(document).expect("default document starts a session"),
+        );
+        PresetRegistry::bundled()
+            .apply_to_document_base(&mut history, "three-guide-cells-scale")
+            .expect("three-guide preset applies to the document base");
+        let definition = history
+            .document()
+            .pattern_definition_for(ChannelId(1))
+            .expect("RGB channel resolves the bundled definition");
+        let plan = resolve_document_pattern_pipeline(history.document(), definition)
+            .expect("document-owned guide resources resolve");
+        let density = DensityMetric2D {
+            density: 125.0,
+            aspect: 1.0,
+        }
+        .resolve(&canvas)
+        .expect("zoomed density resolves");
+        let support_radius = maximum_emitted_guide_spacing(&plan.family, &canvas, &density)
+            .expect("guide spacing resolves")
+            + definition.coverage.additional_margin;
+        let family = evaluate_typed_family_product_cancellable(
+            &plan.family,
+            &GridInspectRequest {
+                canvas,
+                density,
+                rotation_degrees: 17.0,
+                translation_x: 0.0,
+                translation_y: 0.0,
+                guard_steps: definition.coverage.guard_steps,
+                support_radius,
+                max_family_candidates: usize::MAX,
+            },
+            &|| false,
+        )
+        .expect("bundled zoomed and rotated family evaluates");
+        let paths = family
+            .structural_path_set()
+            .expect("Guide Faces family publishes structural paths")
+            .paths();
+        for (first_index, first) in paths.iter().enumerate() {
+            for first_segment in 0..first.path.segments().len() {
+                for second_segment in (first_segment + 2)..first.path.segments().len() {
+                    first.path.segments()[first_segment]
+                        .intersections(&first.path.segments()[second_segment])
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "path {:?} segments {first_segment}/{second_segment} {:?}: {error}",
+                                first.id,
+                                first.path.segments(),
+                            )
+                        });
+                }
+            }
+            for second in paths.iter().skip(first_index + 1) {
+                first
+                    .path
+                    .intersections(&second.path)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "path {:?} {:?} against {:?} {:?}: {error}",
+                            first.id,
+                            first.path.segments(),
+                            second.id,
+                            second.path.segments(),
+                        )
+                    });
+            }
+        }
+        let output = &plan.ordered_outputs[0];
+        let RegionSourceIntent::GuideFaces {
+            guide_mechanism_id,
+            dimensions,
+        } = output.regions().expect("bundled output is regional")
+        else {
+            panic!("bundled output must use Guide Faces")
+        };
+        build_guide_faces_cancellable(
+            GuideFaceRequest {
+                output_layer_id: output.layer_id,
+                guide_mechanism_id: *guide_mechanism_id,
+                dimensions: dimensions.clone(),
+                paths: family
+                    .structural_path_set()
+                    .expect("Guide Faces family publishes structural paths")
+                    .clone(),
+                canvas: Bounds::new(Point2::new(0.0, 0.0), Point2::new(1024.0, 1024.0))
+                    .expect("canvas bounds are finite"),
+            },
+            GuideFaceLimits::default(),
+            || false,
+        )
+        .expect("zoomed rotated bundled paths build canonical Guide Faces");
     }
 
     #[test]
@@ -12974,9 +14130,9 @@ mod generalized_straight_guide_tests {
         };
         *site_mechanism_id = PatternMechanismId(72);
         assert_ne!(baseline, fingerprint(&changed_mechanism_ids, &request()));
-        let mut aspect = request();
-        aspect.density.aspect_locked = false;
-        assert_ne!(baseline, fingerprint(&definition, &aspect));
+        let mut changed_density = request();
+        changed_density.density.across_x *= 2.0;
+        assert_ne!(baseline, fingerprint(&definition, &changed_density));
         let mut changed_phase = definition.clone();
         let PatternMechanism::StraightGuideDimensions { dimensions, .. } =
             &mut changed_phase.mechanisms[0]

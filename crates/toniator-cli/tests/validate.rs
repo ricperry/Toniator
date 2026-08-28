@@ -43,10 +43,10 @@ fn direct_render(source: &str, output: &Path, model: &str) -> Command {
         output.to_str().expect("temporary path is UTF-8"),
         "--channel-model",
         model,
-        "--density-x",
-        "90",
-        "--density-y",
-        "60",
+        "--density",
+        "73.48469228349535",
+        "--density-aspect",
+        "1",
         "--rotation",
         "17",
         "--offset-x",
@@ -72,6 +72,15 @@ fn png_dimensions(bytes: &[u8]) -> (u32, u32) {
     )
 }
 
+/// Reports whether every decoded PNG pixel is fully opaque without changing its RGB bytes.
+fn png_is_opaque(bytes: &[u8]) -> bool {
+    image::load_from_memory(bytes)
+        .expect("PNG output decodes")
+        .into_rgba8()
+        .pixels()
+        .all(|pixel| pixel.0[3] == 255)
+}
+
 /// Proves current ad-hoc validation succeeds and invalid density rejects atomically.
 #[test]
 fn validate_reports_current_success_and_stable_density_failure() {
@@ -79,10 +88,10 @@ fn validate_reports_current_success_and_stable_density_failure() {
         "validate",
         "--canvas",
         "900x600",
-        "--density-x",
-        "90",
-        "--density-y",
-        "60",
+        "--density",
+        "73.48469228349535",
+        "--density-aspect",
+        "1",
         "--opacity",
         "0.75",
     ]);
@@ -94,18 +103,15 @@ fn validate_reports_current_success_and_stable_density_failure() {
         "validate",
         "--canvas",
         "900x600",
-        "--density-x",
+        "--density",
         "0",
-        "--density-y",
-        "60",
+        "--density-aspect",
+        "1",
         "--opacity",
         "0.75",
     ]);
     assert_eq!(invalid.status.code(), Some(2));
-    assert!(
-        String::from_utf8_lossy(&invalid.stderr)
-            .contains("channel.pattern.layout.density.across_x")
-    );
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("document.pattern_settings.density"));
     assert!(invalid.stdout.is_empty());
 }
 
@@ -136,10 +142,10 @@ fn inspect_grid_is_deterministic_with_negative_offsets() {
         "grid",
         "--canvas",
         "900x600",
-        "--density-x",
-        "90",
-        "--density-y",
-        "60",
+        "--density",
+        "73.48469228349535",
+        "--density-aspect",
+        "1",
         "--rotation",
         "17",
         "--offset-x",
@@ -177,10 +183,10 @@ fn inspect_marks_is_deterministic_for_png_and_svg_sources() {
             source,
             "--canvas",
             "900x600",
-            "--density-x",
-            "90",
-            "--density-y",
-            "60",
+            "--density",
+            "73.48469228349535",
+            "--density-aspect",
+            "1",
             "--rotation",
             "17",
             "--offset-x",
@@ -226,10 +232,10 @@ fn evaluation_commands_reject_tiny_candidate_limits() {
         "grid",
         "--canvas",
         "900x600",
-        "--density-x",
-        "90",
-        "--density-y",
-        "60",
+        "--density",
+        "73.48469228349535",
+        "--density-aspect",
+        "1",
         "--rotation",
         "17",
         "--offset-x",
@@ -332,6 +338,59 @@ fn raster_consumer_options_do_not_change_authoritative_geometry_interface() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+/// Proves omitted PNG backing resolves to black for RGB, white for CMYK, and transparency for source color.
+#[test]
+fn omitted_png_background_follows_channel_model_and_explicit_override() {
+    let directory = temporary_directory("modeled-background-defaults");
+    let source = "../../assets/stage20s-preset-icon-source.svg";
+    for (model, explicit_background, expect_opaque) in [
+        ("rgb", "black", true),
+        ("cmyk", "white", true),
+        ("source-color-alpha", "transparent", false),
+    ] {
+        let default_path = directory.join(format!("{model}-default.png"));
+        let explicit_path = directory.join(format!("{model}-explicit.png"));
+        for (path, background) in [
+            (&default_path, None),
+            (&explicit_path, Some(explicit_background)),
+        ] {
+            let mut command = direct_render(source, path, model);
+            command.args(["--canvas", "100x100"]);
+            if let Some(background) = background {
+                command.args(["--background", background]);
+            }
+            let output = command.output().expect("modeled render starts");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let default_bytes = fs::read(default_path).expect("default PNG reads");
+        let explicit_bytes = fs::read(explicit_path).expect("explicit PNG reads");
+        assert_eq!(
+            default_bytes, explicit_bytes,
+            "{model} omitted backing equals its explicit consumer choice"
+        );
+        assert_eq!(png_is_opaque(&default_bytes), expect_opaque);
+    }
+
+    let rgb_transparent = directory.join("rgb-transparent.png");
+    let output = direct_render(source, &rgb_transparent, "rgb")
+        .args(["--canvas", "100x100", "--background", "transparent"])
+        .output()
+        .expect("explicit transparent RGB render starts");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!png_is_opaque(
+        &fs::read(rgb_transparent).expect("transparent RGB PNG reads")
+    ));
+    fs::remove_dir_all(directory).expect("temporary output removes");
+}
+
 /// Proves current document creation is side-effect-free, portable, valid, and renderable.
 #[test]
 fn document_create_validate_and_render_current_container() {
@@ -350,10 +409,10 @@ fn document_create_validate_and_render_current_container() {
         "rgb",
         "--canvas",
         "320x180",
-        "--density-x",
-        "32",
-        "--density-y",
-        "18",
+        "--density",
+        "24",
+        "--density-aspect",
+        "1",
         "--rotation",
         "0",
         "--offset-x",
@@ -379,7 +438,7 @@ fn document_create_validate_and_render_current_container() {
 
     let validated = run(&["validate", "--input", document.to_str().unwrap()]);
     assert!(validated.status.success());
-    assert!(String::from_utf8_lossy(&validated.stdout).contains("document v5"));
+    assert!(String::from_utf8_lossy(&validated.stdout).contains("document v6"));
 
     let capabilities = run(&["capabilities", "--input", document.to_str().unwrap()]);
     assert!(capabilities.status.success());
@@ -413,10 +472,10 @@ fn render_argument_surface_rejects_obsolete_options() {
         "../../assets/raster-sample.png",
         "--output",
         output.to_str().unwrap(),
-        "--density-x",
-        "90",
-        "--density-y",
-        "60",
+        "--density",
+        "73.48469228349535",
+        "--density-aspect",
+        "1",
         "--rotation",
         "0",
         "--offset-x",

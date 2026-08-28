@@ -19,9 +19,8 @@ fn pattern_settings(rotation_degrees: f64) -> DocumentPatternSettings {
     DocumentPatternSettings {
         definition_id: PatternDefinitionId(1),
         density: DensityMetric2D {
-            across_x: 90.0,
-            across_y: 60.0,
-            aspect_locked: true,
+            density: 5_400.0_f64.sqrt(),
+            aspect: 1.0,
         },
         pattern_rotation_degrees: rotation_degrees,
         shape_rotation_degrees: 0.0,

@@ -1,6 +1,6 @@
 use toniator_domain::{
-    CanvasSpec, CoveragePolicy, DensityMetric2D, PatternDefinition, PatternDefinitionId,
-    PatternMechanismId, PatternOutputLayerId,
+    CanvasSpec, CoveragePolicy, PatternDefinition, PatternDefinitionId, PatternMechanismId,
+    PatternOutputLayerId, ResolvedDensityMetric2D,
 };
 use toniator_engine::{
     EvaluationLimits, SiteAdjacencyLimits, SiteAdjacencyPolicy, derive_site_adjacency_cancellable,
@@ -33,10 +33,9 @@ fn request() -> GridInspectRequest {
             width: 40.0,
             height: 40.0,
         },
-        density: DensityMetric2D {
+        density: ResolvedDensityMetric2D {
             across_x: 4.0,
             across_y: 4.0,
-            aspect_locked: true,
         },
         rotation_degrees: 0.0,
         translation_x: 0.0,

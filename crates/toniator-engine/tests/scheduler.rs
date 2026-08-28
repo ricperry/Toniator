@@ -6,7 +6,7 @@ use std::{
 
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternInstance, ChannelPatternLayoutDelta,
-    ChannelSourceMapping, ChannelState, ColorValue, CoveragePolicy, DensityEditedAxis,
+    ChannelSourceMapping, ChannelState, ColorValue, CoveragePolicy, DensityEditedField,
     DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentId,
     DocumentPatternSettings, DocumentSession, MarkGeometryFieldEdit, MarkGeometryResponse,
     PatternDefinition, PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse,
@@ -57,9 +57,8 @@ fn session() -> DocumentSession {
             DocumentPatternSettings {
                 definition_id: PatternDefinitionId(1),
                 density: DensityMetric2D {
-                    across_x: 90.0,
-                    across_y: 60.0,
-                    aspect_locked: true,
+                    density: 5_400.0_f64.sqrt(),
+                    aspect: 1.0,
                 },
                 pattern_rotation_degrees: 17.0,
                 shape_rotation_degrees: 0.0,
@@ -331,11 +330,9 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
         .document()
         .set_channel_density_for_effective(
             CHANNEL_ID,
-            DensityEditedAxis::AcrossX,
             DensityMetric2D {
-                across_x: 80.0,
-                across_y: 60.0,
-                aspect_locked: true,
+                density: 4_800.0_f64.sqrt(),
+                aspect: 1.125,
             },
         )
         .expect("density edit builds");
@@ -357,11 +354,11 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
     );
 
     let mut history = DocumentHistory::new(session);
-    let aspect_unlock = history
+    let aspect_edit = history
         .document()
-        .set_document_density_aspect_lock(false)
-        .expect("document aspect-lock command builds");
-    history.apply(&aspect_unlock).unwrap();
+        .set_document_density_field(DensityEditedField::Aspect, 1.5)
+        .expect("document density-aspect command builds");
+    history.apply(&aspect_edit).unwrap();
     let unlocked = submit_and_accept(
         &scheduler,
         history.session(),

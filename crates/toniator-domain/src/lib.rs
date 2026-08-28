@@ -525,17 +525,92 @@ pub struct CanvasSpec {
     pub height: f64,
 }
 
-/// The continuous density metric supplied to a channel's pattern layout.
+/// The persisted density and density-aspect intent supplied to a pattern layout.
+///
+/// `density²` is the approximate geometry count. `aspect` is the physical
+/// spacing ratio `spacing_x / spacing_y`; neither value is a resolved axis count.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DensityMetric2D {
+    pub density: f64,
+    pub aspect: f64,
+}
+
+/// Positive evaluator axis frequencies derived from density intent and canvas dimensions.
+///
+/// This value is runtime-only and is never persisted or accepted as document authority.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResolvedDensityMetric2D {
     pub across_x: f64,
     pub across_y: f64,
-    pub aspect_locked: bool,
+}
+
+impl DensityMetric2D {
+    /// Resolves the authoritative density/aspect intent into positive evaluator frequencies.
+    ///
+    /// # Errors
+    ///
+    /// Returns the existing finite-positive validation diagnostics when canvas, density, or aspect
+    /// is invalid; no partial layout is returned.
+    pub fn resolve(&self, canvas: &CanvasSpec) -> Result<ResolvedDensityMetric2D, ValidationError> {
+        validate_positive_finite(canvas.width, "canvas.width")?;
+        validate_positive_finite(canvas.height, "canvas.height")?;
+        validate_positive_finite(self.density, "document.pattern_settings.density")?;
+        validate_positive_finite(self.aspect, "document.pattern_settings.density_aspect")?;
+        let across_x = self.density * (canvas.width / (canvas.height * self.aspect)).sqrt();
+        let across_y = self.density * ((canvas.height * self.aspect) / canvas.width).sqrt();
+        validate_positive_finite(across_x, "effective_pattern.density.across_x")?;
+        validate_positive_finite(across_y, "effective_pattern.density.across_y")?;
+        Ok(ResolvedDensityMetric2D { across_x, across_y })
+    }
+
+    /// Derives density/aspect intent from a resolved evaluator layout and its canvas.
+    ///
+    /// # Errors
+    ///
+    /// Returns finite-positive validation diagnostics if either layout frequency or canvas extent
+    /// is invalid; the returned representation round-trips the supplied resolved layout.
+    pub fn from_resolved(
+        canvas: &CanvasSpec,
+        resolved: &ResolvedDensityMetric2D,
+    ) -> Result<Self, ValidationError> {
+        validate_positive_finite(canvas.width, "canvas.width")?;
+        validate_positive_finite(canvas.height, "canvas.height")?;
+        validate_positive_finite(resolved.across_x, "effective_pattern.density.across_x")?;
+        validate_positive_finite(resolved.across_y, "effective_pattern.density.across_y")?;
+        let density = (resolved.across_x * resolved.across_y).sqrt();
+        let aspect = canvas.width * resolved.across_y / (canvas.height * resolved.across_x);
+        validate_positive_finite(density, "document.pattern_settings.density")?;
+        validate_positive_finite(aspect, "document.pattern_settings.density_aspect")?;
+        Ok(Self { density, aspect })
+    }
+
+    /// Returns the source-size-independent, aspect-normalized default density for a new document.
+    ///
+    /// # Errors
+    ///
+    /// Returns existing canvas validation diagnostics for zero, negative, or non-finite extents.
+    pub fn default_for_canvas(canvas: &CanvasSpec) -> Result<Self, ValidationError> {
+        validate_positive_finite(canvas.width, "canvas.width")?;
+        validate_positive_finite(canvas.height, "canvas.height")?;
+        // A default is authored intent, not a derived evaluator resolution:
+        // zoom `1.0` means one hundred sites across the longer canvas edge
+        // and proportional coverage across the shorter one. This remains
+        // source-resolution independent while preserving the exact density /
+        // resolved-across authority. Existing persisted documents retain their
+        // stored value.
+        let density =
+            100.0 * (canvas.width.min(canvas.height) / canvas.width.max(canvas.height)).sqrt();
+        validate_positive_finite(density, "document.pattern_settings.density")?;
+        Ok(Self {
+            density,
+            aspect: 1.0,
+        })
+    }
 }
 
 /// The document-owned shared pattern settings from which every channel derives
-/// its effective family and realization inputs.  `aspect_locked` belongs to
-/// this base density and channels can only contribute additive values.
+/// its effective family and realization inputs. Channels can contribute only
+/// additive density and density-aspect values.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DocumentPatternSettings {
     pub definition_id: PatternDefinitionId,
@@ -1066,8 +1141,8 @@ fn validate_pattern_geometry_response(
 /// An optional additive density adjustment for one channel.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DensityMetricDelta2D {
-    pub across_x_delta: f64,
-    pub across_y_delta: f64,
+    pub density_delta: f64,
+    pub aspect_delta: f64,
 }
 
 /// The optional layout intent stored by a channel.  Translation remains
@@ -1142,6 +1217,7 @@ pub struct ChannelPatternInstance {
 pub struct EffectiveChannelPatternInstance {
     pub definition_id: PatternDefinitionId,
     pub density: DensityMetric2D,
+    pub resolved_density: ResolvedDensityMetric2D,
     pub pattern_rotation_degrees: f64,
     pub translation_x: f64,
     pub translation_y: f64,
@@ -1558,7 +1634,7 @@ impl Default for PathStrokeStyle {
 /// Per-channel placement controls.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelPatternLayout {
-    pub density: DensityMetric2D,
+    pub density: ResolvedDensityMetric2D,
     pub rotation_degrees: f64,
     pub translation_x: f64,
     pub translation_y: f64,
@@ -3540,11 +3616,7 @@ impl Document {
     ) -> Result<Self, ValidationError> {
         let settings = DocumentPatternSettings {
             definition_id: PatternDefinitionId(1),
-            density: DensityMetric2D {
-                across_x: canvas.width / 10.0,
-                across_y: canvas.height / 10.0,
-                aspect_locked: true,
-            },
+            density: DensityMetric2D::default_for_canvas(&canvas)?,
             pattern_rotation_degrees: 0.0,
             shape_rotation_degrees: 0.0,
         };
@@ -3803,6 +3875,30 @@ impl Document {
             prune_output_response_deltas_for_bundle(&bundle, &instance.output_response_deltas);
     }
 
+    /// Removes channel-relative deltas that cannot apply to the channel's selected definition.
+    ///
+    /// Output-response pruning preserves compatible keyed response intent. Artwork-weighted site
+    /// placement additionally removes a channel rotation delta because its source-coordinate
+    /// authority makes that layout transform incompatible; shared document-base rotation remains
+    /// stored for other channels and later compatible definitions.
+    fn prune_incompatible_channel_pattern_deltas(&mut self, channel_id: ChannelId) {
+        let definition_id = self
+            .channel_pattern_instance(channel_id)
+            .expect("validated channel exists")
+            .definition_override
+            .unwrap_or(self.pattern_settings.definition_id);
+        let rotation_is_incompatible = self
+            .definition(definition_id)
+            .is_some_and(definition_uses_artwork_weighted_density);
+        self.prune_incompatible_output_response_deltas(channel_id);
+        if rotation_is_incompatible {
+            self.channel_pattern_instance_mut(channel_id)
+                .expect("validated channel exists")
+                .layout_delta
+                .rotation_degrees = None;
+        }
+    }
+
     /// Removes only deltas made foreign or type-incompatible by a document
     /// base-definition replacement while preserving overridden channels.
     fn prune_document_base_output_response_deltas(&mut self) {
@@ -3886,7 +3982,9 @@ impl Document {
     ///
     /// Returns a stable validation error for a missing channel/definition,
     /// non-finite addition, invalid density, incompatible response, or mark
-    /// response bounds; it never mutates the document.
+    /// response bounds; it never mutates the document. Artwork-weighted site
+    /// placement resolves layout rotation to zero while retaining dormant
+    /// stored base/channel rotation intent for later non-weighted recipes.
     pub fn effective_channel_pattern(
         &self,
         channel_id: ChannelId,
@@ -3913,14 +4011,19 @@ impl Document {
         let definition = &bundle.definition;
         let density_delta = instance.layout_delta.density.as_ref();
         let density = DensityMetric2D {
-            across_x: self.pattern_settings.density.across_x
-                + density_delta.map_or(0.0, |value| value.across_x_delta),
-            across_y: self.pattern_settings.density.across_y
-                + density_delta.map_or(0.0, |value| value.across_y_delta),
-            aspect_locked: self.pattern_settings.density.aspect_locked,
+            density: self.pattern_settings.density.density
+                + density_delta.map_or(0.0, |value| value.density_delta),
+            aspect: self.pattern_settings.density.aspect
+                + density_delta.map_or(0.0, |value| value.aspect_delta),
         };
-        let pattern_rotation_degrees = self.pattern_settings.pattern_rotation_degrees
+        let resolved_density = density.resolve(&self.canvas)?;
+        let stored_pattern_rotation_degrees = self.pattern_settings.pattern_rotation_degrees
             + instance.layout_delta.rotation_degrees.unwrap_or(0.0);
+        let pattern_rotation_degrees = if definition_uses_artwork_weighted_density(definition) {
+            0.0
+        } else {
+            stored_pattern_rotation_degrees
+        };
         let shape_rotation_degrees = self.pattern_settings.shape_rotation_degrees
             + instance.shape_rotation_delta_degrees.unwrap_or(0.0);
         let output_settings =
@@ -3928,6 +4031,7 @@ impl Document {
         let effective = EffectiveChannelPatternInstance {
             definition_id,
             density,
+            resolved_density,
             pattern_rotation_degrees,
             translation_x: instance.layout_delta.translation_x,
             translation_y: instance.layout_delta.translation_y,
@@ -3992,83 +4096,44 @@ impl Document {
                 .collect()
         });
         let mut projection = project_validated_pattern_definition(&bundle.definition, &settings)?;
-        projection.active_controls = capability_active_controls(self, scope, definition_id);
+        projection.active_controls = capability_active_controls(
+            self,
+            scope,
+            definition_id,
+            !definition_uses_artwork_weighted_density(&bundle.definition),
+        );
         Ok(projection)
     }
 
-    /// Builds a stale-aware density-delta command from desired effective
-    /// values.  When the base owns an aspect lock both stored axes are derived
-    /// here, so frontends never subtract the document base.
+    /// Builds a stale-aware density/density-aspect delta command from desired effective values.
     pub fn set_channel_density_for_effective(
         &self,
         channel_id: ChannelId,
-        edited_axis: DensityEditedAxis,
         desired: DensityMetric2D,
     ) -> Result<DocumentCommand, ValidationError> {
-        validate_positive_finite(desired.across_x, "channel.pattern.desired_density.across_x")?;
-        validate_positive_finite(desired.across_y, "channel.pattern.desired_density.across_y")?;
-        let mut desired = desired;
-        if self.pattern_settings.density.aspect_locked {
-            let value = match edited_axis {
-                DensityEditedAxis::AcrossX => desired.across_x,
-                DensityEditedAxis::AcrossY => desired.across_y,
-            };
-            let paired = derive_density_axis(&self.canvas, value, edited_axis)?;
-            match edited_axis {
-                DensityEditedAxis::AcrossX => desired.across_y = paired,
-                DensityEditedAxis::AcrossY => desired.across_x = paired,
-            }
-        }
+        validate_positive_finite(desired.density, "channel.pattern.desired_density")?;
+        validate_positive_finite(desired.aspect, "channel.pattern.desired_density_aspect")?;
         Ok(DocumentCommand::SetChannelDensityDelta {
             base: self.pattern_settings.clone(),
             channel_id,
             density: DensityMetricDelta2D {
-                across_x_delta: desired.across_x - self.pattern_settings.density.across_x,
-                across_y_delta: desired.across_y - self.pattern_settings.density.across_y,
+                density_delta: desired.density - self.pattern_settings.density.density,
+                aspect_delta: desired.aspect - self.pattern_settings.density.aspect,
             },
         })
     }
 
-    /// Builds an atomic document-base density edit and derives the locked
-    /// companion axis within domain authority.
-    pub fn set_document_density_axis(
+    /// Builds an atomic document-base density or density-aspect edit.
+    pub fn set_document_density_field(
         &self,
-        edited_axis: DensityEditedAxis,
+        edited_field: DensityEditedField,
         value: f64,
     ) -> Result<DocumentCommand, ValidationError> {
         validate_positive_finite(value, "document.pattern_settings.density")?;
         let mut settings = self.pattern_settings.clone();
-        match edited_axis {
-            DensityEditedAxis::AcrossX => settings.density.across_x = value,
-            DensityEditedAxis::AcrossY => settings.density.across_y = value,
-        }
-        if settings.density.aspect_locked {
-            let paired = derive_density_axis(&self.canvas, value, edited_axis)?;
-            match edited_axis {
-                DensityEditedAxis::AcrossX => settings.density.across_y = paired,
-                DensityEditedAxis::AcrossY => settings.density.across_x = paired,
-            }
-        }
-        Ok(DocumentCommand::SetDocumentPatternSettings {
-            base: self.pattern_settings.clone(),
-            settings,
-        })
-    }
-
-    /// Builds an atomic document-owned aspect-lock transition without allowing
-    /// any channel to override the lock.
-    pub fn set_document_density_aspect_lock(
-        &self,
-        aspect_locked: bool,
-    ) -> Result<DocumentCommand, ValidationError> {
-        let mut settings = self.pattern_settings.clone();
-        settings.density.aspect_locked = aspect_locked;
-        if aspect_locked {
-            settings.density.across_y = derive_density_axis(
-                &self.canvas,
-                settings.density.across_x,
-                DensityEditedAxis::AcrossX,
-            )?;
+        match edited_field {
+            DensityEditedField::Density => settings.density.density = value,
+            DensityEditedField::Aspect => settings.density.aspect = value,
         }
         Ok(DocumentCommand::SetDocumentPatternSettings {
             base: self.pattern_settings.clone(),
@@ -4078,6 +4143,11 @@ impl Document {
 
     /// Builds a stale-aware rotation-delta command from a desired effective
     /// layout rotation without normalizing authored degrees.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable channel-rotation error when artwork-weighted placement owns site
+    /// coordinates, or a stable finite/channel diagnostic without mutating document authority.
     pub fn set_channel_pattern_rotation_for_effective(
         &self,
         channel_id: ChannelId,
@@ -4087,6 +4157,16 @@ impl Document {
             desired_rotation_degrees,
             "channel.pattern.desired_rotation_degrees",
         )?;
+        let definition_id = self.effective_channel_pattern(channel_id)?.definition_id;
+        if self
+            .definition(definition_id)
+            .is_some_and(definition_uses_artwork_weighted_density)
+        {
+            return Err(ValidationError::new(
+                "channel.pattern.rotation",
+                "artwork-weighted placement does not support pattern rotation",
+            ));
+        }
         Ok(DocumentCommand::SetChannelPatternRotationDelta {
             base: self.pattern_settings.clone(),
             channel_id,
@@ -4620,9 +4700,8 @@ impl Document {
         )];
         for field in [
             PropertyFieldId::DefinitionSelection,
-            PropertyFieldId::DensityAcrossX,
-            PropertyFieldId::DensityAcrossY,
-            PropertyFieldId::DensityAspectLocked,
+            PropertyFieldId::Density,
+            PropertyFieldId::DensityAspect,
             PropertyFieldId::RotationDegrees,
             PropertyFieldId::ShapeRotationDegrees,
         ] {
@@ -4631,8 +4710,8 @@ impl Document {
         for channel_id in self.channel_ids() {
             let target = PropertyTarget::Channel(channel_id);
             for field in [
-                PropertyFieldId::DensityAcrossX,
-                PropertyFieldId::DensityAcrossY,
+                PropertyFieldId::Density,
+                PropertyFieldId::DensityAspect,
                 PropertyFieldId::RotationDegrees,
                 PropertyFieldId::TranslationX,
                 PropertyFieldId::TranslationY,
@@ -5144,14 +5223,11 @@ impl Document {
                 PropertyFieldId::DefinitionSelection => PropertyCurrentValueKind::Reference(
                     PropertyReferenceValue::Definition(self.pattern_settings.definition_id),
                 ),
-                PropertyFieldId::DensityAcrossX => {
-                    PropertyCurrentValueKind::FiniteF64(self.pattern_settings.density.across_x)
+                PropertyFieldId::Density => {
+                    PropertyCurrentValueKind::FiniteF64(self.pattern_settings.density.density)
                 }
-                PropertyFieldId::DensityAcrossY => {
-                    PropertyCurrentValueKind::FiniteF64(self.pattern_settings.density.across_y)
-                }
-                PropertyFieldId::DensityAspectLocked => {
-                    PropertyCurrentValueKind::Boolean(self.pattern_settings.density.aspect_locked)
+                PropertyFieldId::DensityAspect => {
+                    PropertyCurrentValueKind::FiniteF64(self.pattern_settings.density.aspect)
                 }
                 PropertyFieldId::RotationDegrees => PropertyCurrentValueKind::FiniteF64(
                     self.pattern_settings.pattern_rotation_degrees,
@@ -5173,14 +5249,11 @@ impl Document {
                     .effective_channel_pattern(channel_id)
                     .expect("active descriptor resolves an effective pattern");
                 match descriptor.field {
-                    PropertyFieldId::DensityAcrossX => {
-                        PropertyCurrentValueKind::FiniteF64(effective.density.across_x)
+                    PropertyFieldId::Density => {
+                        PropertyCurrentValueKind::FiniteF64(effective.density.density)
                     }
-                    PropertyFieldId::DensityAcrossY => {
-                        PropertyCurrentValueKind::FiniteF64(effective.density.across_y)
-                    }
-                    PropertyFieldId::DensityAspectLocked => {
-                        PropertyCurrentValueKind::Boolean(effective.density.aspect_locked)
+                    PropertyFieldId::DensityAspect => {
+                        PropertyCurrentValueKind::FiniteF64(effective.density.aspect)
                     }
                     PropertyFieldId::RotationDegrees => {
                         PropertyCurrentValueKind::FiniteF64(effective.pattern_rotation_degrees)
@@ -5739,7 +5812,7 @@ impl Document {
             _ => None,
         };
         match descriptor.field {
-            PropertyFieldId::DensityAcrossX | PropertyFieldId::DensityAcrossY => {
+            PropertyFieldId::Density | PropertyFieldId::DensityAspect => {
                 if instance.layout_delta.density.is_some() {
                     PropertyInheritance::Explicit
                 } else {
@@ -5829,14 +5902,11 @@ impl Document {
                 PropertyFieldId::DefinitionSelection => Some(PropertyCurrentValueKind::Reference(
                     PropertyReferenceValue::Definition(self.pattern_settings.definition_id),
                 )),
-                PropertyFieldId::DensityAcrossX => Some(PropertyCurrentValueKind::FiniteF64(
-                    self.pattern_settings.density.across_x,
+                PropertyFieldId::Density => Some(PropertyCurrentValueKind::FiniteF64(
+                    self.pattern_settings.density.density,
                 )),
-                PropertyFieldId::DensityAcrossY => Some(PropertyCurrentValueKind::FiniteF64(
-                    self.pattern_settings.density.across_y,
-                )),
-                PropertyFieldId::DensityAspectLocked => Some(PropertyCurrentValueKind::Boolean(
-                    self.pattern_settings.density.aspect_locked,
+                PropertyFieldId::DensityAspect => Some(PropertyCurrentValueKind::FiniteF64(
+                    self.pattern_settings.density.aspect,
                 )),
                 PropertyFieldId::RotationDegrees => Some(PropertyCurrentValueKind::FiniteF64(
                     self.pattern_settings.pattern_rotation_degrees,
@@ -5860,16 +5930,16 @@ impl Document {
                             ))
                         })
                     }
-                    PropertyFieldId::DensityAcrossX => instance
+                    PropertyFieldId::Density => instance
                         .layout_delta
                         .density
                         .as_ref()
-                        .map(|value| PropertyCurrentValueKind::FiniteF64(value.across_x_delta)),
-                    PropertyFieldId::DensityAcrossY => instance
+                        .map(|value| PropertyCurrentValueKind::FiniteF64(value.density_delta)),
+                    PropertyFieldId::DensityAspect => instance
                         .layout_delta
                         .density
                         .as_ref()
-                        .map(|value| PropertyCurrentValueKind::FiniteF64(value.across_y_delta)),
+                        .map(|value| PropertyCurrentValueKind::FiniteF64(value.aspect_delta)),
                     PropertyFieldId::RotationDegrees => instance
                         .layout_delta
                         .rotation_degrees
@@ -6038,6 +6108,27 @@ impl Document {
         self.channel_ids()
             .into_iter()
             .filter(|channel_id| self.pattern_definition_id_for(*channel_id) == Some(definition_id))
+            .collect()
+    }
+
+    /// Returns channels whose pattern-relative intent will be cleared by a
+    /// document-base recipe application, in authoritative channel order.
+    ///
+    /// Translation and presentation/source state are intentionally excluded
+    /// because applying a base recipe never clears those independent values.
+    pub fn channels_with_pattern_replacement_intent(&self) -> Vec<ChannelId> {
+        self.channel_ids()
+            .into_iter()
+            .filter(|channel_id| {
+                self.channel_pattern_instance(*channel_id)
+                    .is_some_and(|instance| {
+                        instance.definition_override.is_some()
+                            || instance.layout_delta.density.is_some()
+                            || instance.layout_delta.rotation_degrees.is_some()
+                            || instance.shape_rotation_delta_degrees.is_some()
+                            || !instance.output_response_deltas.is_empty()
+                    })
+            })
             .collect()
     }
 
@@ -7825,7 +7916,7 @@ impl Document {
         }
 
         validate_layout(&ChannelPatternLayout {
-            density: self.pattern_settings.density.clone(),
+            density: self.pattern_settings.density.resolve(&self.canvas)?,
             rotation_degrees: self.pattern_settings.pattern_rotation_degrees,
             translation_x: 0.0,
             translation_y: 0.0,
@@ -12229,15 +12320,32 @@ fn project_validated_pattern_definition(
     })
 }
 
-/// Retains only descriptor authorities that belong to a requested capability scope.
+/// Retains only active descriptor authorities for one requested capability scope.
+///
+/// Deprecated random attempt/neighbor-count fields remain readable recipe data
+/// in schema v6 but are not active commands while normal evaluation has no
+/// application-authored work ceiling. Source-weighted site placement omits
+/// layout rotation rather than projecting a command that cannot preserve its
+/// source-coordinate authority.
 fn capability_active_controls(
     document: &Document,
     scope: PatternCapabilityScope,
     definition_id: PatternDefinitionId,
+    supports_pattern_rotation: bool,
 ) -> Vec<PropertyDescriptor> {
     document
         .property_descriptors()
         .into_iter()
+        .filter(|descriptor| {
+            !matches!(
+                descriptor.field,
+                PropertyFieldId::RandomMaximumAttempts
+                    | PropertyFieldId::RandomMaximumNeighborChecks
+            )
+        })
+        .filter(|descriptor| {
+            supports_pattern_rotation || descriptor.field != PropertyFieldId::RotationDegrees
+        })
         .filter(|descriptor| match (scope, descriptor.target) {
             (PatternCapabilityScope::DocumentBase, PropertyTarget::Document) => {
                 !matches!(descriptor.field, PropertyFieldId::SourceReference)
@@ -12248,8 +12356,8 @@ fn capability_active_controls(
                 matches!(
                     descriptor.field,
                     PropertyFieldId::DefinitionSelection
-                        | PropertyFieldId::DensityAcrossX
-                        | PropertyFieldId::DensityAcrossY
+                        | PropertyFieldId::Density
+                        | PropertyFieldId::DensityAspect
                         | PropertyFieldId::RotationDegrees
                         | PropertyFieldId::ShapeRotationDegrees
                 )
@@ -12265,6 +12373,23 @@ fn capability_active_controls(
             _ => false,
         })
         .collect()
+}
+
+/// Reports whether a definition's site placement depends on source-document density weighting.
+///
+/// This read-only classification is shared by capability projection, effective evaluator
+/// resolution, command validation, and incompatible-delta pruning. It never mutates persisted
+/// intent, geometry, or cache identity itself; those authorities consume its result.
+fn definition_uses_artwork_weighted_density(definition: &PatternDefinition) -> bool {
+    definition.mechanisms.iter().any(|mechanism| {
+        matches!(
+            mechanism,
+            PatternMechanism::SiteDensityModulation {
+                modulation: SiteDensityModulation::ArtworkWeighted { .. },
+                ..
+            }
+        )
+    })
 }
 
 /// Projects one accepted mark output without exposing renderer behavior or payload IDs.
@@ -13208,22 +13333,6 @@ fn validate_generalized_output_layers(
     }
 }
 
-fn derive_density_axis(
-    canvas: &CanvasSpec,
-    authoritative_value: f64,
-    edited_axis: DensityEditedAxis,
-) -> Result<f64, ValidationError> {
-    validate_positive_finite(authoritative_value, "channel.pattern.layout.density")?;
-    validate_positive_finite(canvas.width, "canvas.width")?;
-    validate_positive_finite(canvas.height, "canvas.height")?;
-    let result = match edited_axis {
-        DensityEditedAxis::AcrossX => authoritative_value * canvas.height / canvas.width,
-        DensityEditedAxis::AcrossY => authoritative_value * canvas.width / canvas.height,
-    };
-    validate_positive_finite(result, "channel.pattern.layout.density.derived_axis")?;
-    Ok(result)
-}
-
 fn validate_layout(layout: &ChannelPatternLayout) -> Result<(), ValidationError> {
     validate_positive_finite(
         layout.density.across_x,
@@ -13257,12 +13366,12 @@ fn validate_channel_pattern_instance(
     )?;
     if let Some(density) = &instance.layout_delta.density {
         validate_finite(
-            density.across_x_delta,
-            "channel.pattern.layout_delta.density.across_x_delta",
+            density.density_delta,
+            "channel.pattern.layout_delta.density.density_delta",
         )?;
         validate_finite(
-            density.across_y_delta,
-            "channel.pattern.layout_delta.density.across_y_delta",
+            density.aspect_delta,
+            "channel.pattern.layout_delta.density.aspect_delta",
         )?;
     }
     if let Some(rotation) = instance.layout_delta.rotation_degrees {
@@ -13307,11 +13416,11 @@ fn validate_effective_pattern(
     effective: &EffectiveChannelPatternInstance,
 ) -> Result<(), ValidationError> {
     validate_positive_finite(
-        effective.density.across_x,
+        effective.resolved_density.across_x,
         "effective_pattern.density.across_x",
     )?;
     validate_positive_finite(
-        effective.density.across_y,
+        effective.resolved_density.across_y,
         "effective_pattern.density.across_y",
     )?;
     validate_finite(
@@ -13589,13 +13698,11 @@ pub struct CommandResult {
     pub created_authored_structure_id: Option<AuthoredStructureId>,
 }
 
-/// The explicit density control which supplied a replacement value.  Keeping
-/// this intent in the command (rather than inferring it from two values) is
-/// what makes aspect-locked updates deterministic and replayable.
+/// The explicit authoritative density field supplied by one edit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DensityEditedAxis {
-    AcrossX,
-    AcrossY,
+pub enum DensityEditedField {
+    Density,
+    Aspect,
 }
 
 /// The explicit translation coordinate supplied by a channel-frame edit.
@@ -13610,9 +13717,8 @@ pub enum TranslationEditedAxis {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PropertyFieldId {
     SourceReference,
-    DensityAcrossX,
-    DensityAcrossY,
-    DensityAspectLocked,
+    Density,
+    DensityAspect,
     RotationDegrees,
     TranslationX,
     TranslationY,
@@ -13715,9 +13821,8 @@ pub enum PropertyFieldId {
 /// without deriving any ordering from frontend state or allocation order.
 pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::SourceReference,
-    PropertyFieldId::DensityAcrossX,
-    PropertyFieldId::DensityAcrossY,
-    PropertyFieldId::DensityAspectLocked,
+    PropertyFieldId::Density,
+    PropertyFieldId::DensityAspect,
     PropertyFieldId::RotationDegrees,
     PropertyFieldId::TranslationX,
     PropertyFieldId::TranslationY,
@@ -15477,10 +15582,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::AlongParametricInterval
             | PropertyFieldId::AlongParametricPhase => PropertyCommandKind::SetParametricCurve,
             PropertyFieldId::SourceReference => PropertyCommandKind::SetSourceReference,
-            PropertyFieldId::DensityAcrossX | PropertyFieldId::DensityAcrossY => {
+            PropertyFieldId::Density | PropertyFieldId::DensityAspect => {
                 PropertyCommandKind::SetChannelDensityDelta
             }
-            PropertyFieldId::DensityAspectLocked => PropertyCommandKind::SetDocumentPatternSettings,
             PropertyFieldId::RotationDegrees => PropertyCommandKind::SetChannelPatternRotationDelta,
             PropertyFieldId::TranslationX | PropertyFieldId::TranslationY => {
                 PropertyCommandKind::SetTranslationAxis
@@ -15627,8 +15731,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::OutputSiteUseFilterReference
             | PropertyFieldId::GuideAuthoredStructure
             | PropertyFieldId::OutputAuthoredClosedShape => PropertyValueKind::StableIdReference,
-            PropertyFieldId::DensityAspectLocked
-            | PropertyFieldId::ModeledMappingInverted
+            PropertyFieldId::ModeledMappingInverted
             | PropertyFieldId::ArtworkWeightMappingInverted
             | PropertyFieldId::Visibility => PropertyValueKind::Boolean,
             PropertyFieldId::CoverageGuardSteps
@@ -15697,8 +15800,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             _ => &[],
         },
         bounds: match field {
-            PropertyFieldId::DensityAcrossX
-            | PropertyFieldId::DensityAcrossY
+            PropertyFieldId::Density
             | PropertyFieldId::GuideSpacingMultiplier
             | PropertyFieldId::GuideArcRadius
             | PropertyFieldId::GuideOffsetSpacing
@@ -15745,8 +15847,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             _ => None,
         },
         unit: match field {
-            PropertyFieldId::DensityAcrossX
-            | PropertyFieldId::DensityAcrossY
+            PropertyFieldId::Density
+            | PropertyFieldId::DensityAspect
             | PropertyFieldId::GuideSpacingMultiplier
             | PropertyFieldId::AlongGuideIntervalMultiplier
             | PropertyFieldId::RandomClusterDensity => PropertyUnit::Density,
@@ -16256,9 +16358,8 @@ const fn property_authority(field: PropertyFieldId, target: PropertyTarget) -> P
             if matches!(
                 field,
                 PropertyFieldId::DefinitionSelection
-                    | PropertyFieldId::DensityAcrossX
-                    | PropertyFieldId::DensityAcrossY
-                    | PropertyFieldId::DensityAspectLocked
+                    | PropertyFieldId::Density
+                    | PropertyFieldId::DensityAspect
                     | PropertyFieldId::RotationDegrees
                     | PropertyFieldId::ShapeRotationDegrees
                     | PropertyFieldId::MarkMinimumFill
@@ -16268,9 +16369,8 @@ const fn property_authority(field: PropertyFieldId, target: PropertyTarget) -> P
             PropertyAuthority::DocumentBase
         }
         _ => match field {
-            PropertyFieldId::DensityAspectLocked => PropertyAuthority::DocumentBase,
-            PropertyFieldId::DensityAcrossX
-            | PropertyFieldId::DensityAcrossY
+            PropertyFieldId::Density
+            | PropertyFieldId::DensityAspect
             | PropertyFieldId::RotationDegrees
             | PropertyFieldId::ShapeRotationDegrees
             | PropertyFieldId::MarkMinimumFill
@@ -16310,8 +16410,8 @@ const fn property_reset_capable(field: PropertyFieldId, target: PropertyTarget) 
         PropertyTarget::Channel(_) | PropertyTarget::ChannelOutput(_, _)
     ) && matches!(
         field,
-        PropertyFieldId::DensityAcrossX
-            | PropertyFieldId::DensityAcrossY
+        PropertyFieldId::Density
+            | PropertyFieldId::DensityAspect
             | PropertyFieldId::RotationDegrees
             | PropertyFieldId::ShapeRotationDegrees
             | PropertyFieldId::MarkMinimumFill
@@ -17520,8 +17620,12 @@ pub enum DocumentCommand {
         base: DocumentPatternSettings,
         settings: DocumentPatternSettings,
     },
-    /// Materializes a fresh recipe definition and installs it as the document
-    /// base without changing any channel override/delta intent.
+    /// Materializes a fresh recipe definition as the document base and clears
+    /// every channel's pattern-relative replacement and delta intent.
+    ///
+    /// Translation, source mapping, paint, color, opacity, and visibility stay
+    /// untouched. `DocumentHistory` records this as one exact reversible
+    /// transition so an undo restores the former base and all cleared intent.
     ReplaceDocumentPatternDefinitionRecipe {
         base: DocumentPatternSettings,
         base_definition: PatternDefinition,
@@ -18466,7 +18570,7 @@ impl DocumentCommand {
                     ));
                 }
                 validate_layout(&ChannelPatternLayout {
-                    density: settings.density.clone(),
+                    density: settings.density.resolve(document.canvas())?,
                     rotation_degrees: settings.pattern_rotation_degrees,
                     translation_x: 0.0,
                     translation_y: 0.0,
@@ -18566,21 +18670,36 @@ impl DocumentCommand {
                         "channel command base is stale",
                     ));
                 }
-                validate_finite(
-                    density.across_x_delta,
-                    "channel.pattern.density_delta.across_x_delta",
-                )?;
-                validate_finite(
-                    density.across_y_delta,
-                    "channel.pattern.density_delta.across_y_delta",
-                )
+                validate_finite(density.density_delta, "channel.pattern.density_delta")?;
+                validate_finite(density.aspect_delta, "channel.pattern.density_aspect_delta")
             }
             Self::SetChannelPatternRotationDelta {
                 base,
+                channel_id,
                 rotation_degrees,
-                ..
+            } => {
+                if &document.pattern_settings != base {
+                    return Err(ValidationError::new(
+                        "document.pattern_settings.base",
+                        "channel command base is stale",
+                    ));
+                }
+                validate_finite(*rotation_degrees, "channel.pattern.rotation_delta")?;
+                let definition_id = document
+                    .effective_channel_pattern(*channel_id)?
+                    .definition_id;
+                if document
+                    .definition(definition_id)
+                    .is_some_and(definition_uses_artwork_weighted_density)
+                {
+                    return Err(ValidationError::new(
+                        "channel.pattern.rotation",
+                        "artwork-weighted placement does not support pattern rotation",
+                    ));
+                }
+                Ok(())
             }
-            | Self::SetChannelShapeRotationDelta {
+            Self::SetChannelShapeRotationDelta {
                 base,
                 rotation_degrees,
                 ..
@@ -19044,7 +19163,16 @@ impl DocumentCommand {
                     .pattern_definition_bundles
                     .push(materialized.bundle);
                 document.pattern_settings.definition_id = definition_id;
-                document.prune_document_base_output_response_deltas();
+                for channel_id in document.channel_ids() {
+                    let instance = document
+                        .channel_pattern_instance_mut(channel_id)
+                        .expect("validated channel exists");
+                    instance.definition_override = None;
+                    instance.layout_delta.density = None;
+                    instance.layout_delta.rotation_degrees = None;
+                    instance.shape_rotation_delta_degrees = None;
+                    instance.output_response_deltas.clear();
+                }
                 return;
             }
             Self::SetChannelPatternDefinitionOverride {
@@ -19056,7 +19184,7 @@ impl DocumentCommand {
                     .channel_pattern_instance_mut(*channel_id)
                     .expect("validated channel")
                     .definition_override = Some(*definition_id);
-                document.prune_incompatible_output_response_deltas(*channel_id);
+                document.prune_incompatible_channel_pattern_deltas(*channel_id);
                 return;
             }
             Self::ResetChannelPatternDefinitionOverride { channel_id, .. } => {
@@ -19064,7 +19192,7 @@ impl DocumentCommand {
                     .channel_pattern_instance_mut(*channel_id)
                     .expect("validated channel")
                     .definition_override = None;
-                document.prune_incompatible_output_response_deltas(*channel_id);
+                document.prune_incompatible_channel_pattern_deltas(*channel_id);
                 return;
             }
             Self::ReplaceChannelPatternDefinitionOverrideRecipe {
@@ -19084,7 +19212,7 @@ impl DocumentCommand {
                     .channel_pattern_instance_mut(*channel_id)
                     .expect("validated channel")
                     .definition_override = Some(definition_id);
-                document.prune_incompatible_output_response_deltas(*channel_id);
+                document.prune_incompatible_channel_pattern_deltas(*channel_id);
                 return;
             }
             Self::SetChannelDensityDelta {
@@ -19307,6 +19435,7 @@ impl DocumentCommand {
                     .pattern_definition_bundles
                     .push(bundle_from_definition(definition.clone()));
                 document.retarget_channel(*channel_id, definition.id);
+                document.prune_incompatible_channel_pattern_deltas(*channel_id);
                 return;
             }
             Self::DuplicatePatternDefinition { definition_id } => {
@@ -19351,6 +19480,7 @@ impl DocumentCommand {
                     document.pattern_definition_bundles.push(clone.clone());
                     document.retarget_channel(*channel_id, clone_id);
                     document.remap_channel_output_response_deltas(*channel_id, &source, &clone);
+                    document.prune_incompatible_channel_pattern_deltas(*channel_id);
                 } else {
                     let definition = document
                         .pattern_definition_bundles
@@ -19358,6 +19488,7 @@ impl DocumentCommand {
                         .find(|definition| definition.id == base_definition.id)
                         .expect("validated definition");
                     apply_definition_edit(definition, edit);
+                    document.prune_incompatible_channel_pattern_deltas(*channel_id);
                 }
                 return;
             }
@@ -19372,6 +19503,9 @@ impl DocumentCommand {
                     .find(|definition| definition.id == *definition_id)
                     .expect("validated definition");
                 apply_definition_edit(definition, edit);
+                for channel_id in document.linked_channels(*definition_id) {
+                    document.prune_incompatible_channel_pattern_deltas(channel_id);
+                }
                 return;
             }
             Self::ReplaceSharedPatternDefinitionRecipe {
@@ -19402,7 +19536,7 @@ impl DocumentCommand {
                     .expect("validated definition");
                 *definition = replacement;
                 for channel_id in linked_channels {
-                    document.prune_incompatible_output_response_deltas(channel_id);
+                    document.prune_incompatible_channel_pattern_deltas(channel_id);
                 }
                 return;
             }
@@ -20570,6 +20704,52 @@ impl fmt::Display for DocumentSessionError {
 impl Error for DocumentSessionError {}
 
 #[cfg(test)]
+mod density_default_tests {
+    use super::*;
+
+    /// Verifies new-document density is resolution-independent and resolves to normalized edge coverage.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the default density stops preserving one hundred sites across
+    /// the long edge and proportional coverage across the short edge.
+    #[test]
+    fn default_density_normalizes_long_edge_without_source_resolution() {
+        let square = DensityMetric2D::default_for_canvas(&CanvasSpec {
+            width: 256.0,
+            height: 256.0,
+        })
+        .expect("square default density");
+        let square_large = DensityMetric2D::default_for_canvas(&CanvasSpec {
+            width: 1024.0,
+            height: 1024.0,
+        })
+        .expect("large square default density");
+        let landscape_canvas = CanvasSpec {
+            width: 200.0,
+            height: 100.0,
+        };
+        let portrait_canvas = CanvasSpec {
+            width: 100.0,
+            height: 200.0,
+        };
+        let landscape = DensityMetric2D::default_for_canvas(&landscape_canvas)
+            .expect("landscape default density");
+        let portrait = DensityMetric2D::default_for_canvas(&portrait_canvas)
+            .expect("portrait default density");
+
+        assert_eq!(square.density, 100.0);
+        assert_eq!(square, square_large);
+        assert!((landscape.density - 100.0 / 2.0_f64.sqrt()).abs() < 1e-12);
+        assert_eq!(portrait.density, landscape.density);
+        assert!((landscape.resolve(&landscape_canvas).unwrap().across_x - 100.0).abs() < 1e-12);
+        assert!((landscape.resolve(&landscape_canvas).unwrap().across_y - 50.0).abs() < 1e-12);
+        assert!((portrait.resolve(&portrait_canvas).unwrap().across_x - 50.0).abs() < 1e-12);
+        assert!((portrait.resolve(&portrait_canvas).unwrap().across_y - 100.0).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
 mod history_tests {
     use super::*;
 
@@ -20605,9 +20785,8 @@ mod history_tests {
             DocumentPatternSettings {
                 definition_id: PatternDefinitionId(1),
                 density: DensityMetric2D {
-                    across_x: 1.0,
-                    across_y: 1.0,
-                    aspect_locked: true,
+                    density: 1.0,
+                    aspect: 1.0,
                 },
                 pattern_rotation_degrees: 0.0,
                 shape_rotation_degrees: 0.0,
@@ -20716,9 +20895,8 @@ mod history_tests {
             DocumentPatternSettings {
                 definition_id: PatternDefinitionId(40),
                 density: DensityMetric2D {
-                    across_x: 8.0,
-                    across_y: 6.0,
-                    aspect_locked: false,
+                    density: 48.0_f64.sqrt(),
+                    aspect: 1.0,
                 },
                 pattern_rotation_degrees: 0.0,
                 shape_rotation_degrees: 0.0,
@@ -20782,9 +20960,8 @@ mod history_tests {
             DocumentPatternSettings {
                 definition_id,
                 density: DensityMetric2D {
-                    across_x: 8.0,
-                    across_y: 6.0,
-                    aspect_locked: false,
+                    density: 48.0_f64.sqrt(),
+                    aspect: 1.0,
                 },
                 pattern_rotation_degrees: 0.0,
                 shape_rotation_degrees: 0.0,
@@ -20876,9 +21053,8 @@ mod history_tests {
             DocumentPatternSettings {
                 definition_id,
                 density: DensityMetric2D {
-                    across_x: 8.0,
-                    across_y: 6.0,
-                    aspect_locked: false,
+                    density: 48.0_f64.sqrt(),
+                    aspect: 1.0,
                 },
                 pattern_rotation_degrees: 0.0,
                 shape_rotation_degrees: 0.0,
