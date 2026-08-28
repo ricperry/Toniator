@@ -837,8 +837,32 @@ release performance/memory gate also passed all 28 intrinsic evaluator-only
 cases under timeout/RSS supervision with cold 24-worker evaluation and warm
 full cache hits. The user accepted this headless prerequisite on 2026-08-28,
 and the local implementation checkpoint is
-`b8826c95f3be2abd13d0e007cd59c49c2ce16915`. Stage 21B stays Planned and
-requires separate planning completion and implementation authorization.
+`b8826c95f3be2abd13d0e007cd59c49c2ce16915`. At that prerequisite checkpoint,
+Stage 21B remained Planned and still required separate planning completion and
+implementation authorization.
+
+**Stage 21B — Pattern Wizard and Personal Library — In progress.**
+The user authorized the decision-complete four-gate Stage 21B plan on
+2026-08-28 and accepted Gate 21B-1 on 2026-08-28. Gate 21B-1 is **Complete at
+commit `f77998c`** and covers the headless Storage and Registry Foundation
+only: current-only reusable-resource v1 and library-config v1 storage, safe
+personal-library operations, a layered immutable-built-in/personal catalog,
+bundled-registry version 3, and the seventeenth `curve-motif-rows` preset.
+`Edit Pattern` remains disabled. GTK, Blueprint, pending-icon adoption,
+complete wizard pages, and personal-library UI remain in later gates.
+The accepted filesystem implementation uses single-open no-follow reads,
+actual byte limits, exact-byte preset parsing and fingerprints,
+prepublication stale checks, candidate-root validation, type-qualified
+thumbnails, rollback-capable paired trash/undo moves, and an explicit
+single-process-writer boundary. Focused domain, registry, current preset-v4,
+personal-library, Curve Motif persistence/evaluation, check, strict Clippy,
+formatting, architecture, diff, rotated-engine, and private-Sway/apply/
+Advanced Settings verification pass; independent rereviews pass. Gates
+21B-2 (Wizard Shell and Gallery), 21B-3 (Complete Editing and Nested Editors),
+and 21B-4 (Personal Management and Final Verification) are Planned, not begun,
+and separately gated. The exact contract is
+[`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](docs/STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md).
+No push or publication is implied by this transition.
 
 ## Maintenance rules
 

@@ -549,7 +549,8 @@ row and visits only nonzero-winding spans, with bounded cancellation polling,
 so rotating long guide strokes no longer expands work to every pixel and every
 edge in their full axis-aligned bounds.
 The tracked Holiday v5 file remains only as an explicit rejection-test witness.
-Preset-v3 recipes remain unchanged. Still import now covers PNG, SVG,
+Stage 21A used preset-v3 recipes; the accepted Curve Motif prerequisite and
+Gate 21B-1 now use current preset-v4 recipes. Still import now covers PNG, SVG,
 JPEG/JPG, WebP, BMP, TIFF, OpenEXR, and AVIF with exact embedded-byte
 round-trips, single-image enforcement, native dav1d AVIF decoding, and linear
 finite-clamped OpenEXR handling without implicit tone mapping.
@@ -562,19 +563,22 @@ embedded authored open path across adjacent one-guide Along Guides sites into
 continuous canonical variable-width stroke rows. Odd provenance rows can mirror
 and then use an optional fractional interval phase, while guide layout remains
 the sole layout authority and phase receives padded coverage. The implementation
-uses ordinary source sampling, paint, PNG, and SVG paths, and keeps the bundled
-catalog at sixteen entries. Its future gallery card, Pattern Wizard, personal
-presets, and reusable shape storage stay paused in separately gated Stage 21B.
+uses ordinary source sampling, paint, PNG, and SVG paths. Gate 21B-1 is now
+complete at `f77998c`: the registry is v3 with seventeen built-ins, including
+`curve-motif-rows` displayed as Curve Motif in Guides, and the layered personal
+resource/library foundation is current. The gallery, Edit Pattern, and
+personal-management UI remain in separately gated 21B-2 through 21B-4.
 
 The main inspector defaults to runtime-only **ALL** or a real named channel.
 Its compact recipe dropdown is non-mutating until **Apply Pattern**; applying
 to ALL discloses and clears pattern-relative channel intent in one exactly
 undoable transaction. Capability-valid common controls, visible inheritance
 and reset actions, and the Blueprint-owned private-history **Advanced
-Settings** dialog are included. **Edit Pattern** remains accessibly disabled:
-the Pattern Wizard and personal preset library are the separately gated Stage
-21B. Stage 21A acceptance satisfies its sequencing prerequisite but does not
-authorize Stage 21B implementation, which remains separately gated.
+Settings** dialog are included. **Edit Pattern** remains accessibly disabled
+until Gate 21B-2. Stage 21B is In progress only through accepted Gate 21B-1;
+the exact four-gate contract is
+[`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](docs/STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md),
+and Gates 21B-2 through 21B-4 remain separately gated and not begun.
 
 Advanced Settings presents one modal immediately and evaluates only a bounded
 source proxy on its own cancelable scheduler. Its status exposes current
@@ -613,6 +617,8 @@ cargo run --bin toniator-app -- assets/raster-sample.png
 ```
 
 The approved execution roadmap is [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md),
+the exact Stage 21B gate plan is
+[`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](docs/STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md),
 and the current checkpoint ledger is [ProgressTracker.md](ProgressTracker.md).
 The normative design is in [Architecture Schema](Project%20Specification/ArchitectureSchema.md),
 [Pattern Schema](Project%20Specification/PatternSchema.md),

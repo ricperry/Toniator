@@ -2228,20 +2228,47 @@ presets, reusable shape storage, and wizard design work remain paused in Stage
 
 ### Stage 21B — Pattern Wizard and Personal Preset Library
 
-Stage 21A acceptance satisfies this stage's sequencing prerequisite but does
-not authorize implementation. When Stage 21B is separately authorized, enable
-**Edit Pattern** as the capability-driven private
-Pattern Wizard and integrate the accepted Guide Curve and Shape Editors as
-nested subeditors. Cover all sixteen current bundled recipes, structural
-breadcrumb/review navigation, stale-preview rejection, ALL/named-channel
-publication, and custom drafts without requiring a save.
+Stage 21B is **In progress** as four separately reviewed and accepted gates.
+Gate 21B-1 is complete and user-accepted at implementation checkpoint
+`f77998c`; Gates 21B-2 through 21B-4 remain planned, separately gated, and not
+begun. The exact decision-complete contract is
+[`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md).
 
-Add a layered immutable built-in plus user preset-v3 registry. Personal files
-use safe atomic regular-file storage in a configurable absolute XDG data
-directory, with versioned XDG config, unique `user-*` IDs, case-insensitive
-unique names, corrupt-file isolation, and non-authoritative canonical-pipeline
-thumbnails. Directory changes switch libraries without moving or deleting old
-content. Cloud sync, a database, and preset import/export remain out of scope.
+Gate 21B-1 establishes the current-only reusable-resource v1 and library-config
+v1 storage, safe personal-library operations, a layered immutable
+built-in/personal catalog, registry v3 with seventeen built-ins including
+`curve-motif-rows` displayed as Curve Motif in Guides, and the persistence and
+frontend corrections recorded by its independent review. It uses document v7,
+preset v4, and container v1; obsolete document-v6 and preset-v3 files reject.
+The default data root is `$XDG_DATA_HOME/Toniator`, the versioned configuration
+is under `$XDG_CONFIG_HOME/Toniator`, and the one-process writer boundary,
+bounded no-follow reads, atomic writes, fingerprints, candidate-root checks,
+qualified thumbnails, rollback-capable trash/undo, and nonfatal warnings are
+current implementation facts. Gate 21B-1 does not enable **Edit Pattern**.
+
+Gate 21B-2 is Wizard Shell and Gallery: GTK/Blueprint/GResource modal shell,
+gallery, breadcrumb, private canonical preview, Review/Apply, shared combined
+catalog, all seventeen **Use as is** cards, and initial Edit support for
+`curve-motif-rows`, `one-guide-lines`, `even-random-circles`, and
+`round-spiral-line`. Its fixed private-preview target is a 256-longest-edge
+source proxy and 512×512 output; pending canonical SVG icons may be adopted
+only within this gate. Gate 21B-3 completes capability-driven editing for all
+17 cards, structural reconstruction, ordered outputs, nested Guide/Shape/Motif
+editors, reusable insertion, copy/shared behavior, local history, and focus
+restoration. Gate 21B-4 adds personal management and final persistence,
+filesystem, concurrency, performance, memory, accessibility, keyboard, and UX
+verification.
+
+The wizard remains a modal transient private draft with dirty-close
+confirmation, Cancel discard, and one-history-transition Apply. Capability and
+descriptor projection owns page/control visibility. ALL preset replacement
+resets pattern-relative channel deltas; ordinary base edits preserve compatible
+deltas; named-channel edits use selected-copy/fresh-resource rules. Built-ins
+remain immutable, and saving a personal preset is separate from applying it.
+Cloud sync, a database, import/export, multiple mounted libraries, recovery
+drafts, Stage 22 media, TSP, wraparound endpoints, aligned curved-guide
+sampling, new topology mechanisms, renderer branches, and compatibility
+adapters remain excluded.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and

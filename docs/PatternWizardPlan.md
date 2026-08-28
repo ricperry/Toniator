@@ -1,21 +1,22 @@
 # Toniator Pattern Wizard Plan
 
 Status: **approved future-work plan; Stage 21A and the headless Curve Motif
-prerequisite are complete and accepted, and
-Pattern Wizard implementation remains separately gated in Stage 21B**
-(accepted 2026-08-22; Stage 20S closeout reconciled 2026-08-26; Stage 21A
-and the Curve Motif prerequisite accepted 2026-08-28).
+prerequisite are complete and accepted; Stage 21B Gate 21B-1 is complete and
+accepted, and Gates 21B-2 through 21B-4 remain separately gated and not
+begun** (accepted 2026-08-22; Stage 20S closeout reconciled 2026-08-26;
+Stage 21A and Gate 21B-1 accepted 2026-08-28).
 
 This document records the intended replacement direction for the artist-facing
 Pattern Editor workflow. It does not itself authorize additional
-implementation, change the accepted Stage 20F–20S ledger state, or begin Stage
-21B. Stage 21A is separately authorized and tracked as the main-window and
+implementation, change the accepted Stage 20F–20S ledger state, or silently
+advance a Stage 21B gate. Stage 21A is separately authorized and tracked as the main-window and
 still-import checkpoint, complete at
 `3028193b787960fb402b0af6807d6e8e8ab174db`. The user-authorized normative effective-pattern
 direction is recorded in the protected specifications and implemented by
-accepted Stage 20G authority. The complete Pattern Wizard remains a separately
-gated Stage 21B UI milestone requiring separate implementation authorization.
-Stage 21A acceptance satisfies only its sequencing prerequisite. The
+accepted Stage 20G authority. The exact four-gate Stage 21B contract is recorded
+in [`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md).
+Stage 21A acceptance satisfied its sequencing prerequisite; Gate 21B-1 now
+covers only storage and registry foundation. The
 2026-08-24 accepted remainder roadmap is
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
 
@@ -230,6 +231,7 @@ Availability terms:
 | Baseline card | Structural recipe | Required capability flags | Artist controls revealed | Availability | Representative asset |
 |---|---|---|---|---|---|
 | One Guide — Lines | One straight guide family -> paths | `family.grid`, `guides.count.1`, `guides.spacing`, `guides.phase`, `guides.raw_paths`, `paths.raw` | Guide spacing/phase; path thickness/fill response | Current headless Stage 20I; wizard card planned | `lingrid.svg` |
+| Curve Motif — Paths | One-guide Along Guides sites -> one authored open motif path per row | `family.grid`, `guides.count.1`, `sites.along_guides`, `paths.raw`, typed mirror/phase | Motif path; site interval/phase; source-driven path response | Registry entry current after Gate 21B-1; gallery/Edit exposure planned in Gate 21B-2/3 | Synthetic canonical thumbnail in Gate 21B-2 |
 | One Guide — Curved Lines | One authored guide family -> paths | Prior row plus `guides.editable_curve` | Edit curve; guide repetition; path controls | Current headless Stage 20I; wizard card planned | `lingrid-curve-stacked.svg` |
 | One Guide — Constant Gap Curves | One authored guide -> offset path family | Prior row plus `paths.spacing.constant_gap`, `paths.endpoint_policy` | Path Gap; Extend Beyond Canvas endpoint summary | Current headless Stage 20J; wizard card planned | `lingrid-curve-even-gaps.svg` |
 | One Guide — Marks | One guide -> sites along guide -> marks | `family.grid`, `guides.count.1`, `sites.along_guides`, `marks.at_sites`, `marks.shape`, `response.fill_range` | Site interval/phase; mark shape; fill | Current engine | `lingrid-dots.svg`, `MarksAlongGuide.svg` |
@@ -440,19 +442,18 @@ Recommended filters are All, Grid, Dispersion, Parametric, and Hybrid. Tags may
 include Marks, Lines, Cells, Connected, Maze, Organic, Geometric, Radial,
 Sparse, and Dense. Filters and tags are metadata only.
 
-The first production gallery should contain only capability-complete recipes.
-With today's headless engine, viable candidates are mark-producing baselines:
+The first production gallery must contain only capability-complete recipes.
+The accepted Gate 21B-2 contract now sets that initial gallery to all seventeen
+current built-ins, each with **Use as is**. A card whose editing branch is not
+yet implemented remains selectable as a baseline and explains why **Edit** is
+unavailable; it must not lead to a dead or name-dispatched wizard page.
 
-- Even Dispersion — Marks;
-- Source-Weighted Dispersion — Marks;
-- One Guide — Marks;
-- Two Guides — Intersection Marks;
-- Two Curved Guides — Intersection Marks;
-- Triagrid — Marks; and
-- authored-shape variants of those site generators.
-
-Raw guide/curve, connections, maze, Voronoi, guide-cell, and constant-gap cards
-join the gallery only after their corresponding headless stages are accepted.
+The accepted Gate 21B-1 registry is version 3 with seventeen immutable
+built-ins, including `curve-motif-rows` displayed as **Curve Motif** in
+**Guides**. Registry presence does not imply gallery or editing availability:
+Gate 21B-2 will expose all seventeen cards with **Use as is**, and Gate 21B-3
+will expand the initially limited Edit coverage. The exact gate contract is
+[`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md).
 
 ## State, validation, and accessibility
 
@@ -511,7 +512,7 @@ geometry or inventing frontend-only document state. The approved order is:
 | 20S | **Complete at `55651dee7c744c2aa207924bf0dbb7737609942d`:** headless capabilities/descriptors and ordinary serialized 16-card gallery recipes; wizard exposure remains Stage 21B. |
 | 21A | **Complete at `3028193b787960fb402b0af6807d6e8e8ab174db`:** main window, density/schema-v6 transition, expanded single-still import, ALL/named inspector, compact pattern apply, and private Advanced Settings; user accepted 2026-08-28. |
 | Curve Motif prerequisite | **Complete at `b8826c95f3be2abd13d0e007cd59c49c2ce16915`:** accepted headless one-guide Along Guides open-path chaining, typed alternate-row mirror/optional phase, canonical variable-width stroke realization, document-v7/preset-v4 persistence, and no added catalog card. |
-| 21B | **Planned and separately gated:** Pattern Wizard gallery (including a future Curve Motif card), adaptive pages, Review, nested subeditors, and layered built-in/personal preset storage. |
+| 21B | **In progress:** Gate 21B-1 is complete and accepted at `f77998c` with the 17-card layered registry and personal-library foundation; Gates 21B-2 through 21B-4 remain planned, separately gated, and not begun. |
 | 22 | Headless frame/media authority, frame sequences/export, and simple start/end transitions. |
 | 23 | Temporal GTK with descriptor-driven start/end pins only. |
 
@@ -531,11 +532,13 @@ renderer behavior.
 Stage 21A and Stage 21B are sequential, separately accepted checkpoints. The
 headless Curve Motif prerequisite is a separately accepted checkpoint between
 them, complete at `b8826c95f3be2abd13d0e007cd59c49c2ce16915`; it does not
-enable the wizard.
+enable the wizard. Stage 21B is now In progress only because Gate 21B-1 has
+been accepted; the remaining gates are not begun.
 Stage 21A is complete at `3028193b787960fb402b0af6807d6e8e8ab174db`
 after focused verification, independent re-review, and user acceptance on
-2026-08-28. Stage 21B remains Planned and separately gated; accepting Stage
-21A does not authorize its implementation.
+2026-08-28. Gate 21B-1 is complete at `f77998c` and covers only the headless
+Storage and Registry Foundation. Gates 21B-2 through 21B-4 remain Planned and
+separately gated; accepting Gate 21B-1 does not authorize the next gate.
 Stage 21A owns the current-only Density/Density-aspect and schema-v6 transition,
 expanded single-still import, runtime-only ALL target, compact non-mutating
 recipe selection plus explicit Apply, capability-filtered common controls, and
@@ -575,17 +578,20 @@ cancellation.
 
 The headless prerequisite owns one authored open Curve Motif path resource,
 one-guide Along Guides cadence, optional odd-row mirror/phase, and the ordinary
-canonical stroke/persistence authority. It deliberately does not create a
-gallery card, personal file, reusable closed-shape store, or GTK editor.
+canonical stroke/persistence authority. Gate 21B-1 now materializes the
+seventeenth registry entry and personal-resource/library foundation; it does
+not expose the gallery, enable Edit Pattern, or add a GTK editor.
 
-When separately authorized, Stage 21B may enable **Edit Pattern**. The wizard
-starts from the current dropdown candidate without first applying it,
-uses capability-driven pages and canonical private preview, integrates the
-Guide Curve and Shape Editors as nested drafts, and publishes once to its entry
+When separately authorized, Gate 21B-2 may enable **Edit Pattern** and add the
+modal gallery shell; later gates add capability-driven pages, canonical private
+preview, nested Guide/Shape/Motif editors, and one publication to the entry
 target. Its gallery and main dropdown share immutable built-ins and safe
-user-owned preset-v3 files under a configurable XDG data directory. Built-ins
-cannot be renamed, overwritten, or deleted; malformed user files are isolated
-with nonfatal warnings and are never rewritten automatically.
+user-owned current-format resources under a configurable XDG data directory.
+Built-ins cannot be renamed, overwritten, or deleted; malformed user files are
+isolated with nonfatal warnings and are never rewritten automatically. See the
+[exact Stage 21B gate plan](STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md)
+for the accepted 256-source/512-output private-preview target and Gate 21B-4
+personal-management scope.
 
 TSP, aligned curved-guide sampling, wraparound endpoints, extra parametric
 forms, animated media, Tetragrid promotion, cloud synchronization, a preset
