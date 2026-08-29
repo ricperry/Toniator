@@ -13841,6 +13841,164 @@ mod tests {
         assert_eq!(workspace.history.revision().0, 0);
     }
 
+    /// Crosses every channel model with private ALL and named wizard materialization safely.
+    ///
+    /// Each model first publishes through the ordinary topology history command. The test then
+    /// squashes one ALL and one named private draft, applies a capability-valid output-response
+    /// delta, verifies inspector property/control projection, and proves each publication has exact
+    /// one-step Undo/Redo semantics without inventing a frontend model authority.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a current model cannot publish its canonical topology, a mark-capable bundled
+    /// recipe cannot materialize for that topology, no active mark minimum-fill descriptor is
+    /// projected, a capability-valid private command fails, or Undo/Redo does not restore the
+    /// exact authoritative before/after document.
+    #[test]
+    fn stage21b_model_switches_preserve_wizard_materialization_output_deltas_and_history() {
+        let catalog = LayeredPresetCatalog::new(&PresetRegistry::bundled(), Vec::new()).unwrap();
+        for model in PreviewModel::ALL {
+            let mut workspace = direct_png_workspace();
+            replace_model_topology(&mut workspace.history, model)
+                .expect("model topology publishes through history authority");
+
+            let before_all = workspace.document().clone();
+            let mut all_draft = DocumentHistory::new_draft(&workspace.history);
+            catalog
+                .apply_to_document_base(&mut all_draft, "round-spiral-marks")
+                .expect("mark recipe materializes for every supported model through ALL");
+            assert!(
+                all_draft
+                    .document()
+                    .property_values()
+                    .iter()
+                    .all(|value| control_route(value).is_some())
+            );
+            let after_all = all_draft.document().clone();
+            assert!(
+                !workspace
+                    .history
+                    .squash_draft(&all_draft)
+                    .expect("ALL draft squashes once")
+                    .unchanged
+            );
+            assert_eq!(workspace.document(), &after_all);
+            workspace
+                .history
+                .undo()
+                .expect("ALL Undo publishes before state");
+            assert_eq!(workspace.document(), &before_all);
+            workspace
+                .history
+                .redo()
+                .expect("ALL Redo republishes after state");
+            assert_eq!(workspace.document(), &after_all);
+
+            let channel_id = authoritative_channel_ids(workspace.document())[0];
+            let before_named = workspace.document().clone();
+            let mut named_draft = DocumentHistory::new_draft(&workspace.history);
+            catalog
+                .apply_to_selected(&mut named_draft, channel_id, "even-random-circles")
+                .expect("mark recipe materializes for every supported named channel");
+            let minimum_fill = named_draft
+                .document()
+                .property_values()
+                .into_iter()
+                .find(|value| {
+                    matches!(
+                        value.descriptor.target,
+                        PropertyTarget::ChannelOutput(target_channel, _)
+                            if target_channel == channel_id
+                    ) && value.descriptor.field == PropertyFieldId::MarkMinimumFill
+                })
+                .expect("mark output exposes a minimum-fill delta descriptor")
+                .descriptor;
+            let delta = command_for_inspector_input(
+                named_draft.document(),
+                Some(channel_id),
+                DefinitionEditScope::SelectedCopy,
+                &minimum_fill,
+                InspectorInput::FiniteF64(0.25),
+            )
+            .expect("capability-valid minimum-fill delta builds");
+            named_draft
+                .apply(&delta)
+                .expect("capability-valid minimum-fill delta remains private");
+            assert!(
+                named_draft
+                    .document()
+                    .property_values()
+                    .iter()
+                    .all(|value| control_route(value).is_some())
+            );
+            let after_named = named_draft.document().clone();
+            assert!(
+                !workspace
+                    .history
+                    .squash_draft(&named_draft)
+                    .expect("named draft squashes once")
+                    .unchanged
+            );
+            assert_eq!(workspace.document(), &after_named);
+            workspace
+                .history
+                .undo()
+                .expect("named Undo publishes exact before state");
+            assert_eq!(workspace.document(), &before_named);
+            workspace
+                .history
+                .redo()
+                .expect("named Redo republishes exact after state");
+            assert_eq!(workspace.document(), &after_named);
+        }
+    }
+
+    /// Rejects incompatible SourceColorAlpha path recipes without publishing an invalid draft.
+    ///
+    /// Both captured wizard targets intentionally attempt the same path-output preset against the
+    /// sampled-paint-only model. The catalog/domain rejection is preserved as the stable result;
+    /// neither private history nor the main document receives a partial topology or invalid output.
+    ///
+    /// # Panics
+    ///
+    /// Panics when SourceColorAlpha topology cannot publish, the incompatible path recipe stops
+    /// rejecting for either target, a failed private materialization mutates its draft, the main
+    /// document changes before Apply, or the remaining inspector property projection loses a
+    /// generic control route.
+    #[test]
+    fn stage21b_source_color_alpha_path_recipe_rejection_stays_private_and_projectable() {
+        let mut workspace = direct_png_workspace();
+        replace_model_topology(&mut workspace.history, PreviewModel::SourceColorAlpha)
+            .expect("SourceColorAlpha topology publishes through history authority");
+        let catalog = LayeredPresetCatalog::new(&PresetRegistry::bundled(), Vec::new()).unwrap();
+        let before = workspace.document().clone();
+        let channel_id = authoritative_channel_ids(workspace.document())[0];
+
+        let mut all_draft = DocumentHistory::new_draft(&workspace.history);
+        assert!(
+            catalog
+                .apply_to_document_base(&mut all_draft, "one-guide-lines")
+                .is_err()
+        );
+        assert_eq!(all_draft.document(), &before);
+
+        let mut named_draft = DocumentHistory::new_draft(&workspace.history);
+        assert!(
+            catalog
+                .apply_to_selected(&mut named_draft, channel_id, "one-guide-lines")
+                .is_err()
+        );
+        assert_eq!(named_draft.document(), &before);
+        assert_eq!(workspace.document(), &before);
+        assert!(
+            workspace
+                .document()
+                .property_values()
+                .iter()
+                .all(|value| control_route(value).is_some())
+        );
+    }
+
     /// Proves the temporary four-record edit gate, unavailable identities, and responsive layout policy.
     ///
     /// This pure policy test fixes only the permitted stable-ID allowlist. The actual descriptor

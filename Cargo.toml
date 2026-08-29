@@ -18,6 +18,10 @@ edition = "2024"
 rust-version = "1.94"
 license = "GPL-3.0-only"
 
+# Keep ordinary `cargo run` responsive for canonical evaluation while retaining dev assertions and debug info.
+[profile.dev]
+opt-level = 2
+
 [workspace.dependencies]
 clap = { version = "4.5.54", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }

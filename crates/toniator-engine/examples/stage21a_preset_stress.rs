@@ -15,10 +15,10 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use toniator_domain::{
-    CanvasSpec, ChannelId, DensityEditedField, Document, DocumentHistory, DocumentSession,
-    MarkPrototype, PatternCapabilityScope, PatternGeometryResponse, PatternOutputRealization,
-    PropertyFieldId, RegionGeometryFieldEdit, RegionSamplingStrategy, SourceReference,
-    SourceReferenceId,
+    CanvasSpec, ChannelId, ChannelTopologyTemplate, DensityEditedField, Document, DocumentCommand,
+    DocumentHistory, DocumentSession, HalftoneChannelModel, MarkPrototype, PatternCapabilityScope,
+    PatternGeometryResponse, PatternOutputRealization, PropertyFieldId, RegionGeometryFieldEdit,
+    RegionSamplingStrategy, SourceReference, SourceReferenceId,
 };
 use toniator_engine::{
     EvaluationLimits, EvaluationPerformanceMetrics, EvaluationProfileCache, EvaluationRequest,
@@ -26,9 +26,6 @@ use toniator_engine::{
     evaluate_profiled_cached_with_limits, write_svg,
 };
 use toniator_patterns::PresetRegistry;
-
-/// The ordinary RGB channels installed by `Document::new_default_document`.
-const RGB_CHANNELS: [ChannelId; 3] = [ChannelId(1), ChannelId(2), ChannelId(3)];
 
 /// Represents the immutable source baseline and its intrinsic canvas dimensions.
 #[derive(Clone, Copy, Debug)]
@@ -38,6 +35,49 @@ struct SourceCase {
     format: SourceFormatHint,
     width: f64,
     height: f64,
+}
+
+/// Selects the authoritative channel topology used by one isolated stress process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StressModel {
+    Rgb,
+    Cmyk,
+    SourceColorAlpha,
+}
+
+impl StressModel {
+    /// Parses one exact model spelling without accepting presentation aliases.
+    ///
+    /// # Errors
+    ///
+    /// Returns an argument error before a document/history is built when the supplied model is not
+    /// `rgb`, `cmyk`, or `source-color-alpha`.
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "rgb" => Ok(Self::Rgb),
+            "cmyk" => Ok(Self::Cmyk),
+            "source-color-alpha" => Ok(Self::SourceColorAlpha),
+            _ => Err("--model must be rgb, cmyk, or source-color-alpha".into()),
+        }
+    }
+
+    /// Returns the stable lowercase model identity used in diagnostic output and artifact names.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Rgb => "rgb",
+            Self::Cmyk => "cmyk",
+            Self::SourceColorAlpha => "source-color-alpha",
+        }
+    }
+
+    /// Returns the one domain-owned topology model selected by this process.
+    const fn domain(self) -> HalftoneChannelModel {
+        match self {
+            Self::Rgb => HalftoneChannelModel::Rgb,
+            Self::Cmyk => HalftoneChannelModel::Cmyk,
+            Self::SourceColorAlpha => HalftoneChannelModel::SourceColorAlpha,
+        }
+    }
 }
 
 /// Parses the two immutable still-image inputs supported by the runner.
@@ -140,6 +180,7 @@ impl Mutation {
 struct Arguments {
     preset_id: String,
     source: SourceCase,
+    model: StressModel,
     mutation: Mutation,
     canvas_scale: f64,
     artifacts: Option<PathBuf>,
@@ -152,7 +193,7 @@ struct Arguments {
 ///
 /// Returns a human-readable usage or validation message for an unknown flag, a missing value,
 /// duplicate required argument, conflicting export options, non-finite scale, or unsupported
-/// source/mutation spelling.
+/// source/model/mutation spelling.
 fn parse_arguments() -> Result<Arguments, String> {
     let mut values = std::collections::BTreeMap::<String, String>::new();
     let mut skip_exports = false;
@@ -170,7 +211,7 @@ fn parse_arguments() -> Result<Arguments, String> {
         }
         if !matches!(
             flag.as_str(),
-            "--preset" | "--source" | "--mutation" | "--canvas-scale" | "--artifacts"
+            "--preset" | "--source" | "--model" | "--mutation" | "--canvas-scale" | "--artifacts"
         ) {
             return Err(format!("unknown argument {flag:?}\n{}", usage()));
         }
@@ -189,6 +230,7 @@ fn parse_arguments() -> Result<Arguments, String> {
     };
     let preset_id = required("--preset")?;
     let source = parse_source(&required("--source")?)?;
+    let model = StressModel::parse(&required("--model")?)?;
     let mutation = Mutation::parse(&required("--mutation")?)?;
     let canvas_scale = values.get("--canvas-scale").map_or(Ok(1.0), |value| {
         value
@@ -204,6 +246,7 @@ fn parse_arguments() -> Result<Arguments, String> {
     Ok(Arguments {
         preset_id,
         source,
+        model,
         mutation,
         canvas_scale,
         artifacts: values.get("--artifacts").map(PathBuf::from),
@@ -215,7 +258,7 @@ fn parse_arguments() -> Result<Arguments, String> {
 fn usage() -> String {
     [
         "usage: cargo run -p toniator-engine --release --example stage21a_preset_stress -- ",
-        "--preset <id> --source png|svg --mutation <baseline|zoom-out-080|zoom-in-140|rotation-17|rotation-895|aspect-wide-2|aspect-tall-05|response-min-0|response-max-1|response-min-025|response-max-075|shape-rotation-37|zoom-out-080-rotation-17|region-reference-point|region-area-average> [--canvas-scale <finite-positive>] [--artifacts target/validation/<child>] [--skip-exports]",
+        "--preset <id> --source png|svg --model rgb|cmyk|source-color-alpha --mutation <baseline|zoom-out-080|zoom-in-140|rotation-17|rotation-895|aspect-wide-2|aspect-tall-05|response-min-0|response-max-1|response-min-025|response-max-075|shape-rotation-37|zoom-out-080-rotation-17|region-reference-point|region-area-average> [--canvas-scale <finite-positive>] [--artifacts target/validation/<child>] [--skip-exports]",
     ]
     .join("\n")
 }
@@ -313,31 +356,83 @@ fn scaled_canvas(source: SourceCase, canvas_scale: f64) -> Result<CanvasSpec, St
     Ok(CanvasSpec { width, height })
 }
 
-/// Builds a fresh ordinary RGB document, replaces only its base recipe, and retains exact source authority.
+/// Builds a fresh model-selected document through the canonical topology/history authority.
 ///
 /// # Errors
 ///
-/// Returns an authoritative domain/history error if the supplied preset is absent or its recipe
-/// cannot be published as the current document base.
+/// Returns an authoritative domain/history error when the requested model topology or supplied
+/// preset cannot be published. Incompatible SourceColorAlpha path recipes deliberately return this
+/// error rather than being coerced into a different output or model.
 fn build_history(
     registry: &PresetRegistry,
     preset_id: &str,
     source: SourceCase,
+    model: StressModel,
     canvas_scale: f64,
 ) -> Result<DocumentHistory, String> {
     let canvas = scaled_canvas(source, canvas_scale)?;
     let source_id = SourceReferenceId::new(format!("stage21a-preset-stress-{}", source.name))
         .map_err(|error| format!("could not build source ID: {error}"))?;
     let document = Document::new_default_document(canvas, SourceReference::Assigned(source_id))
-        .map_err(|error| format!("could not build RGB document: {error}"))?;
+        .map_err(|error| format!("could not build default document: {error}"))?;
     let mut history = DocumentHistory::new(
         DocumentSession::new(document)
             .map_err(|error| format!("could not start session: {error}"))?,
     );
+    if history.document().channel_model() != Some(model.domain()) {
+        let template = {
+            let channel = history
+                .document()
+                .channel_topology()
+                .and_then(|topology| topology.channels().first())
+                .ok_or_else(|| {
+                    "document.channel_topology: model selection requires stored topology".to_owned()
+                })?;
+            ChannelTopologyTemplate {
+                pattern_instance: channel.pattern_instance.clone(),
+            }
+        };
+        let topology = history
+            .document()
+            .canonical_channel_topology(model.domain(), template)
+            .map_err(|error| format!("could not build {} topology: {error}", model.name()))?;
+        history
+            .apply(&DocumentCommand::ReplaceChannelTopology {
+                model: model.domain(),
+                topology,
+            })
+            .map_err(|error| format!("could not publish {} topology: {error}", model.name()))?;
+    }
     registry
         .apply_to_document_base(&mut history, preset_id)
-        .map_err(|error| format!("could not apply preset {preset_id:?}: {error}"))?;
+        .map_err(|error| {
+            format!(
+                "could not apply preset {preset_id:?} for {}: {error}",
+                model.name()
+            )
+        })?;
     Ok(history)
+}
+
+/// Derives the currently authoritative channel IDs in topology order for diagnostic mutations.
+///
+/// # Errors
+///
+/// Returns a stable topology error when the selected model failed to publish a stored channel
+/// topology. The returned IDs are read from the current document rather than inferred from RGB
+/// defaults, so CMYK and SourceColorAlpha stay model-valid.
+fn channel_ids(history: &DocumentHistory) -> Result<Vec<ChannelId>, String> {
+    history
+        .document()
+        .channel_topology()
+        .map(|topology| {
+            topology
+                .channels()
+                .iter()
+                .map(|channel| channel.id)
+                .collect()
+        })
+        .ok_or_else(|| "document.channel_topology: stress runner requires stored topology".into())
 }
 
 /// Reports whether one active channel capability exposes a named field.
@@ -416,13 +511,13 @@ fn apply_zoom(history: &mut DocumentHistory, zoom: f64) -> Result<(), String> {
     Ok(())
 }
 
-/// Applies eligible RGB pattern rotations and records the required artwork-weighted rejection.
+/// Applies eligible model-selected pattern rotations and records the required artwork-weighted rejection.
 ///
 /// # Errors
 ///
 /// Returns a typed command construction/publication or effective-pattern resolution error without
 /// continuing to later channels. Eligible channels receive the same requested rotation in stable
-/// RGB order.
+/// topology order.
 ///
 /// # Panics
 ///
@@ -433,7 +528,7 @@ fn apply_rotation(
     rotation: f64,
     report: &mut MutationReport,
 ) -> Result<(), String> {
-    for channel_id in RGB_CHANNELS {
+    for channel_id in channel_ids(history)? {
         if channel_supports(history, channel_id, PropertyFieldId::RotationDegrees)? {
             let command = history
                 .document()
@@ -488,7 +583,7 @@ fn apply_rotation(
 /// back because each transition is intentionally part of the isolated stress case. Region-sampling
 /// requests already selected by one effective output are counted and skipped so the domain's
 /// authoritative semantic no-op rejection remains intact. The combined zoom/rotation fixture
-/// always publishes zoom before asking the domain to rotate each eligible RGB channel.
+/// always publishes zoom before asking the domain to rotate each eligible topology channel.
 ///
 /// # Panics
 ///
@@ -520,7 +615,7 @@ fn apply_mutation(
         Mutation::Rotation17 => apply_rotation(history, 17.0, &mut report)?,
         Mutation::Rotation895 => apply_rotation(history, 89.5, &mut report)?,
         Mutation::ShapeRotation37 => {
-            for channel_id in RGB_CHANNELS {
+            for channel_id in channel_ids(history)? {
                 if channel_supports(history, channel_id, PropertyFieldId::ShapeRotationDegrees)?
                     && channel_has_rotatable_authored_shape(history, channel_id)?
                 {
@@ -553,7 +648,7 @@ fn apply_mutation(
                 Mutation::ResponseMaximum075 => (false, 0.75),
                 _ => unreachable!("the enclosing mutation branch is response-only"),
             };
-            for channel_id in RGB_CHANNELS {
+            for channel_id in channel_ids(history)? {
                 let outputs = history
                     .document()
                     .effective_channel_pattern(channel_id)
@@ -651,7 +746,7 @@ fn apply_mutation(
             } else {
                 RegionSamplingStrategy::AreaAverage
             };
-            for channel_id in RGB_CHANNELS {
+            for channel_id in channel_ids(history)? {
                 let outputs = history
                     .document()
                     .effective_channel_pattern(channel_id)
@@ -724,13 +819,13 @@ fn build_request(
     ))
 }
 
-/// Prints the stable active field projection for each RGB effective channel.
+/// Prints the stable active field projection for each current model channel.
 ///
 /// # Errors
 ///
 /// Returns the capability projection error without evaluating or exporting the document.
 fn print_active_fields(history: &DocumentHistory) -> Result<(), String> {
-    for channel_id in RGB_CHANNELS {
+    for channel_id in channel_ids(history)? {
         let mut fields = BTreeSet::new();
         for descriptor in history
             .document()
@@ -749,7 +844,7 @@ fn print_active_fields(history: &DocumentHistory) -> Result<(), String> {
     Ok(())
 }
 
-/// Prints the effective layout authority used by each RGB evaluator request.
+/// Prints the effective layout authority used by each current model evaluator request.
 ///
 /// The diagnostic reads the same resolved density, aspect, rotation, and translation values that
 /// enter family cache identity. It does not derive an alternate layout or mutate document history.
@@ -758,7 +853,7 @@ fn print_active_fields(history: &DocumentHistory) -> Result<(), String> {
 ///
 /// Returns effective-pattern resolution errors before canonical evaluation.
 fn print_effective_layout(history: &DocumentHistory) -> Result<(), String> {
-    for channel_id in RGB_CHANNELS {
+    for channel_id in channel_ids(history)? {
         let effective = history
             .document()
             .effective_channel_pattern(channel_id)
@@ -877,9 +972,10 @@ fn write_artifacts(
     };
     let scale = sanitized_component(&format!("{:.6}", arguments.canvas_scale));
     let stem = format!(
-        "preset-{}-{}-{}-scale-{}",
+        "preset-{}-{}-model-{}-{}-scale-{}",
         sanitized_component(&arguments.preset_id),
         arguments.source.name,
+        arguments.model.name(),
         arguments.mutation.name(),
         scale
     );
@@ -890,14 +986,15 @@ fn write_artifacts(
     Ok(())
 }
 
-/// Executes one isolated cold/export/warm stress case through the canonical authority path.
+/// Executes one model-selected cold/export/warm stress case through the canonical authority path.
 ///
 /// # Errors
 ///
 /// Returns setup, domain, evaluator, exporter, or artifact errors without reporting a successful
 /// case. With `--skip-exports`, it intentionally omits PNG/SVG construction and artifact writes
-/// so external RSS supervision isolates canonical preview evaluation. It does not catch process
-/// OOM, signals, or external timeouts; supervisors classify those process-level outcomes.
+/// so external RSS supervision isolates canonical preview evaluation. The requested model remains
+/// visible in the case and artifact identity. It does not catch process OOM, signals, or external
+/// timeouts; supervisors classify those process-level outcomes.
 fn run(arguments: Arguments) -> Result<(), String> {
     let registry = PresetRegistry::bundled();
     if registry.find(&arguments.preset_id).is_none() {
@@ -911,14 +1008,16 @@ fn run(arguments: Arguments) -> Result<(), String> {
         &registry,
         &arguments.preset_id,
         arguments.source,
+        arguments.model,
         arguments.canvas_scale,
     )?;
     let mutation_report = apply_mutation(&mut history, arguments.mutation)?;
     let canvas = history.document().canvas();
     println!(
-        "case preset={} source={} mutation={} canvas_width={} canvas_height={} canvas_scale={}",
+        "case preset={} source={} model={} mutation={} canvas_width={} canvas_height={} canvas_scale={}",
         arguments.preset_id,
         arguments.source.name,
+        arguments.model.name(),
         arguments.mutation.name(),
         canvas.width,
         canvas.height,
