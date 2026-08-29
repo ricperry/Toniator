@@ -874,7 +874,18 @@ reports `toniator 0.2.0`. Gates
 21B-3 (Complete Editing and Nested Editors) and 21B-4 (Personal Management and
 Final Verification) are Planned, not begun, and separately gated. The exact contract is
 [`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](docs/STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md).
-No push or publication is implied by this transition.
+The user then accepted a Gate 21B-2 CMYK/SourceColorAlpha stabilization at
+commit `b67a3483d2a1670e01b29716a1a33df51e10f7a1`. Ordinary development builds
+now use optimization level 2 while retaining development assertions and debug
+information, so the measured intrinsic Three-Guide Cells CMYK case fell from
+69.22 seconds to 5.50 seconds without changing release semantics. The existing
+stress runner now covers authoritative RGB, CMYK, and SourceColorAlpha topology,
+and focused app regressions cover ALL/named private materialization, output
+deltas, inspector projection, exact Undo/Redo, and stable SourceColorAlpha path
+rejection. Both immutable sources and a fresh private-Sway CMYK-to-source-alpha
+workflow pass with clean app logs; automated wlroots evidence is not manual
+GNOME/Mutter acceptance. Gate 21B-3 remains not begun. No push or publication
+is implied by this transition.
 
 ## Maintenance rules
 

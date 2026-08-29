@@ -2231,8 +2231,10 @@ presets, reusable shape storage, and wizard design work remain paused in Stage
 Stage 21B is **In progress** as four separately reviewed and accepted gates.
 Gate 21B-1 is complete and user-accepted at implementation checkpoint
 `f77998c`; Gate 21B-2 is complete and user-accepted at implementation
-checkpoint `63fd9fb` on 2026-08-28; Gates 21B-3 and 21B-4 remain planned,
-separately gated, and not begun. The exact decision-complete contract is
+checkpoint `63fd9fb` on 2026-08-28, with its accepted CMYK/SourceColorAlpha
+stabilization at `b67a3483d2a1670e01b29716a1a33df51e10f7a1`; Gates 21B-3 and
+21B-4 remain planned, separately gated, and not begun. The exact
+decision-complete contract is
 [`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md).
 
 Gate 21B-1 establishes the current-only reusable-resource v1 and library-config
@@ -2271,6 +2273,17 @@ Curve Motif icon, wide gallery, and canonical private preview with clean app
 logs. This is automated semantic/pixel/diagnostic evidence, not manual
 GNOME/Mutter acceptance; the narrow keyboard-restoration probe remains an
 inconclusive nonblocking limitation.
+
+The accepted Gate 21B-2 stabilization makes ordinary development builds use
+optimization level 2 while retaining development assertions and debug
+information. Model-aware diagnostic evaluation now uses canonical topology for
+RGB, CMYK, and SourceColorAlpha instead of assuming RGB channel IDs. Focused
+regressions preserve ALL/named private materialization, output-response deltas,
+property projection, exact Undo/Redo, and clean rejection of path-output
+recipes under sampled-paint-only SourceColorAlpha. Both immutable sources and
+the CMYK-to-source-alpha private GTK workflow were reverified; release,
+canonical geometry, cache/publication authority, painter order, and channel
+coordination are unchanged.
 
 The wizard remains a modal transient private draft with dirty-close
 confirmation, Cancel discard, and one-history-transition Apply. Capability and
