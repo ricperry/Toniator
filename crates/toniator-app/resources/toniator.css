@@ -16,3 +16,24 @@
 .toniator-draft-controls {
   min-height: 180px;
 }
+
+.toniator-wizard-preview {
+  min-width: 220px;
+  min-height: 220px;
+}
+
+.toniator-wizard-card {
+  padding: 10px;
+  border-radius: 8px;
+  background: alpha(currentColor, 0.04);
+}
+
+.toniator-wizard-card-current {
+  border: 1px solid alpha(#3584e4, 0.75);
+  background: alpha(#3584e4, 0.12);
+}
+
+.toniator-wizard-card-badge {
+  color: #3584e4;
+  font-weight: 700;
+}

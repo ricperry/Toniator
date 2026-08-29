@@ -45,4 +45,14 @@ pub(crate) enum AppEvent {
         epoch: u64,
         progress: EvaluationProgress,
     },
+    /// Delivers a Pattern Wizard scheduler candidate for one captured modal epoch.
+    WizardPreview {
+        epoch: u64,
+        completion: EvaluationCompletion,
+    },
+    /// Delivers monotonic progress for the newest Pattern Wizard preview ticket.
+    WizardPreviewProgress {
+        epoch: u64,
+        progress: EvaluationProgress,
+    },
 }

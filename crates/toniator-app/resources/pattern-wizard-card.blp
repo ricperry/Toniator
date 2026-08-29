@@ -1,0 +1,48 @@
+using Gtk 4.0;
+
+template $ToniatorPatternWizardCard : Gtk.Box {
+  orientation: vertical;
+  spacing: 6;
+  styles [ "toniator-wizard-card" ]
+
+  Gtk.Image wizard_card_thumbnail {
+    pixel-size: 96;
+    halign: start;
+  }
+
+  Gtk.Label wizard_card_name {
+    xalign: 0;
+    styles [ "heading" ]
+  }
+
+  Gtk.Label wizard_card_category {
+    xalign: 0;
+    styles [ "dim-label" ]
+  }
+
+  Gtk.Label wizard_card_current_candidate {
+    label: "Current candidate";
+    visible: false;
+    xalign: 0;
+    styles [ "toniator-wizard-card-badge" ]
+  }
+
+  Gtk.Label wizard_card_description {
+    xalign: 0;
+    wrap: true;
+    styles [ "dim-label" ]
+  }
+
+  Gtk.Label wizard_card_unavailable {
+    visible: false;
+    xalign: 0;
+    wrap: true;
+    styles [ "dim-label" ]
+  }
+
+  Gtk.Box wizard_card_actions {
+    orientation: vertical;
+    spacing: 8;
+    hexpand: true;
+  }
+}

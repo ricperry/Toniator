@@ -55,11 +55,12 @@ use toniator_engine::{
     SourceIdentity, encode_png, evaluate_with_limits, rasterize_output, reduced_preview_png,
     resolve_source_identity, write_svg,
 };
+use toniator_io::personal_library::{LibraryEnvironment, PersonalLibrary, PersonalLibraryPaths};
 use toniator_io::{
     EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load as load_container,
     save as save_container,
 };
-use toniator_patterns::PresetRegistry;
+use toniator_patterns::{LayeredPresetCatalog, PresetOrigin, PresetRegistry};
 use view_models::{LifecycleViewModel, project_document};
 
 const APP_ID: &str = "com.silentbutdigital.Toniator";
@@ -82,6 +83,33 @@ const OPEN_FILTER_LABELS: [&str; 10] = [
 ];
 const SAVE_FILTER_LABEL: &str = "Toniator documents (.toniator)";
 const EXPORT_FILTER_LABELS: [&str; 2] = ["PNG image", "SVG vector image"];
+/// Lists every Gate 21B-2 image resource whose GResource presence is test-authoritative.
+///
+/// The first entry is the ordinary synthetic thumbnail source. The remaining exact 17 entries are
+/// the adopted Stage 20S built-in icon subset, including Curve Motif.
+#[cfg(test)]
+const WIZARD_IMAGE_RESOURCE_PATHS: [&str; 18] = [
+    "/com/silentbutdigital/Toniator/preset-icon-source.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/clustered-dispersion-random-links.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/curve-motif-rows.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/even-random-circles.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/grid-voronoi-scale.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/one-guide-lines.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/residual-sites-along-guide.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/round-spiral-line.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/round-spiral-marks.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/source-weighted-dispersion-voronoi.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/square-spiral-marks.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/straight-grid-circles.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/three-guide-cells-scale.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/three-guide-maze.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/triagrid-custom-shape-marks.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/triagrid-spanning-tree.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/two-guide-cells-uniform-offset.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/two-guide-maze.svg",
+];
+const WIZARD_EDIT_UNAVAILABLE_EXPLANATION: &str =
+    "Editing this recipe arrives in the next Pattern Wizard gate; Use as is is available now.";
 const LIFECYCLE_BUTTONS: [(&str, &str, &str); 6] = [
     ("_New", "app.new", "New document (Ctrl+N)"),
     ("_Open", "app.open", "Open a document or artwork (Ctrl+O)"),
@@ -768,6 +796,24 @@ fn accepts_private_preview_terminal(
     current_epoch == completion_epoch && pending_ticket == Some(completion_ticket)
 }
 
+/// Models private-preview surface retention after one terminal completion without any GTK mutation.
+///
+/// A stale completion and a newest-ticket error both retain the last successful surface. Only a
+/// newest accepted completion with a rendered surface can replace it; this pure boundary mirrors
+/// the terminal handler’s `Picture` installation rule for focused tests.
+#[cfg(test)]
+fn wizard_preview_surface_after<T: Copy>(
+    last_success: Option<T>,
+    terminal_accepted: bool,
+    completed_surface: Option<T>,
+) -> Option<T> {
+    if terminal_accepted {
+        completed_surface.or(last_success)
+    } else {
+        last_success
+    }
+}
+
 #[derive(Clone)]
 struct Actions {
     new: gio::SimpleAction,
@@ -857,6 +903,12 @@ const CONSTRUCTION_SIDEBAR_WIDTH_PX: i32 = 320;
 
 /// Defines the smallest usable channel-settings sidebar allocation.
 const MAIN_SIDEBAR_MIN_WIDTH_PX: i32 = 300;
+/// Fixes the private Wizard source-proxy bound without changing document density authority.
+const WIZARD_SOURCE_PROXY_LONGEST_EDGE: u32 = 256;
+/// Fixes the private Wizard output target without changing export dimensions.
+const WIZARD_PREVIEW_TARGET_PX: u32 = 512;
+/// Changes the Wizard semantic grouping from side-by-side to stacked below this allocation.
+const WIZARD_NARROW_MAX_WIDTH_PX: i32 = 760;
 
 /// Defines the largest channel-settings sidebar allocation at wide window sizes.
 const MAIN_SIDEBAR_MAX_WIDTH_PX: i32 = 420;
@@ -1006,6 +1058,93 @@ struct AdvancedSettingsSurface {
     preview_bridge_stop: Arc<AtomicBool>,
 }
 
+/// Holds one modal Pattern Wizard clone and its independent canonical preview route.
+///
+/// The surface captures a stable target and compact candidate at open. Its history, source proxy,
+/// tickets, texture, and widget state never alter the main workspace until its explicit Apply.
+struct PatternWizardSurface {
+    epoch: u64,
+    window: gtk::Window,
+    draft: Rc<RefCell<DocumentHistory>>,
+    initial_document: Document,
+    target: InspectorTarget,
+    candidate: Option<String>,
+    materialized_candidate: Option<String>,
+    gallery_cards: BTreeMap<String, components::ToniatorPatternWizardCard>,
+    preview_source: WizardPreviewSource,
+    picture: gtk::Picture,
+    spinner: gtk::Spinner,
+    status: gtk::Label,
+    breadcrumb: gtk::Label,
+    page: gtk::Box,
+    back: gtk::Button,
+    review: gtk::Button,
+    apply: gtk::Button,
+    scheduler: Arc<EvaluationScheduler>,
+    preview_submission: Option<u64>,
+    preview_bridge_stop: Arc<AtomicBool>,
+    invoking_edit: gtk::Button,
+}
+
+/// Names the current private wizard page for navigation sensitivity only.
+///
+/// This presentation enum does not encode a document target, catalog record, draft command, or
+/// history state. It merely prevents a visible navigation action from resolving to its own page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WizardNavigationPage {
+    Gallery,
+    Edit,
+    Review,
+}
+
+/// Carries the enabled state of private wizard navigation controls for one visible page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WizardNavigationSensitivity {
+    back_enabled: bool,
+    review_enabled: bool,
+}
+
+/// Derives Back and Review sensitivity from visible page and actual draft materialization.
+///
+/// A captured compact candidate is presentation-only and cannot enable Review. The action becomes
+/// available only after a card has materialized a catalog record in the private draft; Review then
+/// disables itself on its own page while Back remains available away from Gallery.
+fn wizard_navigation_sensitivity(
+    page: WizardNavigationPage,
+    has_materialized_draft: bool,
+) -> WizardNavigationSensitivity {
+    WizardNavigationSensitivity {
+        back_enabled: page != WizardNavigationPage::Gallery,
+        review_enabled: has_materialized_draft && page != WizardNavigationPage::Review,
+    }
+}
+
+/// Applies one pure navigation sensitivity projection without changing wizard draft authority.
+fn apply_wizard_navigation_sensitivity(
+    back: &gtk::Button,
+    review: &gtk::Button,
+    page: WizardNavigationPage,
+    has_materialized_draft: bool,
+) {
+    let sensitivity = wizard_navigation_sensitivity(page, has_materialized_draft);
+    back.set_sensitive(sensitivity.back_enabled);
+    review.set_sensitive(sensitivity.review_enabled);
+}
+
+/// Holds the only source admitted to a Pattern Wizard preview evaluation.
+///
+/// A ready value has a bounded PNG proxy with the original stable source ID. An unavailable value
+/// is visible only inside the private modal and never causes a full-source preview fallback.
+#[derive(Clone)]
+enum WizardPreviewSource {
+    Ready {
+        source: ResolvedSource,
+        width: u32,
+        height: u32,
+    },
+    Unavailable(String),
+}
+
 /// Holds the only source admitted to an Advanced Settings preview evaluation.
 ///
 /// A ready value retains the original source reference ID but supplies bounded PNG proxy bytes.
@@ -1108,9 +1247,13 @@ struct AppState {
     draft_epoch: u64,
     advanced_settings: Option<AdvancedSettingsSurface>,
     advanced_epoch: u64,
+    pattern_wizard: Option<PatternWizardSurface>,
+    wizard_epoch: u64,
     preview: Option<gtk::gdk::Texture>,
     preview_target: Option<toniator_engine::PreviewRasterTarget>,
     presets: PresetRegistry,
+    catalog: LayeredPresetCatalog,
+    catalog_notice: Option<String>,
     automation: Option<AutomationSink>,
     event_sender: async_channel::Sender<AppEvent>,
     preview_bridge_stop: Arc<AtomicBool>,
@@ -1160,6 +1303,59 @@ fn main() {
 fn register_resources() {
     gio::resources_register_include!("toniator.gresource")
         .expect("failed to register compiled Toniator GResource");
+}
+
+/// Initializes the active personal library and combines its valid records with immutable built-ins.
+///
+/// Filesystem and scan failures remain a visible nonfatal frontend notice: the returned catalog
+/// always preserves the bundled registry. This function does not create a second recipe model or
+/// change document/history authority.
+fn initialize_layered_catalog(registry: &PresetRegistry) -> (LayeredPresetCatalog, Option<String>) {
+    let environment = LibraryEnvironment {
+        data_home: env::var_os("XDG_DATA_HOME").map(PathBuf::from),
+        config_home: env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+        home: env::var_os("HOME").map(PathBuf::from),
+    };
+    let loaded = PersonalLibraryPaths::default_for(&environment)
+        .and_then(PersonalLibrary::open_or_initialize)
+        .and_then(|library| library.scan());
+    match loaded {
+        Ok(snapshot) => match LayeredPresetCatalog::new(
+            registry,
+            snapshot
+                .presets
+                .into_iter()
+                .map(|entry| entry.preset)
+                .collect(),
+        ) {
+            Ok(catalog) => {
+                let notices = snapshot
+                    .warnings
+                    .into_iter()
+                    .map(|warning| format!("{}: {}", warning.path.display(), warning.message))
+                    .chain(
+                        catalog
+                            .warnings()
+                            .iter()
+                            .map(|warning| format!("{}: {}", warning.id, warning.message)),
+                    )
+                    .collect::<Vec<_>>();
+                let notice = (!notices.is_empty())
+                    .then(|| format!("Some personal presets were skipped: {}", notices.join("; ")));
+                (catalog, notice)
+            }
+            Err(error) => (
+                LayeredPresetCatalog::new(registry, Vec::new())
+                    .expect("bundled registry remains a valid layered catalog"),
+                Some(format!("Personal presets are unavailable: {error}")),
+            ),
+        },
+        Err(error) => (
+            LayeredPresetCatalog::new(registry, Vec::new())
+                .expect("bundled registry remains a valid layered catalog"),
+            Some(format!("Personal presets are unavailable: {error}")),
+        ),
+    }
 }
 
 fn parse_args(arguments: Vec<std::ffi::OsString>) -> Result<Option<PathBuf>, String> {
@@ -1280,6 +1476,8 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
     app.set_accels_for_action("app.undo", &["<Primary>z"]);
     app.set_accels_for_action("app.redo", &["<Primary><Shift>z"]);
     let (event_sender, event_receiver) = async_channel::unbounded();
+    let presets = PresetRegistry::bundled();
+    let (catalog, catalog_notice) = initialize_layered_catalog(&presets);
     let state = Rc::new(RefCell::new(AppState {
         application_model: application_model::ApplicationModel::new(),
         syncing_model: false,
@@ -1317,13 +1515,20 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
         draft_epoch: 0,
         advanced_settings: None,
         advanced_epoch: 0,
+        pattern_wizard: None,
+        wizard_epoch: 0,
         preview: None,
         preview_target: None,
-        presets: PresetRegistry::bundled(),
+        presets,
+        catalog,
+        catalog_notice,
         automation: AutomationSink::from_environment(),
         event_sender,
         preview_bridge_stop: Arc::new(AtomicBool::new(false)),
     }));
+    if let Some(notice) = state.borrow().catalog_notice.as_deref() {
+        state.borrow().shell.set_banner(Some(notice));
+    }
     {
         let state_for_dismiss = Rc::clone(&state);
         state
@@ -2442,11 +2647,11 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
             if state.inspector_runtime.pattern_candidate.is_none() {
                 state.inspector_runtime.pattern_candidate = Some(
                     state
-                        .presets
+                        .catalog
                         .entries()
                         .iter()
-                        .find(|entry| entry.metadata.name == active_pattern_text)
-                        .map(|entry| PatternCandidate::Preset(entry.metadata.id.clone()))
+                        .find(|entry| entry.preset.metadata.name == active_pattern_text)
+                        .map(|entry| PatternCandidate::Preset(entry.preset.metadata.id.clone()))
                         .unwrap_or(PatternCandidate::Custom),
                 );
             }
@@ -2548,10 +2753,10 @@ fn sync_pattern_candidate_selector(state: &Rc<RefCell<AppState>>) {
         app_state.syncing_inspector = true;
         let selected = match app_state.inspector_runtime.pattern_candidate.as_ref() {
             Some(PatternCandidate::Preset(id)) => app_state
-                .presets
+                .catalog
                 .entries()
                 .iter()
-                .position(|entry| &entry.metadata.id == id)
+                .position(|entry| &entry.preset.metadata.id == id)
                 .map(|index| index as u32 + 1)
                 .unwrap_or(0),
             Some(PatternCandidate::Custom) | None => 0,
@@ -2757,8 +2962,7 @@ fn descriptor_detail_text(current: &PropertyCurrentValue) -> String {
 /// Adds one compact non-mutating recipe selector and explicit pattern actions.
 ///
 /// The dropdown stores runtime candidate selection only. A document transition
-/// occurs exclusively through Apply Pattern; Edit Pattern remains visibly
-/// disabled until the accepted Stage 21B Pattern Wizard checkpoint.
+/// occurs exclusively through Apply Pattern; Edit Pattern opens a captured private wizard.
 fn append_preset_catalog(state: &Rc<RefCell<AppState>>, inspector: &gtk::Box) {
     let heading = gtk::Label::new(Some("Pattern"));
     heading.set_xalign(0.0);
@@ -2766,10 +2970,15 @@ fn append_preset_catalog(state: &Rc<RefCell<AppState>>, inspector: &gtk::Box) {
     inspector.append(&heading);
     let entries = state
         .borrow()
-        .presets
+        .catalog
         .entries()
         .iter()
-        .map(|entry| (entry.metadata.id.clone(), entry.metadata.name.clone()))
+        .map(|entry| {
+            (
+                entry.preset.metadata.id.clone(),
+                entry.preset.metadata.name.clone(),
+            )
+        })
         .collect::<Vec<_>>();
     let mut labels = vec!["Custom pattern".to_owned()];
     labels.extend(entries.iter().map(|(_, name)| name.clone()));
@@ -2808,10 +3017,14 @@ fn append_preset_catalog(state: &Rc<RefCell<AppState>>, inspector: &gtk::Box) {
     let state_for_apply = Rc::clone(state);
     apply.connect_clicked(move |_| apply_pattern_candidate(&state_for_apply));
     let edit = gtk::Button::with_mnemonic("_Edit Pattern");
-    edit.set_sensitive(false);
-    let edit_explanation = "Pattern Wizard arrives in Stage 21B.";
+    edit.set_sensitive(true);
+    let edit_explanation =
+        "Open the private Pattern Wizard. Changes do not affect the artwork until Apply.";
     edit.set_tooltip_text(Some(edit_explanation));
     edit.update_property(&[gtk::accessible::Property::Description(edit_explanation)]);
+    let state_for_edit = Rc::clone(state);
+    let edit_for_restore = edit.clone();
+    edit.connect_clicked(move |_| open_pattern_wizard(&state_for_edit, edit_for_restore.clone()));
     actions.append(&apply);
     actions.append(&edit);
     inspector.append(&actions);
@@ -2825,6 +3038,1032 @@ fn append_preset_catalog(state: &Rc<RefCell<AppState>>, inspector: &gtk::Box) {
     app_state.apply_pattern_button = Some(apply);
 }
 
+/// Opens the one modal Pattern Wizard and captures the invoking target and compact candidate once.
+///
+/// Repeated activation presents the same modal instead of creating a second draft. The captured
+/// candidate remains non-mutating until a card action changes only the cloned draft history.
+fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button) {
+    if let Some(window) = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .map(|surface| surface.window.clone())
+    {
+        window.present();
+        return;
+    }
+    let (draft, initial_document, sources, presentation, target, candidate, parent, epoch, catalog) = {
+        let mut app_state = state.borrow_mut();
+        app_state.wizard_epoch = app_state.wizard_epoch.saturating_add(1);
+        let epoch = app_state.wizard_epoch;
+        let Some(workspace) = app_state.workspace.as_ref() else {
+            return;
+        };
+        (
+            Rc::new(RefCell::new(DocumentHistory::new_draft(&workspace.history))),
+            workspace.document().clone(),
+            workspace.sources.clone(),
+            workspace.source_presentation.clone(),
+            app_state.inspector_runtime.target,
+            match &app_state.inspector_runtime.pattern_candidate {
+                Some(PatternCandidate::Preset(id)) => Some(id.clone()),
+                Some(PatternCandidate::Custom) | None => None,
+            },
+            app_state.window.clone(),
+            epoch,
+            app_state.catalog.clone(),
+        )
+    };
+    let window = gtk::Window::builder()
+        .title("Pattern Wizard")
+        .transient_for(&parent)
+        .modal(true)
+        .default_width(980)
+        .default_height(680)
+        .build();
+    let shell = components::ToniatorPatternWizardShell::new();
+    let preview_source = prepare_wizard_preview_source(&sources, presentation.as_ref());
+    let breadcrumb = shell.breadcrumb();
+    breadcrumb.set_label(&wizard_breadcrumb(target, None));
+    let status = shell.status();
+    let picture = shell.preview();
+    let spinner = shell.spinner();
+    let page = shell.page();
+    let apply = gtk::Button::with_mnemonic("_Apply");
+    apply.set_sensitive(false);
+    let back = gtk::Button::with_mnemonic("_Back");
+    back.set_sensitive(false);
+    let cancel = gtk::Button::with_mnemonic("_Cancel");
+    let review = gtk::Button::with_mnemonic("_Review");
+    review.set_sensitive(false);
+    shell.append_action(&back);
+    shell.append_action(&cancel);
+    shell.append_action(&review);
+    shell.append_action(&apply);
+    let layout = shell.layout();
+    reflow_wizard_layout_while_visible(&window, &layout);
+    let scheduler =
+        Arc::new(EvaluationScheduler::new().expect("Pattern Wizard private scheduler starts"));
+    let preview_bridge_stop = Arc::new(AtomicBool::new(false));
+    start_wizard_preview_event_bridge(
+        Arc::clone(&scheduler),
+        state.borrow().event_sender.clone(),
+        Arc::clone(&preview_bridge_stop),
+        epoch,
+    );
+    state.borrow_mut().pattern_wizard = Some(PatternWizardSurface {
+        epoch,
+        window: window.clone(),
+        draft,
+        initial_document,
+        target,
+        candidate,
+        materialized_candidate: None,
+        gallery_cards: BTreeMap::new(),
+        preview_source,
+        picture,
+        spinner,
+        status,
+        breadcrumb,
+        page,
+        back: back.clone(),
+        review: review.clone(),
+        apply: apply.clone(),
+        scheduler,
+        preview_submission: None,
+        preview_bridge_stop,
+        invoking_edit,
+    });
+    let gallery_cards = append_wizard_gallery(state, epoch, &shell.gallery(), &catalog);
+    if let Some(surface) = state
+        .borrow_mut()
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.gallery_cards = gallery_cards;
+    }
+    show_wizard_gallery_page(state, epoch);
+    let state_for_back = Rc::clone(state);
+    back.connect_clicked(move |_| show_wizard_gallery_page(&state_for_back, epoch));
+    let state_for_review = Rc::clone(state);
+    review.connect_clicked(move |_| show_wizard_review_page(&state_for_review, epoch));
+    let state_for_cancel = Rc::clone(state);
+    cancel.connect_clicked(move |_| request_wizard_discard(&state_for_cancel, epoch));
+    let state_for_apply = Rc::clone(state);
+    apply.connect_clicked(move |_| apply_pattern_wizard(&state_for_apply, epoch));
+    let state_for_close = Rc::clone(state);
+    window.connect_close_request(move |_| {
+        if state_for_close
+            .borrow()
+            .pattern_wizard
+            .as_ref()
+            .is_some_and(|surface| surface.epoch == epoch)
+        {
+            request_wizard_discard(&state_for_close, epoch);
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    window.set_child(Some(&shell));
+    window.present();
+    submit_wizard_preview(state, epoch);
+}
+
+/// Builds the only bounded private source proxy used by one Pattern Wizard lifetime.
+///
+/// The proxy preserves the source reference ID while reducing ordinary PNG/SVG bytes to the
+/// approved 256-pixel longest edge. Errors stay local to the modal and never request full bytes.
+fn prepare_wizard_preview_source(
+    sources: &SourceBundle,
+    presentation: Option<&SourcePresentation>,
+) -> WizardPreviewSource {
+    let Some(presentation) = presentation else {
+        return WizardPreviewSource::Unavailable("no source artwork is assigned".to_owned());
+    };
+    let Some(source) = sources.get(&presentation.id) else {
+        return WizardPreviewSource::Unavailable("the source bundle is incomplete".to_owned());
+    };
+    reduced_preview_png(
+        source.bytes(),
+        presentation.format,
+        WIZARD_SOURCE_PROXY_LONGEST_EDGE,
+    )
+    .map_err(|error| error.to_string())
+    .and_then(|proxy| {
+        ResolvedSource::new(
+            presentation.id.clone(),
+            Arc::<[u8]>::from(proxy.png_bytes),
+            SourceFormatHint::Png,
+        )
+        .map(|source| (source, proxy.width, proxy.height))
+        .map_err(|error| error.to_string())
+    })
+    .map_or_else(
+        WizardPreviewSource::Unavailable,
+        |(source, width, height)| WizardPreviewSource::Ready {
+            source,
+            width,
+            height,
+        },
+    )
+}
+
+/// Returns the responsive wizard orientation for one actual allocated window width.
+///
+/// The threshold only changes GTK presentation grouping; it never changes the private draft,
+/// selected catalog record, navigation state, preview request, or keyboard focus authority.
+fn wizard_layout_orientation(width: i32) -> gtk::Orientation {
+    if width <= WIZARD_NARROW_MAX_WIDTH_PX {
+        gtk::Orientation::Vertical
+    } else {
+        gtk::Orientation::Horizontal
+    }
+}
+
+/// Renders one responsive wizard composition without changing navigation, draft, or focus state.
+fn apply_wizard_layout(layout: &gtk::Box, width: i32) {
+    layout.set_orientation(wizard_layout_orientation(width));
+}
+
+/// Tracks actual wizard allocation while the transient window is visible and reflows only on change.
+///
+/// GTK default-size notifications do not describe ordinary interactive resizing. This bounded
+/// 100ms local tick reads the allocated `GtkWindow::width`, stops as soon as the wizard hides, and
+/// changes only the template-owned layout orientation without retaining document or scheduler state.
+fn reflow_wizard_layout_while_visible(window: &gtk::Window, layout: &gtk::Box) {
+    let window = window.clone();
+    let layout = layout.clone();
+    let last_width = Rc::new(Cell::new(i32::MIN));
+    let last_width_for_tick = Rc::clone(&last_width);
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        if !window.is_visible() {
+            return glib::ControlFlow::Break;
+        }
+        let width = window.width();
+        if last_width_for_tick.replace(width) != width {
+            apply_wizard_layout(&layout, width);
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
+/// Formats the wizard target and selected card family from captured presentation-only facts.
+fn wizard_breadcrumb(target: InspectorTarget, category: Option<&str>) -> String {
+    let scope = match target {
+        InspectorTarget::DocumentAll => "ALL",
+        InspectorTarget::Channel(_) => "Selected channel",
+    };
+    category.map_or_else(
+        || format!("Pattern Wizard · {scope}"),
+        |category| format!("Pattern Wizard · {scope} · {category}"),
+    )
+}
+
+/// Returns the visible and therefore AT-SPI-surfaced Use action text for one catalog card.
+///
+/// The complete metadata name keeps repeated actions distinguishable without inventing a second
+/// identity. The Blueprint action column supplies the 255px gallery width required for wrapping.
+fn wizard_use_action_label(name: &str) -> String {
+    format!("Use {name} as is")
+}
+
+/// Returns the visible and therefore AT-SPI-surfaced Edit action text for one catalog card.
+///
+/// Disabled buttons retain this exact unique text plus their available/unavailable description,
+/// so assistive technology does not need an ignored invisible label to identify the card action.
+fn wizard_edit_action_label(name: &str) -> String {
+    format!("Edit {name}")
+}
+
+/// Appends one accessible card for every entry in the shared layered catalog order.
+///
+/// Built-in resource thumbnails remain exact GResource SVGs for the authorized 17-item subset.
+/// Personal entries receive a canonical synthetic-source thumbnail instead. The
+/// returned stable-ID map is presentation-only and permits one current-candidate marker to update
+/// without changing catalog order, metadata, draft, history, or evaluator authority.
+fn append_wizard_gallery(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    gallery: &gtk::Box,
+    catalog: &LayeredPresetCatalog,
+) -> BTreeMap<String, components::ToniatorPatternWizardCard> {
+    let mut cards = BTreeMap::new();
+    for entry in catalog.entries() {
+        let card = components::ToniatorPatternWizardCard::new();
+        populate_wizard_card_thumbnail(&card, catalog, entry);
+        card.set_name(&entry.preset.metadata.name);
+        card.relate_accessible_name_to_card_title();
+        card.set_category(&entry.preset.metadata.category);
+        card.set_description(&entry.preset.metadata.description);
+        let use_action_label = wizard_use_action_label(&entry.preset.metadata.name);
+        let use_as_is = gtk::Button::with_label(&use_action_label);
+        use_as_is.update_property(&[
+            gtk::accessible::Property::Label(&use_action_label),
+            gtk::accessible::Property::Description(
+                "Materialize this recipe in the private draft and review it before Apply.",
+            ),
+        ]);
+        let state_for_use = Rc::clone(state);
+        let id_for_use = entry.preset.metadata.id.clone();
+        use_as_is
+            .connect_clicked(move |_| use_wizard_preset(&state_for_use, epoch, &id_for_use, false));
+        card.append_action(&use_as_is);
+        let edit_action_label = wizard_edit_action_label(&entry.preset.metadata.name);
+        let edit = gtk::Button::with_label(&edit_action_label);
+        let edit_available = wizard_edit_allowlisted(&entry.preset.metadata.id);
+        edit.set_sensitive(edit_available);
+        let explanation = if edit_available {
+            "Open this recipe’s capability-driven private edit page."
+        } else {
+            WIZARD_EDIT_UNAVAILABLE_EXPLANATION
+        };
+        edit.set_tooltip_text(Some(explanation));
+        edit.update_property(&[
+            gtk::accessible::Property::Label(&edit_action_label),
+            gtk::accessible::Property::Description(explanation),
+        ]);
+        let state_for_edit = Rc::clone(state);
+        let id_for_edit = entry.preset.metadata.id.clone();
+        edit.connect_clicked(move |_| {
+            use_wizard_preset(&state_for_edit, epoch, &id_for_edit, true)
+        });
+        card.append_action(&edit);
+        card.set_unavailable((!edit_available).then_some(explanation));
+        card.update_property(&[
+            gtk::accessible::Property::Label(&format!(
+                "{} pattern card",
+                entry.preset.metadata.name
+            )),
+            gtk::accessible::Property::Description(&format!(
+                "{} · {} · {}",
+                entry.preset.metadata.category, entry.preset.metadata.description, explanation
+            )),
+        ]);
+        gallery.append(&card);
+        cards.insert(entry.preset.metadata.id.clone(), card);
+    }
+    cards
+}
+
+/// Returns whether one stable catalog ID is the captured or latest private wizard candidate.
+///
+/// Names, categories, descriptions, and thumbnails deliberately do not participate in this marker
+/// identity; catalog ordering and record identity remain the sole projection authority.
+fn wizard_card_is_current_candidate(card_id: &str, candidate: Option<&str>) -> bool {
+    candidate == Some(card_id)
+}
+
+/// Updates visible and accessible candidate markers without changing any private draft content.
+fn update_wizard_candidate_cards(
+    cards: &BTreeMap<String, components::ToniatorPatternWizardCard>,
+    candidate: Option<&str>,
+) {
+    for (id, card) in cards {
+        card.set_current_candidate(wizard_card_is_current_candidate(id, candidate));
+    }
+}
+
+/// Populates one static wizard-card thumbnail without changing renderer or ordinary SVG policy.
+///
+/// Every authorized built-in uses its exact GResource SVG. Personal entries use a normal
+/// synthetic-source recipe evaluation so no renderer branch or hidden recipe behavior is added.
+fn populate_wizard_card_thumbnail(
+    card: &components::ToniatorPatternWizardCard,
+    catalog: &LayeredPresetCatalog,
+    entry: &toniator_patterns::LayeredPresetEntry,
+) {
+    if entry.origin == PresetOrigin::BuiltIn {
+        card.set_thumbnail_resource(&format!(
+            "{RESOURCE_PREFIX}/preset-icons/{}.svg",
+            entry.preset.metadata.id
+        ));
+        return;
+    }
+    if let Some(texture) = render_synthetic_catalog_thumbnail(catalog, &entry.preset.metadata.id) {
+        card.set_thumbnail_paintable(Some(&texture));
+    }
+}
+
+/// Materializes and renders a personal record through the ordinary canonical path.
+///
+/// This synchronous gallery fallback is presentation-only: it uses a synthetic resource bundled
+/// in the GResource, applies the ID-free recipe to temporary history, and installs no
+/// document/cache state. Built-ins never take this route because their stored icon SVGs are exact.
+fn render_synthetic_catalog_thumbnail(
+    catalog: &LayeredPresetCatalog,
+    id: &str,
+) -> Option<gtk::gdk::Texture> {
+    let bytes = gio::resources_lookup_data(
+        &format!("{RESOURCE_PREFIX}/preset-icon-source.svg"),
+        gio::ResourceLookupFlags::NONE,
+    )
+    .ok()?;
+    let source_id = SourceReferenceId::new("wizard-synthetic-thumbnail").ok()?;
+    let source = ResolvedSource::new(
+        source_id.clone(),
+        Arc::<[u8]>::from(bytes.as_ref()),
+        SourceFormatHint::Svg,
+    )
+    .ok()?;
+    let document = Document::new_default_document(
+        CanvasSpec {
+            width: 100.0,
+            height: 100.0,
+        },
+        SourceReference::Assigned(source_id),
+    )
+    .ok()?;
+    let mut history = DocumentHistory::new(DocumentSession::new(document).ok()?);
+    catalog.apply_to_document_base(&mut history, id).ok()?;
+    let request = EvaluationRequest::with_preview_target(
+        history.session().document_evaluation_snapshot(),
+        source,
+        toniator_engine::PreviewRasterTarget::new(100, 100).ok()?,
+    );
+    let result = evaluate_with_limits(request, EvaluationLimits::default()).ok()?;
+    texture_from_surface(result.raster()).ok()
+}
+
+/// Returns the temporary Gate 21B-2 stable-ID allowlist and no other behavioral selector.
+fn wizard_edit_allowlisted(id: &str) -> bool {
+    matches!(
+        id,
+        "curve-motif-rows" | "one-guide-lines" | "even-random-circles" | "round-spiral-line"
+    )
+}
+
+/// Materializes one selected catalog record in the captured private draft and opens Review or Edit.
+///
+/// The target is the value captured at modal open, never the current sidebar selection. Failure
+/// leaves the previous private draft intact and visible; successful materialization schedules only
+/// the wizard scheduler and does not publish main history.
+fn use_wizard_preset(state: &Rc<RefCell<AppState>>, epoch: u64, id: &str, edit: bool) {
+    let result = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        let mut draft = surface.draft.borrow_mut();
+        match surface.target {
+            InspectorTarget::DocumentAll => {
+                app_state.catalog.apply_to_document_base(&mut draft, id)
+            }
+            InspectorTarget::Channel(channel_id) => app_state
+                .catalog
+                .apply_to_selected(&mut draft, channel_id, id),
+        }
+    };
+    match result {
+        Ok(_) => {
+            if let Some(surface) = state
+                .borrow_mut()
+                .pattern_wizard
+                .as_mut()
+                .filter(|surface| surface.epoch == epoch)
+            {
+                surface.candidate = Some(id.to_owned());
+                surface.materialized_candidate = Some(id.to_owned());
+                update_wizard_candidate_cards(&surface.gallery_cards, surface.candidate.as_deref());
+                surface.apply.set_sensitive(wizard_apply_enabled(
+                    surface.draft.borrow().document(),
+                    &surface.initial_document,
+                ));
+            }
+            if edit {
+                show_wizard_edit_page(state, epoch);
+            } else {
+                show_wizard_review_page(state, epoch);
+            }
+            submit_wizard_preview(state, epoch);
+        }
+        Err(error) => {
+            if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+                surface.status.set_label(&format!(
+                    "Couldn’t use this recipe in the private draft: {error}"
+                ));
+            }
+        }
+    }
+}
+
+/// Removes every dynamic control while preserving the static shell, preview, and spinner widgets.
+fn clear_wizard_page(page: &gtk::Box) {
+    while let Some(child) = page.first_child() {
+        page.remove(&child);
+    }
+}
+
+/// Reports whether a validated private wizard draft differs exactly from its captured document.
+///
+/// `DocumentHistory` admits only validated documents, so equality is the no-op authority. Preview
+/// pending state, texture success, and gallery selection deliberately do not affect Apply.
+fn wizard_apply_enabled(draft: &Document, initial_document: &Document) -> bool {
+    draft != initial_document
+}
+
+/// Shows the neutral Gallery page without discarding the private draft or its last successful preview.
+fn show_wizard_gallery_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let (page, breadcrumb, status, candidate, catalog, target, cards, back, review, materialized) = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        (
+            surface.page.clone(),
+            surface.breadcrumb.clone(),
+            surface.status.clone(),
+            surface.candidate.clone(),
+            app_state.catalog.clone(),
+            surface.target,
+            surface.gallery_cards.clone(),
+            surface.back.clone(),
+            surface.review.clone(),
+            surface.materialized_candidate.is_some(),
+        )
+    };
+    clear_wizard_page(&page);
+    apply_wizard_navigation_sensitivity(
+        &back,
+        &review,
+        WizardNavigationPage::Gallery,
+        materialized,
+    );
+    update_wizard_candidate_cards(&cards, candidate.as_deref());
+    if let Some(entry) = candidate.as_deref().and_then(|id| catalog.find(id)) {
+        breadcrumb.set_label(&wizard_breadcrumb(
+            target,
+            Some(&entry.preset.metadata.category),
+        ));
+        status.set_label(&format!(
+            "{} is selected. Use as is keeps this choice private until Review and Apply.",
+            entry.preset.metadata.name
+        ));
+    } else {
+        breadcrumb.set_label(&wizard_breadcrumb(target, None));
+        status.set_label("Choose a pattern. Nothing changes until Apply.");
+    }
+}
+
+/// Shows Review from the cloned history and enables Apply only for a valid non-no-op draft.
+fn show_wizard_review_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let (
+        page,
+        breadcrumb,
+        status,
+        back,
+        review,
+        apply,
+        materialized_candidate,
+        catalog,
+        target,
+        dirty,
+    ) = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        (
+            surface.page.clone(),
+            surface.breadcrumb.clone(),
+            surface.status.clone(),
+            surface.back.clone(),
+            surface.review.clone(),
+            surface.apply.clone(),
+            surface.materialized_candidate.clone(),
+            app_state.catalog.clone(),
+            surface.target,
+            wizard_apply_enabled(surface.draft.borrow().document(), &surface.initial_document),
+        )
+    };
+    let Some(candidate) = materialized_candidate else {
+        show_wizard_gallery_page(state, epoch);
+        return;
+    };
+    clear_wizard_page(&page);
+    apply_wizard_navigation_sensitivity(&back, &review, WizardNavigationPage::Review, true);
+    let heading = gtk::Label::new(Some("Review"));
+    heading.add_css_class("heading");
+    heading.set_xalign(0.0);
+    page.append(&heading);
+    let Some(entry) = catalog.find(&candidate) else {
+        let no_choice = gtk::Label::new(Some("Choose a gallery card before review."));
+        no_choice.set_xalign(0.0);
+        no_choice.set_wrap(true);
+        page.append(&no_choice);
+        apply.set_sensitive(false);
+        status.set_label("Apply is unavailable until a valid private draft changes the document.");
+        return;
+    };
+    breadcrumb.set_label(&wizard_breadcrumb(
+        target,
+        Some(&entry.preset.metadata.category),
+    ));
+    let review = gtk::Label::new(Some(&format!(
+        "{} will publish as one undoable {} change. Cancel discards this private draft.",
+        entry.preset.metadata.name,
+        match target {
+            InspectorTarget::DocumentAll => "ALL/base-pattern",
+            InspectorTarget::Channel(_) => "selected-channel",
+        }
+    )));
+    review.set_xalign(0.0);
+    review.set_wrap(true);
+    page.append(&review);
+    apply.set_sensitive(dirty);
+    status.set_label(if dirty {
+        "Review ready. Apply is available even while a newer private preview is rendering."
+    } else {
+        "This private draft matches the document, so Apply is unavailable."
+    });
+}
+
+/// Shows the temporary four-record edit page using current capability and descriptor projections.
+///
+/// Stable IDs only select the Gate 21B-2 allowlist. Controls are generated from active typed
+/// descriptors, so labels, categories, thumbnails, and names never determine actual editability.
+fn show_wizard_edit_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let (page, breadcrumb, status, back, review, candidate, catalog, target, document) = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        (
+            surface.page.clone(),
+            surface.breadcrumb.clone(),
+            surface.status.clone(),
+            surface.back.clone(),
+            surface.review.clone(),
+            surface.materialized_candidate.clone(),
+            app_state.catalog.clone(),
+            surface.target,
+            surface.draft.borrow().document().clone(),
+        )
+    };
+    clear_wizard_page(&page);
+    let Some(entry) = candidate.as_deref().and_then(|id| catalog.find(id)) else {
+        show_wizard_gallery_page(state, epoch);
+        return;
+    };
+    if !wizard_edit_allowlisted(&entry.preset.metadata.id) {
+        let unavailable = gtk::Label::new(Some(WIZARD_EDIT_UNAVAILABLE_EXPLANATION));
+        unavailable.set_xalign(0.0);
+        unavailable.set_wrap(true);
+        unavailable.update_property(&[gtk::accessible::Property::Description(
+            "This card has no editable page in Gate 21B-2; the wizard has not entered a dead page.",
+        )]);
+        page.append(&unavailable);
+        status.set_label("Edit is unavailable for this card in Gate 21B-2.");
+        return;
+    }
+    apply_wizard_navigation_sensitivity(&back, &review, WizardNavigationPage::Edit, true);
+    breadcrumb.set_label(&wizard_breadcrumb(
+        target,
+        Some(&entry.preset.metadata.category),
+    ));
+    let heading = gtk::Label::new(Some("Edit"));
+    heading.add_css_class("heading");
+    heading.set_xalign(0.0);
+    page.append(&heading);
+    let explanation = gtk::Label::new(Some(
+        "These controls are derived from the current recipe’s active descriptors. They remain private until Apply.",
+    ));
+    explanation.set_xalign(0.0);
+    explanation.set_wrap(true);
+    explanation.add_css_class("dim-label");
+    page.append(&explanation);
+    let values = inline_inspector_values(&document, target);
+    let mut count = 0;
+    for value in values {
+        if let PropertyCurrentValueKind::FiniteF64(current) = value.value {
+            append_wizard_numeric_control(state, epoch, &page, value.descriptor, current);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        let unavailable = gtk::Label::new(Some(
+            "This valid recipe has no scalar controls in this first editing pass. Use as is remains available.",
+        ));
+        unavailable.set_xalign(0.0);
+        unavailable.set_wrap(true);
+        page.append(&unavailable);
+    }
+    status.set_label(
+        "Edit the private draft, then choose Review. Pending preview work does not disable Apply.",
+    );
+}
+
+/// Appends one typed scalar entry sourced from a validated active descriptor projection.
+fn append_wizard_numeric_control(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    descriptor: PropertyDescriptor,
+    value: f64,
+) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let label = gtk::Label::new(Some(&inspector_field_label(descriptor.field)));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let entry = gtk::Entry::new();
+    entry.set_input_purpose(gtk::InputPurpose::Number);
+    entry.set_width_chars(10);
+    entry.set_text(&format!("{value:.4}"));
+    label.set_mnemonic_widget(Some(&entry));
+    let state_for_commit = Rc::clone(state);
+    entry.connect_activate(move |entry| {
+        commit_wizard_numeric_entry(&state_for_commit, epoch, descriptor.clone(), entry);
+    });
+    row.append(&label);
+    row.append(&entry);
+    page.append(&row);
+}
+
+/// Commits one finite private wizard scalar through the established typed command builder.
+fn commit_wizard_numeric_entry(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    descriptor: PropertyDescriptor,
+    entry: &gtk::Entry,
+) {
+    let value = match entry.text().trim().parse::<f64>() {
+        Ok(value) if value.is_finite() => value,
+        _ => {
+            if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+                surface.status.set_label("Enter a finite number.");
+            }
+            return;
+        }
+    };
+    let result = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        let mut draft = surface.draft.borrow_mut();
+        command_for_inspector_input(
+            draft.document(),
+            surface.target.channel_id(),
+            DefinitionEditScope::SelectedCopy,
+            &descriptor,
+            InspectorInput::FiniteF64(value),
+        )
+        .and_then(|command| {
+            draft
+                .apply(&command)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+    };
+    match result {
+        Ok(()) => {
+            if let Some(surface) = state
+                .borrow_mut()
+                .pattern_wizard
+                .as_mut()
+                .filter(|surface| surface.epoch == epoch)
+            {
+                surface.apply.set_sensitive(wizard_apply_enabled(
+                    surface.draft.borrow().document(),
+                    &surface.initial_document,
+                ));
+            }
+            submit_wizard_preview(state, epoch);
+        }
+        Err(error) => {
+            if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+                surface
+                    .status
+                    .set_label(&format!("Couldn’t update this private value: {error}"));
+            }
+        }
+    }
+}
+
+/// Submits the newest wizard draft through an isolated scheduler using the fixed proxy and target.
+///
+/// A newer request supersedes an older ticket. Applying remains independently available when the
+/// cloned history is valid and changed; this helper never consults or blocks main preview state.
+fn submit_wizard_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    {
+        let mut app_state = state.borrow_mut();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        let WizardPreviewSource::Ready { source, .. } = &surface.preview_source else {
+            let WizardPreviewSource::Unavailable(error) = &surface.preview_source else {
+                unreachable!("wizard preview source has two explicit states")
+            };
+            surface
+                .status
+                .set_label(&format!("Private preview unavailable: {error}"));
+            return;
+        };
+        let target = toniator_engine::PreviewRasterTarget::new(
+            WIZARD_PREVIEW_TARGET_PX,
+            WIZARD_PREVIEW_TARGET_PX,
+        )
+        .expect("fixed Pattern Wizard preview target is valid");
+        let request = EvaluationRequest::with_preview_target(
+            surface
+                .draft
+                .borrow()
+                .session()
+                .document_evaluation_snapshot(),
+            source.clone(),
+            target,
+        );
+        match surface.scheduler.submit(request) {
+            Ok(ticket) => {
+                surface.preview_submission = Some(ticket.value());
+                surface.spinner.set_visible(true);
+                surface.spinner.start();
+                surface.status.set_label("Rendering private preview…");
+            }
+            Err(error) => {
+                surface
+                    .status
+                    .set_label(&format!("Private preview unavailable: {error}"));
+            }
+        }
+    };
+}
+
+/// Bridges scheduler progress through the captured wizard epoch without installing texture state.
+fn handle_wizard_preview_progress(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    progress: toniator_engine::EvaluationProgress,
+) {
+    let app_state = state.borrow();
+    let Some(surface) = app_state.pattern_wizard.as_ref().filter(|surface| {
+        accepts_private_preview_terminal(
+            surface.epoch,
+            surface.preview_submission,
+            epoch,
+            progress.ticket().value(),
+        )
+    }) else {
+        return;
+    };
+    surface.status.set_label(&format!(
+        "Rendering private preview: {} · {:.0}%",
+        preview_progress_stage_label(progress.stage()).trim_end_matches('…'),
+        progress.fraction().clamp(0.0, 1.0) * 100.0
+    ));
+}
+
+/// Installs only the newest wizard texture and retains the prior success on failure or staleness.
+fn handle_wizard_preview_completion(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    completion: toniator_engine::EvaluationCompletion,
+) {
+    let mut app_state = state.borrow_mut();
+    let Some(surface) = app_state.pattern_wizard.as_mut() else {
+        return;
+    };
+    if !accepts_private_preview_terminal(
+        surface.epoch,
+        surface.preview_submission,
+        epoch,
+        completion.ticket().value(),
+    ) {
+        return;
+    }
+    surface.preview_submission = None;
+    surface.spinner.stop();
+    surface.spinner.set_visible(false);
+    match surface
+        .scheduler
+        .accept_completion(&completion, surface.draft.borrow().session())
+    {
+        Ok(true) => match completion
+            .result()
+            .and_then(|result| texture_from_surface(result.raster()).ok())
+        {
+            Some(texture) => {
+                surface.picture.set_paintable(Some(&texture));
+                let (width, height) = match &surface.preview_source {
+                    WizardPreviewSource::Ready { width, height, .. } => (*width, *height),
+                    WizardPreviewSource::Unavailable(_) => {
+                        unreachable!("completed wizard preview requires a proxy")
+                    }
+                };
+                surface.status.set_label(&format!(
+                    "Private preview updated ({width} × {height} proxy → {WIZARD_PREVIEW_TARGET_PX} × {WIZARD_PREVIEW_TARGET_PX})."
+                ));
+            }
+            None => surface
+                .status
+                .set_label("Couldn’t render this pattern. Your last preview is still shown."),
+        },
+        Ok(false) => {}
+        Err(_) => surface
+            .status
+            .set_label("Couldn’t render this pattern. Your last preview is still shown."),
+    }
+}
+
+/// Applies exactly one valid changed wizard history squash to its captured main-workspace target.
+fn apply_pattern_wizard(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let draft = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        if !wizard_apply_enabled(surface.draft.borrow().document(), &surface.initial_document) {
+            surface
+                .status
+                .set_label("Apply is unavailable because this private draft makes no change.");
+            return;
+        }
+        Rc::clone(&surface.draft)
+    };
+    let result = {
+        let mut app_state = state.borrow_mut();
+        let Some(workspace) = app_state.workspace.as_mut() else {
+            return;
+        };
+        workspace.history.squash_draft(&draft.borrow())
+    };
+    match result {
+        Ok(result) if !result.unchanged => {
+            let mut app_state = state.borrow_mut();
+            set_preview_pending(&mut app_state);
+            set_inspector_status(
+                &mut app_state,
+                "Pattern Wizard applied as one undoable change.",
+            );
+            sync_ui(&mut app_state);
+            drop(app_state);
+            close_pattern_wizard(state, epoch);
+            rebuild_inspector(state);
+            schedule_main_preview_submission(state);
+        }
+        Ok(_) => {
+            if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+                surface
+                    .status
+                    .set_label("Apply is unavailable because this private draft makes no change.");
+            }
+        }
+        Err(error) => {
+            if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+                surface
+                    .status
+                    .set_label(&format!("Couldn’t apply this private draft: {error}"));
+            }
+        }
+    }
+}
+
+/// Requests disposal of the private wizard, confirming only when its cloned history changed.
+fn request_wizard_discard(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let (dirty, parent) = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        (
+            wizard_apply_enabled(surface.draft.borrow().document(), &surface.initial_document),
+            surface.window.clone(),
+        )
+    };
+    if !dirty {
+        close_pattern_wizard(state, epoch);
+        return;
+    }
+    let dialog = gtk::Window::builder()
+        .title("Discard pattern changes?")
+        .transient_for(&parent)
+        .modal(true)
+        .build();
+    let content = components::ToniatorConfirmationContent::new();
+    content
+        .set_detail("Discard this private Pattern Wizard draft? Your document remains unchanged.");
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let keep = gtk::Button::with_label("Keep editing");
+    let discard = gtk::Button::with_label("Discard changes");
+    let dialog_for_keep = dialog.clone();
+    keep.connect_clicked(move |_| dialog_for_keep.close());
+    let dialog_for_discard = dialog.clone();
+    let state_for_discard = Rc::clone(state);
+    discard.connect_clicked(move |_| {
+        dialog_for_discard.close();
+        close_pattern_wizard(&state_for_discard, epoch);
+    });
+    actions.append(&keep);
+    actions.append(&discard);
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    box_.set_margin_top(12);
+    box_.set_margin_bottom(12);
+    box_.set_margin_start(12);
+    box_.set_margin_end(12);
+    box_.append(&content);
+    box_.append(&actions);
+    dialog.set_child(Some(&box_));
+    dialog.present();
+}
+
+/// Detaches a captured wizard, stops its worker bridge, closes its window, and restores edit focus.
+fn close_pattern_wizard(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let surface = {
+        let mut app_state = state.borrow_mut();
+        app_state
+            .pattern_wizard
+            .as_ref()
+            .is_some_and(|surface| surface.epoch == epoch)
+            .then(|| app_state.pattern_wizard.take())
+            .flatten()
+    };
+    if let Some(surface) = surface {
+        surface.preview_bridge_stop.store(true, Ordering::Release);
+        surface.window.close();
+        surface.invoking_edit.grab_focus();
+    }
+}
+
+/// Stops a wizard bridge while clearing workspace state so stale drafts cannot target replacement data.
+fn take_pattern_wizard_for_workspace_change(state: &mut AppState) -> Option<PatternWizardSurface> {
+    state.pattern_wizard.take().inspect(|surface| {
+        surface.preview_bridge_stop.store(true, Ordering::Release);
+    })
+}
+
 /// Applies the current runtime recipe candidate to ALL or one named channel.
 fn apply_pattern_candidate(state: &Rc<RefCell<AppState>>) {
     let (id, name, target, affected) = {
@@ -2834,7 +4073,7 @@ fn apply_pattern_candidate(state: &Rc<RefCell<AppState>>) {
         else {
             return;
         };
-        let Some(entry) = app_state.presets.find(id) else {
+        let Some(entry) = app_state.catalog.find(id) else {
             return;
         };
         let affected = app_state
@@ -2849,7 +4088,7 @@ fn apply_pattern_candidate(state: &Rc<RefCell<AppState>>) {
             .unwrap_or_default();
         (
             id.clone(),
-            entry.metadata.name.clone(),
+            entry.preset.metadata.name.clone(),
             app_state.inspector_runtime.target,
             affected,
         )
@@ -2870,16 +4109,16 @@ fn perform_pattern_apply(
 ) {
     let result = {
         let mut app_state = state.borrow_mut();
-        let registry = app_state.presets.clone();
+        let catalog = app_state.catalog.clone();
         let Some(workspace) = app_state.workspace.as_mut() else {
             return;
         };
         match target {
             InspectorTarget::DocumentAll => {
-                registry.apply_to_document_base(&mut workspace.history, id)
+                catalog.apply_to_document_base(&mut workspace.history, id)
             }
             InspectorTarget::Channel(channel_id) => {
-                registry.apply_to_selected(&mut workspace.history, channel_id, id)
+                catalog.apply_to_selected(&mut workspace.history, channel_id, id)
             }
         }
     };
@@ -3781,6 +5020,48 @@ fn start_advanced_preview_event_bridge(
                 Ok(Some(completion)) => {
                     if sender
                         .send_blocking(AppEvent::AdvancedPreview { epoch, completion })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(None) => thread::park_timeout(Duration::from_millis(4)),
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+/// Bridges one Pattern Wizard scheduler into GTK events until its captured modal epoch closes.
+///
+/// The worker owns no GTK or document authority. Main-context handlers reject stale epoch/ticket
+/// pairs before they can replace the wizard’s retained last-successful texture.
+fn start_wizard_preview_event_bridge(
+    scheduler: Arc<EvaluationScheduler>,
+    sender: async_channel::Sender<AppEvent>,
+    stop: Arc<AtomicBool>,
+    epoch: u64,
+) {
+    thread::spawn(move || {
+        'bridge: while !stop.load(Ordering::Acquire) {
+            loop {
+                match scheduler.try_receive_latest_progress() {
+                    Ok(Some(progress)) => {
+                        if sender
+                            .send_blocking(AppEvent::WizardPreviewProgress { epoch, progress })
+                            .is_err()
+                        {
+                            break 'bridge;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break 'bridge,
+                }
+            }
+            match scheduler.try_receive_latest() {
+                Ok(Some(completion)) => {
+                    if sender
+                        .send_blocking(AppEvent::WizardPreview { epoch, completion })
                         .is_err()
                     {
                         break;
@@ -8740,6 +10021,12 @@ fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
         AppEvent::AdvancedPreviewProgress { epoch, progress } => {
             handle_advanced_preview_progress(state, epoch, progress)
         }
+        AppEvent::WizardPreview { epoch, completion } => {
+            handle_wizard_preview_completion(state, epoch, completion)
+        }
+        AppEvent::WizardPreviewProgress { epoch, progress } => {
+            handle_wizard_preview_progress(state, epoch, progress)
+        }
     }
 }
 
@@ -9015,7 +10302,7 @@ fn handle_advanced_preview_completion(
 /// bound to the replaced document. The next editor launch starts with fresh
 /// runtime-only selection/draft state and cannot target destroyed widgets.
 fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
-    let (model, pattern_editor_window, advanced_settings_window) = {
+    let (model, pattern_editor_window, advanced_settings_window, pattern_wizard_window) = {
         let mut state = state.borrow_mut();
         state.workspace_generation = state.workspace_generation.saturating_add(1);
         state.preview_coordinator.clear_submission();
@@ -9032,6 +10319,8 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
             surface.preview_bridge_stop.store(true, Ordering::Release);
             surface.window
         });
+        let pattern_wizard_window =
+            take_pattern_wizard_for_workspace_change(&mut state).map(|surface| surface.window);
         state.workspace = Some(workspace);
         state.model = state
             .workspace
@@ -9039,7 +10328,12 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
             .and_then(|workspace| workspace.document().channel_model())
             .map(PreviewModel::from_domain)
             .unwrap_or(PreviewModel::Rgb);
-        (state.model, pattern_editor_window, advanced_settings_window)
+        (
+            state.model,
+            pattern_editor_window,
+            advanced_settings_window,
+            pattern_wizard_window,
+        )
     };
     // The close-request callback borrows AppState, so the detached editor may
     // close only after the workspace-install borrow above has ended.
@@ -9047,6 +10341,9 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
         window.close();
     }
     if let Some(window) = advanced_settings_window {
+        window.close();
+    }
+    if let Some(window) = pattern_wizard_window {
         window.close();
     }
     sync_model_selector(state, model);
@@ -9112,7 +10409,7 @@ fn sync_model_selector(state: &Rc<RefCell<AppState>>, model: PreviewModel) {
 /// after that mutable `RefCell` borrow ends. Cleanup remains presentation-only
 /// and never creates document/history/persistence side effects.
 fn clear_workspace(state: &Rc<RefCell<AppState>>) {
-    let pattern_editor_window = {
+    let (pattern_editor_window, pattern_wizard_window) = {
         let mut state = state.borrow_mut();
         state.generation = state.generation.saturating_add(1);
         state.workspace_generation = state.workspace_generation.saturating_add(1);
@@ -9125,6 +10422,8 @@ fn clear_workspace(state: &Rc<RefCell<AppState>>) {
             surface.preview_spinner.set_visible(false);
             surface.window
         });
+        let pattern_wizard_window =
+            take_pattern_wizard_for_workspace_change(&mut state).map(|surface| surface.window);
         state.workspace = None;
         state.pending_load = false;
         state.pending_save = false;
@@ -9134,9 +10433,12 @@ fn clear_workspace(state: &Rc<RefCell<AppState>>) {
         state.shell.set_banner(None);
         set_page(&mut state, Page::Empty);
         sync_ui(&mut state);
-        pattern_editor_window
+        (pattern_editor_window, pattern_wizard_window)
     };
     if let Some(window) = pattern_editor_window {
+        window.close();
+    }
+    if let Some(window) = pattern_wizard_window {
         window.close();
     }
 }
@@ -9676,6 +10978,8 @@ mod tests {
             "channel-editor.ui",
             "pattern-editor.ui",
             "advanced-settings.ui",
+            "pattern-wizard.ui",
+            "pattern-wizard-card.ui",
             "preset-row.ui",
             "confirmation-dialog.ui",
             "png-export-options.ui",
@@ -9713,6 +11017,14 @@ mod tests {
                     "main canvas exposes dismissible errors and staged determinate progress"
                 );
             }
+        }
+        for resource in WIZARD_IMAGE_RESOURCE_PATHS {
+            let data = gio::resources_lookup_data(resource, gio::ResourceLookupFlags::NONE)
+                .expect("Gate 21B-2 card image resource remains in the registered bundle");
+            assert!(
+                !data.is_empty(),
+                "Gate 21B-2 card image resource must retain content: {resource}"
+            );
         }
     }
 
@@ -10575,11 +11887,19 @@ mod tests {
             "/com/silentbutdigital/Toniator/channel-editor.ui",
             "/com/silentbutdigital/Toniator/pattern-editor.ui",
             "/com/silentbutdigital/Toniator/advanced-settings.ui",
+            "/com/silentbutdigital/Toniator/pattern-wizard.ui",
+            "/com/silentbutdigital/Toniator/pattern-wizard-card.ui",
             "/com/silentbutdigital/Toniator/preset-row.ui",
             "/com/silentbutdigital/Toniator/confirmation-dialog.ui",
             "/com/silentbutdigital/Toniator/png-export-options.ui",
             "/com/silentbutdigital/Toniator/toniator.css",
         ] {
+            assert!(
+                gio::resources_lookup_data(path, gio::ResourceLookupFlags::NONE).is_ok(),
+                "compiled GResource is missing {path}"
+            );
+        }
+        for path in WIZARD_IMAGE_RESOURCE_PATHS {
             assert!(
                 gio::resources_lookup_data(path, gio::ResourceLookupFlags::NONE).is_ok(),
                 "compiled GResource is missing {path}"
@@ -12493,5 +13813,463 @@ mod tests {
         assert_ne!(draft.document(), &main_document);
         assert_eq!(workspace.document(), &main_document);
         assert!(!workspace.history.can_undo());
+    }
+
+    /// Exercises every current built-in through both captured wizard targets without publishing it.
+    ///
+    /// The test uses only cloned histories and proves the shared layered order is the 17-record
+    /// built-in authority. Each selected-channel replacement and ALL replacement stays private
+    /// until the ordinary history squash boundary is explicitly invoked elsewhere.
+    #[test]
+    fn stage21b_wizard_materializes_all_catalog_records_for_all_and_named_targets() {
+        let workspace = direct_png_workspace();
+        let catalog = LayeredPresetCatalog::new(&PresetRegistry::bundled(), Vec::new()).unwrap();
+        assert_eq!(catalog.entries().len(), 17);
+        let selected = authoritative_channel_ids(workspace.document())[0];
+        for entry in catalog.entries() {
+            let mut all_draft = DocumentHistory::new_draft(&workspace.history);
+            catalog
+                .apply_to_document_base(&mut all_draft, &entry.preset.metadata.id)
+                .unwrap();
+            assert_ne!(all_draft.document(), workspace.document());
+            let mut channel_draft = DocumentHistory::new_draft(&workspace.history);
+            catalog
+                .apply_to_selected(&mut channel_draft, selected, &entry.preset.metadata.id)
+                .unwrap();
+            assert_ne!(channel_draft.document(), workspace.document());
+        }
+        assert_eq!(workspace.history.revision().0, 0);
+    }
+
+    /// Proves the temporary four-record edit gate, unavailable identities, and responsive layout policy.
+    ///
+    /// This pure policy test fixes only the permitted stable-ID allowlist. The actual descriptor
+    /// projection remains independently covered by the document-backed edit-page helpers.
+    #[test]
+    fn stage21b_wizard_edit_gate_and_breadcrumb_remain_bounded() {
+        for id in [
+            "curve-motif-rows",
+            "one-guide-lines",
+            "even-random-circles",
+            "round-spiral-line",
+        ] {
+            assert!(wizard_edit_allowlisted(id));
+        }
+        assert!(!wizard_edit_allowlisted("straight-grid-circles"));
+        assert_eq!(
+            wizard_breadcrumb(InspectorTarget::DocumentAll, Some("Guides")),
+            "Pattern Wizard · ALL · Guides"
+        );
+        assert_eq!(
+            wizard_breadcrumb(InspectorTarget::Channel(ChannelId(7)), None),
+            "Pattern Wizard · Selected channel"
+        );
+        assert_eq!(WIZARD_SOURCE_PROXY_LONGEST_EDGE, 256);
+        assert_eq!(WIZARD_PREVIEW_TARGET_PX, 512);
+        assert_eq!(WIZARD_NARROW_MAX_WIDTH_PX, 760);
+        assert_eq!(
+            WIZARD_EDIT_UNAVAILABLE_EXPLANATION,
+            "Editing this recipe arrives in the next Pattern Wizard gate; Use as is is available now."
+        );
+        assert_eq!(
+            wizard_layout_orientation(WIZARD_NARROW_MAX_WIDTH_PX),
+            gtk::Orientation::Vertical
+        );
+        assert_eq!(
+            wizard_layout_orientation(WIZARD_NARROW_MAX_WIDTH_PX + 1),
+            gtk::Orientation::Horizontal
+        );
+        assert_eq!(
+            wizard_use_action_label("Clustered Connections"),
+            "Use Clustered Connections as is"
+        );
+        assert_eq!(
+            wizard_edit_action_label("Clustered Connections"),
+            "Edit Clustered Connections"
+        );
+    }
+
+    /// Proves Gallery navigation needs a materialized draft and candidate markers use stable IDs only.
+    ///
+    /// A compact candidate may be captured at modal open, but it never grants Review navigation
+    /// before Use or Edit has changed the private history. Marker equality deliberately ignores
+    /// metadata text and therefore remains stable when card presentation changes.
+    #[test]
+    fn stage21b_wizard_navigation_and_candidate_marker_policy_avoid_no_op_states() {
+        assert_eq!(
+            wizard_navigation_sensitivity(WizardNavigationPage::Gallery, false),
+            WizardNavigationSensitivity {
+                back_enabled: false,
+                review_enabled: false,
+            }
+        );
+        assert_eq!(
+            wizard_navigation_sensitivity(WizardNavigationPage::Gallery, true),
+            WizardNavigationSensitivity {
+                back_enabled: false,
+                review_enabled: true,
+            }
+        );
+        assert_eq!(
+            wizard_navigation_sensitivity(WizardNavigationPage::Edit, true),
+            WizardNavigationSensitivity {
+                back_enabled: true,
+                review_enabled: true,
+            }
+        );
+        assert_eq!(
+            wizard_navigation_sensitivity(WizardNavigationPage::Review, true),
+            WizardNavigationSensitivity {
+                back_enabled: true,
+                review_enabled: false,
+            }
+        );
+        assert!(wizard_card_is_current_candidate(
+            "clustered-dispersion-random-links",
+            Some("clustered-dispersion-random-links")
+        ));
+        assert!(!wizard_card_is_current_candidate(
+            "clustered-dispersion-random-links",
+            Some("curve-motif-rows")
+        ));
+        assert!(!wizard_card_is_current_candidate(
+            "clustered-dispersion-random-links",
+            None
+        ));
+    }
+
+    /// Verifies each permitted edit branch derives controls from its materialized capability projection.
+    ///
+    /// The test intentionally never uses card names, categories, thumbnails, or presentation text as
+    /// an editability selector. Each recipe is materialized only in a fresh private history for both
+    /// captured targets, keeping the main workspace candidate and document unchanged.
+    #[test]
+    fn stage21b_wizard_edit_branches_are_capability_projected_for_all_and_named_targets() {
+        let workspace = direct_png_workspace();
+        let before = workspace.document().clone();
+        let catalog = LayeredPresetCatalog::new(&PresetRegistry::bundled(), Vec::new()).unwrap();
+        let channel = authoritative_channel_ids(workspace.document())[0];
+        for id in [
+            "curve-motif-rows",
+            "one-guide-lines",
+            "even-random-circles",
+            "round-spiral-line",
+        ] {
+            let mut all_draft = DocumentHistory::new_draft(&workspace.history);
+            catalog.apply_to_document_base(&mut all_draft, id).unwrap();
+            assert!(wizard_edit_allowlisted(id));
+            assert!(
+                !inline_inspector_values(all_draft.document(), InspectorTarget::DocumentAll)
+                    .is_empty(),
+                "{id} exposes its own current ALL capability projection"
+            );
+
+            let mut channel_draft = DocumentHistory::new_draft(&workspace.history);
+            catalog
+                .apply_to_selected(&mut channel_draft, channel, id)
+                .unwrap();
+            assert!(
+                !inline_inspector_values(
+                    channel_draft.document(),
+                    InspectorTarget::Channel(channel)
+                )
+                .is_empty(),
+                "{id} exposes its own current named-channel capability projection"
+            );
+        }
+        assert_eq!(workspace.document(), &before);
+    }
+
+    /// Checks compiled wizard templates retain the static-preview slot and accessible card controls.
+    ///
+    /// This headless resource assertion checks semantic structure only. It does not claim human
+    /// visual acceptance, compositor behavior, or runtime focus traversal evidence.
+    #[test]
+    fn stage21b_wizard_template_preserves_static_preview_and_accessible_card_semantics() {
+        register_resources();
+        let wizard = gio::resources_lookup_data(
+            "/com/silentbutdigital/Toniator/pattern-wizard.ui",
+            gio::ResourceLookupFlags::NONE,
+        )
+        .expect("compiled Pattern Wizard template is registered");
+        let wizard = std::str::from_utf8(wizard.as_ref()).expect("wizard template is UTF-8");
+        let controls = wizard
+            .find("id=\"wizard_controls\"")
+            .expect("dynamic controls slot remains explicit");
+        let preview = wizard
+            .find("id=\"wizard_preview\"")
+            .expect("private preview remains explicit");
+        let spinner = wizard
+            .find("id=\"wizard_spinner\"")
+            .expect("private preview spinner remains explicit");
+        assert!(controls < preview && preview < spinner);
+        let gallery_heading = wizard
+            .find("id=\"wizard_gallery_heading\"")
+            .expect("gallery scroll content has a heading");
+        let gallery_instruction = wizard
+            .find("id=\"wizard_gallery_instruction\"")
+            .expect("gallery scroll content has instructions");
+        let cards = wizard
+            .find("id=\"wizard_cards\"")
+            .expect("gallery card slot remains explicit");
+        assert!(
+            gallery_heading < gallery_instruction && gallery_instruction < cards,
+            "narrow scroll content presents gallery context before card list"
+        );
+
+        let card = gio::resources_lookup_data(
+            "/com/silentbutdigital/Toniator/pattern-wizard-card.ui",
+            gio::ResourceLookupFlags::NONE,
+        )
+        .expect("compiled Pattern Wizard card template is registered");
+        let card = std::str::from_utf8(card.as_ref()).expect("card template is UTF-8");
+        for id in [
+            "wizard_card_thumbnail",
+            "wizard_card_name",
+            "wizard_card_category",
+            "wizard_card_current_candidate",
+            "wizard_card_description",
+            "wizard_card_unavailable",
+            "wizard_card_actions",
+        ] {
+            assert!(
+                card.contains(id),
+                "card retains {id} for accessible projection"
+            );
+        }
+        let actions = card
+            .find("id=\"wizard_card_actions\"")
+            .expect("card action slot remains explicit");
+        assert!(
+            card[actions..].contains("<property name=\"orientation\">1</property>"),
+            "card action column preserves usable full unique action labels at 255px gallery width"
+        );
+        assert!(
+            card.contains("Current candidate"),
+            "card exposes a visible and accessible current-candidate marker"
+        );
+    }
+
+    /// Builds bounded wizard proxies for both immutable still-image formats without full-source fallback.
+    ///
+    /// This test reads current source bundles only and verifies the helper preserves each stable
+    /// source ID while enforcing the 256-pixel longest-edge private-preview bound.
+    #[test]
+    fn stage21b_wizard_proxy_bounds_png_and_svg_sources() {
+        for input in ["raster-sample.toniator", "vector-sample.toniator"] {
+            let workspace = load_workspace(&asset(input)).unwrap();
+            let proxy = prepare_wizard_preview_source(
+                &workspace.sources,
+                workspace.source_presentation.as_ref(),
+            );
+            let WizardPreviewSource::Ready {
+                source,
+                width,
+                height,
+            } = proxy
+            else {
+                panic!("{input} must build a private wizard proxy")
+            };
+            assert!(width.max(height) <= WIZARD_SOURCE_PROXY_LONGEST_EDGE);
+            assert_eq!(
+                source.reference_id(),
+                &workspace.source_presentation.unwrap().id
+            );
+        }
+    }
+
+    /// Writes native RGBA private-preview artifacts for both immutable input assets on explicit request.
+    ///
+    /// This ignored generator is the same Gate 21B-2 path used by the modal: it creates a direct
+    /// source-backed workspace, clones a private draft, reduces the source to the 256px proxy, and
+    /// renders the fixed 512×512 target through the ordinary evaluator. It writes only new-stage
+    /// `target/validation/stage21b-gate2` PNG outputs without flattening or compositing source alpha.
+    #[test]
+    #[ignore = "writes Gate 21B-2 native RGBA validation artifacts on explicit request"]
+    fn stage21b_wizard_proxy_validation_artifacts() {
+        let output_directory =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/validation/stage21b-gate2");
+        fs::create_dir_all(&output_directory)
+            .expect("Gate 21B-2 validation directory is creatable");
+        for (input, format) in [
+            ("raster-sample.png", SourceFormatHint::Png),
+            ("vector-sample.svg", SourceFormatHint::Svg),
+        ] {
+            let workspace = Workspace::from_direct(
+                Arc::from(fs::read(asset(input)).expect("immutable validation input reads")),
+                format,
+                input.to_owned(),
+            )
+            .expect("immutable validation input creates current workspace");
+            let WizardPreviewSource::Ready {
+                source,
+                width,
+                height,
+            } = prepare_wizard_preview_source(
+                &workspace.sources,
+                workspace.source_presentation.as_ref(),
+            )
+            else {
+                panic!("{input} must build a bounded private wizard proxy")
+            };
+            assert!(width.max(height) <= WIZARD_SOURCE_PROXY_LONGEST_EDGE);
+            let draft = DocumentHistory::new_draft(&workspace.history);
+            let target = toniator_engine::PreviewRasterTarget::new(
+                WIZARD_PREVIEW_TARGET_PX,
+                WIZARD_PREVIEW_TARGET_PX,
+            )
+            .expect("fixed wizard target remains valid");
+            let result = evaluate_with_limits(
+                EvaluationRequest::with_preview_target(
+                    draft.session().document_evaluation_snapshot(),
+                    source,
+                    target,
+                ),
+                EvaluationLimits::default(),
+            )
+            .expect("ordinary private preview evaluation succeeds");
+            assert_eq!(result.raster().width(), WIZARD_PREVIEW_TARGET_PX);
+            assert_eq!(result.raster().height(), WIZARD_PREVIEW_TARGET_PX);
+            let png = encode_png(result.raster()).expect("native RGBA private preview encodes");
+            assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+            let stem = input
+                .strip_suffix(".png")
+                .or_else(|| input.strip_suffix(".svg"))
+                .unwrap();
+            fs::write(
+                output_directory.join(format!("{stem}-wizard-private-proxy-512.png")),
+                png,
+            )
+            .expect("native RGBA private preview artifact writes");
+        }
+    }
+
+    /// Preserves ALL replacement delta-reset and exact one-step Undo and Redo publication.
+    ///
+    /// The test models the wizard’s captured ALL target and confirms the domain-owned replacement
+    /// resets deltas while Undo and Redo restore the exact before/after authoritative documents.
+    #[test]
+    fn stage21b_wizard_all_apply_resets_deltas_and_round_trips_history() {
+        let mut workspace = direct_png_workspace();
+        let channel = authoritative_channel_ids(workspace.document())[0];
+        let desired = DensityMetric2D {
+            density: workspace.document().pattern_settings().density.density + 3.0,
+            aspect: workspace.document().pattern_settings().density.aspect + 0.25,
+        };
+        let delta_command = workspace
+            .document()
+            .set_channel_density_for_effective(channel, desired)
+            .expect("valid named delta is authored before captured ALL wizard target");
+        workspace
+            .history
+            .apply(&delta_command)
+            .expect("named delta applies before private wizard opens");
+        let before = workspace.document().clone();
+        assert!(
+            workspace
+                .document()
+                .channel_pattern_instance(channel)
+                .expect("channel remains authoritative")
+                .layout_delta
+                .density
+                .is_some()
+        );
+        let catalog = LayeredPresetCatalog::new(&PresetRegistry::bundled(), Vec::new()).unwrap();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        catalog
+            .apply_to_document_base(&mut draft, "curve-motif-rows")
+            .unwrap();
+        let after = draft.document().clone();
+        assert!(
+            after
+                .channel_pattern_instance(channel)
+                .expect("ALL replacement retains channel topology")
+                .layout_delta
+                .density
+                .is_none(),
+            "base recipe replacement resets channel density delta"
+        );
+        let result = workspace.history.squash_draft(&draft).unwrap();
+        assert!(!result.unchanged);
+        assert_eq!(workspace.document(), &after);
+        workspace.history.undo().unwrap();
+        assert_eq!(workspace.document(), &before);
+        workspace.history.redo().unwrap();
+        assert_eq!(workspace.document(), &after);
+    }
+
+    /// Preserves exact named-channel wizard publication through one private squash and Undo/Redo.
+    ///
+    /// The captured selected channel receives a recipe override while the base and other channel
+    /// authority remain in the cloned draft until the single main-history transition publishes it.
+    #[test]
+    fn stage21b_wizard_named_apply_round_trips_history_exactly() {
+        let mut workspace = direct_png_workspace();
+        let channel = authoritative_channel_ids(workspace.document())[0];
+        let before = workspace.document().clone();
+        let catalog = LayeredPresetCatalog::new(&PresetRegistry::bundled(), Vec::new()).unwrap();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        catalog
+            .apply_to_selected(&mut draft, channel, "one-guide-lines")
+            .expect("named wizard target materializes only in private draft");
+        assert_eq!(workspace.document(), &before);
+        let after = draft.document().clone();
+        assert_ne!(after, before);
+        assert!(wizard_apply_enabled(&after, &before));
+        assert!(!workspace.history.squash_draft(&draft).unwrap().unchanged);
+        assert_eq!(workspace.document(), &after);
+        workspace.history.undo().unwrap();
+        assert_eq!(workspace.document(), &before);
+        workspace.history.redo().unwrap();
+        assert_eq!(workspace.document(), &after);
+    }
+
+    /// Proves captured candidate materialization cannot mutate the main document before Apply.
+    ///
+    /// This uses the same clone and selected target path as Use as is, then discards its local
+    /// history instead of squashing it, so the non-mutating candidate contract stays explicit.
+    #[test]
+    fn stage21b_wizard_candidate_use_stays_private_until_apply() {
+        let workspace = direct_png_workspace();
+        let channel = authoritative_channel_ids(workspace.document())[0];
+        let before = workspace.document().clone();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        LayeredPresetCatalog::new(&PresetRegistry::bundled(), Vec::new())
+            .unwrap()
+            .apply_to_selected(&mut draft, channel, "round-spiral-line")
+            .expect("Use as is materializes a named candidate privately");
+        assert_ne!(draft.document(), &before);
+        assert_eq!(workspace.document(), &before);
+        assert_eq!(workspace.history.revision().0, 0);
+    }
+
+    /// Rejects stale wizard epochs and preview tickets while retaining the last success and allowing Apply.
+    ///
+    /// The acceptance predicate is shared by terminal publication. A pending ticket is deliberately
+    /// not an Apply validity condition, preserving the private draft’s full-document authority.
+    #[test]
+    fn stage21b_wizard_preview_acceptance_is_latest_only_and_apply_is_independent() {
+        assert!(accepts_private_preview_terminal(9, Some(14), 9, 14));
+        assert!(!accepts_private_preview_terminal(9, Some(14), 8, 14));
+        assert!(!accepts_private_preview_terminal(9, Some(14), 9, 13));
+        let last_success = Some("ticket-13 texture");
+        let older_completion = accepts_private_preview_terminal(9, Some(14), 9, 13);
+        assert_eq!(
+            wizard_preview_surface_after(last_success, older_completion, Some("ticket-13 stale")),
+            last_success
+        );
+        let pending_or_error = wizard_preview_surface_after(last_success, true, None);
+        assert_eq!(pending_or_error, last_success);
+        assert_eq!(
+            wizard_preview_surface_after(last_success, true, Some("ticket-14 texture")),
+            Some("ticket-14 texture")
+        );
+        let workspace = direct_png_workspace();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        LayeredPresetCatalog::new(&PresetRegistry::bundled(), Vec::new())
+            .unwrap()
+            .apply_to_document_base(&mut draft, "curve-motif-rows")
+            .unwrap();
+        assert!(wizard_apply_enabled(draft.document(), workspace.document()));
     }
 }

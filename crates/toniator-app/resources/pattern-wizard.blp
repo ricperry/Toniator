@@ -1,0 +1,100 @@
+using Gtk 4.0;
+
+template $ToniatorPatternWizardShell : Gtk.Box {
+  orientation: vertical;
+  spacing: 12;
+  vexpand: true;
+  margin-top: 12;
+  margin-bottom: 12;
+  margin-start: 12;
+  margin-end: 12;
+
+  Gtk.Label wizard_breadcrumb {
+    xalign: 0;
+    wrap: true;
+    styles [ "heading" ]
+  }
+
+  Gtk.Label wizard_status {
+    label: "Choose a pattern. Nothing changes until Apply.";
+    xalign: 0;
+    wrap: true;
+    styles [ "dim-label" ]
+  }
+
+  Gtk.Box wizard_layout {
+    orientation: horizontal;
+    spacing: 16;
+    hexpand: true;
+    vexpand: true;
+
+    Gtk.ScrolledWindow {
+      hscrollbar-policy: never;
+      vscrollbar-policy: automatic;
+      hexpand: true;
+      vexpand: true;
+      min-content-width: 300;
+      min-content-height: 300;
+
+      Gtk.Box wizard_gallery {
+        orientation: vertical;
+        spacing: 10;
+        valign: start;
+
+        Gtk.Label wizard_gallery_heading {
+          label: "Gallery";
+          xalign: 0;
+          styles [ "heading" ]
+        }
+
+        Gtk.Label wizard_gallery_instruction {
+          label: "Choose Use as is to materialize a card in the private draft, or Edit when this gate exposes a capability-driven page.";
+          xalign: 0;
+          wrap: true;
+          styles [ "dim-label" ]
+        }
+
+        Gtk.Box wizard_cards {
+          orientation: vertical;
+          spacing: 10;
+          valign: start;
+        }
+      }
+    }
+
+    Gtk.Box wizard_page {
+      orientation: vertical;
+      spacing: 10;
+      hexpand: true;
+      vexpand: true;
+      width-request: 300;
+
+      Gtk.Box wizard_controls {
+        orientation: vertical;
+        spacing: 10;
+        valign: start;
+      }
+
+      Gtk.Picture wizard_preview {
+        content-fit: contain;
+        can-shrink: true;
+        hexpand: true;
+        vexpand: true;
+        height-request: 260;
+        styles [ "toniator-wizard-preview" ]
+      }
+
+      Gtk.Spinner wizard_spinner {
+        visible: false;
+        halign: center;
+        tooltip-text: "Preview updating";
+      }
+    }
+  }
+
+  Gtk.Box wizard_actions {
+    orientation: horizontal;
+    spacing: 8;
+    halign: end;
+  }
+}

@@ -60,3 +60,18 @@ Tests using the SVG must prove that live text is accepted and handled by the
 declared text/font policy. Do not use exact text raster pixels as a portable
 golden until the test supplies a deterministic font; system font fallback can
 vary while the fixture itself remains stable.
+
+## Gate 21B-2 adopted built-in gallery icons
+
+`stage20s-preset-icon-source.svg` is a synthetic 100×100 black-to-white
+linear-gradient source used only to generate the exact 17 approved built-in
+gallery SVG subset under `stage20s-preset-icons/`. Each icon is canonical Stage
+20S preset geometry evaluated in RGB mode, serialized through the ordinary SVG
+renderer, and given an explicit icon-only black presentation rectangle so
+additive channel color is representative outside Toniator. The rectangle is
+not part of the document, scene identity, or ordinary SVG export policy.
+Curve Motif now uses its stored generated SVG alongside the other built-ins;
+only personal-library thumbnails use ordinary canonical synthetic-source
+materialization, evaluation, and rendering instead of stored icons. These
+source/icon files are neither immutable project-wide inputs nor a replacement
+for validation artifacts under `target/validation/`.

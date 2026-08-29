@@ -5,9 +5,29 @@
     <file preprocess="xml-stripblanks">channel-editor.ui</file>
     <file preprocess="xml-stripblanks">pattern-editor.ui</file>
     <file preprocess="xml-stripblanks">advanced-settings.ui</file>
+    <file preprocess="xml-stripblanks">pattern-wizard.ui</file>
+    <file preprocess="xml-stripblanks">pattern-wizard-card.ui</file>
     <file preprocess="xml-stripblanks">preset-row.ui</file>
     <file preprocess="xml-stripblanks">confirmation-dialog.ui</file>
     <file preprocess="xml-stripblanks">png-export-options.ui</file>
     <file>toniator.css</file>
+    <file alias="preset-icon-source.svg">../../../assets/stage20s-preset-icon-source.svg</file>
+    <file alias="preset-icons/clustered-dispersion-random-links.svg">../../../assets/stage20s-preset-icons/clustered-dispersion-random-links.svg</file>
+    <file alias="preset-icons/curve-motif-rows.svg">../../../assets/stage20s-preset-icons/curve-motif-rows.svg</file>
+    <file alias="preset-icons/even-random-circles.svg">../../../assets/stage20s-preset-icons/even-random-circles.svg</file>
+    <file alias="preset-icons/grid-voronoi-scale.svg">../../../assets/stage20s-preset-icons/grid-voronoi-scale.svg</file>
+    <file alias="preset-icons/one-guide-lines.svg">../../../assets/stage20s-preset-icons/one-guide-lines.svg</file>
+    <file alias="preset-icons/residual-sites-along-guide.svg">../../../assets/stage20s-preset-icons/residual-sites-along-guide.svg</file>
+    <file alias="preset-icons/round-spiral-line.svg">../../../assets/stage20s-preset-icons/round-spiral-line.svg</file>
+    <file alias="preset-icons/round-spiral-marks.svg">../../../assets/stage20s-preset-icons/round-spiral-marks.svg</file>
+    <file alias="preset-icons/source-weighted-dispersion-voronoi.svg">../../../assets/stage20s-preset-icons/source-weighted-dispersion-voronoi.svg</file>
+    <file alias="preset-icons/square-spiral-marks.svg">../../../assets/stage20s-preset-icons/square-spiral-marks.svg</file>
+    <file alias="preset-icons/straight-grid-circles.svg">../../../assets/stage20s-preset-icons/straight-grid-circles.svg</file>
+    <file alias="preset-icons/three-guide-cells-scale.svg">../../../assets/stage20s-preset-icons/three-guide-cells-scale.svg</file>
+    <file alias="preset-icons/three-guide-maze.svg">../../../assets/stage20s-preset-icons/three-guide-maze.svg</file>
+    <file alias="preset-icons/triagrid-custom-shape-marks.svg">../../../assets/stage20s-preset-icons/triagrid-custom-shape-marks.svg</file>
+    <file alias="preset-icons/triagrid-spanning-tree.svg">../../../assets/stage20s-preset-icons/triagrid-spanning-tree.svg</file>
+    <file alias="preset-icons/two-guide-cells-uniform-offset.svg">../../../assets/stage20s-preset-icons/two-guide-cells-uniform-offset.svg</file>
+    <file alias="preset-icons/two-guide-maze.svg">../../../assets/stage20s-preset-icons/two-guide-maze.svg</file>
   </gresource>
 </gresources>

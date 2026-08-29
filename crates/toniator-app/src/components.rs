@@ -596,6 +596,241 @@ impl Default for ToniatorAdvancedSettingsShell {
     }
 }
 
+mod pattern_wizard_shell {
+    use super::*;
+
+    /// Installs the Blueprint-owned Pattern Wizard shell and its stable dynamic slots.
+    #[derive(Default, gtk::CompositeTemplate)]
+    #[template(resource = "/com/silentbutdigital/Toniator/pattern-wizard.ui")]
+    pub struct ToniatorPatternWizardShell {
+        #[template_child]
+        pub wizard_breadcrumb: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub wizard_status: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub wizard_layout: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub wizard_cards: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub wizard_controls: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub wizard_preview: gtk::TemplateChild<gtk::Picture>,
+        #[template_child]
+        pub wizard_spinner: gtk::TemplateChild<gtk::Spinner>,
+        #[template_child]
+        pub wizard_actions: gtk::TemplateChild<gtk::Box>,
+    }
+
+    #[glib::object_subclass]
+    impl glib::subclass::types::ObjectSubclass for ToniatorPatternWizardShell {
+        const NAME: &'static str = "ToniatorPatternWizardShell";
+        type Type = super::ToniatorPatternWizardShell;
+        type ParentType = gtk::Box;
+
+        /// Binds the compiled Pattern Wizard template exactly once for this widget class.
+        fn class_init(class: &mut Self::Class) {
+            Self::bind_template(class);
+        }
+
+        /// Initializes one private wizard shell from the bound resource template.
+        fn instance_init(object: &glib::subclass::InitializingObject<Self>) {
+            object.init_template();
+        }
+    }
+
+    impl glib::subclass::object::ObjectImpl for ToniatorPatternWizardShell {}
+    impl gtk::subclass::widget::WidgetImpl for ToniatorPatternWizardShell {}
+    impl gtk::subclass::box_::BoxImpl for ToniatorPatternWizardShell {}
+}
+
+glib::wrapper! {
+    /// Provides the stable private Pattern Wizard layout and dynamic presentation slots.
+    pub struct ToniatorPatternWizardShell(ObjectSubclass<pattern_wizard_shell::ToniatorPatternWizardShell>)
+        @extends gtk::Widget, gtk::Box,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget, gtk::Orientable;
+}
+
+impl ToniatorPatternWizardShell {
+    /// Creates one resource-owned wizard shell before catalog cards and actions attach.
+    pub fn new() -> Self {
+        glib::Object::builder().build()
+    }
+
+    /// Returns the target and family breadcrumb presentation label.
+    pub fn breadcrumb(&self) -> gtk::Label {
+        self.imp().wizard_breadcrumb.get()
+    }
+
+    /// Returns the visible and accessible wizard status label.
+    pub fn status(&self) -> gtk::Label {
+        self.imp().wizard_status.get()
+    }
+
+    /// Returns the responsive group container for gallery/page and preview.
+    pub fn layout(&self) -> gtk::Box {
+        self.imp().wizard_layout.get()
+    }
+
+    /// Returns the dynamic catalog-card container.
+    pub fn gallery(&self) -> gtk::Box {
+        self.imp().wizard_cards.get()
+    }
+
+    /// Returns the dynamic review or capability-driven edit-page container.
+    ///
+    /// Static preview and spinner widgets remain outside this slot so page replacement cannot
+    /// remove the private preview presentation.
+    pub fn page(&self) -> gtk::Box {
+        self.imp().wizard_controls.get()
+    }
+
+    /// Returns the private canonical preview paintable surface.
+    pub fn preview(&self) -> gtk::Picture {
+        self.imp().wizard_preview.get()
+    }
+
+    /// Returns the latest-only private preview pending indicator.
+    pub fn spinner(&self) -> gtk::Spinner {
+        self.imp().wizard_spinner.get()
+    }
+
+    /// Appends one explicit wizard action without transferring document authority.
+    pub fn append_action(&self, action: &impl IsA<gtk::Widget>) {
+        self.imp().wizard_actions.append(action);
+    }
+}
+
+impl Default for ToniatorPatternWizardShell {
+    /// Creates the same empty wizard shell as [`Self::new`].
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+mod pattern_wizard_card {
+    use super::*;
+
+    /// Installs the Blueprint-owned repeated Pattern Wizard card hierarchy.
+    #[derive(Default, gtk::CompositeTemplate)]
+    #[template(resource = "/com/silentbutdigital/Toniator/pattern-wizard-card.ui")]
+    pub struct ToniatorPatternWizardCard {
+        #[template_child]
+        pub wizard_card_thumbnail: gtk::TemplateChild<gtk::Image>,
+        #[template_child]
+        pub wizard_card_name: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub wizard_card_category: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub wizard_card_current_candidate: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub wizard_card_description: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub wizard_card_unavailable: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub wizard_card_actions: gtk::TemplateChild<gtk::Box>,
+    }
+
+    #[glib::object_subclass]
+    impl glib::subclass::types::ObjectSubclass for ToniatorPatternWizardCard {
+        const NAME: &'static str = "ToniatorPatternWizardCard";
+        type Type = super::ToniatorPatternWizardCard;
+        type ParentType = gtk::Box;
+
+        /// Binds the compiled repeated-card template once for this widget class.
+        fn class_init(class: &mut Self::Class) {
+            class.set_accessible_role(gtk::AccessibleRole::Group);
+            Self::bind_template(class);
+        }
+
+        /// Initializes one data-populated card from its static Blueprint hierarchy.
+        fn instance_init(object: &glib::subclass::InitializingObject<Self>) {
+            object.init_template();
+        }
+    }
+
+    impl glib::subclass::object::ObjectImpl for ToniatorPatternWizardCard {}
+    impl gtk::subclass::widget::WidgetImpl for ToniatorPatternWizardCard {}
+    impl gtk::subclass::box_::BoxImpl for ToniatorPatternWizardCard {}
+}
+
+glib::wrapper! {
+    /// Provides one reusable Blueprint-owned Pattern Wizard gallery card.
+    pub struct ToniatorPatternWizardCard(ObjectSubclass<pattern_wizard_card::ToniatorPatternWizardCard>)
+        @extends gtk::Widget, gtk::Box,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget, gtk::Orientable;
+}
+
+impl ToniatorPatternWizardCard {
+    /// Creates an empty reusable card before catalog data and actions are projected.
+    pub fn new() -> Self {
+        glib::Object::builder().build()
+    }
+
+    /// Sets the card thumbnail from one bundled image resource without changing catalog authority.
+    pub fn set_thumbnail_resource(&self, resource: &str) {
+        self.imp()
+            .wizard_card_thumbnail
+            .set_resource(Some(resource));
+    }
+
+    /// Sets the card thumbnail from a canonical rendered paintable without changing renderer authority.
+    pub fn set_thumbnail_paintable(&self, paintable: Option<&gtk::gdk::Texture>) {
+        self.imp().wizard_card_thumbnail.set_paintable(paintable);
+    }
+
+    /// Sets the card name from immutable catalog metadata.
+    pub fn set_name(&self, name: &str) {
+        self.imp().wizard_card_name.set_label(name);
+    }
+
+    /// Relates this explicit accessible group to its visible card title without storing catalog state.
+    pub fn relate_accessible_name_to_card_title(&self) {
+        let title = self.imp().wizard_card_name.get();
+        self.update_relation(&[gtk::accessible::Relation::LabelledBy(&[title.upcast_ref()])]);
+    }
+
+    /// Sets the card category from immutable catalog metadata.
+    pub fn set_category(&self, category: &str) {
+        self.imp().wizard_card_category.set_label(category);
+    }
+
+    /// Marks this card as the stable-ID current candidate without changing its catalog record.
+    pub fn set_current_candidate(&self, current: bool) {
+        self.imp()
+            .wizard_card_current_candidate
+            .set_visible(current);
+        if current {
+            self.add_css_class("toniator-wizard-card-current");
+        } else {
+            self.remove_css_class("toniator-wizard-card-current");
+        }
+    }
+
+    /// Sets the card description from immutable catalog metadata.
+    pub fn set_description(&self, description: &str) {
+        self.imp().wizard_card_description.set_label(description);
+    }
+
+    /// Shows or hides the visible unavailable explanation for this gate’s edit policy.
+    pub fn set_unavailable(&self, explanation: Option<&str>) {
+        let label = self.imp().wizard_card_unavailable.get();
+        label.set_label(explanation.unwrap_or_default());
+        label.set_visible(explanation.is_some());
+    }
+
+    /// Appends a wired action to the static card action row.
+    pub fn append_action(&self, action: &impl IsA<gtk::Widget>) {
+        self.imp().wizard_card_actions.append(action);
+    }
+}
+
+impl Default for ToniatorPatternWizardCard {
+    /// Creates the same empty card as [`Self::new`].
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 mod confirmation_content {
     use super::*;
 
