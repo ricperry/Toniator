@@ -1,6 +1,8 @@
 # Toniator
 
 Toniator is a GPL-3.0-only native Linux creative tool in a greenfield rewrite.
+The current first-party release is version `0.2.0`; `toniator --version`
+reports `toniator 0.2.0`.
 The accepted Stage 9 headless authoritative multi-channel render path is
 checkpointed at `67e831a`, after the Stage 1 foundation, authoritative document
 boundary, deterministic guide family, source sampling, rendering, scheduling,
@@ -566,19 +568,26 @@ the sole layout authority and phase receives padded coverage. The implementation
 uses ordinary source sampling, paint, PNG, and SVG paths. Gate 21B-1 is now
 complete at `f77998c`: the registry is v3 with seventeen built-ins, including
 `curve-motif-rows` displayed as Curve Motif in Guides, and the layered personal
-resource/library foundation is current. The gallery, Edit Pattern, and
-personal-management UI remain in separately gated 21B-2 through 21B-4.
+resource/library foundation is current. Gate 21B-2 is complete and user-accepted
+at `63fd9fb` on 2026-08-28: its modal Pattern Wizard gallery exposes all 17
+**Use as is** cards, initial Edit support for exactly Curve Motif, One Guide
+Lines, Even Random Circles, and Round Spiral Line, a shared layered catalog,
+256-longest-edge/512×512 private previews, latest-ticket/last-success behavior,
+one-Apply publication, and wide/narrow layouts. The gate adopts exact stored
+SVGs for all 17 built-ins, including the corrected density-10 Curve Motif icon;
+only personal entries use synthetic thumbnail fallback. Gates 21B-3 and 21B-4
+remain separately gated and planned.
 
 The main inspector defaults to runtime-only **ALL** or a real named channel.
 Its compact recipe dropdown is non-mutating until **Apply Pattern**; applying
 to ALL discloses and clears pattern-relative channel intent in one exactly
 undoable transaction. Capability-valid common controls, visible inheritance
 and reset actions, and the Blueprint-owned private-history **Advanced
-Settings** dialog are included. **Edit Pattern** remains accessibly disabled
-until Gate 21B-2. Stage 21B is In progress only through accepted Gate 21B-1;
+Settings** dialog are included. **Edit Pattern** is enabled by accepted Gate
+21B-2. Stage 21B remains In progress through its separately accepted gates;
 the exact four-gate contract is
 [`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](docs/STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md),
-and Gates 21B-2 through 21B-4 remain separately gated and not begun.
+Gates 21B-3 and 21B-4 remain separately gated and not begun.
 
 Advanced Settings presents one modal immediately and evaluates only a bounded
 source proxy on its own cancelable scheduler. Its status exposes current

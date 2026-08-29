@@ -1,9 +1,9 @@
 # Stage 21B — Pattern Wizard and Personal Library
 
-Status: **approved decision-complete plan; Gate 21B-1 complete and accepted;
-Gates 21B-2 through 21B-4 planned and not begun** (2026-08-28). This plan is
+Status: **approved decision-complete plan; Gates 21B-1 and 21B-2 complete and
+accepted; Gates 21B-3 and 21B-4 planned and not begun** (2026-08-28). This plan is
 subordinate to the protected project specifications, especially the Addendum,
-and does not authorize a push or publication.
+and does not by itself authorize later gates or publication.
 
 Stage 21B follows the accepted Stage 21A checkpoint and the accepted headless
 Curve Motif prerequisite. It is one product stage with four separately
@@ -25,7 +25,7 @@ authored open path, one-guide Along Guides cadence, continuous per-row motif
 paths, odd-row mirror/phase composition, and source-driven variable-width
 stroke realization. It is not a wizard editor or a reusable closed-shape
 store. The Gate 21B-1 registry entry exposes that authority as the
-seventeenth built-in, but gallery UI remains Gate 21B-2.
+seventeenth built-in, and accepted Gate 21B-2 now projects it in the gallery.
 
 Current-only persistence is document schema v7 and preset format v4; the
 container remains v1. Preset-v4 embeds motif geometry and layout. Obsolete v6
@@ -40,6 +40,10 @@ registry v3 with 17 built-ins, the `curve-motif-rows` entry displayed as
 projection, personal resource storage, safe filesystem operations, the
 frontend exhaustiveness correction, focused and independent verification, and
 private-Sway smoke evidence. It does not enable **Edit Pattern**.
+
+The exact implementation checkpoint for Gate 21B-2 is `63fd9fb`, user-accepted
+on 2026-08-28. All first-party crates declare version `0.2.0`, and
+`toniator --version` reports `toniator 0.2.0`.
 
 ## Gate sequence
 
@@ -77,17 +81,16 @@ multi-process transactional behavior.
 
 ### Gate 21B-2 — Wizard Shell and Gallery
 
-**Planned; not begun.** This gate requires separate authorization after the
-Gate 21B-1 closeout.
+**Complete and user-accepted at `63fd9fb` on 2026-08-28.**
 
-Add the GTK/Blueprint/GResource wizard shell. It is modal and transient, with
-a visual gallery, family breadcrumb, canonical private preview, **Use as is**,
-**Edit**, Back, Cancel, and Review/Apply. The gallery and compact main-window
-dropdown use the same layered catalog. All 17 built-ins are cards and support
-**Use as is**. Initially, **Edit** is available for `curve-motif-rows`,
-`one-guide-lines`, `even-random-circles`, and `round-spiral-line`; other cards
-explain why editing is unavailable. This gate enables the existing
-accessibly-disabled **Edit Pattern** control.
+The implemented GTK/Blueprint/GResource wizard shell is modal and transient,
+with a visual gallery, family breadcrumb, canonical private preview,
+**Use as is**, **Edit**, Back, Cancel, and Review/Apply. The gallery and
+compact main-window dropdown use the same layered catalog. All 17 built-ins
+are cards and support **Use as is**. **Edit** is available for exactly
+`curve-motif-rows`, `one-guide-lines`, `even-random-circles`, and
+`round-spiral-line`; other cards explain why editing is unavailable. This gate
+enables the existing accessibly-disabled **Edit Pattern** control.
 
 Opening the wizard captures its ALL/document or named-channel target and seeds
 the private draft from the compact dropdown candidate without first applying
@@ -98,19 +101,22 @@ ticket alone may publish; the last successful preview remains visible while a
 replacement runs, and Apply/export continue to use full document data.
 
 The private preview uses a 256-pixel-longest-edge source proxy and a 512×512
-output. Curve Motif and personal thumbnails use the ordinary canonical
-pipeline and a synthetic thumbnail policy; the pending 16 canonical SVG icon
-assets may be adopted only in this gate and only as the approved icon set.
-Private Sway/AT-SPI/grim verification covers the shell, gallery, keyboard and
-focus behavior, accessible names/state, narrow layout, and canonical preview;
-then the work stops for acceptance.
+output with latest-ticket/last-success semantics. Curve Motif uses the exact
+stored density-10 canonical SVG presentation adopted for the 17 built-in icon
+assets; only personal entries use the synthetic thumbnail fallback. ALL and
+named-channel drafts retain the specified delta-reset/named behavior, and one
+Apply publishes one history transition. Private Sway/AT-SPI/grim verification
+and focused tests cover the shell, gallery, accessible names/state, wide and
+narrow layout, and canonical preview. This automated Sway/wlroots evidence is
+not manual GNOME/Mutter acceptance; the narrow keyboard-restoration probe
+remains inconclusive after WayVNC capture-buffer errors.
 
-One writer owns `crates/toniator-app`, its Blueprint/GResource composition,
-and focused app tests for this gate. The previously pending Stage 20S icon
-source, 16 icon files, asset note, and icon test enter the gate only as an
-explicitly audited adoption; no other asset work is pulled forward. The normal
-wide layout presents gallery and preview side by side, while a narrow window
-stacks the same semantic groups without changing navigation or draft state.
+One writer owned `crates/toniator-app`, its Blueprint/GResource composition,
+and focused app tests for this gate. The Stage 20S source and exact 17 built-in
+SVG icons, including the corrected Curve Motif density-10 icon, were adopted
+only within this gate; no other asset work was pulled forward. The normal wide
+layout presents gallery and preview side by side, while a narrow window stacks
+the same semantic groups without changing navigation or draft state.
 
 ### Gate 21B-3 — Complete Editing and Nested Editors
 
@@ -242,9 +248,9 @@ part of Gate 21B-1.
 
 Each gate uses one writer, focused verification, independent review, and a
 parent-owned acceptance transition. Update `ProgressTracker.md` only to the
-verified status: Gate 21B-1 is Complete at `f77998c`; Gates 21B-2 through
-21B-4 are Planned/not begun; Stage 21B overall remains In progress. Do not
-mark the whole stage accepted at Gate 21B-1.
+verified status: Gate 21B-1 is Complete at `f77998c`; Gate 21B-2 is Complete
+at `63fd9fb`; Gates 21B-3 and 21B-4 are Planned/not begun; Stage 21B overall
+remains In progress. Do not mark the whole stage accepted at Gate 21B-2.
 
 Do not commit, push, publish, or begin the next gate without its explicit
 authorization. At closeout, inspect the exact milestone diff, preserve

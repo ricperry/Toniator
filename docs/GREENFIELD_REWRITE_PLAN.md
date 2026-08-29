@@ -2110,8 +2110,8 @@ does not claim manual GNOME Shell/Mutter acceptance.
 Stage 21 is split into two sequential, separately accepted checkpoints on the
 `ToniatorGUI` branch. Stage 21B may not begin before explicit Stage 21A
 acceptance. Each checkpoint has one writer, focused verification, independent
-review, and a user-owned acceptance transition; neither checkpoint authorizes
-a push.
+review, and a user-owned acceptance transition; a checkpoint does not
+automatically authorize a push.
 
 ### Stage 21A — Main Window and Still-Image Import
 
@@ -2230,8 +2230,9 @@ presets, reusable shape storage, and wizard design work remain paused in Stage
 
 Stage 21B is **In progress** as four separately reviewed and accepted gates.
 Gate 21B-1 is complete and user-accepted at implementation checkpoint
-`f77998c`; Gates 21B-2 through 21B-4 remain planned, separately gated, and not
-begun. The exact decision-complete contract is
+`f77998c`; Gate 21B-2 is complete and user-accepted at implementation
+checkpoint `63fd9fb` on 2026-08-28; Gates 21B-3 and 21B-4 remain planned,
+separately gated, and not begun. The exact decision-complete contract is
 [`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md).
 
 Gate 21B-1 establishes the current-only reusable-resource v1 and library-config
@@ -2251,13 +2252,25 @@ gallery, breadcrumb, private canonical preview, Review/Apply, shared combined
 catalog, all seventeen **Use as is** cards, and initial Edit support for
 `curve-motif-rows`, `one-guide-lines`, `even-random-circles`, and
 `round-spiral-line`. Its fixed private-preview target is a 256-longest-edge
-source proxy and 512×512 output; pending canonical SVG icons may be adopted
-only within this gate. Gate 21B-3 completes capability-driven editing for all
+source proxy and 512×512 output with latest-ticket/last-success semantics.
+The gate adopts exact stored SVGs for all 17 built-ins, including the corrected
+density-10 Curve Motif icon; only personal entries use synthetic thumbnails.
+ALL and named-channel drafts preserve the specified delta-reset/named behavior,
+and one Apply publishes one history transition. Gate 21B-3 completes
+capability-driven editing for all
 17 cards, structural reconstruction, ordered outputs, nested Guide/Shape/Motif
 editors, reusable insertion, copy/shared behavior, local history, and focus
 restoration. Gate 21B-4 adds personal management and final persistence,
 filesystem, concurrency, performance, memory, accessibility, keyboard, and UX
 verification.
+
+Gate 21B-2 verification passed its focused app/engine tests, formatting,
+strict Clippy, architecture, and diff checks, plus independent UX and
+regression rereviews. The final private Sway/wlroots run confirmed the stored
+Curve Motif icon, wide gallery, and canonical private preview with clean app
+logs. This is automated semantic/pixel/diagnostic evidence, not manual
+GNOME/Mutter acceptance; the narrow keyboard-restoration probe remains an
+inconclusive nonblocking limitation.
 
 The wizard remains a modal transient private draft with dirty-close
 confirmation, Cancel discard, and one-history-transition Apply. Capability and
