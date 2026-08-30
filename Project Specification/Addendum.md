@@ -425,15 +425,25 @@ color, visibility, and opacity changes are presentation invalidations. Source
 mapping and mark-response changes are realization invalidations.
 
 RGB scalar fields are decoded sRGB converted to linear-light `R`, `G`, and
-`B`. CMYK scalar fields use deterministic profile-independent unnormalized
-full UCR:
+`B`. CMYK scalar fields use deterministic profile-independent normalized
+linear-light separation:
 
 ```text
 K = 1 - max(R, G, B)
-C = 1 - R - K
-M = 1 - G - K
-Y = 1 - B - K
+if K = 1: C = M = Y = 0
+otherwise:
+  C = (1 - R - K) / (1 - K)
+  M = (1 - G - K) / (1 - K)
+  Y = (1 - B - K) / (1 - K)
 ```
+
+The implementation may use the algebraically equivalent stable forms
+`C = 1 - R / max(R,G,B)`, `M = 1 - G / max(R,G,B)`, and
+`Y = 1 - B / max(R,G,B)` outside the exact-black guard. This normalized CMY
+with pure process paints is the inverse of the fixed linear CMYK transmittance
+for source-color fidelity. ICC/profile handling, dot gain, configurable
+UCR/GCR, black-generation curves, physical ink simulation, and soft proofing
+remain deferred.
 
 Color-derived response fields are associated with source alpha exactly once
 before spatial interpolation. Alpha is an independent scalar and is not

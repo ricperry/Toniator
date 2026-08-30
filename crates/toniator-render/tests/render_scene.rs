@@ -904,6 +904,7 @@ fn modeled_single_layer_matches_accepted_stage5_transparent_pixels() {
     );
 }
 
+/// Verifies modeled SVG retains one ordered editable canvas and model-specific presentation.
 #[test]
 fn modeled_svg_is_one_editable_canvas_with_ordered_vector_channel_groups() {
     let rgb = write_svg(&modeled(
@@ -943,9 +944,13 @@ fn modeled_svg_is_one_editable_canvas_with_ordered_vector_channel_groups() {
         ],
     ));
     assert!(cmyk.contains("<title>Toniator CMYK halftone</title>"));
-    assert!(cmyk.contains("<g id=\"channel-4\" style=\"mix-blend-mode:multiply\">"));
-    assert!(cmyk.contains("<g id=\"channel-5\" style=\"mix-blend-mode:multiply\">"));
+    assert!(cmyk.contains("<g id=\"cmyk-composition\" filter=\"url(#cmyk-fixed-transmittance)\">"));
+    assert!(cmyk.contains("<filter id=\"cmyk-fixed-transmittance\""));
+    assert!(cmyk.contains("<g id=\"channel-4\" filter=\"url(#channel-4-atlas-slot)\">"));
+    assert!(cmyk.contains("<g id=\"channel-5\" filter=\"url(#channel-5-atlas-slot)\">"));
     assert_eq!(cmyk.matches("<g id=\"channel-").count(), 2);
+    assert!(!cmyk.contains("mix-blend-mode") && !cmyk.contains("<feImage"));
+    assert!(!cmyk.contains("data:image"));
     let source_color = write_svg(&modeled(
         HalftoneChannelModel::SourceColorAlpha,
         vec![
@@ -975,6 +980,7 @@ fn modeled_svg_is_one_editable_canvas_with_ordered_vector_channel_groups() {
     assert!(!source_color.contains("mix-blend-mode"));
 }
 
+/// Verifies invisible modeled channels retain geometry while contributing no rendered coverage.
 #[test]
 fn invisible_modeled_channels_keep_editable_geometry_but_do_not_render() {
     let output = validation_output();
@@ -1009,7 +1015,7 @@ fn invisible_modeled_channels_keep_editable_geometry_but_do_not_render() {
         &cmyk,
         &output.join("synthetic-cmyk-hidden-channel.svg"),
         &output.join("synthetic-cmyk-hidden-channel-inkscape.png"),
-        "<g id=\"channel-5\" style=\"mix-blend-mode:multiply;display:none\">",
+        "<g id=\"channel-5\" filter=\"url(#channel-5-atlas-slot)\" style=\"display:none\">",
         "channel-5-mark-0",
         [0, 255, 255, 255],
     );
@@ -1041,6 +1047,7 @@ fn invisible_modeled_channels_keep_editable_geometry_but_do_not_render() {
     );
 }
 
+/// Verifies editable RGB SVG retains opaque correspondence and the characterized fractional gap.
 #[test]
 fn editable_rgb_svg_has_opaque_semantic_correspondence_in_both_renderers_and_characterized_fractional_difference()
  {
@@ -1063,6 +1070,7 @@ fn editable_rgb_svg_has_opaque_semantic_correspondence_in_both_renderers_and_cha
         &opaque_native,
         &opaque_inkscape,
         [255, 255, 0, 255],
+        0,
         &[
             "channel-1",
             "channel-1-mark-0",
@@ -1090,9 +1098,9 @@ fn editable_rgb_svg_has_opaque_semantic_correspondence_in_both_renderers_and_cha
     );
 }
 
+/// Verifies editable CMYK SVG applies fixed transmittance for opaque and fractional overlap.
 #[test]
-fn editable_cmyk_svg_has_opaque_semantic_correspondence_in_both_renderers_and_characterized_fractional_difference()
- {
+fn editable_cmyk_svg_has_fixed_transmittance_correspondence_for_opaque_and_fractional_overlap() {
     let output = validation_output();
     let opaque = modeled_with_canvas(
         HalftoneChannelModel::Cmyk,
@@ -1103,15 +1111,16 @@ fn editable_cmyk_svg_has_opaque_semantic_correspondence_in_both_renderers_and_ch
             overlap_layer(5, color(1.0, 0.0, 1.0, 1.0), 1.0, 120.0),
         ],
     );
-    let opaque_svg = output.join("synthetic-cmyk-multiply-overlap.svg");
-    let opaque_native = output.join("synthetic-cmyk-multiply-overlap-native.png");
-    let opaque_inkscape = output.join("synthetic-cmyk-multiply-overlap-inkscape.png");
+    let opaque_svg = output.join("synthetic-cmyk-fixed-overlap.svg");
+    let opaque_native = output.join("synthetic-cmyk-fixed-overlap-native.png");
+    let opaque_inkscape = output.join("synthetic-cmyk-fixed-overlap-inkscape.png");
     assert_opaque_editable_secondary(
         &opaque,
         &opaque_svg,
         &opaque_native,
         &opaque_inkscape,
         [0, 0, 255, 255],
+        1,
         &[
             "channel-4",
             "channel-4-mark-0",
@@ -1129,13 +1138,13 @@ fn editable_cmyk_svg_has_opaque_semantic_correspondence_in_both_renderers_and_ch
             overlap_layer(5, color(1.0, 0.0, 1.0, 1.0), 0.5, 120.0),
         ],
     );
-    assert_fractional_svg_difference(
+    assert_fractional_svg_parity(
         &fractional,
-        output.join("synthetic-cmyk-multiply-fractional.svg"),
-        output.join("synthetic-cmyk-multiply-fractional-native.png"),
-        output.join("synthetic-cmyk-multiply-fractional-inkscape.png"),
+        output.join("synthetic-cmyk-fixed-fractional.svg"),
+        output.join("synthetic-cmyk-fixed-fractional-native.png"),
+        output.join("synthetic-cmyk-fixed-fractional-inkscape.png"),
         [156, 156, 255, 191],
-        [85, 85, 255, 192],
+        2,
     );
 }
 
@@ -1159,12 +1168,14 @@ fn immutable_project_assets_decode_and_vector_rasterizes_without_claiming_model_
     assert!(rasterized.pixels().any(|pixel| pixel[3] != 0));
 }
 
+/// Verifies one opaque modeled SVG secondary against native and Inkscape rendering.
 fn assert_opaque_editable_secondary(
     scene: &RenderScene,
     svg_path: &std::path::Path,
     native_path: &std::path::Path,
     inkscape_path: &std::path::Path,
     expected_center: [u8; 4],
+    tolerance: u8,
     visible_ids: &[&str],
 ) {
     fs::write(svg_path, write_svg(scene)).unwrap();
@@ -1174,7 +1185,12 @@ fn assert_opaque_editable_secondary(
     let inkscape = image::open(inkscape_path).unwrap().to_rgba8();
     let native_center = surface_pixel(&native, 100, 80);
     assert_eq!(native_center, expected_center);
-    assert_eq!(inkscape.get_pixel(100, 80).0, expected_center);
+    assert_pixel_within(
+        inkscape.get_pixel(100, 80).0,
+        expected_center,
+        tolerance,
+        "opaque Inkscape center",
+    );
     for id in visible_ids {
         assert!(
             inkscape_query_width(svg_path, id) > 0.0,
@@ -1183,6 +1199,7 @@ fn assert_opaque_editable_secondary(
     }
 }
 
+/// Verifies an invisible channel retains serialized geometry without contributing pixels.
 fn assert_invisible_channel_is_editable_but_hidden(
     scene: &RenderScene,
     svg_path: &std::path::Path,
@@ -1192,7 +1209,7 @@ fn assert_invisible_channel_is_editable_but_hidden(
     expected_center: [u8; 4],
 ) {
     let svg = write_svg(scene);
-    assert_eq!(svg.matches("clip-path=").count(), 1);
+    assert!(svg.contains("<g id=\"canvas\" clip-path=\"url(#canvas-clip)\""));
     assert!(svg.contains(hidden_group));
     assert!(svg.contains(&format!("id=\"{hidden_mark_id}\"")));
     fs::write(svg_path, svg).unwrap();
@@ -1210,7 +1227,50 @@ fn assert_invisible_channel_is_editable_but_hidden(
             "hidden SVG group has no visible coverage"
         );
     } else {
-        assert_eq!(exported_center, expected_center);
+        assert_pixel_within(
+            exported_center,
+            expected_center,
+            1,
+            "visible channel beside hidden group",
+        );
+    }
+}
+
+/// Verifies fractional CMYK SVG output follows native fixed transmittance within renderer rounding.
+fn assert_fractional_svg_parity(
+    scene: &RenderScene,
+    svg_path: std::path::PathBuf,
+    native_path: std::path::PathBuf,
+    inkscape_path: std::path::PathBuf,
+    expected_native: [u8; 4],
+    tolerance: u8,
+) {
+    fs::write(&svg_path, write_svg(scene)).unwrap();
+    let native = rasterize(scene, RasterBackground::Transparent).unwrap();
+    fs::write(&native_path, encode_png(&native).unwrap()).unwrap();
+    export_inkscape(&svg_path, &inkscape_path);
+    let native_center = surface_pixel(&native, 100, 80);
+    let inkscape_center = image::open(&inkscape_path)
+        .unwrap()
+        .to_rgba8()
+        .get_pixel(100, 80)
+        .0;
+    assert_eq!(native_center, expected_native);
+    assert_pixel_within(
+        inkscape_center,
+        native_center,
+        tolerance,
+        "fractional Inkscape center",
+    );
+}
+
+/// Verifies each straight-sRGBA byte differs from its reference by at most `tolerance`.
+fn assert_pixel_within(actual: [u8; 4], expected: [u8; 4], tolerance: u8, context: &str) {
+    for (component, (actual, expected)) in actual.into_iter().zip(expected).enumerate() {
+        assert!(
+            actual.abs_diff(expected) <= tolerance,
+            "{context} component {component}: actual {actual}, expected {expected}, tolerance {tolerance}"
+        );
     }
 }
 

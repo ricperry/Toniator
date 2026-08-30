@@ -4080,6 +4080,10 @@ fn write_stage5_svg(scene: &RenderScene) -> String {
     document
 }
 
+/// Serializes one modeled scene as deterministic editable SVG with its fixed model compositor.
+///
+/// RGB retains its accepted editable screen-blend structure, CMYK emits explicit linear-light
+/// same-document filter inputs, and SourceColorAlpha retains ordinary ordered source-over.
 fn write_modeled_svg(scene: &RenderScene, model: HalftoneChannelModel) -> String {
     let width = compact_number(scene.canvas.width);
     let height = compact_number(scene.canvas.height);
@@ -4089,32 +4093,119 @@ fn write_modeled_svg(scene: &RenderScene, model: HalftoneChannelModel) -> String
         HalftoneChannelModel::SourceColorAlpha => "Toniator source-colored halftone",
     };
     let mut document = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">\n<title>{title}</title>\n<metadata>family={};realization={};scene={}</metadata>\n<defs><clipPath id=\"canvas-clip\"><rect x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\"/></clipPath></defs>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">\n<title>{title}</title>\n<metadata>family={};realization={};scene={}</metadata>\n<defs><clipPath id=\"canvas-clip\"><rect x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\"/></clipPath>\n",
         xml_escape(&scene.identity.family_fingerprint),
         xml_escape(&scene.identity.realization_fingerprint),
         xml_escape(&scene.identity.scene_fingerprint),
     );
+    if model == HalftoneChannelModel::Cmyk {
+        write_cmyk_svg_filter_definitions(&mut document, scene);
+    }
+    document.push_str("</defs>\n");
     document.push_str(
         "<g id=\"canvas\" clip-path=\"url(#canvas-clip)\" style=\"isolation:isolate\">\n",
     );
     let blend_mode = match model {
         HalftoneChannelModel::Rgb => Some("screen"),
-        HalftoneChannelModel::Cmyk => Some("multiply"),
-        HalftoneChannelModel::SourceColorAlpha => None,
+        HalftoneChannelModel::Cmyk | HalftoneChannelModel::SourceColorAlpha => None,
     };
+    if model == HalftoneChannelModel::Cmyk {
+        document
+            .push_str("<g id=\"cmyk-composition\" filter=\"url(#cmyk-fixed-transmittance)\">\n");
+    }
     for layer in &scene.layers {
-        write_svg_channel_group(&mut document, layer, blend_mode, &scene.canvas);
+        let filter_id = (model == HalftoneChannelModel::Cmyk)
+            .then(|| format!("channel-{}-atlas-slot", layer.channel_id.0));
+        write_svg_channel_group(
+            &mut document,
+            layer,
+            blend_mode,
+            filter_id.as_deref(),
+            model == HalftoneChannelModel::Cmyk,
+            &scene.canvas,
+        );
+    }
+    if model == HalftoneChannelModel::Cmyk {
+        document.push_str("</g>\n");
     }
     document.push_str("</g>\n");
     document.push_str("</svg>\n");
     document
 }
 
+/// Appends the same-document CMYK channel atlas and fixed-transmittance filter graph.
+///
+/// Each live channel group remains in canvas coordinates and uses a nested filter to move only
+/// its rendered layer-local result into a disjoint atlas slot. The parent filter extracts those
+/// slots from one `SourceGraphic`, restores them to the canvas origin, and applies the protected
+/// linear-light transmittance and coverage-union equations. This avoids fragment `feImage`
+/// references, embedded rasters, viewer blend modes, and duplicate proxy geometry.
+fn write_cmyk_svg_filter_definitions(document: &mut String, scene: &RenderScene) {
+    let column_count = scene.layers.len().min(2);
+    let row_count = scene.layers.len().div_ceil(column_count);
+    let atlas_width = scene.canvas.width * column_count as f64;
+    let atlas_height = scene.canvas.height * row_count as f64;
+    let width = compact_number(scene.canvas.width);
+    let height = compact_number(scene.canvas.height);
+    let atlas_width = compact_number(atlas_width);
+    let atlas_height = compact_number(atlas_height);
+
+    for (index, layer) in scene.layers.iter().enumerate() {
+        let slot_x = scene.canvas.width * (index % column_count) as f64;
+        let slot_y = scene.canvas.height * (index / column_count) as f64;
+        document.push_str(&format!(
+            "<filter id=\"channel-{}-atlas-slot\" filterUnits=\"userSpaceOnUse\" primitiveUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"{atlas_width}\" height=\"{atlas_height}\" color-interpolation-filters=\"linearRGB\"><feOffset in=\"SourceGraphic\" dx=\"{}\" dy=\"{}\"/></filter>\n",
+            layer.channel_id.0,
+            compact_number(slot_x),
+            compact_number(slot_y),
+        ));
+    }
+
+    document.push_str(&format!(
+        "<filter id=\"cmyk-fixed-transmittance\" filterUnits=\"userSpaceOnUse\" primitiveUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"{atlas_width}\" height=\"{atlas_height}\" color-interpolation-filters=\"linearRGB\">\n<feFlood x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" flood-color=\"#ffffff\" result=\"canvas-white\"/>\n"
+    ));
+    for (index, layer) in scene.layers.iter().enumerate() {
+        let slot_x = scene.canvas.width * (index % column_count) as f64;
+        let slot_y = scene.canvas.height * (index / column_count) as f64;
+        let channel_id = layer.channel_id.0;
+        document.push_str(&format!(
+            "<feFlood x=\"{}\" y=\"{}\" width=\"{width}\" height=\"{height}\" flood-color=\"#ffffff\" result=\"channel-{channel_id}-slot\"/>\n<feComposite in=\"SourceGraphic\" in2=\"channel-{channel_id}-slot\" operator=\"in\" result=\"channel-{channel_id}-atlas\"/>\n<feOffset in=\"channel-{channel_id}-atlas\" dx=\"{}\" dy=\"{}\" result=\"channel-{channel_id}-layer\"/>\n<feComposite in=\"channel-{channel_id}-layer\" in2=\"canvas-white\" operator=\"over\" result=\"channel-{channel_id}-factor\"/>\n<feComposite in=\"canvas-white\" in2=\"channel-{channel_id}-layer\" operator=\"in\" result=\"channel-{channel_id}-coverage\"/>\n",
+            compact_number(slot_x),
+            compact_number(slot_y),
+            compact_number(if slot_x == 0.0 { 0.0 } else { -slot_x }),
+            compact_number(if slot_y == 0.0 { 0.0 } else { -slot_y }),
+        ));
+    }
+
+    let first_channel = scene.layers[0].channel_id.0;
+    let mut transmittance = format!("channel-{first_channel}-factor");
+    let mut coverage = format!("channel-{first_channel}-coverage");
+    for (index, layer) in scene.layers.iter().enumerate().skip(1) {
+        let channel_id = layer.channel_id.0;
+        let next_transmittance = format!("cmyk-transmittance-{index}");
+        let next_coverage = format!("cmyk-coverage-{index}");
+        document.push_str(&format!(
+            "<feBlend in=\"{transmittance}\" in2=\"channel-{channel_id}-factor\" mode=\"multiply\" result=\"{next_transmittance}\"/>\n<feComposite in=\"channel-{channel_id}-coverage\" in2=\"{coverage}\" operator=\"over\" result=\"{next_coverage}\"/>\n"
+        ));
+        transmittance = next_transmittance;
+        coverage = next_coverage;
+    }
+    document.push_str(&format!(
+        "<feComposite in=\"{transmittance}\" in2=\"{coverage}\" operator=\"arithmetic\" k2=\"1\" k3=\"1\" k4=\"-1\"/>\n</filter>\n"
+    ));
+}
+
 /// Appends one modeled channel group with immutable presentation and per-mark paint semantics.
+///
+/// An optional filter moves only the rendered group result into a same-document model-compositor
+/// input while all child geometry retains its canonical canvas coordinates and stable IDs. The
+/// optional inner canvas clip bounds a CMYK layer before the filter moves it into its atlas slot.
 fn write_svg_channel_group(
     document: &mut String,
     layer: &RenderLayer,
     blend_mode: Option<&str>,
+    filter_id: Option<&str>,
+    clip_layer_to_canvas: bool,
     canvas: &CanvasSpec,
 ) {
     let mut styles = Vec::new();
@@ -4124,12 +4215,18 @@ fn write_svg_channel_group(
     if !layer.visible {
         styles.push("display:none".to_owned());
     }
+    let filter = filter_id.map_or_else(String::new, |filter_id| {
+        format!(" filter=\"url(#{filter_id})\"")
+    });
     let style = (!styles.is_empty()).then(|| format!(" style=\"{}\"", styles.join(";")));
     document.push_str(&format!(
-        "<g id=\"channel-{}\"{}>\n",
+        "<g id=\"channel-{}\"{filter}{}>\n",
         layer.channel_id.0,
         style.unwrap_or_default(),
     ));
+    if clip_layer_to_canvas {
+        document.push_str("<g clip-path=\"url(#canvas-clip)\">\n");
+    }
     for output in &layer.outputs {
         write_svg_geometry(
             document,
@@ -4139,6 +4236,9 @@ fn write_svg_channel_group(
             Some(output),
             canvas,
         );
+    }
+    if clip_layer_to_canvas {
+        document.push_str("</g>\n");
     }
     document.push_str("</g>\n");
 }

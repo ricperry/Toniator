@@ -2046,19 +2046,31 @@ fn component_value(pixel: SourcePixel, component: SourceComponent) -> f64 {
     }
 }
 
-/// Returns the requested Stage 9 scalar field for one decoded straight-sRGB
-/// pixel. RGB and CMYK are always calculated in linear light and CMY is the
-/// unnormalized full-UCR separation, not a `(1-K)` normalized variant.
+/// Returns the requested Stage 9 scalar field for one decoded straight-sRGB pixel.
+///
+/// RGB and CMYK are calculated in linear light. CMYK retains `K = 1 - max(R, G, B)`
+/// and normalizes C, M, and Y by `1 - K` so pure-process subtractive transmittance
+/// reconstructs the linear source color. Exact black has no chromatic denominator and
+/// therefore returns zero C, M, and Y. This function never associates color fields
+/// with alpha; [`mapped_response`] performs that operation exactly once after mapping.
 pub fn mapping_component_value(pixel: SourcePixel, component: SourceMappingComponent) -> f64 {
     let (red, green, blue) = linear_rgb(pixel);
-    let black = (1.0 - red.max(green).max(blue)).clamp(0.0, 1.0);
+    let maximum = red.max(green).max(blue);
+    let black = (1.0 - maximum).clamp(0.0, 1.0);
+    let normalized_chromatic = |value: f64| {
+        if maximum == 0.0 {
+            0.0
+        } else {
+            (1.0 - value / maximum).clamp(0.0, 1.0)
+        }
+    };
     match component {
         SourceMappingComponent::Red => red,
         SourceMappingComponent::Green => green,
         SourceMappingComponent::Blue => blue,
-        SourceMappingComponent::Cyan => (1.0 - red - black).clamp(0.0, 1.0),
-        SourceMappingComponent::Magenta => (1.0 - green - black).clamp(0.0, 1.0),
-        SourceMappingComponent::Yellow => (1.0 - blue - black).clamp(0.0, 1.0),
+        SourceMappingComponent::Cyan => normalized_chromatic(red),
+        SourceMappingComponent::Magenta => normalized_chromatic(green),
+        SourceMappingComponent::Yellow => normalized_chromatic(blue),
         SourceMappingComponent::Black => black,
         SourceMappingComponent::Alpha => pixel.alpha.clamp(0.0, 1.0),
         SourceMappingComponent::Luminance => rec709_luminance_linear(red, green, blue),
@@ -2767,8 +2779,9 @@ mod tests {
         }
     }
 
+    /// Verifies linear RGB and normalized CMYK fields for canonical opaque colors.
     #[test]
-    fn stage9_linear_rgb_and_full_ucr_fields_cover_synthetic_colors() {
+    fn stage9_linear_rgb_and_normalized_cmyk_fields_cover_synthetic_colors() {
         let field = synthetic_field(vec![
             SourcePixel {
                 red: 0.0,
@@ -2835,9 +2848,13 @@ mod tests {
         let black = field.pixel(0, 0).unwrap();
         assert_eq!(component(black, SourceMappingComponent::Black), 1.0);
         assert_eq!(component(black, SourceMappingComponent::Cyan), 0.0);
+        assert_eq!(component(black, SourceMappingComponent::Magenta), 0.0);
+        assert_eq!(component(black, SourceMappingComponent::Yellow), 0.0);
         let white = field.pixel(1, 0).unwrap();
         assert_eq!(component(white, SourceMappingComponent::Black), 0.0);
         assert_eq!(component(white, SourceMappingComponent::Cyan), 0.0);
+        assert_eq!(component(white, SourceMappingComponent::Magenta), 0.0);
+        assert_eq!(component(white, SourceMappingComponent::Yellow), 0.0);
         let red = field.pixel(2, 0).unwrap();
         assert_eq!(component(red, SourceMappingComponent::Red), 1.0);
         assert_eq!(component(red, SourceMappingComponent::Cyan), 0.0);
@@ -2872,39 +2889,110 @@ mod tests {
         assert!(
             (component(gray, SourceMappingComponent::Black) - (1.0 - linear_gray)).abs() < 1e-12
         );
+        assert_eq!(component(gray, SourceMappingComponent::Cyan), 0.0);
+        assert_eq!(component(gray, SourceMappingComponent::Magenta), 0.0);
+        assert_eq!(component(gray, SourceMappingComponent::Yellow), 0.0);
         assert!(component(gray, SourceMappingComponent::Luminance) > 0.21);
         let chromatic_midtone = field.pixel(9, 0).unwrap();
         let linear_red = srgb_to_linear(0.8);
         let linear_green = srgb_to_linear(0.4);
         let linear_blue = srgb_to_linear(0.2);
         let chromatic_black = 1.0 - linear_red.max(linear_green).max(linear_blue);
-        let unnormalized_magenta = 1.0 - linear_green - chromatic_black;
-        let normalized_magenta = unnormalized_magenta / (1.0 - chromatic_black);
+        let normalized_magenta = 1.0 - linear_green / linear_red;
         assert!(
             (component(chromatic_midtone, SourceMappingComponent::Black) - chromatic_black).abs()
                 < 1e-12
         );
         assert!(
-            (component(chromatic_midtone, SourceMappingComponent::Magenta) - unnormalized_magenta)
+            (component(chromatic_midtone, SourceMappingComponent::Magenta) - normalized_magenta)
                 .abs()
                 < 1e-12
         );
         assert!(
             (component(chromatic_midtone, SourceMappingComponent::Yellow)
-                - (1.0 - linear_blue - chromatic_black))
+                - (1.0 - linear_blue / linear_red))
                 .abs()
                 < 1e-12
         );
         assert!(
-            (component(chromatic_midtone, SourceMappingComponent::Magenta) - normalized_magenta)
+            (component(chromatic_midtone, SourceMappingComponent::Magenta)
+                - (1.0 - linear_green - chromatic_black))
                 .abs()
                 > 0.1,
-            "full UCR CMY is intentionally not normalized by (1-K)"
+            "normalized CMY must differ from unnormalized full UCR for a chromatic midtone"
         );
         assert_eq!(
             DECODER_CONTRACT_ID,
             "toniator-sampling-decoder-v3-still-image-linear-source-fields"
         );
+    }
+
+    /// Verifies that normalized CMYK and pure-process transmittance reconstruct linear RGB.
+    #[test]
+    fn normalized_cmyk_reconstructs_representative_linear_rgb_through_pure_inks() {
+        for pixel in [
+            SourcePixel {
+                red: 0.8,
+                green: 0.4,
+                blue: 0.2,
+                alpha: 1.0,
+            },
+            SourcePixel {
+                red: 0.35,
+                green: 0.65,
+                blue: 0.9,
+                alpha: 1.0,
+            },
+            SourcePixel {
+                red: 0.5,
+                green: 0.5,
+                blue: 0.5,
+                alpha: 1.0,
+            },
+        ] {
+            let (red, green, blue) = linear_rgb(pixel);
+            let cyan = mapping_component_value(pixel, SourceMappingComponent::Cyan);
+            let magenta = mapping_component_value(pixel, SourceMappingComponent::Magenta);
+            let yellow = mapping_component_value(pixel, SourceMappingComponent::Yellow);
+            let black = mapping_component_value(pixel, SourceMappingComponent::Black);
+            assert!(((1.0 - black) * (1.0 - cyan) - red).abs() < 1e-12);
+            assert!(((1.0 - black) * (1.0 - magenta) - green).abs() < 1e-12);
+            assert!(((1.0 - black) * (1.0 - yellow) - blue).abs() < 1e-12);
+        }
+    }
+
+    /// Verifies normalized CMYK retains exactly-once alpha association and zero-alpha suppression.
+    #[test]
+    fn normalized_cmyk_associates_source_alpha_once_and_suppresses_hidden_rgb() {
+        let mapping = SourceMapping {
+            component: SourceMappingComponent::Magenta,
+            placement: SourcePlacement::StretchToCanvas,
+            inverted: false,
+            gain: 1.0,
+            bias: 0.0,
+        };
+        let partial_red = SourcePixel {
+            red: 1.0,
+            green: 0.0,
+            blue: 0.0,
+            alpha: 0.25,
+        };
+        assert_eq!(
+            mapping_component_value(partial_red, SourceMappingComponent::Magenta),
+            1.0
+        );
+        assert_eq!(mapped_response(partial_red, mapping), 0.25);
+
+        let hidden_red = SourcePixel {
+            alpha: 0.0,
+            ..partial_red
+        };
+        assert_eq!(
+            mapping_component_value(hidden_red, SourceMappingComponent::Magenta),
+            1.0,
+            "straight hidden RGB remains inspectable before association"
+        );
+        assert_eq!(mapped_response(hidden_red, mapping), 0.0);
     }
 
     #[test]
