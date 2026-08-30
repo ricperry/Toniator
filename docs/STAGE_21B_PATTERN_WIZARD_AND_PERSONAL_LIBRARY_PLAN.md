@@ -1,7 +1,8 @@
 # Stage 21B — Pattern Wizard and Personal Library
 
 Status: **approved decision-complete plan; Gates 21B-1 and 21B-2 complete and
-accepted; Gates 21B-3 and 21B-4 planned and not begun** (2026-08-28). This plan is
+accepted; Gates 21B-3 and 21B-4 planned and not begun** (updated 2026-08-30).
+This plan is
 subordinate to the protected project specifications, especially the Addendum,
 and does not by itself authorize later gates or publication.
 
@@ -44,6 +45,11 @@ private-Sway smoke evidence. It does not enable **Edit Pattern**.
 The exact implementation checkpoint for Gate 21B-2 is `63fd9fb`, user-accepted
 on 2026-08-28. All first-party crates declare version `0.2.0`, and
 `toniator --version` reports `toniator 0.2.0`.
+
+The cross-stage CMYK source-fidelity correction is user-accepted at `a2633e1`
+on 2026-08-30. The intermittent RGB-edit-to-CMYK crash is deliberately
+deferred until the user can provide a reliable reproducer. It is not a Gate
+21B-3 blocker and must not be investigated as part of that gate.
 
 ## Gate sequence
 
@@ -127,6 +133,11 @@ reusable-resource insertion, explicit copy-versus-shared behavior, local
 undo/redo, and focus restoration. A private draft remains isolated until one
 Apply. Independent geometry, history, and UX review runs before the gate stops
 for acceptance.
+
+The unreliable RGB-edit-to-CMYK crash is outside this gate. Preserve any
+relevant diagnostics, but do not attempt reproduction, mitigation, or a broad
+model-transition change unless the user later supplies a reliable reproducer
+and separately authorizes that investigation.
 
 Recipe pages are grouped by authoritative capability and descriptor families,
 not by card name. The Curve Motif path is one-guide layout, row spacing and

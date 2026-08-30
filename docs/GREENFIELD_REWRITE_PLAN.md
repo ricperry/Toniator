@@ -557,11 +557,17 @@ SourceColorAlpha channel topologies. The technical contract below is one
 coherent Stage 9 contract, delivered through five separately accepted local
 checkpoints:
 
+The user-accepted CMYK source-fidelity correction at `a2633e1` on 2026-08-30
+updates the current Stage 9B/9C authority without rewriting their historical
+checkpoints: normalized linear-light CMYK fields reconstruct source color
+through pure process transmittance, and editable CMYK SVG uses the same fixed
+equation through same-document filter inputs rather than CSS multiply.
+
 1. **Stage 9A — Channel authority and topology.** Domain model, roles, stable
    IDs, canonical topology factory, mappings, validation, atomic replacement,
    revisions, affected-channel reporting, and invalidation.
 2. **Stage 9B — Source fields and source-colored realization.** Linear RGB,
-   deterministic full-UCR CMYK fields, mapping transforms, alpha association,
+   deterministic normalized CMYK fields, mapping transforms, alpha association,
    SourceColorAlpha interpolation, zero-alpha suppression, and per-mark sampled
    paint/content identity.
 3. **Stage 9C — Fixed model compositors.** Layer-local coverage, additive RGB,
@@ -621,20 +627,23 @@ retain its accepted Stage 3–8 identities and output under equivalent mapping.
 
 Decode straight sRGB, convert color to linear light, and derive fields before
 spatial interpolation. RGB uses linear `R`, `G`, and `B`. CMYK uses
-profile-independent unnormalized full UCR:
+profile-independent normalized linear-light separation:
 
 ```text
 K = 1 - max(R, G, B)
-C = 1 - R - K
-M = 1 - G - K
-Y = 1 - B - K
+if K = 1: C = M = Y = 0
+otherwise:
+  C = (1 - R - K) / (1 - K)
+  M = (1 - G - K) / (1 - K)
+  Y = (1 - B - K) / (1 - K)
 ```
 
 Clamp component values to `[0,1]`. Apply the mapping transform, then multiply
 color-derived responses by source alpha exactly once before interpolation.
 Alpha is independent and is not alpha-multiplied again. Do not add normalized
-CMYK, ICC/profile handling, dot gain, configurable UCR/GCR, black-generation
-curves, physical ink simulation, or soft proofing.
+CMYK variants beyond this fixed source-fidelity separation, ICC/profile
+handling, dot gain, configurable UCR/GCR, black-generation curves, physical
+ink simulation, or soft proofing.
 
 SourceColorAlpha has one special evaluated-paint contract:
 
@@ -727,10 +736,12 @@ after this transparent scene result as a final consumer operation.
 
 ### Editable vector SVG semantic correspondence
 
-- Export RGB and CMYK channels as ordinary first-class `<g>` children of one
-  shared canvas group, in authoritative channel order. Apply the single canvas
-  clip to that shared group. Keep every mark as ordinary editable vector
-  geometry inside its channel group.
+- Export RGB and CMYK channels as ordinary first-class `<g>` descendants of one
+  shared canvas group, in authoritative channel order. Apply the final canvas
+  clip to that shared group. CMYK may repeat that same clip inside each channel
+  before moving only its rendered layer result to a filter-input atlas slot.
+  Keep every mark as ordinary editable vector geometry at canonical canvas
+  coordinates inside its channel group.
 - SourceColorAlpha remains one ordinary clipped source-colored group whose
   marks carry their sampled colors; do not decompose it into RGB groups.
 - Do not move channel geometry into `<defs>`, reconstruct it through `feImage`,
@@ -740,19 +751,21 @@ after this transparent scene result as a final consumer operation.
   reproduce the layer-local equation; do not move opacity to a post-composited
   group operation.
 - Isolate the shared canvas group. Use editable artist-facing `screen` group
-  blending for RGB, `multiply` group blending for CMYK, and ordinary ordered
-  source-over for SourceColorAlpha. SVG remains transparent.
+  blending for RGB and ordinary ordered source-over for SourceColorAlpha. For
+  CMYK, move each live channel group's rendered layer-local result into a
+  disjoint nested-filter atlas slot and recombine those slots from the parent's
+  single `SourceGraphic` with explicit linear-light transmittance and
+  coverage-union filter primitives. SVG remains transparent.
 - The raster compositor remains the canonical exact linear implementation.
-  SVG and raster require semantic correspondence, not unconditional pixel
-  parity: full-opacity canonical relationships must match exactly, while known
-  fractional-alpha differences from supported SVG viewer blend behavior must
-  be tested and documented with RGB and alpha reported separately. Exact
-  equality is required only where both representations can express the same
-  result.
+  CMYK SVG applies the same equation; native and SVG results may differ only by
+  bounded antialiasing and renderer quantization. Tests and evidence report RGB
+  and alpha separately and require exact equality where both representations
+  quantize identically.
 - Assert the serialized editable group structure and render human-readable
   synthetic SVG fixtures through the in-process SVG stack and Inkscape. Verify
   channel and mark editability/query visibility, exact full-opacity canonical
-  relationships, and the explicitly characterized fractional-alpha behavior.
+  relationships, fractional fixed-transmittance correspondence, and bounded
+  renderer rounding.
 
 ### Identity and cache layering
 
@@ -862,7 +875,8 @@ domain API is read-only in this substage.
 
 Acceptance uses exact black, white, RGB primary/secondary, neutral-gray,
 partial-alpha, zero-alpha hidden-RGB, and opaque/transparent-boundary fixtures.
-It proves linear fields, unnormalized full UCR, transform order,
+It proves linear fields, normalized CMYK separation and pure-ink reconstruction,
+transform order,
 inversion/gain/bias/clamping, color alpha association exactly once, independent
 Alpha, SourceColorAlpha unassociation and straight sampled paint, exact-zero
 suppression, positive-alpha size-only behavior, immutable source-derived paint
@@ -887,13 +901,13 @@ quantization, consumer-only transparent/black/white PNG backing, exact
 single-layer compatibility, deterministic editable SVG channel structure, no
 raster embedding or proxy composition, and in-process plus Inkscape SVG/raster
 semantic correspondence with RGB and alpha measured separately. Exact parity
-is required only where both representations can express the same result; known
-fractional-alpha differences are explicitly tested and documented. Both
-immutable sources are exercised.
+is required where both representations quantize identically; fractional CMYK
+must follow the same equation within explicitly bounded renderer antialiasing
+and quantization. Both immutable sources are exercised.
 
 **9C stop:** Update only Stage 9C to **Implemented awaiting review**, report the
 equations, synthetic results, editable SVG structure, semantic-correspondence
-evidence, and known fractional-alpha differences, and wait. After user
+evidence, and bounded renderer differences, and wait. After user
 acceptance, create local implementation and tracker checkpoint commits before
 Stage 9D.
 
@@ -982,18 +996,18 @@ invalidation.
 
 Sampling/math tests use exact black, white, RGB primary/secondary, neutral-gray,
 partial-alpha, and zero-alpha hidden-RGB fixtures. Prove linear fields,
-unnormalized UCR, transform order, inversion/gain/bias/clamping, color alpha
-association exactly once, independent Alpha, SourceColorAlpha interpolation,
-zero-alpha suppression, and that positive alpha changes size without fading
-paint.
+normalized CMYK separation and pure-ink reconstruction, transform order,
+inversion/gain/bias/clamping, color alpha association exactly once, independent
+Alpha, SourceColorAlpha interpolation, zero-alpha suppression, and that
+positive alpha changes size without fading paint.
 
 Render tests prove exact RGB and CMYK primary/secondary/neutral relationships,
 overlap, fractional coverage, opacity, visibility, transparent output,
 straight-sRGBA quantization, single-layer compatibility, deterministic editable
 SVG channel structure, and native-raster/SVG semantic correspondence without
 raster embedding, `feImage` reconstruction, or proxy artwork. Exact parity is
-required only for mutually expressible results; fractional-alpha differences
-are characterized explicitly.
+required where results quantize identically; bounded antialiasing and renderer
+quantization differences are characterized explicitly.
 
 Engine/cache/scheduler tests prove 3 ordered RGB layers, 4 ordered CMYK layers,
 1 SourceColorAlpha layer, per-channel mapping/presentation/topology reuse,
@@ -2232,8 +2246,11 @@ Stage 21B is **In progress** as four separately reviewed and accepted gates.
 Gate 21B-1 is complete and user-accepted at implementation checkpoint
 `f77998c`; Gate 21B-2 is complete and user-accepted at implementation
 checkpoint `63fd9fb` on 2026-08-28, with its accepted CMYK/SourceColorAlpha
-stabilization at `b67a3483d2a1670e01b29716a1a33df51e10f7a1`; Gates 21B-3 and
-21B-4 remain planned, separately gated, and not begun. The exact
+stabilization at `b67a3483d2a1670e01b29716a1a33df51e10f7a1`. The accepted
+cross-stage CMYK source-fidelity correction is `a2633e1`; the intermittent
+RGB-edit-to-CMYK crash is deliberately deferred until the user supplies a
+reliable reproducer and does not block Gate 21B-3. Gates 21B-3 and 21B-4 remain
+planned, separately gated, and not begun. The exact
 decision-complete contract is
 [`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md).
 

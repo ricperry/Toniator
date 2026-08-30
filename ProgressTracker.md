@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-28**. The durable execution contract is
+Last updated: **2026-08-30**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -127,7 +127,7 @@ reporting, and `ChannelTopology` invalidation in the domain layer.
 complete-document evaluation snapshot/token boundary required by Stage 9D
 without changing the accepted single-channel evaluation APIs.
 
-**Stage 9B — Complete at commit `fb1b31d`.** Add deterministic linear RGB/full-UCR CMYK source
+**Stage 9B — Complete at commit `fb1b31d`.** Add deterministic linear RGB/normalized CMYK source
 fields and SourceColorAlpha sampled-paint realization, including alpha
 association exactly once and zero-alpha paint suppression.
 
@@ -886,6 +886,32 @@ rejection. Both immutable sources and a fresh private-Sway CMYK-to-source-alpha
 workflow pass with clean app logs; automated wlroots evidence is not manual
 GNOME/Mutter acceptance. Gate 21B-3 remains not begun. No push or publication
 is implied by this transition.
+
+**CMYK source-fidelity correction — Complete at commit `a2633e1`.** The user
+accepted the correction on 2026-08-30 after selecting it from the
+validation-only color-model audit:
+linear-light `(1-K)`-normalized C/M/Y fields with the current pure process
+paints and fixed subtractive compositor. The correction must preserve
+straight-sRGBA alpha association, RGB and SourceColorAlpha behavior,
+model-sensitive backgrounds, canonical topology, and pattern geometry. It
+includes the required protected Addendum and durable Stage 9 authority
+revisions plus focused source-reconstruction and intrinsic raster/SVG visual
+evidence. Focused reconstruction tests and both immutable source fixtures prove
+that the corrected source separation restores chromatic-channel support and
+improves spatially averaged fidelity. Editable CMYK SVG now preserves every
+live channel group at its canonical coordinates, moves only each rendered
+layer result into a disjoint nested-filter atlas slot, and recombines those
+same-document `SourceGraphic` inputs with the protected linear-light
+transmittance and coverage-union equations. This removes CSS multiply without
+`feImage`, duplicate proxy geometry, or raster embedding. Checked-in opaque and
+fractional overlap tests agree with native output within one byte of renderer
+quantization; all 36 full-resolution fixture variants render through resvg and
+Inkscape, and native/SVG visible-color error improves materially in all six
+primary cases. The intermittent RGB-edit-to-CMYK crash investigation is
+deliberately deferred until the user can provide a reliable reproducer; it is
+not a Gate 21B-3 blocker and must not be mixed into that gate. Gate 21B-3
+remains planned, separately gated, and not begun. No push or publication is
+implied by this acceptance transition.
 
 ## Maintenance rules
 
