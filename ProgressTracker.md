@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-30**. The durable execution contract is
+Last updated: **2026-09-01**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -871,7 +871,8 @@ source proxy to 512×512 preview, latest-ticket/last-success semantics, one
 Apply publication, specified ALL delta reset/named behavior, and wide/narrow
 layout. All first-party crates are version `0.2.0`; `toniator --version`
 reports `toniator 0.2.0`. Gates
-21B-3 (Complete Editing and Nested Editors) is **Implemented awaiting review**.
+21B-3 (Complete Editing and Nested Editors) is **Complete at commit `68ef02e`
+and user-accepted on 2026-09-01**.
 The actual New/Edit wizard now follows Family → Family Settings → Sites →
 Rendering → Review, reconstructs existing presets into prepopulated controls,
 and exposes capability-driven routes for every built-in and valid personal
@@ -883,8 +884,11 @@ keyboard/focus paths, representative New constructions, nested editing,
 Previous navigation, final one-squash Apply, the Dispersion/Branching crash
 regression, and curved Stacked/Constant-gap guide generation; independent
 geometry/history and hands-on UX reviews pass. Automated wlroots evidence is
-not manual GNOME/Mutter acceptance. Gate 21B-4 (Personal Management and Final
-Verification) remains Planned, not begun, and separately gated. The exact
+not manual GNOME/Mutter acceptance. The accepted follow-up also fixes the
+main-window random-seed row reordering and prevents seed-one random connections
+from collapsing a saved CMYK channel to empty geometry; the saved-project
+regression realizes positive geometry for all four CMYK channels. Gate 21B-4
+(Personal Management and Final Verification) remains Planned, not begun, and separately gated. The exact
 contract is
 [`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](docs/STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md).
 The user then accepted a Gate 21B-2 CMYK/SourceColorAlpha stabilization at
@@ -897,9 +901,8 @@ and focused app regressions cover ALL/named private materialization, output
 deltas, inspector projection, exact Undo/Redo, and stable SourceColorAlpha path
 rejection. Both immutable sources and a fresh private-Sway CMYK-to-source-alpha
 workflow pass with clean app logs; automated wlroots evidence is not manual
-GNOME/Mutter acceptance. Gate 21B-3 is now Implemented awaiting review under
-its separate 2026-08-30 authorization. No push or publication is implied by
-this transition.
+GNOME/Mutter acceptance. Gate 21B-3 is complete and user-accepted as recorded
+above. No push or publication is implied by this transition.
 
 **CMYK source-fidelity correction — Complete at commit `a2633e1`.** The user
 accepted the correction on 2026-08-30 after selecting it from the
@@ -924,8 +927,8 @@ Inkscape, and native/SVG visible-color error improves materially in all six
 primary cases. The intermittent RGB-edit-to-CMYK crash investigation is
 deliberately deferred until the user can provide a reliable reproducer; it is
 not a Gate 21B-3 blocker and must not be mixed into that gate. Gate 21B-3 is
-Implemented awaiting review under its separate 2026-08-30 authorization. No
-push or publication is implied by this acceptance transition.
+complete and user-accepted as recorded above. No push or publication is
+implied by this acceptance transition.
 
 ## Maintenance rules
 

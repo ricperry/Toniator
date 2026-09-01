@@ -1,7 +1,8 @@
 # Stage 21B — Pattern Wizard and Personal Library
 
-Status: **approved decision-complete plan; Gates 21B-1 and 21B-2 complete and
-accepted; Gates 21B-3 and 21B-4 planned and not begun** (updated 2026-08-30).
+Status: **approved decision-complete plan; Gates 21B-1, 21B-2, and 21B-3
+complete and accepted; Gate 21B-4 planned and not begun** (updated
+2026-09-01).
 This plan is
 subordinate to the protected project specifications, especially the Addendum,
 and does not by itself authorize later gates or publication.
@@ -126,13 +127,29 @@ the same semantic groups without changing navigation or draft state.
 
 ### Gate 21B-3 — Complete Editing and Nested Editors
 
-**Planned; not begun.** Complete capability/descriptor-driven Edit coverage
-for all 17 cards, including structural reconstruction and ordered outputs.
-Integrate nested Guide, Shape, and Motif editors with endpoint/seam rules,
-reusable-resource insertion, explicit copy-versus-shared behavior, local
-undo/redo, and focus restoration. A private draft remains isolated until one
-Apply. Independent geometry, history, and UX review runs before the gate stops
-for acceptance.
+**Complete at commit `68ef02e`; user-accepted on 2026-09-01.** The wizard now
+uses the adaptive Family → Family Settings → Sites → Rendering → Review flow
+for New and Edit. It reconstructs existing recipes into prepopulated controls
+and derives pages and routes from capabilities, descriptors, output records,
+and recipe authority for all 17 built-ins and valid personal recipes; preset
+names, IDs, categories, and thumbnails are not behavior selectors.
+
+Nested Guide, Shape, and Motif editors use isolated child drafts with local
+undo/redo, one parent-draft Apply entry, exact Cancel/dirty-close restoration,
+copy-versus-shared resource behavior, endpoint/seam constraints, and invoking
+control focus restoration. The accepted implementation also exposes
+per-channel random seeds and preserves ordered outputs, guide intersections,
+guide cells, and Voronoi choices through reconstruction and application.
+
+Focused domain, geometry, pattern, engine, and app tests plus strict checks
+pass. Private Sway/AT-SPI evidence covers semantic controls, keyboard/focus
+paths, nested transitions, representative New constructions, the
+Dispersion/Branching crash regression, and curved Stacked/Constant-gap guide
+generation; automated wlroots evidence is not manual GNOME/Mutter acceptance.
+The final follow-up corrected random-seed row reordering and a seed-one random
+connection distribution that could collapse a saved CMYK channel to empty
+geometry; the saved-project regression now realizes positive geometry in all
+four CMYK channels.
 
 The unreliable RGB-edit-to-CMYK crash is outside this gate. Preserve any
 relevant diagnostics, but do not attempt reproduction, mitigation, or a broad
@@ -160,7 +177,22 @@ persisted when the geometry already determines the result.
 
 ### Gate 21B-4 — Personal Management and Final Verification
 
-**Planned; not begun.** Add user-facing save/update, copy, rename, trash,
+**Planned; not begun.** Before acceptance, perform an in-depth bug hunt across
+the wizard's validity and application flow. In particular, every invalid
+recipe state must explain the cause at the relevant page/control, focus the
+first actionable error, and keep Apply disabled truthfully; an enabled Apply
+must either publish successfully or surface the authoritative validation error
+without silently dropping the draft. Add regression coverage for transitions
+that currently produce unexplained invalid states, inexplicably disabled Apply,
+or enabled Apply that fails.
+
+Also add at least one capability patch, such as Motif along a curved guide,
+through the domain capability/descriptor, recipe, evaluation/rendering, and
+wizard route as applicable. Verify that the new capability follows the same
+Family/topology → capabilities → construction/output model rather than adding
+a preset-specific branch.
+
+Then add user-facing save/update, copy, rename, trash,
 undo, configurable-root switching, external refresh, conflict handling,
 thumbnail behavior, warnings, accessibility, and keyboard workflows. Built-ins
 remain immutable. Saving a user preset and applying a pattern remain separate
@@ -260,8 +292,9 @@ part of Gate 21B-1.
 Each gate uses one writer, focused verification, independent review, and a
 parent-owned acceptance transition. Update `ProgressTracker.md` only to the
 verified status: Gate 21B-1 is Complete at `f77998c`; Gate 21B-2 is Complete
-at `63fd9fb`; Gates 21B-3 and 21B-4 are Planned/not begun; Stage 21B overall
-remains In progress. Do not mark the whole stage accepted at Gate 21B-2.
+at `63fd9fb`; Gate 21B-3 is Complete at `68ef02e` and user-accepted on
+2026-09-01; Gate 21B-4 remains Planned/not begun; Stage 21B overall remains
+In progress.
 
 Do not commit, push, publish, or begin the next gate without its explicit
 authorization. At closeout, inspect the exact milestone diff, preserve
