@@ -14,7 +14,7 @@ use toniator_domain::{
     AuthoredStructureKind, CanvasSpec, ChannelId, ConnectedGeometryResponse, ConnectionProgram,
     CoveragePolicy, DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentSession,
     GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
-    MarkOrientation, ModeledMappingFieldEdit, OffsetCleanup, OffsetSides, PathStrokeStyle,
+    MarkOrientation, ModeledMappingFieldEdit, OffsetCleanup, PathStrokeStyle,
     PatternCapabilityScope, PatternDefinition, PatternDefinitionBundle, PatternDefinitionEdit,
     PatternDefinitionId, PatternGeometryResponse, PatternMechanism, PatternMechanismId,
     PatternOutputLayerId, PatternOutputRealization, PatternOutputSettings, PropertyDescriptor,
@@ -299,7 +299,6 @@ fn curved_one_stack_history_for_canvas(
             repetition: if normal_offset {
                 GuideRepetition::NormalOffset {
                     spacing: canvas.height * 0.5,
-                    sides: OffsetSides::Both,
                     cleanup: OffsetCleanup::DissolveCrossings,
                 }
             } else {
@@ -382,6 +381,7 @@ fn curved_one_stack_history_for_canvas(
                     PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                         minimum_thickness: 0.15,
                         maximum_thickness: 0.65,
+                        bias: 0.0,
                     })
                 } else {
                     PatternGeometryResponse::Marks(toniator_domain::MarkGeometryResponse {
@@ -565,6 +565,7 @@ fn curved_two_stack_history_for_canvas(
                     PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                         minimum_thickness: 0.15,
                         maximum_thickness: 0.65,
+                        bias: 0.0,
                     })
                 } else {
                     PatternGeometryResponse::Marks(toniator_domain::MarkGeometryResponse {
@@ -2087,7 +2088,6 @@ fn curved_one_normal_offset_paths_evaluates_repeated_stroke_layers() {
         dimensions[0].repetition,
         GuideRepetition::NormalOffset {
             spacing: 12.0,
-            sides: OffsetSides::Both,
             cleanup: OffsetCleanup::DissolveCrossings,
         }
     ));
@@ -2131,7 +2131,6 @@ fn curved_one_normal_offset_sites_evaluates_repeated_mark_layers() {
         dimensions[0].repetition,
         GuideRepetition::NormalOffset {
             spacing: 12.0,
-            sides: OffsetSides::Both,
             cleanup: OffsetCleanup::DissolveCrossings,
         }
     ));
@@ -2153,8 +2152,8 @@ fn curved_one_normal_offset_sites_evaluates_repeated_mark_layers() {
     }
 }
 
-/// Evaluates both authored cubic TransformStacks as repeated GuidePaths and
-/// proves canonical stroke provenance retains each distinct source structure.
+/// Evaluates both authored cubic TransformStacks as repeated GuidePaths and proves canonical
+/// stroke provenance retains each distinct source structure through terminal line extension.
 #[test]
 fn curved_two_stack_paths_evaluates_both_cubic_structure_provenances() {
     let source_id = SourceReferenceId::new("curved-two-stack-rgb").expect("source ID validates");
@@ -2203,10 +2202,13 @@ fn curved_two_stack_paths_evaluates_both_cubic_structure_provenances() {
             .collect::<Vec<_>>();
         assert!(sources.contains(&AuthoredStructureId(11)));
         assert!(sources.contains(&AuthoredStructureId(12)));
-        assert!(strokes.iter().all(|stroke| matches!(
-            stroke.path.segments()[0],
-            toniator_patterns::CurveSegment::CubicBezier(_)
-        )));
+        assert!(strokes.iter().all(|stroke| {
+            stroke
+                .path
+                .segments()
+                .iter()
+                .any(|segment| matches!(segment, toniator_patterns::CurveSegment::CubicBezier(_)))
+        }));
     }
 }
 
@@ -2580,7 +2582,7 @@ fn curved_guide_derived_svg_evidence_histories_preserve_variants_and_rgb() {
                 assert!(definition.mechanisms.iter().any(|mechanism| matches!(
                     mechanism,
                     PatternMechanism::GuideDimensions { dimensions, .. }
-                        if matches!(dimensions[0].repetition, GuideRepetition::NormalOffset { spacing, sides: OffsetSides::Both, cleanup: OffsetCleanup::DissolveCrossings } if spacing == 77.5)
+                        if matches!(dimensions[0].repetition, GuideRepetition::NormalOffset { spacing, cleanup: OffsetCleanup::DissolveCrossings } if spacing == 77.5)
                 )));
             }
             let density = history

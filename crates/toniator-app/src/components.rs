@@ -317,11 +317,15 @@ mod pattern_editor_shell {
         #[template_child]
         pub new_structure: gtk::TemplateChild<gtk::Button>,
         #[template_child]
+        pub construction_canvas_heading: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
         pub construction_canvas: gtk::TemplateChild<gtk::DrawingArea>,
         #[template_child]
         pub coordinate_x: gtk::TemplateChild<gtk::Entry>,
         #[template_child]
         pub coordinate_y: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub selected_point_label: gtk::TemplateChild<gtk::Label>,
         #[template_child]
         pub primary_rows: gtk::TemplateChild<gtk::Box>,
         #[template_child]
@@ -334,6 +338,18 @@ mod pattern_editor_shell {
         pub insert_node: gtk::TemplateChild<gtk::Button>,
         #[template_child]
         pub delete_node: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub motif_direction_row: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub smooth_direction: gtk::TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub corner_direction: gtk::TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub motif_terminal_handle_row: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub edit_left_terminal_handle: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub edit_right_terminal_handle: gtk::TemplateChild<gtk::Button>,
     }
 
     #[glib::object_subclass]
@@ -409,6 +425,10 @@ impl ToniatorPatternEditorShell {
     pub fn new_structure(&self) -> gtk::Button {
         self.imp().new_structure.get()
     }
+    /// Returns the visible heading that labels the interactive construction canvas.
+    pub fn construction_canvas_heading(&self) -> gtk::Label {
+        self.imp().construction_canvas_heading.get()
+    }
     /// Returns the dynamic private-draft drawing surface.
     pub fn construction_canvas(&self) -> gtk::DrawingArea {
         self.imp().construction_canvas.get()
@@ -420,6 +440,10 @@ impl ToniatorPatternEditorShell {
     /// Returns the selected-anchor Y entry.
     pub fn coordinate_y(&self) -> gtk::Entry {
         self.imp().coordinate_y.get()
+    }
+    /// Returns the visible selection label paired with construction-coordinate editing.
+    pub fn selected_point_label(&self) -> gtk::Label {
+        self.imp().selected_point_label.get()
     }
     /// Returns the dynamic ordinary-descriptor slot.
     pub fn primary_rows(&self) -> gtk::Box {
@@ -444,6 +468,30 @@ impl ToniatorPatternEditorShell {
     /// Returns the static selected-node deletion action control.
     pub fn delete_node(&self) -> gtk::Button {
         self.imp().delete_node.get()
+    }
+    /// Returns the Motif-only terminal-direction presentation group.
+    pub fn motif_direction_row(&self) -> gtk::Box {
+        self.imp().motif_direction_row.get()
+    }
+    /// Returns the local Smooth-direction choice for Curve Motif terminal handles.
+    pub fn smooth_direction(&self) -> gtk::ToggleButton {
+        self.imp().smooth_direction.get()
+    }
+    /// Returns the local Corner-direction choice for Curve Motif terminal handles.
+    pub fn corner_direction(&self) -> gtk::ToggleButton {
+        self.imp().corner_direction.get()
+    }
+    /// Returns the Motif-only terminal-handle selection actions container.
+    pub fn motif_terminal_handle_row(&self) -> gtk::Box {
+        self.imp().motif_terminal_handle_row.get()
+    }
+    /// Returns the explicit left terminal-handle selection or conversion action.
+    pub fn edit_left_terminal_handle(&self) -> gtk::Button {
+        self.imp().edit_left_terminal_handle.get()
+    }
+    /// Returns the explicit right terminal-handle selection or conversion action.
+    pub fn edit_right_terminal_handle(&self) -> gtk::Button {
+        self.imp().edit_right_terminal_handle.get()
     }
 }
 
@@ -610,7 +658,13 @@ mod pattern_wizard_shell {
         #[template_child]
         pub wizard_layout: gtk::TemplateChild<gtk::Box>,
         #[template_child]
-        pub wizard_cards: gtk::TemplateChild<gtk::Box>,
+        pub wizard_gallery_panel: gtk::TemplateChild<gtk::ScrolledWindow>,
+        #[template_child]
+        pub wizard_cards: gtk::TemplateChild<gtk::FlowBox>,
+        #[template_child]
+        pub wizard_page_panel: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub wizard_controls_scroll: gtk::TemplateChild<gtk::ScrolledWindow>,
         #[template_child]
         pub wizard_controls: gtk::TemplateChild<gtk::Box>,
         #[template_child]
@@ -671,9 +725,24 @@ impl ToniatorPatternWizardShell {
         self.imp().wizard_layout.get()
     }
 
-    /// Returns the dynamic catalog-card container.
-    pub fn gallery(&self) -> gtk::Box {
+    /// Returns the full-width Presets container shown only on the first fixed wizard card.
+    pub fn gallery_panel(&self) -> gtk::ScrolledWindow {
+        self.imp().wizard_gallery_panel.get()
+    }
+
+    /// Returns the responsive catalog-card flow container.
+    pub fn gallery(&self) -> gtk::FlowBox {
         self.imp().wizard_cards.get()
+    }
+
+    /// Returns the full-width fixed-card editing container shown after Presets.
+    pub fn page_panel(&self) -> gtk::Box {
+        self.imp().wizard_page_panel.get()
+    }
+
+    /// Returns the bounded scrolling viewport that keeps long fixed-card controls reachable.
+    pub fn page_scroll(&self) -> gtk::ScrolledWindow {
+        self.imp().wizard_controls_scroll.get()
     }
 
     /// Returns the dynamic review or capability-driven edit-page container.
@@ -726,8 +795,6 @@ mod pattern_wizard_card {
         pub wizard_card_description: gtk::TemplateChild<gtk::Label>,
         #[template_child]
         pub wizard_card_unavailable: gtk::TemplateChild<gtk::Label>,
-        #[template_child]
-        pub wizard_card_actions: gtk::TemplateChild<gtk::Box>,
     }
 
     #[glib::object_subclass]
@@ -789,7 +856,7 @@ impl ToniatorPatternWizardCard {
         self.update_relation(&[gtk::accessible::Relation::LabelledBy(&[title.upcast_ref()])]);
     }
 
-    /// Sets the card category from immutable catalog metadata.
+    /// Sets the card's presentation-only family label from the caller's recipe projection.
     pub fn set_category(&self, category: &str) {
         self.imp().wizard_card_category.set_label(category);
     }
@@ -816,11 +883,6 @@ impl ToniatorPatternWizardCard {
         let label = self.imp().wizard_card_unavailable.get();
         label.set_label(explanation.unwrap_or_default());
         label.set_visible(explanation.is_some());
-    }
-
-    /// Appends a wired action to the static card action row.
-    pub fn append_action(&self, action: &impl IsA<gtk::Widget>) {
-        self.imp().wizard_card_actions.append(action);
     }
 }
 

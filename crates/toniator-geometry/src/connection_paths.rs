@@ -351,7 +351,7 @@ fn select_random(
         let range = maximum - minimum + 1;
         targets.insert(
             *node,
-            minimum + (priority(seed, *node, *node) as usize % range),
+            minimum + priority_bucket(priority(seed, *node, *node), range),
         );
     }
     let mut unique = BTreeSet::new();
@@ -872,6 +872,16 @@ fn priority(seed: u32, first: FamilySiteId, second: FamilySiteId) -> u64 {
     value
 }
 
+/// Maps one full-width deterministic priority into a bounded degree bucket.
+///
+/// Multiply-high reduction avoids both modulo bias and FNV-1a's correlated low bits. The caller
+/// supplies the validated inclusive degree-range width, which is always positive and no larger
+/// than the authored `u32` degree domain.
+fn priority_bucket(priority: u64, range: usize) -> usize {
+    debug_assert!(range > 0, "a connection degree range is never empty");
+    ((u128::from(priority) * range as u128) >> u64::BITS) as usize
+}
+
 /// Builds the stable content identity while explicitly excluding diagnostics and operational limits.
 fn fingerprint(
     output: PatternOutputLayerId,
@@ -1010,6 +1020,24 @@ mod tests {
         let mut values = Vec::<u8>::new();
         let error = reserve_connection(&mut values, usize::MAX).expect_err("overflow rejects");
         assert_eq!(error.path(), "connection.allocation");
+    }
+
+    /// Proves a zero-minimum random-link degree choice uses the full priority instead of collapsing
+    /// every ordinal into the same FNV low-bit bucket.
+    #[test]
+    fn random_link_degree_bucket_uses_full_priority_width() {
+        let mut counts = [0_usize; 4];
+        for ordinal in 0..1_000 {
+            let site = FamilySiteId {
+                mechanism_id: PatternMechanismId(9),
+                ordinal,
+            };
+            counts[priority_bucket(priority(1, site, site), counts.len())] += 1;
+        }
+        assert!(
+            counts.iter().all(|count| *count > 0),
+            "every authored degree bucket receives deterministic site choices: {counts:?}"
+        );
     }
 
     /// Splits an oversized Euler trail only at shared endpoints so the fixed curve-path bound

@@ -1,8 +1,8 @@
 use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureId,
-    AuthoredStructureKind, CanvasSpec, CoveragePolicy, Document, DocumentId,
+    AuthoredStructureKind, CanvasSpec, CoveragePolicy, DensityMetric2D, Document, DocumentId,
     GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
-    MarkOrientation, OffsetCleanup, OffsetSides, PatternDefinition, PatternDefinitionBundle,
+    MarkOrientation, OffsetCleanup, PatternDefinition, PatternDefinitionBundle,
     PatternDefinitionId, PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
     PatternOutputRealization, PatternOutputSettings, ResolvedDensityMetric2D, SourceComponent,
     SourcePlacement, SourceReference,
@@ -120,6 +120,24 @@ fn request(max_family_candidates: usize) -> GridInspectRequest {
         support_radius: 4.5,
         max_family_candidates,
     }
+}
+
+/// Builds the square test request at one artist-facing Pattern size.
+///
+/// # Panics
+///
+/// Panics only if the fixed positive square canvas or density fixture ceases to validate.
+fn request_at_pattern_size(max_family_candidates: usize, pattern_size: f64) -> GridInspectRequest {
+    let mut request = request(max_family_candidates);
+    let default = DensityMetric2D::default_for_canvas(&request.canvas)
+        .expect("fixed square canvas has a default density");
+    request.density = DensityMetric2D {
+        density: default.density / pattern_size,
+        aspect: 1.0,
+    }
+    .resolve(&request.canvas)
+    .expect("fixed positive Pattern size resolves");
+    request
 }
 
 /// Proves resolved authored guides report work and merge contributors in selected order.
@@ -409,10 +427,10 @@ fn curved_transform_stacks_and_along_guides_preserve_scope_phase_and_variable_in
         vec![GuideDimension {
             id: GuideDimensionId(19),
             baseline_angle_degrees: 0.0,
-            phase: 27.0,
+            phase: 7.0,
             prototype: GuidePrototype::CircularArc {
                 center: AuthoredPoint2 { x: 0.0, y: 0.0 },
-                radius: 55.0,
+                radius: 20.0,
                 start_angle_degrees: 0.0,
                 sweep_angle_degrees: 360.0,
             },
@@ -437,11 +455,10 @@ fn curved_transform_stacks_and_along_guides_preserve_scope_phase_and_variable_in
     .expect("stacked finite arcs publish bounded along-guide sites");
     let guides = output.structural_path_set().unwrap().paths();
     assert!(guides.len() > 1);
-    assert!(
-        guides
-            .windows(2)
-            .all(|pair| pair[0].id.repetition_index < pair[1].id.repetition_index)
-    );
+    assert!(guides.windows(2).all(|pair| {
+        (pair[0].id.repetition_index, pair[0].id.component_ordinal)
+            < (pair[1].id.repetition_index, pair[1].id.component_ordinal)
+    }));
     let raw_phase = guides
         .iter()
         .find(|guide| guide.id.repetition_index == 0)
@@ -454,7 +471,7 @@ fn curved_transform_stacks_and_along_guides_preserve_scope_phase_and_variable_in
         Vector2::new(54.0, 47.0),
     )
     .unwrap()
-    .apply_point(Point2::new(55.0 + 27.0, 0.0));
+    .apply_point(Point2::new(20.0 + 7.0, 0.0));
     assert!((raw_phase.path.start().x - expected.x).abs() < 1.0e-10);
     assert!((raw_phase.path.start().y - expected.y).abs() < 1.0e-10);
     let next = guides
@@ -467,7 +484,7 @@ fn curved_transform_stacks_and_along_guides_preserve_scope_phase_and_variable_in
         Vector2::new(54.0, 47.0),
     )
     .unwrap()
-    .apply_point(Point2::new(55.0 + 27.0 + 5.0, 0.0));
+    .apply_point(Point2::new(20.0 + 7.0 + 5.0, 0.0));
     assert!((next.path.start().x - expected_next.x).abs() < 1.0e-10);
     assert!((next.path.start().y - expected_next.y).abs() < 1.0e-10);
     let sites = output.site_set().sites();
@@ -515,6 +532,241 @@ fn curved_transform_stacks_and_along_guides_preserve_scope_phase_and_variable_in
     );
 }
 
+/// Proves one curved repetition populates every canvas tile across wide, tall, and rotated layouts.
+///
+/// This is an independent realized-site witness rather than a planner-bound assertion: every
+/// quarter of the final canvas in both axes must contain at least one canvas-scoped site. The
+/// coverage contract therefore cannot pass merely because some repeated geometry remains visible.
+///
+/// # Panics
+///
+/// Panics when the repetition cannot evaluate or leaves any final-canvas tile without geometry.
+fn assert_curved_repetition_covers_canvas(repetition_name: &str, repetition: GuideRepetition) {
+    for canvas in [
+        CanvasSpec {
+            width: 320.0,
+            height: 120.0,
+        },
+        CanvasSpec {
+            width: 120.0,
+            height: 320.0,
+        },
+    ] {
+        for rotation_degrees in [0.0, 37.0] {
+            let definition = definition(
+                vec![GuideDimension {
+                    id: GuideDimensionId(91),
+                    baseline_angle_degrees: 0.0,
+                    phase: 0.0,
+                    prototype: GuidePrototype::AuthoredOpenPath {
+                        structure_id: AuthoredStructureId(91),
+                    },
+                    repetition: repetition.clone(),
+                }],
+                GeneralizedSiteProduct::AlongGuides {
+                    dimensions: vec![GuideDimensionId(91)],
+                    interval_multiplier: 0.75,
+                    phase: 0.0,
+                },
+            );
+            let curve = AuthoredStructure::new(
+                AuthoredStructureId(91),
+                AuthoredStructureKind::OpenPath,
+                vec![AuthoredCurveSegment::CubicBezier {
+                    start: AuthoredPoint2 {
+                        x: canvas.width * -0.5,
+                        y: 0.0,
+                    },
+                    control_1: AuthoredPoint2 {
+                        x: canvas.width / -6.0,
+                        y: canvas.height * -0.18,
+                    },
+                    control_2: AuthoredPoint2 {
+                        x: canvas.width / 6.0,
+                        y: 0.0,
+                    },
+                    end: AuthoredPoint2 {
+                        x: canvas.width * 0.5,
+                        y: 0.0,
+                    },
+                }],
+            )
+            .expect("coverage witness curve validates");
+            let document = document_with_canvas(definition.clone(), vec![curve], canvas.clone());
+            let request = GridInspectRequest {
+                canvas: canvas.clone(),
+                density: ResolvedDensityMetric2D {
+                    across_x: canvas.width / 8.0,
+                    across_y: canvas.height / 8.0,
+                },
+                rotation_degrees,
+                translation_x: 0.0,
+                translation_y: 0.0,
+                guard_steps: 2,
+                support_radius: 4.5,
+                max_family_candidates: 100_000,
+            };
+            let output = evaluate_document_typed_family_cancellable(
+                &document,
+                &definition,
+                &request,
+                &|| false,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{repetition_name} evaluates on {}x{} at {rotation_degrees} degrees: {error}",
+                    canvas.width, canvas.height
+                )
+            });
+            let canvas_sites = output
+                .site_set()
+                .sites()
+                .iter()
+                .filter(|site| site.scope == SiteScope::Canvas)
+                .collect::<Vec<_>>();
+            for tile_y in 0..4 {
+                for tile_x in 0..4 {
+                    let minimum_x = canvas.width * f64::from(tile_x) / 4.0;
+                    let maximum_x = canvas.width * f64::from(tile_x + 1) / 4.0;
+                    let minimum_y = canvas.height * f64::from(tile_y) / 4.0;
+                    let maximum_y = canvas.height * f64::from(tile_y + 1) / 4.0;
+                    assert!(
+                        canvas_sites.iter().any(|site| {
+                            site.position.x >= minimum_x
+                                && site.position.x <= maximum_x
+                                && site.position.y >= minimum_y
+                                && site.position.y <= maximum_y
+                        }),
+                        "{repetition_name} left tile ({tile_x}, {tile_y}) empty on {}x{} at {rotation_degrees} degrees",
+                        canvas.width,
+                        canvas.height
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Proves Stacked curved copies fill wide, tall, and rotated final canvases.
+///
+/// # Panics
+///
+/// Panics when finite stacked endpoints leave any final-canvas tile uncovered.
+#[test]
+fn curved_transform_stack_covers_wide_tall_and_rotated_canvases() {
+    assert_curved_repetition_covers_canvas(
+        "Stacked",
+        GuideRepetition::TransformStack {
+            direction_degrees: 90.0,
+            spacing_multiplier: 1.0,
+        },
+    );
+}
+
+/// Proves clipped Stacked output retains the preset-owned nominal pitch after longitudinal scale.
+///
+/// # Panics
+///
+/// Panics when the source and adjacent rank do not publish, lose the authoritative eight-unit
+/// nominal basis, or fail to retain a longitudinally scaled source span.
+#[test]
+fn stacked_curve_scales_once_without_scaling_its_repetition_pitch() {
+    let canvas = CanvasSpec {
+        width: 320.0,
+        height: 120.0,
+    };
+    let definition = definition(
+        vec![GuideDimension {
+            id: GuideDimensionId(92),
+            baseline_angle_degrees: 0.0,
+            phase: 0.0,
+            prototype: GuidePrototype::AuthoredOpenPath {
+                structure_id: AuthoredStructureId(92),
+            },
+            repetition: GuideRepetition::TransformStack {
+                direction_degrees: 90.0,
+                spacing_multiplier: 1.0,
+            },
+        }],
+        GeneralizedSiteProduct::AlongGuides {
+            dimensions: vec![GuideDimensionId(92)],
+            interval_multiplier: 1.0,
+            phase: 0.0,
+        },
+    );
+    let curve = AuthoredStructure::new(
+        AuthoredStructureId(92),
+        AuthoredStructureKind::OpenPath,
+        vec![AuthoredCurveSegment::CubicBezier {
+            start: AuthoredPoint2 { x: -60.0, y: 0.0 },
+            control_1: AuthoredPoint2 { x: -20.0, y: -24.0 },
+            control_2: AuthoredPoint2 { x: 20.0, y: 16.0 },
+            end: AuthoredPoint2 { x: 60.0, y: 0.0 },
+        }],
+    )
+    .expect("stacked coverage curve validates");
+    let document = document_with_canvas(definition.clone(), vec![curve], canvas.clone());
+    let output = evaluate_document_typed_family_cancellable(
+        &document,
+        &definition,
+        &GridInspectRequest {
+            canvas: canvas.clone(),
+            density: ResolvedDensityMetric2D {
+                across_x: canvas.width / 8.0,
+                across_y: canvas.height / 8.0,
+            },
+            rotation_degrees: 37.0,
+            translation_x: 0.0,
+            translation_y: 0.0,
+            guard_steps: 2,
+            support_radius: 4.5,
+            max_family_candidates: 100_000,
+        },
+        &|| false,
+    )
+    .expect("stacked curve evaluates");
+    let paths = output
+        .structural_path_set()
+        .expect("stacked paths publish")
+        .paths();
+    let source = paths
+        .iter()
+        .find(|path| path.id.repetition_index == 0)
+        .expect("stacked source index publishes");
+    let next = paths
+        .iter()
+        .find(|path| path.id.repetition_index == 1)
+        .expect("adjacent stacked index publishes");
+    assert_eq!(output.guide_nominal_basis(source.id), Some(8.0));
+    assert_eq!(output.guide_nominal_basis(next.id), Some(8.0));
+    assert!(
+        source
+            .path
+            .measure_arc_length()
+            .expect("scaled source length remains finite")
+            .total_length()
+            > 120.0
+    );
+    assert_ne!(source.path, next.path);
+}
+
+/// Proves Constant-gap curved copies fill wide, tall, and rotated final canvases.
+///
+/// # Panics
+///
+/// Panics when normal-offset cleanup leaves any final-canvas tile uncovered or cannot prove its
+/// requested bilateral coverage.
+#[test]
+fn curved_normal_offset_covers_wide_tall_and_rotated_canvases() {
+    assert_curved_repetition_covers_canvas(
+        "Constant-gap",
+        GuideRepetition::NormalOffset {
+            spacing: 8.0,
+            cleanup: OffsetCleanup::DissolveCrossings,
+        },
+    );
+}
+
 /// Proves normal offsets use independent signed document-space gaps and retain source index zero.
 #[test]
 fn normal_offsets_publish_signed_constant_gap_centerlines() {
@@ -528,7 +780,6 @@ fn normal_offsets_publish_signed_constant_gap_centerlines() {
             },
             repetition: GuideRepetition::NormalOffset {
                 spacing: 12.0,
-                sides: OffsetSides::Both,
                 cleanup: OffsetCleanup::DissolveCrossings,
             },
         }],
@@ -549,7 +800,7 @@ fn normal_offsets_publish_signed_constant_gap_centerlines() {
     let output = evaluate_document_typed_family_cancellable(
         &document,
         &definition,
-        &request(5_000),
+        &request_at_pattern_size(1_000_000, 1.0),
         &|| false,
     )
     .expect("normal-offset family evaluates");
@@ -574,31 +825,66 @@ fn normal_offsets_publish_signed_constant_gap_centerlines() {
         .iter()
         .find(|guide| guide.id.repetition_index == 1)
         .expect("left offset publishes");
-    let distance = |first: Point2, second: Point2| (first.x - second.x).hypot(first.y - second.y);
-    assert!((distance(prior.path.start(), source.path.start()) - 12.0).abs() < 1.0e-9);
-    assert!((distance(source.path.start(), next.path.start()) - 12.0).abs() < 1.0e-9);
+    let source_normal = source.path.segments()[0]
+        .unit_normal_at(0.5)
+        .expect("straight source has a finite normal");
+    let transverse_gap = |first: Point2, second: Point2| {
+        Vector2::new(second.x - first.x, second.y - first.y)
+            .dot(source_normal)
+            .abs()
+    };
+    assert!((transverse_gap(prior.path.start(), source.path.start()) - 12.0).abs() < 1.0e-9);
+    assert!((transverse_gap(source.path.start(), next.path.start()) - 12.0).abs() < 1.0e-9);
     assert_eq!(output.guide_nominal_basis(source.id), Some(12.0));
-    let authored_points = [Point2::new(-30.0, 0.0), Point2::new(30.0, 0.0)].map(|point| {
-        AffineTransform2D::rotate_about_then_translate(
-            Point2::new(0.0, 0.0),
-            17.0,
-            Vector2::new(54.0, 47.0),
-        )
-        .unwrap()
-        .apply_point(point)
-    });
-    assert!(authored_points.into_iter().all(|authored| {
-        source.path.segments().iter().any(|segment| {
-            [segment.start(), segment.end()].into_iter().any(|point| {
-                (point.x - authored.x).abs() < 1.0e-9 && (point.y - authored.y).abs() < 1.0e-9
-            })
-        })
-    }));
+    assert!(
+        source
+            .path
+            .segments()
+            .iter()
+            .all(|segment| matches!(segment, toniator_geometry::CurveSegment::Line(_))),
+        "coverage scaling and end-to-end tiling preserve authored segment kind"
+    );
+    let final_canvas =
+        toniator_geometry::Bounds::new(Point2::new(0.0, 0.0), Point2::new(100.0, 100.0))
+            .expect("fixed final canvas bounds");
+    assert!(!final_canvas.contains(source.path.start()));
+    assert!(!final_canvas.contains(source.path.end()));
+
+    let larger = evaluate_document_typed_family_cancellable(
+        &document,
+        &definition,
+        &request_at_pattern_size(1_000_000, 2.0),
+        &|| false,
+    )
+    .expect("larger Pattern size evaluates the same constant-gap recipe");
+    let larger_guides = larger
+        .structural_path_set()
+        .expect("larger Pattern size publishes guide paths")
+        .paths();
+    let larger_source = larger_guides
+        .iter()
+        .find(|guide| guide.id.repetition_index == 0)
+        .expect("larger Pattern size retains source index zero");
+    let larger_next = larger_guides
+        .iter()
+        .find(|guide| guide.id.repetition_index == 1)
+        .expect("larger Pattern size publishes the next offset");
+    assert!(
+        (transverse_gap(larger_source.path.start(), larger_next.path.start()) - 24.0).abs()
+            < 1.0e-9,
+        "doubling Pattern size doubles the authored constant gap"
+    );
+    assert_eq!(larger.guide_nominal_basis(larger_source.id), Some(24.0));
 }
 
-/// Proves crossing cleanup components publish through the family boundary with distinct full identities.
+/// Proves an authored Constant-gap source with unpaired interior nodes fails atomically.
+///
+/// # Panics
+///
+/// Panics when the invalid finite source publishes partial guide components or reports a diagnostic
+/// outside Constant-gap coverage authority.
 #[test]
-fn normal_offset_cleanup_components_publish_without_identity_collision() {
+fn normal_offset_self_crossing_source_with_unpaired_nodes_fails_atomically() {
     let structure = AuthoredStructure::new(
         AuthoredStructureId(41),
         AuthoredStructureKind::OpenPath,
@@ -628,7 +914,6 @@ fn normal_offset_cleanup_components_publish_without_identity_collision() {
             },
             repetition: GuideRepetition::NormalOffset {
                 spacing: 12.0,
-                sides: OffsetSides::Left,
                 cleanup: OffsetCleanup::DissolveCrossings,
             },
         }],
@@ -639,60 +924,24 @@ fn normal_offset_cleanup_components_publish_without_identity_collision() {
         },
     );
     let document = document(definition.clone(), vec![structure]);
-    let output = evaluate_document_typed_family_cancellable(
+    let error = evaluate_document_typed_family_cancellable(
         &document,
         &definition,
-        &request(10_000),
+        &request_at_pattern_size(100_000, 1.0),
         &|| false,
     )
-    .expect("split normal-offset family publishes atomically");
-    let guides = output
-        .structural_path_set()
-        .expect("guide paths publish")
-        .paths();
-    let split_index = guides
-        .iter()
-        .find(|guide| guide.id.component_ordinal > 0)
-        .expect("at least one offset crossing becomes multiple components")
-        .id
-        .repetition_index;
-    let components = guides
-        .iter()
-        .filter(|guide| guide.id.repetition_index == split_index)
-        .collect::<Vec<_>>();
-    assert!(components.len() >= 2);
-    assert!(components.windows(2).all(|pair| {
-        pair[0].id.component_ordinal < pair[1].id.component_ordinal && pair[0].id != pair[1].id
-    }));
-    let samples = output
-        .site_set()
-        .iter()
-        .filter_map(|site| match &site.provenance {
-            FamilySiteProvenance::CurveAlongGuide {
-                location,
-                sequence,
-                absolute_arc_position_bits,
-                ..
-            } if location.path.repetition_index == split_index => Some((
-                location.path.component_ordinal,
-                *sequence,
-                f64::from_bits(*absolute_arc_position_bits),
-            )),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert!(samples.iter().any(|sample| sample.0 == 0));
-    assert!(samples.iter().any(|sample| sample.0 > 0));
-    assert!(
-        samples
-            .windows(2)
-            .all(|pair| { pair[0].1 < pair[1].1 && pair[0].2 < pair[1].2 })
-    );
+    .expect_err("unpaired Constant-gap endpoints cannot publish a partial frontier");
+    assert_eq!(error.path(), "coverage.curved_guides.normal_offset");
 }
 
-/// Proves the 320x320 diagnostic propagates both ways and stops at terminal-extension collapse.
+/// Proves a rotated Constant-gap guide tiles its finite ends beyond the visible canvas.
+///
+/// # Panics
+///
+/// Panics when a visible offset terminates inside the canvas instead of continuing through an
+/// end-to-end copy of the authored guide.
 #[test]
-fn diagnostic_cubic_stops_when_terminal_extensions_cross() {
+fn constant_gap_tiles_curve_ends_beyond_rotated_canvas() {
     let dimension_id = GuideDimensionId(61);
     let definition = definition(
         vec![GuideDimension {
@@ -704,7 +953,6 @@ fn diagnostic_cubic_stops_when_terminal_extensions_cross() {
             },
             repetition: GuideRepetition::NormalOffset {
                 spacing: 12.0,
-                sides: OffsetSides::Both,
                 cleanup: OffsetCleanup::DissolveCrossings,
             },
         }],
@@ -723,8 +971,8 @@ fn diagnostic_cubic_stops_when_terminal_extensions_cross() {
         AuthoredStructureKind::OpenPath,
         vec![AuthoredCurveSegment::CubicBezier {
             start: AuthoredPoint2 { x: -140.0, y: 0.0 },
-            control_1: AuthoredPoint2 { x: -64.0, y: -96.0 },
-            control_2: AuthoredPoint2 { x: 64.0, y: -96.0 },
+            control_1: AuthoredPoint2 { x: -64.0, y: -48.0 },
+            control_2: AuthoredPoint2 { x: 64.0, y: 24.0 },
             end: AuthoredPoint2 { x: 140.0, y: 0.0 },
         }],
     )
@@ -738,109 +986,299 @@ fn diagnostic_cubic_stops_when_terminal_extensions_cross() {
                 width: 320.0,
                 height: 320.0,
             },
-            density: ResolvedDensityMetric2D {
-                across_x: 32.0,
-                across_y: 32.0,
-            },
-            rotation_degrees: 0.0,
+            density: DensityMetric2D::default_for_canvas(&CanvasSpec {
+                width: 320.0,
+                height: 320.0,
+            })
+            .expect("diagnostic canvas has a default density")
+            .resolve(&CanvasSpec {
+                width: 320.0,
+                height: 320.0,
+            })
+            .expect("diagnostic default density resolves"),
+            rotation_degrees: 37.0,
             translation_x: 0.0,
             translation_y: 0.0,
             guard_steps: 1,
             support_radius: 4.5,
-            max_family_candidates: 50_000,
+            max_family_candidates: 1_000_000,
         },
         &|| false,
     )
-    .expect("diagnostic normal-offset family evaluates");
+    .expect("rotated tiled normal-offset family evaluates");
     let paths = output
         .structural_path_set()
-        .expect("diagnostic paths publish")
+        .expect("tiled paths publish")
         .paths();
-    assert!(
-        paths.iter().any(|path| path.id.repetition_index < 0),
-        "diagnostic publishes the right-side offset ladder"
-    );
-    assert!(
-        paths.iter().any(|path| path.id.repetition_index > 0),
-        "diagnostic publishes the left-side offset ladder"
-    );
-    let mut positive_indices = paths
+    let canvas = toniator_geometry::Bounds::new(Point2::new(0.0, 0.0), Point2::new(320.0, 320.0))
+        .expect("fixed canvas bounds");
+    let visible = paths
         .iter()
-        .filter_map(|path| (path.id.repetition_index > 0).then_some(path.id.repetition_index))
+        .filter(|instance| {
+            let bounds = instance.path.bounds().expect("tiled path bounds");
+            bounds.max.x >= canvas.min.x
+                && bounds.min.x <= canvas.max.x
+                && bounds.max.y >= canvas.min.y
+                && bounds.min.y <= canvas.max.y
+        })
         .collect::<Vec<_>>();
-    positive_indices.sort_unstable();
-    positive_indices.dedup();
-    let mut left_canvas = false;
-    for repetition_index in positive_indices {
-        let intersects_canvas = paths
-            .iter()
-            .filter(|path| path.id.repetition_index == repetition_index)
-            .any(|path| {
-                let bounds = path.path.bounds().expect("diagnostic path bounds");
-                bounds.max.x >= 0.0
-                    && bounds.min.x <= 320.0
-                    && bounds.max.y >= 0.0
-                    && bounds.min.y <= 320.0
-            });
-        if intersects_canvas {
-            assert!(
-                !left_canvas,
-                "repetition {repetition_index} must not re-enter the canvas after the cusp family leaves it"
-            );
-        } else {
-            left_canvas = true;
-        }
-    }
-    for (first_index, first) in paths.iter().enumerate() {
-        for second in paths.iter().skip(first_index + 1) {
-            let intersections = first
-                .path
-                .intersections(&second.path)
-                .expect("diagnostic component intersections remain bounded");
-            assert!(
-                intersections.iter().all(|intersection| {
-                    intersection.kind() != toniator_geometry::IntersectionKind::Crossing
-                }),
-                "diagnostic paths {:?} and {:?} must not form a cross-hatched offset family: {intersections:?}",
-                first.id,
-                second.id
-            );
-        }
-    }
-    let last_visible = paths
-        .iter()
-        .filter(|path| path.id.repetition_index == 14)
-        .collect::<Vec<_>>();
-    assert_eq!(last_visible.len(), 2);
-    assert_eq!(last_visible[0].id.component_ordinal, 0);
-    assert_eq!(last_visible[1].id.component_ordinal, 1);
-    assert!(last_visible.iter().all(|component| {
-        let bounds = component.path.bounds().expect("last visible cusp bounds");
-        bounds.max.x - bounds.min.x > 40.0
-            && bounds.max.y - bounds.min.y > 50.0
-            && component
-                .path
-                .unit_tangent_at(
-                    toniator_geometry::PathLocation::new(0, 0.0).expect("component start location"),
-                )
-                .is_ok()
-            && component
-                .path
-                .unit_tangent_at(
-                    toniator_geometry::PathLocation::new(component.path.segments().len() - 1, 1.0)
-                        .expect("component end location"),
-                )
-                .is_ok()
+    assert!(
+        visible.len() > 2,
+        "both offset sides cross the final canvas"
+    );
+    assert!(visible.iter().all(|instance| {
+        !canvas.contains(instance.path.start()) && !canvas.contains(instance.path.end())
     }));
-    assert!(
-        paths.iter().all(|path| path.id.repetition_index < 15),
-        "the family stops when both tangential endpoint extensions cross instead of publishing floating cusp fragments"
-    );
 }
 
-/// Proves a one-sided family reports a stable coverage failure when even its source cannot survive.
+/// Reproduces the user-authored Constant-gap curve with complete canvas coverage and solved nodes.
+///
+/// # Panics
+///
+/// Panics when the exact two-cubic witness cannot evaluate, leaves a component endpoint without a
+/// shared vector node in the open canvas, retains an in-canvas backtracking fold, or leaves a
+/// canvas coverage tile empty.
 #[test]
-fn normal_offset_one_sided_collapse_fails_coverage_atomically() {
+fn user_reported_constant_gap_curve_dissolves_visible_crossings() {
+    let dimension_id = GuideDimensionId(62);
+    let definition = definition(
+        vec![GuideDimension {
+            id: dimension_id,
+            baseline_angle_degrees: 0.0,
+            phase: 0.0,
+            prototype: GuidePrototype::AuthoredOpenPath {
+                structure_id: AuthoredStructureId(62),
+            },
+            repetition: GuideRepetition::NormalOffset {
+                spacing: 16.0,
+                cleanup: OffsetCleanup::DissolveCrossings,
+            },
+        }],
+        GeneralizedSiteProduct::AlongGuides {
+            dimensions: vec![dimension_id],
+            interval_multiplier: 1.0,
+            phase: 0.0,
+        },
+    );
+    let structure = AuthoredStructure::new(
+        AuthoredStructureId(62),
+        AuthoredStructureKind::OpenPath,
+        vec![
+            AuthoredCurveSegment::CubicBezier {
+                start: AuthoredPoint2 {
+                    x: -450.0,
+                    y: -46.302_273_048_281_165,
+                },
+                control_1: AuthoredPoint2 {
+                    x: -224.216_966_331_868_2,
+                    y: -220.394_722_504_916_44,
+                },
+                control_2: AuthoredPoint2 {
+                    x: -216.385_253_516_574_38,
+                    y: -226.458_861_247_314_08,
+                },
+                end: AuthoredPoint2 {
+                    x: 0.210_554_031_395_076_9,
+                    y: -51.754_559_226_983_986,
+                },
+            },
+            AuthoredCurveSegment::CubicBezier {
+                start: AuthoredPoint2 {
+                    x: 0.210_554_031_395_076_9,
+                    y: -51.754_559_226_983_986,
+                },
+                control_1: AuthoredPoint2 {
+                    x: 148.700_372_878_311_1,
+                    y: -158.434_452_888_086_78,
+                },
+                control_2: AuthoredPoint2 {
+                    x: 179.347_387_957_603_25,
+                    y: 182.054_700_446_266_62,
+                },
+                end: AuthoredPoint2 { x: 450.0, y: 0.0 },
+            },
+        ],
+    )
+    .expect("user-authored two-cubic guide validates");
+    let canvas = CanvasSpec {
+        width: 900.0,
+        height: 620.0,
+    };
+    let document = document_with_canvas(definition.clone(), vec![structure], canvas.clone());
+    for rotation_degrees in [
+        0.0, 45.0, 89.999, 90.0, 135.0, 179.999, 180.0, 270.0, 359.999,
+    ] {
+        let output = evaluate_document_typed_family_cancellable(
+            &document,
+            &definition,
+            &GridInspectRequest {
+                canvas: canvas.clone(),
+                density: DensityMetric2D {
+                    density: 82.340_605_806_803_78,
+                    aspect: 1.0,
+                }
+                .resolve(&canvas)
+                .expect("saved density resolves"),
+                rotation_degrees,
+                translation_x: 0.0,
+                translation_y: 0.0,
+                guard_steps: 1,
+                support_radius: 4.5,
+                max_family_candidates: 1_000_000,
+            },
+            &|| false,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "user-reported Constant-gap guide evaluates at {rotation_degrees} degrees: {error}"
+            )
+        });
+        let paths = output
+            .structural_path_set()
+            .expect("user-reported guide paths publish")
+            .paths();
+        assert!(
+            paths
+                .iter()
+                .all(|path| path.path.closure() == toniator_geometry::PathClosure::Open),
+            "Dissolve crossings publishes only the exterior Constant-gap frontier at {rotation_degrees} degrees"
+        );
+        let canvas_bounds = toniator_geometry::Bounds::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(canvas.width, canvas.height),
+        )
+        .expect("canvas bounds validate");
+        let component_endpoints = paths
+            .iter()
+            .filter(|path| path.path.closure() == toniator_geometry::PathClosure::Open)
+            .flat_map(|path| [(path.id, path.path.start()), (path.id, path.path.end())])
+            .collect::<Vec<_>>();
+        let path_nodes = paths
+            .iter()
+            .flat_map(|path| {
+                path.path
+                    .segments()
+                    .iter()
+                    .flat_map(move |segment| [(path.id, segment.start()), (path.id, segment.end())])
+            })
+            .collect::<Vec<_>>();
+        let unpaired_endpoints = component_endpoints
+            .iter()
+            .copied()
+            .filter(|(_, endpoint)| {
+                endpoint.x > canvas_bounds.min.x
+                    && endpoint.x < canvas_bounds.max.x
+                    && endpoint.y > canvas_bounds.min.y
+                    && endpoint.y < canvas_bounds.max.y
+            })
+            .filter_map(|(path_id, endpoint)| {
+                let paired_node_count = path_nodes
+                    .iter()
+                    .filter(|(_, candidate)| {
+                        (candidate.x - endpoint.x).hypot(candidate.y - endpoint.y) <= 1.0e-6
+                    })
+                    .count();
+                let paired = paired_node_count > 1;
+                (!paired).then(|| {
+                    let nearest_other = path_nodes
+                        .iter()
+                        .filter(|(candidate_id, candidate)| {
+                            *candidate_id != path_id
+                                || (candidate.x - endpoint.x).hypot(candidate.y - endpoint.y)
+                                    > 1.0e-6
+                        })
+                        .map(|(_, candidate)| {
+                            (candidate.x - endpoint.x).hypot(candidate.y - endpoint.y)
+                        })
+                        .fold(f64::INFINITY, f64::min);
+                    (path_id, endpoint, nearest_other)
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            unpaired_endpoints.is_empty(),
+            "every in-canvas cleanup endpoint meets another path at one exact vector node at {rotation_degrees} degrees: {unpaired_endpoints:#?}"
+        );
+        let terminal_curls =
+            paths
+                .iter()
+                .flat_map(|path| {
+                    path.path.segments().windows(2).enumerate().filter_map(
+                        |(segment_index, pair)| {
+                            let node = pair[0].end();
+                            if !canvas_bounds.contains(node) {
+                                return None;
+                            }
+                            let incoming_start = pair[0]
+                                .limiting_unit_tangent_at(0.0)
+                                .expect("published segment start tangent remains finite");
+                            let incoming_end = pair[0]
+                                .limiting_unit_tangent_at(1.0)
+                                .expect("published incoming tangent remains finite");
+                            let outgoing = pair[1]
+                                .limiting_unit_tangent_at(0.0)
+                                .expect("published outgoing tangent remains finite");
+                            let start_agreement = incoming_start.dot(outgoing);
+                            let end_agreement = incoming_end.dot(outgoing);
+                            (start_agreement > 1.0e-9 && end_agreement < -1.0e-9).then_some((
+                                path.id,
+                                segment_index,
+                                node,
+                                start_agreement,
+                                end_agreement,
+                            ))
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+        assert!(
+            terminal_curls.is_empty(),
+            "Dissolve crossings retains no in-canvas terminal curl at {rotation_degrees} degrees: {terminal_curls:#?}"
+        );
+        let source = paths
+            .iter()
+            .find(|path| path.id.repetition_index == 0)
+            .expect("chained source guide publishes");
+        assert!(
+            !canvas_bounds.contains(source.path.start())
+                && !canvas_bounds.contains(source.path.end()),
+            "chained base guide supplies off-canvas runway at {rotation_degrees} degrees"
+        );
+        let canvas_sites = output
+            .site_set()
+            .sites()
+            .iter()
+            .filter(|site| site.scope == SiteScope::Canvas)
+            .collect::<Vec<_>>();
+        let published_rank_range = paths.iter().fold((i64::MAX, i64::MIN), |range, path| {
+            (
+                range.0.min(path.id.repetition_index),
+                range.1.max(path.id.repetition_index),
+            )
+        });
+        for tile_y in 0..4 {
+            for tile_x in 0..4 {
+                let minimum_x = canvas.width * f64::from(tile_x) / 4.0;
+                let maximum_x = canvas.width * f64::from(tile_x + 1) / 4.0;
+                let minimum_y = canvas.height * f64::from(tile_y) / 4.0;
+                let maximum_y = canvas.height * f64::from(tile_y + 1) / 4.0;
+                assert!(
+                    canvas_sites.iter().any(|site| {
+                        site.position.x >= minimum_x
+                            && site.position.x <= maximum_x
+                            && site.position.y >= minimum_y
+                            && site.position.y <= maximum_y
+                    }),
+                    "user-reported Constant-gap curve left tile ({tile_x}, {tile_y}) empty at {rotation_degrees} degrees after ranks {published_rank_range:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Proves a bilateral family reports a stable coverage failure when even its source cannot survive.
+#[test]
+fn normal_offset_bilateral_collapse_fails_coverage_atomically() {
     let definition = definition(
         vec![GuideDimension {
             id: GuideDimensionId(51),
@@ -851,7 +1289,6 @@ fn normal_offset_one_sided_collapse_fails_coverage_atomically() {
             },
             repetition: GuideRepetition::NormalOffset {
                 spacing: 12.0,
-                sides: OffsetSides::Left,
                 cleanup: OffsetCleanup::DissolveCrossings,
             },
         }],
@@ -898,7 +1335,6 @@ fn normal_offset_along_guides_bound_their_transverse_basis_before_mark_realizati
             },
             repetition: GuideRepetition::NormalOffset {
                 spacing: 77.5,
-                sides: OffsetSides::Both,
                 cleanup: OffsetCleanup::DissolveCrossings,
             },
         }],
@@ -936,7 +1372,13 @@ fn normal_offset_along_guides_bound_their_transverse_basis_before_mark_realizati
         .expect("normal-offset pipeline resolves");
     let maximum = maximum_nominal_cell_diameter(&plan.family, &canvas, &density)
         .expect("normal-offset bound remains finite");
-    assert!((maximum - (225.0 / 16.0 + 77.5)).abs() <= 1e-12);
+    let pattern_size = DensityMetric2D::default_for_canvas(&canvas)
+        .expect("fixed anisotropic canvas has a default density")
+        .density
+        / DensityMetric2D::from_resolved(&canvas, &density)
+            .expect("fixed resolved density round-trips")
+            .density;
+    assert!((maximum - (225.0 / 16.0 + 77.5 * pattern_size)).abs() <= 1e-12);
     let request = GridInspectRequest {
         canvas: canvas.clone(),
         density,
@@ -945,7 +1387,7 @@ fn normal_offset_along_guides_bound_their_transverse_basis_before_mark_realizati
         translation_y: 0.0,
         guard_steps: 2,
         support_radius: maximum,
-        max_family_candidates: 100_000,
+        max_family_candidates: 1_000_000,
     };
     let family =
         evaluate_document_typed_family_cancellable(&document, &definition, &request, &|| false)

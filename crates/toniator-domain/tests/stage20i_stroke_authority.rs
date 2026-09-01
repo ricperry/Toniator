@@ -58,6 +58,7 @@ fn stroke_document() -> Document {
             response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.25,
                 maximum_thickness: 1.0,
+                bias: 0.0,
             }),
         }],
         definition,
@@ -86,6 +87,7 @@ fn connected_response_delta_is_effective_only_and_resettable() {
         delta: ChannelGeometryResponseDelta::Connected(ConnectedGeometryResponseDelta {
             minimum_thickness_delta: Some(0.25),
             maximum_thickness_delta: Some(0.5),
+            bias_delta: Some(0.75),
         }),
     };
     let (document, _) = document.apply_command(&command).expect("delta applies");
@@ -98,8 +100,12 @@ fn connected_response_delta_is_effective_only_and_resettable() {
         panic!("guide-path document resolves the connected branch");
     };
     assert_eq!(
-        (response.minimum_thickness, response.maximum_thickness),
-        (0.5, 1.5)
+        (
+            response.minimum_thickness,
+            response.maximum_thickness,
+            response.bias,
+        ),
+        (0.5, 1.5, 0.75)
     );
     let reset = DocumentCommand::ResetChannelOutputResponseDelta {
         base: document.pattern_settings().clone(),
@@ -127,15 +133,19 @@ fn connected_desired_effective_builder_validates_branch_and_reset_intent() {
             PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.4,
                 maximum_thickness: 1.2,
+                bias: -0.35,
             }),
         )
         .expect("valid desired connected response builds a delta command");
     assert!(matches!(
         command,
         DocumentCommand::SetChannelOutputResponseDelta {
-            delta: ChannelGeometryResponseDelta::Connected(_),
+            delta: ChannelGeometryResponseDelta::Connected(ConnectedGeometryResponseDelta {
+                bias_delta: Some(value),
+                ..
+            }),
             ..
-        }
+        } if (value + 0.35).abs() < 1.0e-12
     ));
     let error = document
         .set_channel_output_response_for_effective(
@@ -144,10 +154,23 @@ fn connected_desired_effective_builder_validates_branch_and_reset_intent() {
             PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 1.2,
                 maximum_thickness: 0.4,
+                bias: 0.0,
             }),
         )
         .expect_err("inverted connected response rejects");
     assert_eq!(error.path(), "channel.pattern.geometry_response");
+    let error = document
+        .set_channel_output_response_for_effective(
+            ChannelId(1),
+            PatternOutputLayerId(33),
+            PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                minimum_thickness: 0.2,
+                maximum_thickness: 0.8,
+                bias: 1.01,
+            }),
+        )
+        .expect_err("out-of-range curve response bias rejects");
+    assert_eq!(error.path(), "channel.pattern.geometry_response.bias");
     let error = document
         .set_channel_output_response_for_effective(
             ChannelId(1),
@@ -221,6 +244,7 @@ fn guide_paths_expose_connected_fields_without_mark_output_descriptors() {
             PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.3,
                 maximum_thickness: 1.1,
+                bias: 0.0,
             }),
         )
         .expect("connected delta command builds");
@@ -269,6 +293,7 @@ fn connected_delta_is_stale_aware_and_history_reversible() {
             PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.3,
                 maximum_thickness: 1.1,
+                bias: 0.0,
             }),
         )
         .expect("connected command builds");

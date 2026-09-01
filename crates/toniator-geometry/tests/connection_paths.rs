@@ -1462,6 +1462,44 @@ fn seeded_programs_change_identity_and_selection_without_changing_input_graph() 
     }
 }
 
+/// Proves seed one with an authored zero minimum still distributes positive connection targets
+/// across a nontrivial graph instead of collapsing every site to degree zero.
+#[test]
+fn zero_minimum_random_links_with_seed_one_do_not_collapse_to_empty() {
+    let graph = graph_at(
+        &[
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (2.0, 0.0),
+            (0.0, 1.0),
+            (1.0, 1.0),
+            (2.0, 1.0),
+        ],
+        3,
+        2.0,
+    );
+    let paths = build_connection_paths_cancellable(
+        PatternOutputLayerId(14),
+        &graph,
+        &ConnectionProgram::RandomLinks {
+            adjacency: ConnectionAdjacencyIntent {
+                maximum_degree: 3,
+                maximum_distance: 2.0,
+            },
+            minimum_degree: 0,
+            seed: 1,
+        },
+        ConnectionPathLimits::default(),
+        &|| false,
+    )
+    .expect("zero-minimum random links build");
+    assert!(
+        !paths.selected_edges.is_empty(),
+        "seed one must not suppress the complete eligible graph"
+    );
+    assert_exact_edge_cover(&paths);
+}
+
 /// Proves policy mismatch, cancellation, and bounded selected-edge failures are atomic stable diagnostics.
 #[test]
 fn policy_cancellation_and_limits_are_stable() {
@@ -1534,7 +1572,7 @@ fn disconnected_random_selected_components_cover_every_edge_once_in_stable_order
                 maximum_distance: 1.1,
             },
             minimum_degree: 0,
-            seed: 2,
+            seed: 0,
         },
         ConnectionPathLimits::default(),
         &|| false,

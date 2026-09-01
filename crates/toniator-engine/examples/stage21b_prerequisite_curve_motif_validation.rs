@@ -53,29 +53,32 @@ pub fn curve_recipe(
     mirror_alternate_rows: bool,
     alternate_row_phase: Option<f64>,
 ) -> PatternDefinitionRecipe {
-    PatternDefinitionRecipe::connected(PatternStructureRecipe::CurveMotifPaths {
-        definition: Box::new(PatternStructureRecipe::GeneralizedStraightGuides {
-            name: "Stage 21B prerequisite Curve Motif evidence".into(),
-            coverage: CoveragePolicy {
-                guard_steps: 2,
-                additional_margin: 0.0,
-            },
-            dimensions: vec![GuideDimensionDraft {
-                baseline_angle_degrees: 0.0,
-                phase: 0.125,
-                spacing_multiplier: 1.0,
-            }],
-            product: GeneralizedSiteProductDraft::AlongGuides {
-                dimension_indices: vec![0],
-                interval_multiplier: 1.0,
-                phase: 0.25,
-            },
-            orientation: MarkOrientationDraft::GuideTangent { dimension_index: 0 },
+    PatternDefinitionRecipe::connected(PatternStructureRecipe::AuthoredResources {
+        resources: vec![asymmetric_motif()],
+        definition: Box::new(PatternStructureRecipe::CurveMotifPaths {
+            definition: Box::new(PatternStructureRecipe::GeneralizedStraightGuides {
+                name: "Stage 21B prerequisite Curve Motif evidence".into(),
+                coverage: CoveragePolicy {
+                    guard_steps: 2,
+                    additional_margin: 0.0,
+                },
+                dimensions: vec![GuideDimensionDraft {
+                    baseline_angle_degrees: 0.0,
+                    phase: 0.125,
+                    spacing_multiplier: 1.0,
+                }],
+                product: GeneralizedSiteProductDraft::AlongGuides {
+                    dimension_indices: vec![0],
+                    interval_multiplier: 1.0,
+                    phase: 0.25,
+                },
+                orientation: MarkOrientationDraft::GuideTangent { dimension_index: 0 },
+            }),
+            resource_index: 0,
+            style: PathStrokeStyle::default(),
+            mirror_alternate_rows,
+            alternate_row_phase,
         }),
-        motif: asymmetric_motif(),
-        style: PathStrokeStyle::default(),
-        mirror_alternate_rows,
-        alternate_row_phase,
     })
 }
 

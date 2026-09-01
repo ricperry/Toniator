@@ -72,6 +72,7 @@ fn path_document() -> Document {
             response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.2,
                 maximum_thickness: 1.0,
+                bias: 0.0,
             }),
         }],
         definition,
@@ -140,6 +141,7 @@ fn guide_path_provenance_is_not_site_authority_and_profile_is_adaptive() {
         StrokeResponse {
             minimum_thickness: 0.2,
             maximum_thickness: 1.0,
+            bias: 0.0,
         },
         1.0,
         262_144,
@@ -188,6 +190,7 @@ fn guide_path_thickness_sampling_uses_pattern_scale_resolution() {
         StrokeResponse {
             minimum_thickness: 0.2,
             maximum_thickness: 1.0,
+            bias: 0.0,
         },
         1.0,
         usize::MAX,
@@ -220,6 +223,7 @@ fn guide_path_realization_observes_limits_and_cancellation() {
         StrokeResponse {
             minimum_thickness: 0.2,
             maximum_thickness: 1.0,
+            bias: 0.0,
         },
         1.0,
         1,
@@ -237,6 +241,7 @@ fn guide_path_realization_observes_limits_and_cancellation() {
         StrokeResponse {
             minimum_thickness: 0.2,
             maximum_thickness: 1.0,
+            bias: 0.0,
         },
         1.0,
         262_144,

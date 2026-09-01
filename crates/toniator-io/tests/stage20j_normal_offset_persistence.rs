@@ -4,10 +4,10 @@ use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureId,
     AuthoredStructureKind, CanvasSpec, ConnectedGeometryResponse, CoveragePolicy, Document,
     DocumentId, GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype,
-    GuideRepetition, MarkOrientation, OffsetCleanup, OffsetSides, PathStrokeStyle,
-    PatternDefinition, PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse,
-    PatternMechanismId, PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization,
-    PatternOutputSettings, SourceReference, SourceReferenceId,
+    GuideRepetition, MarkOrientation, OffsetCleanup, PathStrokeStyle, PatternDefinition,
+    PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
+    PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization, PatternOutputSettings,
+    SourceReference, SourceReferenceId,
 };
 use toniator_io::{EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, save};
 
@@ -18,7 +18,6 @@ fn normal_offset_document(
     height: f64,
     spacing: f64,
     cubic: bool,
-    sides: OffsetSides,
 ) -> Document {
     let base = Document::new_default_document(
         CanvasSpec { width, height },
@@ -40,7 +39,6 @@ fn normal_offset_document(
             },
             repetition: GuideRepetition::NormalOffset {
                 spacing,
-                sides,
                 cleanup: OffsetCleanup::DissolveCrossings,
             },
         }],
@@ -70,6 +68,7 @@ fn normal_offset_document(
             response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.02,
                 maximum_thickness: 0.05,
+                bias: 0.0,
             }),
         }],
         definition,
@@ -131,14 +130,7 @@ fn normal_offset_v5_round_trip_is_deterministic_and_derived_state_free() {
     let output = root.join("target/validation/stage-20j");
     fs::create_dir_all(&output).expect("derived validation directory creates");
     let source_id = SourceReferenceId::new("stage20j-source").expect("source ID validates");
-    let document = normal_offset_document(
-        source_id.clone(),
-        128.0,
-        96.0,
-        96.0,
-        false,
-        OffsetSides::Both,
-    );
+    let document = normal_offset_document(source_id.clone(), 128.0, 96.0, 96.0, false);
     let sources = SourceBundle::new([EmbeddedSource::new(
         source_id,
         EmbeddedSourceFormat::Svg,
@@ -162,7 +154,6 @@ fn normal_offset_v5_round_trip_is_deterministic_and_derived_state_free() {
             if matches!(dimensions[0].repetition,
                 GuideRepetition::NormalOffset {
                     spacing,
-                    sides: OffsetSides::Both,
                     cleanup: OffsetCleanup::DissolveCrossings,
         } if spacing.to_bits() == 96.0_f64.to_bits())
     ));
@@ -194,14 +185,7 @@ fn writes_native_offset_documents_for_both_immutable_sources() {
     ] {
         let source_id =
             SourceReferenceId::new(format!("stage20j-{source_name}")).expect("source ID validates");
-        let document = normal_offset_document(
-            source_id.clone(),
-            width,
-            height,
-            96.0,
-            false,
-            OffsetSides::Both,
-        );
+        let document = normal_offset_document(source_id.clone(), width, height, 96.0, false);
         let bytes =
             fs::read(root.join("assets").join(source_name)).expect("immutable source reads");
         let sources = SourceBundle::new([EmbeddedSource::new(
@@ -225,14 +209,7 @@ fn writes_cubic_offset_diagnostic_document() {
     let output = root.join("target/validation/stage-20j");
     fs::create_dir_all(&output).expect("derived validation directory creates");
     let source_id = SourceReferenceId::new("stage20j-cubic-source").expect("source ID validates");
-    let document = normal_offset_document(
-        source_id.clone(),
-        320.0,
-        320.0,
-        12.0,
-        true,
-        OffsetSides::Both,
-    );
+    let document = normal_offset_document(source_id.clone(), 320.0, 320.0, 12.0, true);
     let sources = SourceBundle::new([EmbeddedSource::new(
         source_id,
         EmbeddedSourceFormat::Svg,
@@ -251,7 +228,6 @@ fn writes_cubic_offset_diagnostic_document() {
             if matches!(dimensions[0].repetition,
                 GuideRepetition::NormalOffset {
                     spacing,
-                    sides: OffsetSides::Both,
                     cleanup: OffsetCleanup::DissolveCrossings,
         } if spacing.to_bits() == 12.0_f64.to_bits())
     ));

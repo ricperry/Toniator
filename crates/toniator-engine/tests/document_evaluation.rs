@@ -12,7 +12,7 @@ use std::{
 
 use toniator_domain::{
     CanvasSpec, ChannelId, DensityEditedField, DensityMetricDelta2D, Document, DocumentCommand,
-    DocumentHistory, DocumentSession, SourceReference, SourceReferenceId,
+    DocumentHistory, DocumentSession, HalftoneChannelModel, SourceReference, SourceReferenceId,
 };
 use toniator_engine::{
     CacheDisposition, EvaluationCompletion, EvaluationExecutionClass, EvaluationLimits,
@@ -68,6 +68,63 @@ fn wait_for_latest(scheduler: &EvaluationScheduler) -> EvaluationCompletion {
         }
         assert!(Instant::now() < deadline, "evaluation timed out");
         std::thread::yield_now();
+    }
+}
+
+/// Proves the saved CMYK random-connections reproducer realizes positive geometry for every
+/// channel, including a Magenta channel whose independent site and connection seeds are both one.
+#[test]
+fn saved_cmyk_seed_one_channel_realizes_connections() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/RandomConnectionsMagentaMissingTestFile.toniator");
+    let loaded = toniator_io::load(&path).expect("current CMYK reproducer loads");
+    assert_eq!(
+        loaded.document().channel_model(),
+        Some(HalftoneChannelModel::Cmyk)
+    );
+    let SourceReference::Assigned(source_id) = loaded.document().source() else {
+        panic!("CMYK reproducer retains its embedded source reference");
+    };
+    let embedded = loaded
+        .sources()
+        .get(source_id)
+        .expect("CMYK reproducer embeds its referenced source");
+    let session = DocumentSession::new(loaded.document().clone()).expect("loaded document session");
+    let evaluated = evaluate(EvaluationRequest::new(
+        session.document_evaluation_snapshot(),
+        ResolvedSource::new(
+            source_id.clone(),
+            embedded.bytes().to_vec(),
+            SourceFormatHint::Svg,
+        )
+        .expect("embedded SVG source resolves"),
+    ))
+    .expect("CMYK reproducer evaluates");
+    let topology = loaded
+        .document()
+        .channel_topology()
+        .expect("CMYK reproducer retains modeled topology");
+    assert_eq!(topology.channels().len(), 4);
+    for channel in topology.channels() {
+        let layer = evaluated
+            .scene()
+            .layers()
+            .iter()
+            .find(|layer| layer.channel_id() == channel.id)
+            .expect("every modeled channel publishes one scene layer");
+        let stroke_count = layer
+            .outputs()
+            .iter()
+            .map(|output| match output.geometry() {
+                GeometryOutput::CanonicalStrokes(strokes) => strokes.len(),
+                _ => 0,
+            })
+            .sum::<usize>();
+        assert!(
+            stroke_count > 0,
+            "{:?} must retain positive random-link geometry",
+            channel.role
+        );
     }
 }
 

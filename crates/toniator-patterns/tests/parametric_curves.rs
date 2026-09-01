@@ -1,9 +1,9 @@
 use toniator_domain::{
     CanvasSpec, CoveragePolicy, CurveWinding, GuideRepetition, MarkOrientation, MarkPrototype,
-    OffsetCleanup, OffsetSides, ParametricCurve, PathStrokeStyle, PatternDefinition,
-    PatternDefinitionId, PatternFamily, PatternMechanism, PatternMechanismId, PatternModulation,
-    PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization, ResolvedDensityMetric2D,
-    SpiralCurve, SpiralShape,
+    OffsetCleanup, ParametricCurve, PathStrokeStyle, PatternDefinition, PatternDefinitionId,
+    PatternFamily, PatternMechanism, PatternMechanismId, PatternModulation, PatternOutputLayer,
+    PatternOutputLayerId, PatternOutputRealization, ResolvedDensityMetric2D, SpiralCurve,
+    SpiralShape,
 };
 use toniator_patterns::{
     GridInspectRequest, StructuralProductCapability, evaluate_typed_family,
@@ -177,7 +177,6 @@ fn normal_offset_sites_keep_path_neutral_repetition_identity() {
     spiral.turns = 0.25;
     *repetition = GuideRepetition::NormalOffset {
         spacing: 36.0,
-        sides: OffsetSides::Both,
         cleanup: OffsetCleanup::DissolveCrossings,
     };
     let output = evaluate_typed_family(&definition, &request()).expect("offset sites");
@@ -283,7 +282,6 @@ fn parametric_paths_compose_with_stage20j_normal_offset() {
     spiral.turns = 0.25;
     *repetition = GuideRepetition::NormalOffset {
         spacing: 36.0,
-        sides: OffsetSides::Both,
         cleanup: OffsetCleanup::DissolveCrossings,
     };
     let output = evaluate_typed_family(&definition, &request()).expect("offset output");

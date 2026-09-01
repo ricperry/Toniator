@@ -35,20 +35,35 @@ use gtk::prelude::*;
 use preview_coordinator::PreviewSubmission;
 use preview_coordinator::accepts_submission;
 use toniator_domain::DensityMetric2D;
-use toniator_domain::{
-    AuthoredStructureAttachment, CanvasSpec, ChannelId, ChannelPaint, ChannelTopologyTemplate,
-    ColorComponent, DensityEditedField, Document, DocumentCommand, DocumentHistory,
-    DocumentSession, HalftoneChannelModel, LegacyMappingFieldEdit, MarkGeometryFieldEdit,
-    MarkOrientationKind, MarkPrototype, ModeledMappingFieldEdit, PaintKind, PatternCapabilityScope,
-    PatternDefinitionEdit, PatternDefinitionId, PatternGeometryResponse, PatternMechanism,
-    PatternMechanismId, PatternOutputLayerId, PropertyCurrentValue, PropertyCurrentValueKind,
-    PropertyDescriptor, PropertyEnumChoice, PropertyFieldId, PropertyInheritance,
-    PropertyReferenceValue, PropertyTarget, PropertyValueKind, RandomCharacterKind,
-    RegionGeometryFieldEdit, SourceComponent, SourceMappingComponent, SourceReference,
-    SourceReferenceId, TranslationEditedAxis, VariantTransitionFieldUpdate, VariantTransitionValue,
-};
 #[cfg(test)]
-use toniator_domain::{DensityModulationKind, ExclusionKind};
+use toniator_domain::{
+    ArtworkWeightResponse, ConnectedGeometryResponse, CoveragePolicy, CurveRepetition,
+    DensityModulationKind, ExclusionKind, GeneralizedSiteProductDraft, GenericGuideDimensionDraft,
+    GenericGuidePrototypeDraft, MarkOrientationDraft, OffsetCleanup, PathStrokeStyle,
+    PatternOutputSettingsRecipe, SiteDensityModulation, SiteUseFilterRecipe, SourceMapping,
+};
+use toniator_domain::{
+    AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureAttachment,
+    AuthoredStructureDraft, AuthoredStructureId, AuthoredStructureKind, AuthoredStructureUse,
+    CanvasSpec, ChannelId, ChannelPaint, ChannelTopologyTemplate, ColorComponent, ColorValue,
+    DensityEditedField, Document, DocumentCommand, DocumentHistory, DocumentSession,
+    HalftoneChannelModel, LegacyMappingFieldEdit, MarkGeometryFieldEdit, MarkOrientationKind,
+    MarkPrototype, ModeledMappingFieldEdit, PaintKind, PatternCapabilityProjection,
+    PatternCapabilityScope, PatternDefinitionBundleEdit, PatternDefinitionEdit,
+    PatternDefinitionId, PatternDefinitionRecipe, PatternFamilyCapabilityProjection,
+    PatternGeometryResponse, PatternMechanism, PatternMechanismId,
+    PatternOutputCapabilityProjection, PatternOutputCapabilityRecord, PatternOutputLayerId,
+    PatternOutputRealization, PatternOutputSettingsEdit, PatternRecipeConnectionMethodKind,
+    PatternRecipeConstructionKind, PatternRecipeFamilyKind, PatternRecipeOutputKind,
+    PatternRecipeRegionMethodKind, PatternRecipeSiteGenerationKind, PatternStructureRecipe,
+    PersonalAuthoredResourceKind, PropertyCurrentValue, PropertyCurrentValueKind,
+    PropertyDescriptor, PropertyEnumChoice, PropertyFieldId, PropertyInheritance,
+    PropertyReferenceConstraint, PropertyReferenceValue, PropertyTarget, PropertyValueKind,
+    RandomCharacterKind, RegionGeometryFieldEdit, SiteUseFilter, SiteUseFilterKind,
+    SourceComponent, SourceMappingComponent, SourceReference, SourceReferenceId,
+    TranslationEditedAxis, VariantTransitionDraft, VariantTransitionField,
+    VariantTransitionFieldUpdate, VariantTransitionValue,
+};
 use toniator_engine::{
     EvaluationLimits, EvaluationRequest, EvaluationScheduler, OutputRasterTarget,
     RasterAntialiasing, RasterBackground, RasterSurface, ResolvedSource, SourceFormatHint,
@@ -60,6 +75,8 @@ use toniator_io::{
     EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load as load_container,
     save as save_container,
 };
+#[cfg(test)]
+use toniator_io::{load_preset, save_preset};
 use toniator_patterns::{LayeredPresetCatalog, PresetOrigin, PresetRegistry};
 use view_models::{LifecycleViewModel, project_document};
 
@@ -108,8 +125,6 @@ const WIZARD_IMAGE_RESOURCE_PATHS: [&str; 18] = [
     "/com/silentbutdigital/Toniator/preset-icons/two-guide-cells-uniform-offset.svg",
     "/com/silentbutdigital/Toniator/preset-icons/two-guide-maze.svg",
 ];
-const WIZARD_EDIT_UNAVAILABLE_EXPLANATION: &str =
-    "Editing this recipe arrives in the next Pattern Wizard gate; Use as is is available now.";
 const LIFECYCLE_BUTTONS: [(&str, &str, &str); 6] = [
     ("_New", "app.new", "New document (Ctrl+N)"),
     ("_Open", "app.open", "Open a document or artwork (Ctrl+O)"),
@@ -126,9 +141,12 @@ pub(crate) enum PreviewModel {
     SourceColorAlpha,
 }
 
-/// Identifies the private Pattern Editor's selected-copy command boundary.
+/// Identifies the private Pattern Editor's structural command boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum DefinitionEditScope {
+    /// Edits the private document-base definition shared by the ALL target.
+    DocumentBase,
+    /// Edits a fresh selected-channel definition copy without changing peers.
     SelectedCopy,
 }
 
@@ -142,6 +160,7 @@ impl Default for DefinitionEditScope {
 #[derive(Clone, Debug, PartialEq)]
 enum InspectorInput {
     FiniteF64(f64),
+    OptionalFiniteF64(Option<f64>),
     U32(u32),
     Boolean(bool),
     EnumChoice(PropertyEnumChoice),
@@ -170,17 +189,9 @@ impl InspectorTarget {
     }
 }
 
-/// Retains the non-mutating recipe dropdown candidate independently of the document.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum PatternCandidate {
-    Custom,
-    Preset(String),
-}
-
 #[derive(Clone, Debug, Default, PartialEq)]
 struct InspectorRuntime {
     target: InspectorTarget,
-    pattern_candidate: Option<PatternCandidate>,
     scope: DefinitionEditScope,
     drafts: BTreeMap<String, String>,
     expanded_groups: BTreeSet<String>,
@@ -833,6 +844,7 @@ struct Actions {
 /// Dropping the surface on close discards that private authority.
 struct PatternEditorSurface {
     purpose: PatternEditorPurpose,
+    parent: PatternEditorParent,
     window: gtk::Window,
     status: gtk::Label,
     picture: gtk::Picture,
@@ -844,16 +856,23 @@ struct PatternEditorSurface {
     primary: gtk::Box,
     advanced_rows: gtk::Box,
     descriptor_components: BTreeMap<String, DraftDescriptorComponent>,
+    undo: gtk::Button,
+    redo: gtk::Button,
     apply: gtk::Button,
     resource_list: gtk::Box,
     construction_canvas: gtk::DrawingArea,
     coordinate_x: gtk::Entry,
     coordinate_y: gtk::Entry,
+    selected_point_label: gtk::Label,
     numeric_commit_active: Rc<Cell<bool>>,
     make_curve: gtk::Button,
     make_line: gtk::Button,
     insert_node: gtk::Button,
     delete_node: gtk::Button,
+    smooth_direction: gtk::ToggleButton,
+    corner_direction: gtk::ToggleButton,
+    edit_left_terminal_handle: gtk::Button,
+    edit_right_terminal_handle: gtk::Button,
 }
 
 /// Identifies the one authored resource and descriptor purpose exposed by a private editor.
@@ -862,16 +881,297 @@ struct PatternEditorSurface {
 /// for every draft mutation, resource attachment, and final publication.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PatternEditorPurpose {
+    /// Retains the provisional standalone Guide entry point.
+    #[allow(dead_code)]
     Grid,
+    /// Retains the provisional standalone Mark entry point.
+    #[allow(dead_code)]
     Mark,
+    /// Edits one wizard-invoked authored guide resource.
+    Guide,
+    /// Edits one wizard-invoked authored closed-shape resource.
+    Shape,
+    /// Edits one wizard-invoked Curve Motif resource.
+    Motif,
+}
+
+/// Identifies the history owner that receives one accepted Pattern Editor child draft.
+///
+/// The nested Wizard variant retains only the private wizard epoch and exact invoking widget. It
+/// never retains a main-history or library write handle, so Cancel may safely discard the child.
+#[derive(Clone)]
+enum PatternEditorParent {
+    #[allow(dead_code)]
+    Workspace,
+    Wizard {
+        epoch: u64,
+        focus_token: NestedEditorFocusToken,
+        invoking_control: gtk::Widget,
+    },
+}
+
+/// Holds the visible and accessible Apply action copy for one editor parent boundary.
+///
+/// This is GTK presentation policy only: the parent match in
+/// `apply_pattern_editor_draft` remains the sole history authority for publishing a standalone
+/// editor or squashing a nested child into its wizard draft.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PatternEditorApplyPresentation {
+    mnemonic_label: &'static str,
+    description: &'static str,
+}
+
+/// Projects Apply wording from whether the editor is nested below a Pattern Wizard.
+///
+/// Nested wording deliberately names the private wizard-history boundary and must never promise
+/// main-history publication. Standalone wording preserves the provisional editor's existing main
+/// publication contract.
+const fn pattern_editor_apply_presentation(
+    is_wizard_child: bool,
+) -> PatternEditorApplyPresentation {
+    if is_wizard_child {
+        PatternEditorApplyPresentation {
+            mnemonic_label: "Apply to _Pattern",
+            description: "Apply these curve changes to the pattern as one wizard step.",
+        }
+    } else {
+        PatternEditorApplyPresentation {
+            mnemonic_label: "_Apply",
+            description: "Apply these curve changes as one undoable document change.",
+        }
+    }
+}
+
+/// Identifies the exact wizard control that invoked one nested authored-path editor.
+///
+/// The token is presentation-only and addresses the stable typed use behind a rebuilt GTK widget.
+/// It lets Apply restore the equivalent live invoker after a copy-and-retarget rebuild, while
+/// Cancel and confirmed close retain the original widget. Allocated authored-resource IDs never
+/// become focus authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct NestedEditorFocusToken {
+    wizard_epoch: u64,
+    target: NestedEditorFocusTarget,
+}
+
+/// Names the stable structural use whose child-editor button receives restored focus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum NestedEditorFocusTarget {
+    Guide {
+        mechanism_id: PatternMechanismId,
+        dimension_id: toniator_domain::GuideDimensionId,
+    },
+    Shape {
+        output_layer_id: PatternOutputLayerId,
+    },
+    Motif {
+        output_layer_id: PatternOutputLayerId,
+    },
+}
+
+/// Names the three terminal nested-editor outcomes that must restore the invoking control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NestedEditorTerminal {
+    Apply,
+    Cancel,
+    ConfirmedClose,
+}
+
+/// Returns the exact invoking-control token restored by one nested-editor terminal outcome.
+///
+/// Standalone editors have no wizard invoker. Every terminal nested outcome returns the retained
+/// token; GTK performs the actual widget focus in `close_pattern_editor` after detaching the child.
+const fn nested_editor_focus_after_terminal(
+    parent: &PatternEditorParent,
+    terminal: NestedEditorTerminal,
+) -> Option<NestedEditorFocusToken> {
+    match (parent, terminal) {
+        (PatternEditorParent::Wizard { focus_token, .. }, _) => {
+            nested_editor_focus_token_after_terminal(Some(*focus_token), terminal)
+        }
+        (PatternEditorParent::Workspace, _) => None,
+    }
+}
+
+/// Preserves one exact nested-editor focus token across a terminal child lifecycle event.
+///
+/// This pure projection lets tests cover Apply, Cancel, and confirmed close without constructing a
+/// GTK widget. The surface path separately retains and focuses the matching live widget.
+const fn nested_editor_focus_token_after_terminal(
+    focus_token: Option<NestedEditorFocusToken>,
+    _terminal: NestedEditorTerminal,
+) -> Option<NestedEditorFocusToken> {
+    focus_token
+}
+
+/// Derives one rebuild-stable child-editor focus token from a typed authored-resource use.
+///
+/// The token follows the mechanism/dimension or output layer that survives resource copy and
+/// retarget operations. It deliberately excludes the replaceable authored-resource ID.
+const fn nested_editor_focus_token(
+    wizard_epoch: u64,
+    use_value: AuthoredStructureUse,
+) -> NestedEditorFocusToken {
+    let target = match use_value {
+        AuthoredStructureUse::Guide {
+            mechanism_id,
+            dimension_id,
+            ..
+        } => NestedEditorFocusTarget::Guide {
+            mechanism_id,
+            dimension_id,
+        },
+        AuthoredStructureUse::Mark {
+            output_layer_id, ..
+        } => NestedEditorFocusTarget::Shape { output_layer_id },
+        AuthoredStructureUse::Motif {
+            output_layer_id, ..
+        } => NestedEditorFocusTarget::Motif { output_layer_id },
+    };
+    NestedEditorFocusToken {
+        wizard_epoch,
+        target,
+    }
+}
+
+/// Names the explicit shared-resource policy selected in the disclosure dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SharedPathEditPolicy {
+    EditCopy,
+    EditAllUses,
+}
+
+/// Names the one typed history operation selected by a confirmed shared-resource policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SharedPathEditCommand {
+    DuplicateRetargetAndReplace,
+    ReplaceAllUses,
+}
+
+/// Identifies one persisted curve-reference slot independently of linked channel projections.
+///
+/// A document-base wizard edits one shared definition. Several channels linked to that definition
+/// therefore project the same slot several times, but they are not separate artist choices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum AuthoredUseSlot {
+    Guide {
+        definition_id: PatternDefinitionId,
+        mechanism_id: PatternMechanismId,
+        dimension_id: toniator_domain::GuideDimensionId,
+    },
+    Mark {
+        definition_id: PatternDefinitionId,
+        output_layer_id: PatternOutputLayerId,
+    },
+    Motif {
+        definition_id: PatternDefinitionId,
+        output_layer_id: PatternOutputLayerId,
+    },
+}
+
+/// Returns the channel-independent persisted slot addressed by one effective curve use.
+const fn authored_use_slot(use_value: &AuthoredStructureUse) -> AuthoredUseSlot {
+    match use_value {
+        AuthoredStructureUse::Guide {
+            definition_id,
+            mechanism_id,
+            dimension_id,
+            ..
+        } => AuthoredUseSlot::Guide {
+            definition_id: *definition_id,
+            mechanism_id: *mechanism_id,
+            dimension_id: *dimension_id,
+        },
+        AuthoredStructureUse::Mark {
+            definition_id,
+            output_layer_id,
+            ..
+        } => AuthoredUseSlot::Mark {
+            definition_id: *definition_id,
+            output_layer_id: *output_layer_id,
+        },
+        AuthoredStructureUse::Motif {
+            definition_id,
+            output_layer_id,
+            ..
+        } => AuthoredUseSlot::Motif {
+            definition_id: *definition_id,
+            output_layer_id: *output_layer_id,
+        },
+    }
+}
+
+/// Collapses linked-channel projections to the distinct slots relevant to document-base editing.
+fn document_base_authored_uses(uses: &[AuthoredStructureUse]) -> Vec<AuthoredStructureUse> {
+    let mut slots = BTreeSet::new();
+    uses.iter()
+        .copied()
+        .filter(|use_value| slots.insert(authored_use_slot(use_value)))
+        .collect()
+}
+
+/// Returns the safe default shared-resource policy for every Guide, Shape, and Motif editor.
+///
+/// The caller must still receive an explicit button activation; this value only determines the
+/// dialog's initial focus and never applies an edit without confirmation.
+const fn default_shared_path_edit_policy(_purpose: PatternEditorPurpose) -> SharedPathEditPolicy {
+    SharedPathEditPolicy::EditCopy
+}
+
+/// Maps an explicit disclosure policy to exactly one grouped domain history operation.
+///
+/// The copy command allocates and retargets one selected typed use; the shared command replaces
+/// the existing document resource. Neither branch performs more than one `DocumentHistory` entry.
+const fn shared_path_edit_command(policy: SharedPathEditPolicy) -> SharedPathEditCommand {
+    match policy {
+        SharedPathEditPolicy::EditCopy => SharedPathEditCommand::DuplicateRetargetAndReplace,
+        SharedPathEditPolicy::EditAllUses => SharedPathEditCommand::ReplaceAllUses,
+    }
+}
+
+/// Holds an immutable personal Shape or Motif insertion payload scanned during app startup.
+///
+/// This intentionally omits the personal-library fingerprint and writable library object. Insertion
+/// copies `draft` into a fresh document-owned structure and cannot update the personal library.
+#[derive(Clone)]
+struct PersonalAuthoredInsertionSnapshot {
+    name: String,
+    kind: PersonalAuthoredResourceKind,
+    draft: AuthoredStructureDraft,
+}
+
+/// Captures one concrete standalone or wizard-owned Pattern Editor launch target.
+///
+/// The selected use is a typed document reference used for default copy-on-edit and personal
+/// insertion attachment. It never stores a catalog record, display name, or mutable library state.
+#[derive(Clone)]
+struct PatternEditorLaunch {
+    parent: PatternEditorParent,
+    selected_channel: ChannelId,
+    selected_structure: Option<AuthoredStructureId>,
+    invoking_use: Option<AuthoredStructureUse>,
+    /// Optional first child-history entry used to materialize an editable resource.
+    ///
+    /// The command is never applied to the wizard parent directly. Apply squashes it together
+    /// with curve edits as one parent entry, while Cancel drops it with the child draft.
+    preparation_command: Option<DocumentCommand>,
 }
 
 impl PatternEditorPurpose {
+    /// Returns the reusable widget-independent geometry policy for this editor purpose.
+    const fn editor_mode(self) -> stage20f_editor::AuthoredPathEditorMode {
+        match self {
+            Self::Grid | Self::Guide => stage20f_editor::AuthoredPathEditorMode::Guide,
+            Self::Mark | Self::Shape => stage20f_editor::AuthoredPathEditorMode::Shape,
+            Self::Motif => stage20f_editor::AuthoredPathEditorMode::Motif,
+        }
+    }
+
     /// Returns the only authored topology this modal may construct or edit.
     const fn structure_kind(self) -> toniator_domain::AuthoredStructureKind {
         match self {
-            Self::Grid => toniator_domain::AuthoredStructureKind::OpenPath,
-            Self::Mark => toniator_domain::AuthoredStructureKind::ClosedShape,
+            Self::Grid | Self::Guide | Self::Motif => AuthoredStructureKind::OpenPath,
+            Self::Mark | Self::Shape => AuthoredStructureKind::ClosedShape,
         }
     }
 
@@ -880,6 +1180,9 @@ impl PatternEditorPurpose {
         match self {
             Self::Grid => "Grid Pattern Editor",
             Self::Mark => "Mark Editor",
+            Self::Guide => "Guide Editor",
+            Self::Shape => "Shape Editor",
+            Self::Motif => "Curve Motif Editor",
         }
     }
 
@@ -888,12 +1191,30 @@ impl PatternEditorPurpose {
         match self {
             Self::Grid => "New guide path",
             Self::Mark => "New mark shape",
+            Self::Guide => "New guide path",
+            Self::Shape => "New shape",
+            Self::Motif => "New Curve Motif",
         }
     }
 }
 
 /// Names the construction canvas's direct-manipulation gestures without consuming editor height.
 const CONSTRUCTION_CANVAS_GESTURE_HINT: &str = "Click to select or add points after choosing New. Scroll to zoom; middle-button drag pans. Enter completes; Escape cancels.";
+/// Supplies the concrete GTK accessibility role for the keyboard-operable construction surface.
+///
+/// GTK's abstract Widget role cannot be assigned to a `DrawingArea`; Group preserves its
+/// interactive spatial-container semantics while the visible heading supplies the label relation.
+const CONSTRUCTION_CANVAS_ACCESSIBLE_ROLE: gtk::AccessibleRole = gtk::AccessibleRole::Group;
+/// Describes the capability-derived Curve Motif workflow in its artist-facing Paths route.
+const CURVE_MOTIF_WORKFLOW_COPY: &str = "Curve Motif draws one connected centerline on each guide row. Family Settings controls row direction and spacing; Site Generation controls how far apart motifs repeat along each row. Here you can edit the motif, mirror odd rows, and optionally offset them. Artwork tone controls stroke thickness, and pure white can make parts of the stroke disappear.";
+/// Names the local Smooth terminal-handle action exposed only in the Curve Motif editor.
+const MOTIF_SMOOTH_DIRECTION_LABEL: &str = "Smooth direction";
+/// Describes Smooth's local next-edit effect without inventing persisted geometry metadata.
+const MOTIF_SMOOTH_DIRECTION_DESCRIPTION: &str = "Keep the left and right end handles pointing in the same direction during later edits. Choosing this does not reshape the curve by itself.";
+/// Names the local Corner terminal-handle action exposed only in the Curve Motif editor.
+const MOTIF_CORNER_DIRECTION_LABEL: &str = "Corner";
+/// Describes Corner's local next-edit effect without inventing persisted geometry metadata.
+const MOTIF_CORNER_DIRECTION_DESCRIPTION: &str = "Let the left and right end handles point in different directions during later edits. Choosing this does not reshape the curve by itself.";
 
 /// Defines the GTK-only modal width at which the construction layout stacks vertically.
 const NARROW_EDITOR_MAX_WIDTH_PX: i32 = 700;
@@ -903,12 +1224,32 @@ const CONSTRUCTION_SIDEBAR_WIDTH_PX: i32 = 320;
 
 /// Defines the smallest usable channel-settings sidebar allocation.
 const MAIN_SIDEBAR_MIN_WIDTH_PX: i32 = 300;
-/// Fixes the private Wizard source-proxy bound without changing document density authority.
-const WIZARD_SOURCE_PROXY_LONGEST_EDGE: u32 = 256;
+/// Records the fixed intrinsic dimensions of the bundled neutral Wizard source.
+const WIZARD_NEUTRAL_SOURCE_EDGE_PX: u32 = 100;
+/// Bounds graph-backed topology on a large disposable canvas while preserving workspace aspect.
+const WIZARD_PREVIEW_CANVAS_LONGEST_EDGE: f64 = 1024.0;
 /// Fixes the private Wizard output target without changing export dimensions.
-const WIZARD_PREVIEW_TARGET_PX: u32 = 512;
+const WIZARD_PREVIEW_TARGET_PX: u32 = 256;
+/// Sets the neutral preview's repeated-geometry baseline for Pattern size 1.0.
+const WIZARD_PREVIEW_BASE_DENSITY: f64 = 8.0;
+/// Caps neutral-preview density so expensive structural recipes remain responsive.
+const WIZARD_PREVIEW_MAX_DENSITY: f64 = 12.0;
+/// Retains enough neutral-preview geometry to make very coarse patterns legible.
+const WIZARD_PREVIEW_MIN_DENSITY: f64 = 2.0;
+/// Sets the lower structural baseline used when a preview must derive a connection graph.
+const WIZARD_CONNECTION_PREVIEW_BASE_DENSITY: f64 = 32.0;
+/// Caps graph-backed previews before guard expansion and adjacency construction amplify work.
+const WIZARD_CONNECTION_PREVIEW_MAX_DENSITY: f64 = 40.0;
+/// Keeps coarse graph-backed patterns visible at large Pattern size values.
+const WIZARD_CONNECTION_PREVIEW_MIN_DENSITY: f64 = 16.0;
+/// Defines the normal interactive Pattern size range while allowing existing valid documents to retain their value.
+const PATTERN_SIZE_SLIDER_MIN: f64 = 0.125;
+/// Defines the normal interactive Pattern size range while allowing existing valid documents to retain their value.
+const PATTERN_SIZE_SLIDER_MAX: f64 = 8.0;
 /// Changes the Wizard semantic grouping from side-by-side to stacked below this allocation.
 const WIZARD_NARROW_MAX_WIDTH_PX: i32 = 760;
+/// Fixes a readable non-expanding Presets card width for the responsive FlowBox grid.
+const WIZARD_PRESET_CARD_WIDTH_PX: i32 = 220;
 
 /// Defines the largest channel-settings sidebar allocation at wide window sizes.
 const MAIN_SIDEBAR_MAX_WIDTH_PX: i32 = 420;
@@ -1004,6 +1345,7 @@ struct PatternEditorDraft {
     geometry_editor: stage20f_editor::Stage20fEditorState,
     construction_attachment: Option<AuthoredStructureAttachment>,
     pending_shared_edit: Option<PendingSharedPathEdit>,
+    invoking_use: Option<AuthoredStructureUse>,
 }
 
 /// Retains a gated private replacement until the artist chooses its shared-resource policy.
@@ -1069,8 +1411,13 @@ struct PatternWizardSurface {
     initial_document: Document,
     target: InspectorTarget,
     candidate: Option<String>,
-    materialized_candidate: Option<String>,
-    gallery_cards: BTreeMap<String, components::ToniatorPatternWizardCard>,
+    editing_started: bool,
+    starting_new: bool,
+    gallery_cards: BTreeMap<String, gtk::ToggleButton>,
+    current_pattern_card: gtk::ToggleButton,
+    gallery_panel: gtk::ScrolledWindow,
+    page_panel: gtk::Box,
+    page_scroll: gtk::ScrolledWindow,
     preview_source: WizardPreviewSource,
     picture: gtk::Picture,
     spinner: gtk::Spinner,
@@ -1079,21 +1426,96 @@ struct PatternWizardSurface {
     page: gtk::Box,
     back: gtk::Button,
     review: gtk::Button,
+    cancel: gtk::Button,
+    edit: gtk::Button,
+    new: gtk::Button,
+    undo: gtk::Button,
+    redo: gtk::Button,
     apply: gtk::Button,
+    route: Vec<WizardRoutePage>,
+    route_index: usize,
+    transition: Option<VariantTransitionDraft>,
+    transition_invalid_control: Option<gtk::Widget>,
+    site_use_filter: Option<WizardSiteUseFilterDraft>,
+    ordered_output_focus: Option<PatternOutputLayerId>,
+    recipe_control_focus: Option<WizardRecipeControlFocus>,
+    dropdown_action_generation: u64,
+    nested_focus_controls: BTreeMap<NestedEditorFocusToken, gtk::Widget>,
     scheduler: Arc<EvaluationScheduler>,
     preview_submission: Option<u64>,
+    preview_session: Option<DocumentSession>,
     preview_bridge_stop: Arc<AtomicBool>,
     invoking_edit: gtk::Button,
 }
 
-/// Names the current private wizard page for navigation sensitivity only.
+/// Identifies one recipe-structural control across a capability-driven card rebuild.
 ///
-/// This presentation enum does not encode a document target, catalog record, draft command, or
-/// history state. It merely prevents a visible navigation action from resolving to its own page.
+/// This transient focus token carries no recipe value or command authority. It prevents the key
+/// event that changes a rebuilt dropdown from falling through to the footer's Next/Review button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WizardRecipeControlFocus {
+    GuideCount,
+    SiteGeneration,
+    Construction(usize),
+    ConstructionMethod(usize),
+    AppendConstruction,
+    Descriptor(PropertyTarget, PropertyFieldId),
+    ReferenceCollection(PropertyTarget, PropertyFieldId, usize),
+    AppendReferenceCollection(PropertyTarget, PropertyFieldId),
+    SiteUseFilter(PropertyTarget),
+    SiteUseFilterTarget(PropertyTarget),
+}
+
+/// Identifies the latest deferred dropdown action on one stable wizard card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WizardDropdownActionToken {
+    generation: u64,
+    route_index: usize,
+}
+
+/// Holds one incomplete site-use filter selection outside document and history authority.
+///
+/// A dependent filter is not materialized until the artist explicitly chooses one domain-advertised
+/// compatible output, so the wizard never fabricates a reference or publishes partial filter state.
+#[derive(Clone, Debug)]
+struct WizardSiteUseFilterDraft {
+    descriptor: PropertyDescriptor,
+    kind: SiteUseFilterKind,
+    target: Option<PatternOutputLayerId>,
+}
+
+/// Names one stable capability-derived private editing page.
+///
+/// This presentation enum never contains a preset identity, document ID, command, or mutable
+/// value. The route calculator alone maps current capability and recipe facts to this ordering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WizardRoutePage {
+    /// Presents the domain-owned construction family choice for a new private recipe.
+    PatternFamily,
+    /// Presents family-specific construction, transforms, and coverage controls.
+    FamilySettings,
+    /// Presents site-product, cadence, collection, and site-use controls.
+    SiteGeneration,
+    /// Presents output response, resource, paint, visibility, and ordered-output controls.
+    Rendering,
+    GridArrangement,
+    GuideLayout,
+    Distribution,
+    ParametricForm,
+    SiteSource,
+    SiteUse,
+    Marks,
+    ConnectionsMaze,
+    Paths,
+    Regions,
+    Review,
+}
+
+/// Names the one visible wizard surface state for button-sensitivity projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WizardNavigationPage {
     Gallery,
-    Edit,
+    Route(WizardRoutePage),
     Review,
 }
 
@@ -1119,6 +1541,18 @@ fn wizard_navigation_sensitivity(
     }
 }
 
+/// Returns whether a New wizard has not yet materialized its explicitly chosen family starter.
+///
+/// This presentation fact is private to the modal: it never persists a family discriminator and
+/// becomes false as soon as private history differs from its captured initial document.
+fn wizard_new_family_is_unselected(
+    starting_new: bool,
+    document: &Document,
+    initial_document: &Document,
+) -> bool {
+    starting_new && document == initial_document
+}
+
 /// Applies one pure navigation sensitivity projection without changing wizard draft authority.
 fn apply_wizard_navigation_sensitivity(
     back: &gtk::Button,
@@ -1131,17 +1565,1435 @@ fn apply_wizard_navigation_sensitivity(
     review.set_sensitive(sensitivity.review_enabled);
 }
 
+/// Returns the visible artist-facing heading for one capability-derived wizard page.
+fn wizard_route_page_title(page: WizardRoutePage) -> &'static str {
+    match page {
+        WizardRoutePage::PatternFamily => "Family",
+        WizardRoutePage::FamilySettings => "Family Settings",
+        WizardRoutePage::SiteGeneration => "Sites",
+        WizardRoutePage::Rendering => "Rendering",
+        WizardRoutePage::GridArrangement => "Grid Arrangement",
+        WizardRoutePage::GuideLayout => "Guide Layout",
+        WizardRoutePage::Distribution => "Distribution",
+        WizardRoutePage::ParametricForm => "Parametric Form",
+        WizardRoutePage::SiteSource => "Site Source",
+        WizardRoutePage::SiteUse => "Site Use",
+        WizardRoutePage::Marks => "Marks",
+        WizardRoutePage::ConnectionsMaze => "Connections and Maze",
+        WizardRoutePage::Paths => "Paths",
+        WizardRoutePage::Regions => "Regions",
+        WizardRoutePage::Review => "Review",
+    }
+}
+
+/// Maps one active descriptor to its sole C1 capability-derived wizard page.
+///
+/// The fallback family page keeps every valid current descriptor visible even when a later domain
+/// field has not yet received a dedicated editor. C1 renders unsupported control kinds read-only;
+/// it never silently drops their descriptor or invents an alternate command route.
+fn wizard_page_for_descriptor(
+    descriptor: &PropertyDescriptor,
+    family: &PatternFamilyCapabilityProjection,
+) -> WizardRoutePage {
+    use PropertyFieldId::*;
+    match descriptor.field {
+        SourceReference
+        | LegacyMappingComponent
+        | LegacyMappingPlacement
+        | ModeledMappingComponent
+        | ModeledMappingPlacement
+        | ModeledMappingInverted
+        | ModeledMappingGain
+        | ModeledMappingBias
+        | Paint
+        | ColorRed
+        | ColorGreen
+        | ColorBlue
+        | ColorAlpha
+        | ArtworkWeightMappingComponent
+        | ArtworkWeightMappingPlacement
+        | ArtworkWeightMappingInverted
+        | ArtworkWeightMappingGain
+        | ArtworkWeightMappingBias
+        | ArtworkWeightStrength
+        | ArtworkWeightResponse => WizardRoutePage::SiteSource,
+        OutputSiteUseFilterKind | OutputSiteUseFilterReference => WizardRoutePage::SiteUse,
+        MarkMinimumFill
+        | MarkMaximumFill
+        | VisibleMarkMargin
+        | OutputPrototype
+        | OutputAuthoredClosedShape
+        | OutputOrientation
+        | OutputOrientationDimension => WizardRoutePage::Marks,
+        ConnectionProgram
+        | ConnectionMaximumDegree
+        | ConnectionMaximumDistance
+        | ConnectionMinimumDegree
+        | ConnectionSeed
+        | MazeSeed => WizardRoutePage::ConnectionsMaze,
+        ConnectedMinimumThickness
+        | ConnectedMaximumThickness
+        | CurveResponseBias
+        | CurveMotifMirrorAlternateRows
+        | CurveMotifAlternateRowPhase => WizardRoutePage::Paths,
+        RegionResizeAlgorithm | RegionSampling | RegionMinimumFill | RegionMaximumFill => {
+            WizardRoutePage::Regions
+        }
+        GuideBaselineAngle
+        | GuidePhase
+        | GuideSpacingMultiplier
+        | GuidePrototype
+        | GuideAuthoredStructure
+        | GuideArcCenterX
+        | GuideArcCenterY
+        | GuideArcRadius
+        | GuideArcStartAngle
+        | GuideArcSweepAngle
+        | GuideRepetition
+        | GuideOffsetSpacing
+        | GuideOffsetCleanup
+        | GuideStackDirection
+        | GuideStackSpacingMultiplier
+        | IntersectionDimensions
+        | IntersectionMergeEpsilon
+        | AlongGuideDimensions
+        | AlongGuideIntervalMultiplier
+        | AlongGuidePhase
+        | OutputSiteProduct => WizardRoutePage::GuideLayout,
+        ParametricShape
+        | ParametricTurns
+        | ParametricRadialSpacing
+        | ParametricPhase
+        | ParametricWinding
+        | ParametricRepetition
+        | ParametricOffsetSpacing
+        | ParametricOffsetCleanup
+        | ParametricStackDirection
+        | ParametricStackSpacingMultiplier
+        | AlongParametricInterval
+        | AlongParametricPhase => WizardRoutePage::ParametricForm,
+        RandomCharacter
+        | RandomEvenMinimumCenterDistance
+        | RandomClusterDensity
+        | RandomClusterSpread
+        | RandomClusterStrength
+        | RandomSeed
+        | RandomDensityModulation
+        | RandomExclusion
+        | ExclusionMinimumCenterDistance => WizardRoutePage::Distribution,
+        Density
+        | DensityAspect
+        | RotationDegrees
+        | ShapeRotationDegrees
+        | TranslationX
+        | TranslationY
+        | Opacity
+        | Visibility
+        | DefinitionSelection
+        | CoverageGuardSteps
+        | CoverageAdditionalMargin
+        | RandomMaximumAttempts
+        | RandomMaximumNeighborChecks => match family {
+            PatternFamilyCapabilityProjection::Dispersion(_) => WizardRoutePage::Distribution,
+            PatternFamilyCapabilityProjection::Parametric(_) => WizardRoutePage::ParametricForm,
+            PatternFamilyCapabilityProjection::Grid(_) => WizardRoutePage::GridArrangement,
+        },
+    }
+}
+
+/// Projects every active descriptor onto one fixed revised-flow editing card.
+///
+/// The existing exhaustive field authority remains the only descriptor classification. This
+/// second projection changes presentation grouping only: it never reads preset metadata, replaces
+/// a domain command, or leaves an active descriptor without one fixed-card owner.
+fn fixed_wizard_page_for_descriptor(
+    descriptor: &PropertyDescriptor,
+    family: &PatternFamilyCapabilityProjection,
+) -> WizardRoutePage {
+    match descriptor.field {
+        PropertyFieldId::DefinitionSelection => return WizardRoutePage::PatternFamily,
+        PropertyFieldId::Density
+        | PropertyFieldId::DensityAspect
+        | PropertyFieldId::RotationDegrees
+        | PropertyFieldId::ShapeRotationDegrees
+        | PropertyFieldId::TranslationX
+        | PropertyFieldId::TranslationY
+        | PropertyFieldId::Opacity
+        | PropertyFieldId::Visibility => return WizardRoutePage::Rendering,
+        _ => {}
+    }
+    if matches!(family, PatternFamilyCapabilityProjection::Dispersion(_))
+        && matches!(
+            descriptor.field,
+            PropertyFieldId::ArtworkWeightMappingComponent
+                | PropertyFieldId::ArtworkWeightMappingPlacement
+                | PropertyFieldId::ArtworkWeightMappingInverted
+                | PropertyFieldId::ArtworkWeightMappingGain
+                | PropertyFieldId::ArtworkWeightMappingBias
+                | PropertyFieldId::ArtworkWeightStrength
+                | PropertyFieldId::ArtworkWeightResponse
+        )
+    {
+        return WizardRoutePage::FamilySettings;
+    }
+    match wizard_page_for_descriptor(descriptor, family) {
+        WizardRoutePage::SiteSource
+        | WizardRoutePage::SiteUse
+        | WizardRoutePage::Marks
+        | WizardRoutePage::ConnectionsMaze
+        | WizardRoutePage::Paths
+        | WizardRoutePage::Regions => WizardRoutePage::Rendering,
+        WizardRoutePage::GuideLayout => match descriptor.field {
+            PropertyFieldId::IntersectionDimensions
+            | PropertyFieldId::IntersectionMergeEpsilon
+            | PropertyFieldId::AlongGuideDimensions
+            | PropertyFieldId::AlongGuideIntervalMultiplier
+            | PropertyFieldId::AlongGuidePhase
+            | PropertyFieldId::OutputSiteProduct => WizardRoutePage::SiteGeneration,
+            _ => WizardRoutePage::FamilySettings,
+        },
+        WizardRoutePage::ParametricForm => match descriptor.field {
+            PropertyFieldId::AlongParametricInterval | PropertyFieldId::AlongParametricPhase => {
+                WizardRoutePage::SiteGeneration
+            }
+            _ => WizardRoutePage::FamilySettings,
+        },
+        WizardRoutePage::GridArrangement | WizardRoutePage::Distribution => {
+            WizardRoutePage::FamilySettings
+        }
+        WizardRoutePage::PatternFamily
+        | WizardRoutePage::FamilySettings
+        | WizardRoutePage::SiteGeneration
+        | WizardRoutePage::Rendering
+        | WizardRoutePage::Review => {
+            unreachable!("legacy descriptor authority never returns a fixed card")
+        }
+    }
+}
+
+/// Names one semantic settings group within the fixed artist-facing card sequence.
+///
+/// Declaration order is presentation order only. Active descriptors, values, applicability, and
+/// commands continue to come exclusively from the domain capability projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum WizardControlSection {
+    ReviewSummary,
+    FamilyStructure,
+    FamilyAlgorithm,
+    FamilyCoverage,
+    SitePlacement,
+    SiteConnections,
+    OutputConstruction,
+    OutputAppearance,
+    SourceResponse,
+    PatternPlacement,
+}
+
+/// Groups one active descriptor by the artist decision it represents on its fixed card.
+fn wizard_control_section(page: WizardRoutePage, field: PropertyFieldId) -> WizardControlSection {
+    match page {
+        WizardRoutePage::FamilySettings => match field {
+            PropertyFieldId::CoverageGuardSteps | PropertyFieldId::CoverageAdditionalMargin => {
+                WizardControlSection::FamilyCoverage
+            }
+            PropertyFieldId::RandomSeed
+            | PropertyFieldId::RandomEvenMinimumCenterDistance
+            | PropertyFieldId::RandomClusterDensity
+            | PropertyFieldId::RandomClusterSpread
+            | PropertyFieldId::RandomClusterStrength
+            | PropertyFieldId::RandomDensityModulation
+            | PropertyFieldId::RandomExclusion
+            | PropertyFieldId::ExclusionMinimumCenterDistance
+            | PropertyFieldId::VisibleMarkMargin
+            | PropertyFieldId::ArtworkWeightMappingComponent
+            | PropertyFieldId::ArtworkWeightMappingPlacement
+            | PropertyFieldId::ArtworkWeightMappingInverted
+            | PropertyFieldId::ArtworkWeightMappingGain
+            | PropertyFieldId::ArtworkWeightMappingBias
+            | PropertyFieldId::ArtworkWeightStrength
+            | PropertyFieldId::ArtworkWeightResponse => WizardControlSection::FamilyAlgorithm,
+            _ => WizardControlSection::FamilyStructure,
+        },
+        WizardRoutePage::SiteGeneration => match field {
+            PropertyFieldId::ConnectionProgram
+            | PropertyFieldId::ConnectionMaximumDegree
+            | PropertyFieldId::ConnectionMaximumDistance
+            | PropertyFieldId::ConnectionMinimumDegree
+            | PropertyFieldId::ConnectionSeed
+            | PropertyFieldId::MazeSeed => WizardControlSection::SiteConnections,
+            _ => WizardControlSection::SitePlacement,
+        },
+        WizardRoutePage::Rendering => match field {
+            PropertyFieldId::ConnectionProgram
+            | PropertyFieldId::ConnectionMaximumDegree
+            | PropertyFieldId::ConnectionMaximumDistance
+            | PropertyFieldId::ConnectionMinimumDegree
+            | PropertyFieldId::ConnectionSeed
+            | PropertyFieldId::MazeSeed => WizardControlSection::SiteConnections,
+            PropertyFieldId::OutputSiteUseFilterKind
+            | PropertyFieldId::OutputSiteUseFilterReference => {
+                WizardControlSection::OutputConstruction
+            }
+            PropertyFieldId::Density
+            | PropertyFieldId::DensityAspect
+            | PropertyFieldId::RotationDegrees
+            | PropertyFieldId::ShapeRotationDegrees
+            | PropertyFieldId::TranslationX
+            | PropertyFieldId::TranslationY => WizardControlSection::PatternPlacement,
+            PropertyFieldId::SourceReference
+            | PropertyFieldId::LegacyMappingComponent
+            | PropertyFieldId::LegacyMappingPlacement
+            | PropertyFieldId::ModeledMappingComponent
+            | PropertyFieldId::ModeledMappingPlacement
+            | PropertyFieldId::ModeledMappingInverted
+            | PropertyFieldId::ModeledMappingGain
+            | PropertyFieldId::ModeledMappingBias
+            | PropertyFieldId::ArtworkWeightMappingComponent
+            | PropertyFieldId::ArtworkWeightMappingPlacement
+            | PropertyFieldId::ArtworkWeightMappingInverted
+            | PropertyFieldId::ArtworkWeightMappingGain
+            | PropertyFieldId::ArtworkWeightMappingBias
+            | PropertyFieldId::ArtworkWeightStrength
+            | PropertyFieldId::ArtworkWeightResponse => WizardControlSection::SourceResponse,
+            _ => WizardControlSection::OutputAppearance,
+        },
+        _ => WizardControlSection::FamilyStructure,
+    }
+}
+
+/// Returns the visible heading and concise explanation for one semantic settings group.
+fn wizard_control_section_presentation(
+    section: WizardControlSection,
+    family: &PatternFamilyCapabilityProjection,
+) -> (&'static str, &'static str) {
+    match section {
+        WizardControlSection::ReviewSummary => (
+            "Pattern summary",
+            "Confirm the construction sequence, then review the settings grouped exactly as they were edited.",
+        ),
+        WizardControlSection::FamilyStructure => match family {
+            PatternFamilyCapabilityProjection::Grid(_) => (
+                "Guide topology",
+                "Choose the number of guides and each guide’s geometry, angle, phase, and spacing.",
+            ),
+            PatternFamilyCapabilityProjection::Dispersion(_) => (
+                "Dispersion algorithm",
+                "Choose how sites are distributed before setting the algorithm’s applicable options.",
+            ),
+            PatternFamilyCapabilityProjection::Parametric(_) => (
+                "Parametric equation",
+                "Choose the curve form and typed variables, including growth per revolution.",
+            ),
+        },
+        WizardControlSection::FamilyAlgorithm => (
+            "Algorithm options",
+            "Adjust only the options used by the selected algorithm, including its repeatable random seed when present.",
+        ),
+        WizardControlSection::FamilyCoverage => (
+            "Edge coverage",
+            "Control how far the family extends beyond the canvas before final clipping.",
+        ),
+        WizardControlSection::SitePlacement => (
+            "Sites and topology capabilities",
+            "Choose how this family produces usable sites, intersections, or cells for the rendering step.",
+        ),
+        WizardControlSection::SiteConnections => (
+            "Connection algorithm and options",
+            "Choose how eligible sites are linked or routed and set only that algorithm’s applicable values.",
+        ),
+        WizardControlSection::OutputConstruction => (
+            "Construction method",
+            "Choose Marks, Connections, or Regions for each output, then select the compatible rendering method below.",
+        ),
+        WizardControlSection::OutputAppearance => (
+            "Algorithm and output options",
+            "Adjust only the controls that apply to the selected construction method. A zero minimum can intentionally hide marks or stroke portions without breaking the underlying guide or path.",
+        ),
+        WizardControlSection::SourceResponse => (
+            "Source response",
+            "Choose how artwork values affect placement, fill, thickness, or region size. A zero minimum can intentionally hide marks or stroke portions without breaking the underlying guide or path.",
+        ),
+        WizardControlSection::PatternPlacement => (
+            "Size and placement",
+            "Adjust the finished pattern as a whole after its structure and output are defined.",
+        ),
+    }
+}
+
+/// Appends one accessible visual section boundary without owning any setting value.
+fn append_wizard_control_section(
+    page: &gtk::Box,
+    section: WizardControlSection,
+    family: &PatternFamilyCapabilityProjection,
+) {
+    let (title, description) = wizard_control_section_presentation(section, family);
+    let heading = gtk::Label::new(Some(title));
+    heading.add_css_class("heading");
+    heading.set_xalign(0.0);
+    heading.set_tooltip_text(Some(description));
+    heading.update_property(&[
+        gtk::accessible::Property::Label(title),
+        gtk::accessible::Property::Description(description),
+    ]);
+    page.append(&heading);
+    let detail = gtk::Label::new(Some(description));
+    detail.add_css_class("dim-label");
+    detail.set_xalign(0.0);
+    detail.set_wrap(true);
+    page.append(&detail);
+}
+
+/// Records the structural control that should regain focus after its command rebuilds the card.
+fn set_wizard_recipe_control_focus(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    focus: WizardRecipeControlFocus,
+) {
+    if let Some(surface) = state
+        .borrow_mut()
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.recipe_control_focus = Some(focus);
+    }
+}
+
+/// Restores a structural control's focus once the replacement widget exists in the rebuilt card.
+fn restore_wizard_recipe_control_focus(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    focus: WizardRecipeControlFocus,
+    control: &impl IsA<gtk::Widget>,
+) {
+    let should_restore = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+        .is_some_and(|surface| surface.recipe_control_focus == Some(focus));
+    if !should_restore {
+        return;
+    }
+    if let Some(surface) = state
+        .borrow_mut()
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.recipe_control_focus = None;
+    }
+    let control = control.clone().upcast::<gtk::Widget>();
+    glib::idle_add_local_once(move || {
+        control.grab_focus();
+    });
+}
+
+/// Builds a string dropdown whose popup rows expose their visible labels as accessible names.
+///
+/// GTK's default string dropdown renders the option text but does not reliably name the popup
+/// list items through AT-SPI. The custom list factory keeps the `StringList` as the sole selection
+/// authority while projecting each bound string onto both the visible label and the GTK 4.12 list
+/// item's accessible label. The closed dropdown retains GTK's ordinary selected-value factory.
+fn accessible_string_dropdown(labels: &[&str]) -> gtk::DropDown {
+    let control = gtk::DropDown::from_strings(labels);
+    let list_factory = gtk::SignalListItemFactory::new();
+    list_factory.connect_setup(|_, object| {
+        let item = object
+            .downcast_ref::<gtk::ListItem>()
+            .expect("dropdown factory receives GTK list items");
+        let label = gtk::Label::new(None);
+        label.set_xalign(0.0);
+        item.set_child(Some(&label));
+    });
+    list_factory.connect_bind(|_, object| {
+        let item = object
+            .downcast_ref::<gtk::ListItem>()
+            .expect("dropdown factory receives GTK list items");
+        let value = item
+            .item()
+            .and_downcast::<gtk::StringObject>()
+            .expect("string dropdown rows bind GTK string objects");
+        let text = value.string();
+        let label = item
+            .child()
+            .and_downcast::<gtk::Label>()
+            .expect("string dropdown rows retain their visible label");
+        label.set_label(&text);
+        label.update_property(&[gtk::accessible::Property::Label(text.as_str())]);
+        item.set_accessible_label(&text);
+    });
+    control.set_list_factory(Some(&list_factory));
+    control
+}
+
+/// Builds truthful assistive-technology readback for one wizard dropdown selection.
+///
+/// GTK's dropdown accessible does not consistently expose its selected item on every supported
+/// GTK release. The description therefore repeats the current visible selection before the
+/// explanatory guidance without creating a second value authority.
+fn wizard_dropdown_description(selection: &str, guidance: &str) -> String {
+    format!("Selected: {selection}. {guidance}")
+}
+
+/// Exposes one selected dropdown value before a card-rebuilding wizard action runs.
+///
+/// The short presentation-only delay lets GTK publish the selected value and finish the popup key
+/// event before the control is replaced. The action still validates the captured epoch and domain
+/// command, so closing or replacing the wizard during the delay cannot mutate another surface.
+fn defer_wizard_dropdown_action(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    control: &gtk::DropDown,
+    selection: &str,
+    guidance: &str,
+    action: impl FnOnce() + 'static,
+) {
+    let description = wizard_dropdown_description(selection, guidance);
+    control.update_property(&[gtk::accessible::Property::Description(&description)]);
+    let token = {
+        let mut app_state = state.borrow_mut();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        surface.dropdown_action_generation = surface.dropdown_action_generation.wrapping_add(1);
+        WizardDropdownActionToken {
+            generation: surface.dropdown_action_generation,
+            route_index: surface.route_index,
+        }
+    };
+    let state_for_action = Rc::clone(state);
+    glib::timeout_add_local_once(Duration::from_millis(175), move || {
+        let current = state_for_action
+            .borrow()
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+            .map(|surface| WizardDropdownActionToken {
+                generation: surface.dropdown_action_generation,
+                route_index: surface.route_index,
+            });
+        if current.is_some_and(|current| wizard_dropdown_action_is_current(token, current)) {
+            action();
+        }
+    });
+}
+
+/// Reports whether a deferred dropdown action still belongs to the latest unchanged card.
+fn wizard_dropdown_action_is_current(
+    pending: WizardDropdownActionToken,
+    current: WizardDropdownActionToken,
+) -> bool {
+    pending == current
+}
+
+/// Reports whether one descriptor is represented by the locked triangular-layout summary.
+fn wizard_descriptor_is_locked_triangular(
+    recipe: &PatternDefinitionRecipe,
+    field: PropertyFieldId,
+) -> bool {
+    recipe.has_locked_triangular_intersection_layout()
+        && matches!(
+            field,
+            PropertyFieldId::GuideBaselineAngle
+                | PropertyFieldId::GuidePhase
+                | PropertyFieldId::GuideSpacingMultiplier
+                | PropertyFieldId::IntersectionDimensions
+        )
+}
+
+/// Reports whether an active descriptor offers a decision beyond the card's structural summary.
+///
+/// Single-source output references, immutable minimum-cardinality collections, and an `All sites`
+/// filter with no compatible peer output are already implied by the selected family/output. They
+/// remain domain-active but are intentionally omitted instead of showing meaningless dropdowns.
+fn wizard_value_has_meaningful_choice(document: &Document, value: &PropertyCurrentValue) -> bool {
+    match (&value.value, value.descriptor.field) {
+        (
+            PropertyCurrentValueKind::Reference(_),
+            PropertyFieldId::OutputSiteProduct | PropertyFieldId::OutputOrientationDimension,
+        ) => wizard_reference_choices(document, &value.descriptor)
+            .map(|choices| choices.len() > 1)
+            .unwrap_or(true),
+        (
+            PropertyCurrentValueKind::ReferenceCollection(current),
+            PropertyFieldId::IntersectionDimensions | PropertyFieldId::AlongGuideDimensions,
+        ) => {
+            let minimum = match value.descriptor.reference_constraint {
+                PropertyReferenceConstraint::OrderedUniqueCollection { minimum_items, .. } => {
+                    usize::from(minimum_items)
+                }
+                _ => 0,
+            };
+            wizard_reference_choices(document, &value.descriptor)
+                .map(|choices| current.len() > minimum || choices.len() > current.len())
+                .unwrap_or(true)
+        }
+        (
+            PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SiteUseFilter(
+                SiteUseFilterKind::All,
+            )),
+            PropertyFieldId::OutputSiteUseFilterKind,
+        ) => document
+            .site_use_filter_targets(&value.descriptor)
+            .map(|targets| !targets.is_empty())
+            .unwrap_or(true),
+        _ => true,
+    }
+}
+
+/// Explains the domain-owned three-guide relationship in place of breakable scalar controls.
+fn append_wizard_locked_triangular_layout(
+    page: &gtk::Box,
+    route_page: WizardRoutePage,
+    recipe: &PatternDefinitionRecipe,
+) -> usize {
+    let text = match route_page {
+        WizardRoutePage::FamilySettings => {
+            "Triangular layout is locked at 0°, 60°, and 120° with equal spacing and a shared phase, so all three guide directions meet. Rotate the complete pattern under Size and placement."
+        }
+        WizardRoutePage::SiteGeneration
+            if recipe.site_generation_kind()
+                == PatternRecipeSiteGenerationKind::GuideIntersections =>
+        {
+            "All three aligned guide directions create shared triangular intersection sites."
+        }
+        WizardRoutePage::SiteGeneration => {
+            "The three guide directions stay locked and aligned. Sites along guides samples each guide separately; choose Guide intersections to use their shared crossings."
+        }
+        _ => return 0,
+    };
+    let summary = gtk::Label::new(Some(text));
+    summary.set_xalign(0.0);
+    summary.set_wrap(true);
+    summary.set_tooltip_text(Some(text));
+    summary.update_property(&[
+        gtk::accessible::Property::Label("Locked triangular guide layout"),
+        gtk::accessible::Property::Description(text),
+    ]);
+    page.append(&summary);
+    1
+}
+
+/// Appends the domain-bounded guide-count control for an editable reconstructed guide recipe.
+///
+/// Choices are filtered by the domain's family-authoring transition, so an artist can return from
+/// intersections to one guide while only incompatible downstream intent is pruned. A Curve Motif
+/// remains one-guide and compact fixed-topology guide recipes remain explicitly read-only.
+fn append_wizard_guide_count_control(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    projection: &PatternCapabilityProjection,
+    recipe: &PatternDefinitionRecipe,
+) -> usize {
+    let PatternFamilyCapabilityProjection::Grid(grid) = &projection.family else {
+        return 0;
+    };
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let label = gtk::Label::new(Some("Guide directions"));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let Some((minimum, maximum)) = grid.guides.editable_count_bounds else {
+        let value = gtk::Label::new(Some(&grid.guides.count.to_string()));
+        let description = "This compact guide construction has fixed topology.";
+        value.set_tooltip_text(Some(description));
+        value.update_property(&[
+            gtk::accessible::Property::Label("Guide directions"),
+            gtk::accessible::Property::Description(description),
+        ]);
+        row.append(&label);
+        row.append(&value);
+        page.append(&row);
+        return 1;
+    };
+    let valid_counts = (minimum..=maximum)
+        .filter(|count| recipe.with_guide_family_dimension_count(*count).is_ok())
+        .collect::<Vec<_>>();
+    let labels = valid_counts
+        .iter()
+        .map(|count| {
+            if *count == 1 {
+                "1 guide".to_owned()
+            } else {
+                format!("{count} guides")
+            }
+        })
+        .collect::<Vec<_>>();
+    let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
+    let control = accessible_string_dropdown(&label_refs);
+    control.set_selected(
+        valid_counts
+            .iter()
+            .position(|count| *count == grid.guides.count)
+            .unwrap_or(0) as u32,
+    );
+    let guidance = "Choose how many repeated guide directions define this family. Three-direction intersections use one locked triangular layout.";
+    let description = wizard_dropdown_description(
+        &labels
+            .get(control.selected() as usize)
+            .cloned()
+            .unwrap_or_else(|| grid.guides.count.to_string()),
+        guidance,
+    );
+    control.set_tooltip_text(Some(guidance));
+    control.update_property(&[
+        gtk::accessible::Property::Label("Guide directions"),
+        gtk::accessible::Property::Description(&description),
+    ]);
+    label.set_mnemonic_widget(Some(&control));
+    let state_for_count = Rc::clone(state);
+    control.connect_selected_notify(move |control| {
+        let Some(count) = valid_counts.get(control.selected() as usize).copied() else {
+            return;
+        };
+        let selection = if count == 1 {
+            "1 guide".to_owned()
+        } else {
+            format!("{count} guides")
+        };
+        set_wizard_recipe_control_focus(
+            &state_for_count,
+            epoch,
+            WizardRecipeControlFocus::GuideCount,
+        );
+        let state_for_commit = Rc::clone(&state_for_count);
+        defer_wizard_dropdown_action(
+            &state_for_count,
+            epoch,
+            control,
+            &selection,
+            guidance,
+            move || {
+                commit_wizard_guide_count(&state_for_commit, epoch, count);
+            },
+        );
+    });
+    row.append(&label);
+    row.append(&control);
+    page.append(&row);
+    restore_wizard_recipe_control_focus(
+        state,
+        epoch,
+        WizardRecipeControlFocus::GuideCount,
+        &control,
+    );
+    1
+}
+
+/// Appends the nested custom-curve route advertised by a one- or two-guide foundation.
+///
+/// Straight guide recipes first materialize centered document-owned OpenPaths inside the child
+/// draft. Three-or-more-guide topologies remain visibly disabled because independent curves would
+/// break their structural intersection contract.
+fn append_wizard_guide_editor_control(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    projection: &PatternCapabilityProjection,
+    target: InspectorTarget,
+) -> usize {
+    let PatternFamilyCapabilityProjection::Grid(grid) = &projection.family else {
+        return 0;
+    };
+    if grid.guides.editable_curve || !grid.guides.prototype_kinds.is_empty() {
+        return 0;
+    }
+    if grid.guides.count > 2 {
+        let unavailable = gtk::Label::new(Some(
+            "Custom guide curves are unavailable for three-or-more-guide topology; its guide relationships stay structurally locked.",
+        ));
+        unavailable.set_xalign(0.0);
+        unavailable.set_wrap(true);
+        unavailable.set_tooltip_text(Some(
+            "Use one or two guides to edit custom curves. Three-guide intersections keep their required lattice geometry.",
+        ));
+        page.append(&unavailable);
+        return 1;
+    }
+    let button = gtk::Button::with_mnemonic("Edit guide _curves…");
+    let description = "Convert the current straight guide shapes into centered editable curves. Apply to Pattern returns the conversion and curve edit as one wizard step; Cancel changes nothing.";
+    button.set_tooltip_text(Some(description));
+    button.update_property(&[
+        gtk::accessible::Property::Label("Edit guide curves"),
+        gtk::accessible::Property::Description(description),
+    ]);
+    let state_for_open = Rc::clone(state);
+    let invoking_control = button.clone().upcast::<gtk::Widget>();
+    button.connect_clicked(move |_| {
+        open_wizard_new_guide_editor(&state_for_open, epoch, target, invoking_control.clone());
+    });
+    page.append(&button);
+    1
+}
+
+/// Returns artist-facing vocabulary for one domain-owned site-construction choice.
+fn wizard_site_generation_label(kind: PatternRecipeSiteGenerationKind) -> &'static str {
+    match kind {
+        PatternRecipeSiteGenerationKind::GuideIntersections => "Guide intersections",
+        PatternRecipeSiteGenerationKind::AlongGuides => "Sites along guides",
+        PatternRecipeSiteGenerationKind::DispersionSites => "Dispersed sites",
+        PatternRecipeSiteGenerationKind::ParametricCurve => "Use the curve itself",
+        PatternRecipeSiteGenerationKind::AlongParametricCurve => "Sites along the curve",
+    }
+}
+
+/// Appends the recipe-owned site-construction control for the current family.
+///
+/// Applicability is established by attempting each finite domain transition on the reconstructed
+/// recipe. A family with one possible construction remains a truthful read-only value.
+fn append_wizard_site_generation_control(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    recipe: &PatternDefinitionRecipe,
+) -> usize {
+    let current = recipe.site_generation_kind();
+    let valid = [
+        PatternRecipeSiteGenerationKind::GuideIntersections,
+        PatternRecipeSiteGenerationKind::AlongGuides,
+        PatternRecipeSiteGenerationKind::DispersionSites,
+        PatternRecipeSiteGenerationKind::ParametricCurve,
+        PatternRecipeSiteGenerationKind::AlongParametricCurve,
+    ]
+    .into_iter()
+    .filter(|kind| recipe.with_site_generation_kind(*kind).is_ok())
+    .collect::<Vec<_>>();
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let label = gtk::Label::new(Some("How are sites created?"));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    if valid.len() == 1 {
+        let value = gtk::Label::new(Some(wizard_site_generation_label(current)));
+        value.update_property(&[
+            gtk::accessible::Property::Label("How are sites created?"),
+            gtk::accessible::Property::Description(
+                "This pattern family supports one way of creating sites.",
+            ),
+        ]);
+        row.append(&label);
+        row.append(&value);
+        page.append(&row);
+        return 1;
+    }
+    let labels = valid
+        .iter()
+        .map(|kind| wizard_site_generation_label(*kind))
+        .collect::<Vec<_>>();
+    let control = accessible_string_dropdown(&labels);
+    control.set_selected(valid.iter().position(|kind| *kind == current).unwrap_or(0) as u32);
+    let guidance = "Choose how the selected family creates sites before choosing how those sites are rendered.";
+    let description = wizard_dropdown_description(wizard_site_generation_label(current), guidance);
+    control.set_tooltip_text(Some(guidance));
+    control.update_property(&[
+        gtk::accessible::Property::Label("How are sites created?"),
+        gtk::accessible::Property::Description(&description),
+    ]);
+    label.set_mnemonic_widget(Some(&control));
+    let state_for_choice = Rc::clone(state);
+    control.connect_selected_notify(move |control| {
+        let Some(kind) = valid.get(control.selected() as usize).copied() else {
+            return;
+        };
+        set_wizard_recipe_control_focus(
+            &state_for_choice,
+            epoch,
+            WizardRecipeControlFocus::SiteGeneration,
+        );
+        let state_for_commit = Rc::clone(&state_for_choice);
+        defer_wizard_dropdown_action(
+            &state_for_choice,
+            epoch,
+            control,
+            wizard_site_generation_label(kind),
+            guidance,
+            move || {
+                commit_wizard_recipe_transform(
+                    &state_for_commit,
+                    epoch,
+                    "change how this family creates sites",
+                    move |recipe| {
+                        recipe
+                            .with_site_generation_kind(kind)
+                            .map_err(|error| error.to_string())
+                    },
+                );
+            },
+        );
+    });
+    row.append(&label);
+    row.append(&control);
+    page.append(&row);
+    restore_wizard_recipe_control_focus(
+        state,
+        epoch,
+        WizardRecipeControlFocus::SiteGeneration,
+        &control,
+    );
+    1
+}
+
+/// Returns artist-facing vocabulary for one consolidated construction class.
+fn wizard_construction_kind_label(kind: PatternRecipeConstructionKind) -> &'static str {
+    match kind {
+        PatternRecipeConstructionKind::Marks => "Marks",
+        PatternRecipeConstructionKind::Connections => "Connections",
+        PatternRecipeConstructionKind::Regions => "Regions",
+    }
+}
+
+/// Returns artist-facing vocabulary for one Connections method.
+fn wizard_connection_method_label(kind: PatternRecipeConnectionMethodKind) -> &'static str {
+    match kind {
+        PatternRecipeConnectionMethodKind::GuideLines => "Guide or curve lines",
+        PatternRecipeConnectionMethodKind::CurveMotif => "Curve motif",
+        PatternRecipeConnectionMethodKind::LinkNetwork => "Link network",
+        PatternRecipeConnectionMethodKind::Maze => "Maze",
+    }
+}
+
+/// Returns artist-facing vocabulary for one Regions method.
+fn wizard_region_method_label(kind: PatternRecipeRegionMethodKind) -> &'static str {
+    match kind {
+        PatternRecipeRegionMethodKind::Voronoi => "Voronoi",
+        PatternRecipeRegionMethodKind::GuideCells => "Guide cells",
+    }
+}
+
+/// Holds one domain-owned method choice across the two method-bearing construction classes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WizardConstructionMethod {
+    Connection(PatternRecipeConnectionMethodKind),
+    Region(PatternRecipeRegionMethodKind),
+}
+
+/// Returns artist-facing vocabulary for one consolidated construction method.
+fn wizard_construction_method_label(kind: WizardConstructionMethod) -> &'static str {
+    match kind {
+        WizardConstructionMethod::Connection(kind) => wizard_connection_method_label(kind),
+        WizardConstructionMethod::Region(kind) => wizard_region_method_label(kind),
+    }
+}
+
+/// Appends one fixed construction method as truthful text instead of a one-choice dropdown.
+///
+/// The row exposes one accessible label and description without manufacturing an enabled nested
+/// toggle below a disabled selector. It owns no state and installs no interaction callback.
+fn append_wizard_fixed_method_row(
+    page: &gtk::Box,
+    label_text: &str,
+    method: WizardConstructionMethod,
+) {
+    let value_text = wizard_construction_method_label(method);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let label = gtk::Label::new(Some(label_text));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let value = gtk::Label::new(Some(value_text));
+    value.set_xalign(1.0);
+    let description = format!(
+        "{label_text}: {value_text}. This is the only method compatible with the current family and construction."
+    );
+    value.set_tooltip_text(Some(&description));
+    value.update_property(&[
+        gtk::accessible::Property::Label(&description),
+        gtk::accessible::Property::Description(&description),
+    ]);
+    row.append(&label);
+    row.append(&value);
+    page.append(&row);
+}
+
+/// Appends painter-ordered output construction, insertion, and removal controls.
+///
+/// Every offered class and method is validated by the reconstructed recipe. Marks retain their
+/// downstream mark-shape choice, Connections consolidate direct paths, motifs, links, and mazes,
+/// and Regions consolidate Voronoi and guide cells. No catalog identity selects compatibility.
+fn append_wizard_output_construction_controls(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    recipe: &PatternDefinitionRecipe,
+) -> usize {
+    let Ok(current_kinds) = recipe.construction_kinds() else {
+        return 0;
+    };
+    let all_kinds = [
+        PatternRecipeConstructionKind::Marks,
+        PatternRecipeConstructionKind::Connections,
+        PatternRecipeConstructionKind::Regions,
+    ];
+    let mut appended = 0;
+    for (output_index, current) in current_kinds.iter().copied().enumerate() {
+        let valid = all_kinds
+            .into_iter()
+            .filter(|kind| recipe.with_construction_kind(output_index, *kind).is_ok())
+            .collect::<Vec<_>>();
+        let labels = valid
+            .iter()
+            .map(|kind| wizard_construction_kind_label(*kind))
+            .collect::<Vec<_>>();
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let label_text = if current_kinds.len() == 1 {
+            "Construction".to_owned()
+        } else {
+            format!("Output {} draws", output_index + 1)
+        };
+        let label = gtk::Label::new(Some(&label_text));
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        let control = accessible_string_dropdown(&labels);
+        control.set_selected(valid.iter().position(|kind| *kind == current).unwrap_or(0) as u32);
+        let guidance = "Choose whether this output draws marks, connections, or regions. Method and algorithm settings appear directly below.";
+        let description =
+            wizard_dropdown_description(wizard_construction_kind_label(current), guidance);
+        control.set_tooltip_text(Some(guidance));
+        control.update_property(&[
+            gtk::accessible::Property::Label(&label_text),
+            gtk::accessible::Property::Description(&description),
+        ]);
+        label.set_mnemonic_widget(Some(&control));
+        let state_for_kind = Rc::clone(state);
+        control.connect_selected_notify(move |control| {
+            let Some(kind) = valid.get(control.selected() as usize).copied() else {
+                return;
+            };
+            set_wizard_recipe_control_focus(
+                &state_for_kind,
+                epoch,
+                WizardRecipeControlFocus::Construction(output_index),
+            );
+            let state_for_commit = Rc::clone(&state_for_kind);
+            defer_wizard_dropdown_action(
+                &state_for_kind,
+                epoch,
+                control,
+                wizard_construction_kind_label(kind),
+                guidance,
+                move || {
+                    commit_wizard_recipe_transform(
+                        &state_for_commit,
+                        epoch,
+                        "change the construction class",
+                        move |recipe| {
+                            recipe
+                                .with_construction_kind(output_index, kind)
+                                .map_err(|error| error.to_string())
+                        },
+                    );
+                },
+            );
+        });
+        row.append(&label);
+        row.append(&control);
+        if current_kinds.len() > 1 {
+            let remove = gtk::Button::with_label("Remove");
+            let remove_description =
+                format!("Remove output {} from this pattern.", output_index + 1);
+            remove.set_tooltip_text(Some(&remove_description));
+            remove.update_property(&[
+                gtk::accessible::Property::Label(&format!("Remove output {}", output_index + 1)),
+                gtk::accessible::Property::Description(&remove_description),
+            ]);
+            let state_for_remove = Rc::clone(state);
+            remove.connect_clicked(move |_| {
+                commit_wizard_recipe_transform(
+                    &state_for_remove,
+                    epoch,
+                    "remove this output",
+                    move |recipe| {
+                        recipe
+                            .without_output(output_index)
+                            .map_err(|error| error.to_string())
+                    },
+                );
+            });
+            row.append(&remove);
+        }
+        page.append(&row);
+        restore_wizard_recipe_control_focus(
+            state,
+            epoch,
+            WizardRecipeControlFocus::Construction(output_index),
+            &control,
+        );
+        appended += 1;
+
+        let method = match current {
+            PatternRecipeConstructionKind::Connections => recipe
+                .connection_method_kind(output_index)
+                .ok()
+                .flatten()
+                .map(|current| {
+                    let all = [
+                        PatternRecipeConnectionMethodKind::GuideLines,
+                        PatternRecipeConnectionMethodKind::CurveMotif,
+                        PatternRecipeConnectionMethodKind::LinkNetwork,
+                        PatternRecipeConnectionMethodKind::Maze,
+                    ];
+                    let valid = all
+                        .into_iter()
+                        .filter(|kind| {
+                            recipe
+                                .with_connection_method_kind(output_index, *kind)
+                                .is_ok()
+                        })
+                        .map(WizardConstructionMethod::Connection)
+                        .collect::<Vec<_>>();
+                    let labels = valid
+                        .iter()
+                        .map(|kind| wizard_construction_method_label(*kind))
+                        .collect::<Vec<_>>();
+                    let selected = valid
+                        .iter()
+                        .position(|kind| *kind == WizardConstructionMethod::Connection(current));
+                    (valid, labels, selected)
+                }),
+            PatternRecipeConstructionKind::Regions => recipe
+                .region_method_kind(output_index)
+                .ok()
+                .flatten()
+                .map(|current| {
+                    let all = [
+                        PatternRecipeRegionMethodKind::Voronoi,
+                        PatternRecipeRegionMethodKind::GuideCells,
+                    ];
+                    let valid = all
+                        .into_iter()
+                        .filter(|kind| recipe.with_region_method_kind(output_index, *kind).is_ok())
+                        .map(WizardConstructionMethod::Region)
+                        .collect::<Vec<_>>();
+                    let labels = valid
+                        .iter()
+                        .map(|kind| wizard_construction_method_label(*kind))
+                        .collect::<Vec<_>>();
+                    let selected = valid
+                        .iter()
+                        .position(|kind| *kind == WizardConstructionMethod::Region(current));
+                    (valid, labels, selected)
+                }),
+            PatternRecipeConstructionKind::Marks => None,
+        };
+        if let Some((valid, labels, Some(selected))) = method {
+            let label_text = if current_kinds.len() == 1 {
+                "Method".to_owned()
+            } else {
+                format!("Output {} method", output_index + 1)
+            };
+            if valid.len() == 1 {
+                append_wizard_fixed_method_row(page, &label_text, valid[selected]);
+                appended += 1;
+                continue;
+            }
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let label = gtk::Label::new(Some(&label_text));
+            label.set_xalign(0.0);
+            label.set_hexpand(true);
+            let control = accessible_string_dropdown(&labels);
+            control.set_selected(selected as u32);
+            let guidance = "Choose the topology-compatible method used by this construction class.";
+            let description = wizard_dropdown_description(
+                wizard_construction_method_label(valid[selected]),
+                guidance,
+            );
+            control.set_tooltip_text(Some(guidance));
+            control.update_property(&[
+                gtk::accessible::Property::Label(&label_text),
+                gtk::accessible::Property::Description(&description),
+            ]);
+            label.set_mnemonic_widget(Some(&control));
+            let state_for_method = Rc::clone(state);
+            control.connect_selected_notify(move |control| {
+                let Some(kind) = valid.get(control.selected() as usize).copied() else {
+                    return;
+                };
+                set_wizard_recipe_control_focus(
+                    &state_for_method,
+                    epoch,
+                    WizardRecipeControlFocus::ConstructionMethod(output_index),
+                );
+                let state_for_commit = Rc::clone(&state_for_method);
+                defer_wizard_dropdown_action(
+                    &state_for_method,
+                    epoch,
+                    control,
+                    wizard_construction_method_label(kind),
+                    guidance,
+                    move || {
+                        commit_wizard_recipe_transform(
+                            &state_for_commit,
+                            epoch,
+                            "change the construction method",
+                            move |recipe| match kind {
+                                WizardConstructionMethod::Connection(kind) => recipe
+                                    .with_connection_method_kind(output_index, kind)
+                                    .map_err(|error| error.to_string()),
+                                WizardConstructionMethod::Region(kind) => recipe
+                                    .with_region_method_kind(output_index, kind)
+                                    .map_err(|error| error.to_string()),
+                            },
+                        );
+                    },
+                );
+            });
+            row.append(&label);
+            row.append(&control);
+            page.append(&row);
+            restore_wizard_recipe_control_focus(
+                state,
+                epoch,
+                WizardRecipeControlFocus::ConstructionMethod(output_index),
+                &control,
+            );
+            appended += 1;
+        }
+    }
+    let appendable = all_kinds
+        .into_iter()
+        .filter(|kind| recipe.with_appended_construction_kind(*kind).is_ok())
+        .collect::<Vec<_>>();
+    if !appendable.is_empty() {
+        let mut labels = vec!["Choose an output to add"];
+        labels.extend(
+            appendable
+                .iter()
+                .map(|kind| wizard_construction_kind_label(*kind)),
+        );
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let label = gtk::Label::new(Some("Add another output"));
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        let control = accessible_string_dropdown(&labels);
+        control.set_selected(0);
+        let guidance = "Add another visible output while retaining this pattern’s current foundation and topology.";
+        let description = wizard_dropdown_description("Choose an output to add", guidance);
+        control.set_tooltip_text(Some(guidance));
+        control.update_property(&[
+            gtk::accessible::Property::Label("Add another output"),
+            gtk::accessible::Property::Description(&description),
+        ]);
+        label.set_mnemonic_widget(Some(&control));
+        let state_for_append = Rc::clone(state);
+        control.connect_selected_notify(move |control| {
+            let selected = control.selected();
+            if selected == 0 {
+                return;
+            }
+            let Some(kind) = appendable.get(selected as usize - 1).copied() else {
+                return;
+            };
+            set_wizard_recipe_control_focus(
+                &state_for_append,
+                epoch,
+                WizardRecipeControlFocus::AppendConstruction,
+            );
+            let state_for_commit = Rc::clone(&state_for_append);
+            defer_wizard_dropdown_action(
+                &state_for_append,
+                epoch,
+                control,
+                wizard_construction_kind_label(kind),
+                guidance,
+                move || {
+                    commit_wizard_recipe_transform(
+                        &state_for_commit,
+                        epoch,
+                        "add this output",
+                        move |recipe| {
+                            recipe
+                                .with_appended_construction_kind(kind)
+                                .map_err(|error| error.to_string())
+                        },
+                    );
+                },
+            );
+        });
+        row.append(&label);
+        row.append(&control);
+        page.append(&row);
+        restore_wizard_recipe_control_focus(
+            state,
+            epoch,
+            WizardRecipeControlFocus::AppendConstruction,
+            &control,
+        );
+        appended += 1;
+    }
+    appended
+}
+
+/// Returns an artist-facing descriptor name with recipe-local guide and output ordinals.
+///
+/// Ordinals come from the active definition's visible guide or painter order and never expose,
+/// sort by, or persist stable allocated IDs. Multi-output labels retain their owning output so
+/// similarly named response and site-use controls remain unambiguous.
+fn wizard_descriptor_label(document: &Document, descriptor: &PropertyDescriptor) -> String {
+    let PropertyTarget::GuideDimension(definition_id, ..) = descriptor.target else {
+        if let PropertyTarget::OutputLayer(definition_id, output_layer_id) = descriptor.target
+            && let Some(definition) = document
+                .pattern_definition_bundles()
+                .iter()
+                .find(|bundle| bundle.definition.id == definition_id)
+                .map(|bundle| &bundle.definition)
+            && definition.output_layers.len() > 1
+            && let Some(index) = definition
+                .output_layers
+                .iter()
+                .position(|output| output.id() == output_layer_id)
+        {
+            return format!(
+                "Output {} — {}",
+                index + 1,
+                inspector_field_label(descriptor.field)
+            );
+        }
+        return inspector_field_label(descriptor.field);
+    };
+    let mut targets = Vec::new();
+    for value in document.property_values() {
+        if let PropertyTarget::GuideDimension(candidate_definition_id, ..) = value.descriptor.target
+            && candidate_definition_id == definition_id
+            && !targets.contains(&value.descriptor.target)
+        {
+            targets.push(value.descriptor.target);
+        }
+    }
+    let ordinal = targets
+        .iter()
+        .position(|target| *target == descriptor.target)
+        .map(|index| index + 1)
+        .unwrap_or(1);
+    let field = match descriptor.field {
+        PropertyFieldId::GuideBaselineAngle => "angle",
+        PropertyFieldId::GuidePhase => "phase",
+        PropertyFieldId::GuideSpacingMultiplier => "spacing",
+        PropertyFieldId::GuidePrototype => "shape",
+        PropertyFieldId::GuideAuthoredStructure => "path",
+        PropertyFieldId::GuideRepetition => "repetition",
+        PropertyFieldId::GuideArcCenterX => "arc center X",
+        PropertyFieldId::GuideArcCenterY => "arc center Y",
+        PropertyFieldId::GuideArcRadius => "arc radius",
+        PropertyFieldId::GuideArcStartAngle => "arc start angle",
+        PropertyFieldId::GuideArcSweepAngle => "arc sweep angle",
+        PropertyFieldId::GuideOffsetSpacing => "constant gap",
+        PropertyFieldId::GuideOffsetCleanup => "offset cleanup",
+        PropertyFieldId::GuideStackDirection => "stack direction",
+        PropertyFieldId::GuideStackSpacingMultiplier => "stack spacing",
+        _ => return inspector_field_label(descriptor.field),
+    };
+    format!("Guide {ordinal} {field}")
+}
+
+/// Reports whether the wizard owns the editable route for one active enum descriptor.
+///
+/// C2b covers every selector; payload-bearing choices use the domain transition draft and
+/// site-use filters use their dedicated atomic reference proposal.
+fn wizard_enum_is_editable(field: PropertyFieldId) -> bool {
+    let _ = field;
+    true
+}
+
+/// Reports whether one active current value has a concrete wizard editing route.
+///
+/// This deliberately follows descriptor kinds and field contracts instead of preset metadata. The
+/// site-use reference is edited by its atomic selector proposal, while every other stable
+/// reference reaches the existing typed inspector-command boundary.
+#[cfg(test)]
+fn wizard_current_value_is_editable(value: &PropertyCurrentValue) -> bool {
+    match value.value {
+        PropertyCurrentValueKind::FiniteF64(_)
+        | PropertyCurrentValueKind::U32(_)
+        | PropertyCurrentValueKind::Boolean(_)
+        | PropertyCurrentValueKind::OptionalFiniteF64(_) => true,
+        PropertyCurrentValueKind::EnumChoice(_) => wizard_enum_is_editable(value.descriptor.field),
+        PropertyCurrentValueKind::Reference(_) => matches!(
+            value.descriptor.field,
+            PropertyFieldId::SourceReference
+                | PropertyFieldId::DefinitionSelection
+                | PropertyFieldId::OutputSiteProduct
+                | PropertyFieldId::OutputOrientationDimension
+                | PropertyFieldId::GuideAuthoredStructure
+                | PropertyFieldId::OutputAuthoredClosedShape
+                | PropertyFieldId::OutputSiteUseFilterReference
+        ),
+        PropertyCurrentValueKind::ReferenceCollection(_) => matches!(
+            value.descriptor.field,
+            PropertyFieldId::IntersectionDimensions | PropertyFieldId::AlongGuideDimensions
+        ),
+    }
+}
+
+/// Returns the ordered-output count from the reconstructed root recipe without using IDs or cards.
+fn reconstructed_ordered_output_count(structure: &PatternStructureRecipe) -> Option<usize> {
+    match structure {
+        PatternStructureRecipe::AuthoredResources { definition, .. }
+        | PatternStructureRecipe::ConnectionPaths { definition, .. }
+        | PatternStructureRecipe::MazeWalls { definition, .. }
+        | PatternStructureRecipe::AuthoredClosedShapeMarks { definition, .. }
+        | PatternStructureRecipe::CurveMotifPaths { definition, .. }
+        | PatternStructureRecipe::VoronoiRegions { definition }
+        | PatternStructureRecipe::GuideFaceRegions { definition, .. } => {
+            reconstructed_ordered_output_count(definition)
+        }
+        PatternStructureRecipe::OrderedOutputs { outputs, .. } => Some(outputs.len()),
+        PatternStructureRecipe::StraightGrid(_)
+        | PatternStructureRecipe::GeneralizedStraightGuides { .. }
+        | PatternStructureRecipe::GenericGuides { .. }
+        | PatternStructureRecipe::RandomSites { .. }
+        | PatternStructureRecipe::ParametricCurve { .. } => None,
+    }
+}
+
+/// Derives one stable adaptive wizard route from current capability, outputs, and reconstruction.
+///
+/// Structural output ordering follows the domain projection's painter order. A page is present only
+/// when active descriptor or output authority requires it, except Review and multi-output ordering,
+/// which are explicit final workflow pages. Preset metadata never participates.
+fn wizard_route_plan(
+    projection: &PatternCapabilityProjection,
+    recipe: &PatternDefinitionRecipe,
+) -> Vec<WizardRoutePage> {
+    let _ = (projection, recipe);
+    vec![
+        WizardRoutePage::PatternFamily,
+        WizardRoutePage::FamilySettings,
+        WizardRoutePage::SiteGeneration,
+        WizardRoutePage::Rendering,
+        WizardRoutePage::Review,
+    ]
+}
+
+/// Recomputes a route while retaining the visible stable page or nearest prior survivor.
+fn recompute_wizard_route(
+    old_route: &[WizardRoutePage],
+    old_index: usize,
+    new_route: Vec<WizardRoutePage>,
+) -> (Vec<WizardRoutePage>, usize) {
+    if old_route.is_empty() {
+        return (new_route, 0);
+    }
+    let old_index = old_index.min(old_route.len().saturating_sub(1));
+    let survivor = old_route
+        .get(..=old_index)
+        .into_iter()
+        .flatten()
+        .rev()
+        .find_map(|page| new_route.iter().position(|candidate| candidate == page));
+    let index = survivor.unwrap_or_else(|| new_route.len().saturating_sub(1));
+    (new_route, index)
+}
+
 /// Holds the only source admitted to a Pattern Wizard preview evaluation.
 ///
-/// A ready value has a bounded PNG proxy with the original stable source ID. An unavailable value
-/// is visible only inside the private modal and never causes a full-source preview fallback.
+/// A ready value holds the immutable neutral SVG with the captured source ID. An unavailable value
+/// is visible only inside the private modal and never causes a live-artwork fallback.
 #[derive(Clone)]
 enum WizardPreviewSource {
-    Ready {
-        source: ResolvedSource,
-        width: u32,
-        height: u32,
-    },
+    Ready { source: ResolvedSource },
     Unavailable(String),
 }
 
@@ -1232,10 +3084,6 @@ struct AppState {
     channel_selector_model: gtk::StringList,
     inspector_catalog: gtk::Box,
     active_pattern: gtk::Label,
-    pattern_selector: Option<gtk::DropDown>,
-    apply_pattern_button: Option<gtk::Button>,
-    guide_editor_button: Option<gtk::Button>,
-    mark_editor_button: Option<gtk::Button>,
     inspector_descriptors: gtk::Box,
     inspector_status: gtk::Label,
     descriptor_components: BTreeMap<String, DescriptorComponent>,
@@ -1254,6 +3102,7 @@ struct AppState {
     presets: PresetRegistry,
     catalog: LayeredPresetCatalog,
     catalog_notice: Option<String>,
+    personal_authored_insertions: Vec<PersonalAuthoredInsertionSnapshot>,
     automation: Option<AutomationSink>,
     event_sender: async_channel::Sender<AppEvent>,
     preview_bridge_stop: Arc<AtomicBool>,
@@ -1310,7 +3159,13 @@ fn register_resources() {
 /// Filesystem and scan failures remain a visible nonfatal frontend notice: the returned catalog
 /// always preserves the bundled registry. This function does not create a second recipe model or
 /// change document/history authority.
-fn initialize_layered_catalog(registry: &PresetRegistry) -> (LayeredPresetCatalog, Option<String>) {
+fn initialize_layered_catalog(
+    registry: &PresetRegistry,
+) -> (
+    LayeredPresetCatalog,
+    Option<String>,
+    Vec<PersonalAuthoredInsertionSnapshot>,
+) {
     let environment = LibraryEnvironment {
         data_home: env::var_os("XDG_DATA_HOME").map(PathBuf::from),
         config_home: env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
@@ -1320,42 +3175,68 @@ fn initialize_layered_catalog(registry: &PresetRegistry) -> (LayeredPresetCatalo
         .and_then(PersonalLibrary::open_or_initialize)
         .and_then(|library| library.scan());
     match loaded {
-        Ok(snapshot) => match LayeredPresetCatalog::new(
-            registry,
-            snapshot
-                .presets
-                .into_iter()
-                .map(|entry| entry.preset)
-                .collect(),
-        ) {
-            Ok(catalog) => {
-                let notices = snapshot
-                    .warnings
+        Ok(snapshot) => {
+            let insertions = personal_authored_insertions(&snapshot);
+            match LayeredPresetCatalog::new(
+                registry,
+                snapshot
+                    .presets
                     .into_iter()
-                    .map(|warning| format!("{}: {}", warning.path.display(), warning.message))
-                    .chain(
-                        catalog
-                            .warnings()
-                            .iter()
-                            .map(|warning| format!("{}: {}", warning.id, warning.message)),
-                    )
-                    .collect::<Vec<_>>();
-                let notice = (!notices.is_empty())
-                    .then(|| format!("Some personal presets were skipped: {}", notices.join("; ")));
-                (catalog, notice)
+                    .map(|entry| entry.preset)
+                    .collect(),
+            ) {
+                Ok(catalog) => {
+                    let notices = snapshot
+                        .warnings
+                        .into_iter()
+                        .map(|warning| format!("{}: {}", warning.path.display(), warning.message))
+                        .chain(
+                            catalog
+                                .warnings()
+                                .iter()
+                                .map(|warning| format!("{}: {}", warning.id, warning.message)),
+                        )
+                        .collect::<Vec<_>>();
+                    let notice = (!notices.is_empty()).then(|| {
+                        format!("Some personal presets were skipped: {}", notices.join("; "))
+                    });
+                    (catalog, notice, insertions)
+                }
+                Err(error) => (
+                    LayeredPresetCatalog::new(registry, Vec::new())
+                        .expect("bundled registry remains a valid layered catalog"),
+                    Some(format!("Personal presets are unavailable: {error}")),
+                    Vec::new(),
+                ),
             }
-            Err(error) => (
-                LayeredPresetCatalog::new(registry, Vec::new())
-                    .expect("bundled registry remains a valid layered catalog"),
-                Some(format!("Personal presets are unavailable: {error}")),
-            ),
-        },
+        }
         Err(error) => (
             LayeredPresetCatalog::new(registry, Vec::new())
                 .expect("bundled registry remains a valid layered catalog"),
             Some(format!("Personal presets are unavailable: {error}")),
+            Vec::new(),
         ),
     }
+}
+
+/// Retains only immutable personal Shape and Motif payloads available for document insertion.
+///
+/// The library scan remains the filesystem authority. This projection discards fingerprints and
+/// every write capability before GTK stores the values, so an editor can only copy exact geometry
+/// into a document-owned resource.
+fn personal_authored_insertions(
+    snapshot: &toniator_io::personal_library::PersonalLibrarySnapshot,
+) -> Vec<PersonalAuthoredInsertionSnapshot> {
+    snapshot
+        .shapes
+        .iter()
+        .chain(&snapshot.motifs)
+        .map(|entry| PersonalAuthoredInsertionSnapshot {
+            name: entry.resource.name().to_owned(),
+            kind: entry.resource.kind(),
+            draft: entry.resource.draft().clone(),
+        })
+        .collect()
 }
 
 fn parse_args(arguments: Vec<std::ffi::OsString>) -> Result<Option<PathBuf>, String> {
@@ -1402,6 +3283,12 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
     let error = shell.error();
     let picture = shell.picture();
     let viewer = shell.viewer();
+    picture.update_property(&[
+        gtk::accessible::Property::Label("Toniator preview"),
+        gtk::accessible::Property::Description(
+            "Rendered pattern preview. Generated marks and paths are intentionally not exposed as separate accessibility nodes.",
+        ),
+    ]);
     let preview_progress = shell.progress();
     let preview_overall_progress_label = shell.overall_progress_label();
     let preview_progress_label = shell.progress_label();
@@ -1477,7 +3364,8 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
     app.set_accels_for_action("app.redo", &["<Primary><Shift>z"]);
     let (event_sender, event_receiver) = async_channel::unbounded();
     let presets = PresetRegistry::bundled();
-    let (catalog, catalog_notice) = initialize_layered_catalog(&presets);
+    let (catalog, catalog_notice, personal_authored_insertions) =
+        initialize_layered_catalog(&presets);
     let state = Rc::new(RefCell::new(AppState {
         application_model: application_model::ApplicationModel::new(),
         syncing_model: false,
@@ -1500,10 +3388,6 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
         channel_selector_model,
         inspector_catalog,
         active_pattern: gtk::Label::new(None),
-        pattern_selector: None,
-        apply_pattern_button: None,
-        guide_editor_button: None,
-        mark_editor_button: None,
         inspector_descriptors,
         inspector_status,
         descriptor_components: BTreeMap::new(),
@@ -1522,6 +3406,7 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
         presets,
         catalog,
         catalog_notice,
+        personal_authored_insertions,
         automation: AutomationSink::from_environment(),
         event_sender,
         preview_bridge_stop: Arc::new(AtomicBool::new(false)),
@@ -1585,7 +3470,6 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
                 let mut app_state = state.borrow_mut();
                 let previous_target = app_state.inspector_runtime.target;
                 app_state.inspector_runtime.target = target;
-                app_state.inspector_runtime.pattern_candidate = None;
                 // A user-selected target is a new inspector context. Never
                 // carry control identity or structural disclosure into it.
                 app_state.inspector_runtime.focus = None;
@@ -1675,8 +3559,6 @@ fn dispatch_ui_intent(state: &Rc<RefCell<AppState>>, intent: UiIntent) {
             state.borrow_mut().selected_channel = Some(channel);
             schedule_inspector_rebuild(state);
         }
-        UiIntent::OpenGridPatternEditor => open_pattern_editor(state, PatternEditorPurpose::Grid),
-        UiIntent::OpenMarkEditor => open_pattern_editor(state, PatternEditorPurpose::Mark),
         UiIntent::DiscardPatternEditor => request_draft_discard(state),
         UiIntent::Undo | UiIntent::Redo => unreachable!("history intents returned above"),
     }
@@ -1911,12 +3793,27 @@ fn inline_inspector_values(
         .map(|projection| projection.active_controls)
         .unwrap_or_default();
     let is_active = |descriptor: &PropertyDescriptor| active.contains(descriptor);
+    let effective_definition_id = match target {
+        InspectorTarget::DocumentAll => Some(document.pattern_settings().definition_id),
+        InspectorTarget::Channel(channel_id) => document
+            .pattern_definition_for(channel_id)
+            .map(|definition| definition.id),
+    };
+    let is_active_seed = |descriptor: &PropertyDescriptor| {
+        matches!(
+            descriptor.field,
+            PropertyFieldId::RandomSeed
+                | PropertyFieldId::ConnectionSeed
+                | PropertyFieldId::MazeSeed
+        ) && target_definition_id(descriptor.target) == effective_definition_id
+            && is_active(descriptor)
+    };
     document
         .property_values()
         .into_iter()
         .filter(|value| match target {
             InspectorTarget::DocumentAll => {
-                value.descriptor.target == PropertyTarget::Document
+                (value.descriptor.target == PropertyTarget::Document
                     && is_active(&value.descriptor)
                     && matches!(
                         value.descriptor.field,
@@ -1924,10 +3821,11 @@ fn inline_inspector_values(
                             | PropertyFieldId::DensityAspect
                             | PropertyFieldId::RotationDegrees
                             | PropertyFieldId::ShapeRotationDegrees
-                    )
+                    ))
+                    || is_active_seed(&value.descriptor)
             }
             InspectorTarget::Channel(channel_id) => {
-                value.descriptor.target == PropertyTarget::Channel(channel_id)
+                (value.descriptor.target == PropertyTarget::Channel(channel_id)
                     && matches!(
                         value.descriptor.field,
                         PropertyFieldId::Density
@@ -1946,7 +3844,8 @@ fn inline_inspector_values(
                                 | PropertyFieldId::TranslationY
                                 | PropertyFieldId::Opacity
                                 | PropertyFieldId::Visibility
-                        ))
+                        )))
+                    || is_active_seed(&value.descriptor)
             }
         })
         .collect()
@@ -2060,7 +3959,6 @@ fn descriptor_belongs_to_editor(field: &PropertyFieldId, purpose: PatternEditorP
                 | PropertyFieldId::GuideArcSweepAngle
                 | PropertyFieldId::GuideRepetition
                 | PropertyFieldId::GuideOffsetSpacing
-                | PropertyFieldId::GuideOffsetSides
                 | PropertyFieldId::GuideOffsetCleanup
                 | PropertyFieldId::GuideStackDirection
                 | PropertyFieldId::GuideStackSpacingMultiplier
@@ -2176,10 +4074,13 @@ fn inspector_group(field: PropertyFieldId) -> &'static str {
         PropertyFieldId::MarkMinimumFill
         | PropertyFieldId::MarkMaximumFill
         | PropertyFieldId::ShapeRotationDegrees => "Marks",
-        PropertyFieldId::ConnectedMinimumThickness | PropertyFieldId::ConnectedMaximumThickness => {
-            "Paths"
-        }
+        PropertyFieldId::ConnectedMinimumThickness
+        | PropertyFieldId::ConnectedMaximumThickness
+        | PropertyFieldId::CurveResponseBias => "Paths",
         PropertyFieldId::DefinitionSelection => "Pattern",
+        PropertyFieldId::RandomSeed
+        | PropertyFieldId::ConnectionSeed
+        | PropertyFieldId::MazeSeed => "Randomness",
         PropertyFieldId::CoverageGuardSteps
         | PropertyFieldId::CoverageAdditionalMargin
         | PropertyFieldId::GuideBaselineAngle
@@ -2191,7 +4092,7 @@ fn inspector_group(field: PropertyFieldId) -> &'static str {
         | PropertyFieldId::AlongGuideDimensions
         | PropertyFieldId::AlongGuideIntervalMultiplier
         | PropertyFieldId::AlongGuidePhase => "Active family",
-        _ => "Active mechanism and output",
+        _ => "Current pattern output",
     }
 }
 
@@ -2202,7 +4103,7 @@ fn inspector_group(field: PropertyFieldId) -> &'static str {
 fn inspector_field_label(field: PropertyFieldId) -> String {
     match field {
         PropertyFieldId::SourceReference => "Source artwork".into(),
-        PropertyFieldId::Density => "Pattern zoom level".into(),
+        PropertyFieldId::Density => "Pattern size".into(),
         PropertyFieldId::DensityAspect => "Pattern aspect".into(),
         PropertyFieldId::RotationDegrees => "Rotation".into(),
         PropertyFieldId::TranslationX => "X offset".into(),
@@ -2212,6 +4113,7 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         // Connected values use the same domain-built inspector command boundary as mark fills.
         PropertyFieldId::ConnectedMinimumThickness => "Minimum thickness".into(),
         PropertyFieldId::ConnectedMaximumThickness => "Maximum thickness".into(),
+        PropertyFieldId::CurveResponseBias => "Curve response bias".into(),
         PropertyFieldId::ShapeRotationDegrees => "Shape rotation".into(),
         PropertyFieldId::LegacyMappingComponent | PropertyFieldId::ModeledMappingComponent => {
             "Source component".into()
@@ -2230,29 +4132,28 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::Opacity => "Opacity".into(),
         PropertyFieldId::Visibility => "Visible".into(),
         PropertyFieldId::DefinitionSelection => "Pattern".into(),
-        PropertyFieldId::CoverageGuardSteps => "Coverage guard steps".into(),
-        PropertyFieldId::CoverageAdditionalMargin => "Additional margin".into(),
-        PropertyFieldId::GuideBaselineAngle => "Direction angle".into(),
-        PropertyFieldId::GuidePhase => "Direction offset".into(),
-        PropertyFieldId::GuideSpacingMultiplier => "Direction spacing".into(),
-        PropertyFieldId::GuidePrototype => "Guide prototype".into(),
-        PropertyFieldId::GuideAuthoredStructure => "Authored open path".into(),
+        PropertyFieldId::CoverageGuardSteps => "Extra guide rows".into(),
+        PropertyFieldId::CoverageAdditionalMargin => "Edge margin".into(),
+        PropertyFieldId::GuideBaselineAngle => "Guide angle".into(),
+        PropertyFieldId::GuidePhase => "Guide phase".into(),
+        PropertyFieldId::GuideSpacingMultiplier => "Guide spacing".into(),
+        PropertyFieldId::GuidePrototype => "Guide shape".into(),
+        PropertyFieldId::GuideAuthoredStructure => "Custom guide path".into(),
         PropertyFieldId::GuideArcCenterX => "Arc center X".into(),
         PropertyFieldId::GuideArcCenterY => "Arc center Y".into(),
         PropertyFieldId::GuideArcRadius => "Arc radius".into(),
         PropertyFieldId::GuideArcStartAngle => "Arc start angle".into(),
         PropertyFieldId::GuideArcSweepAngle => "Arc sweep angle".into(),
-        PropertyFieldId::GuideRepetition => "Guide repetition".into(),
-        PropertyFieldId::GuideOffsetSpacing => "Normal offset spacing".into(),
-        PropertyFieldId::GuideOffsetSides => "Offset sides".into(),
-        PropertyFieldId::GuideOffsetCleanup => "Offset cleanup".into(),
-        PropertyFieldId::GuideStackDirection => "Stack direction".into(),
-        PropertyFieldId::GuideStackSpacingMultiplier => "Stack spacing multiplier".into(),
+        PropertyFieldId::GuideRepetition => "Guide copies".into(),
+        PropertyFieldId::GuideOffsetSpacing => "Constant gap".into(),
+        PropertyFieldId::GuideOffsetCleanup => "Parallel-copy cleanup".into(),
+        PropertyFieldId::GuideStackDirection => "Copy direction".into(),
+        PropertyFieldId::GuideStackSpacingMultiplier => "Copy spacing".into(),
         PropertyFieldId::IntersectionDimensions => "Directions at intersections".into(),
         PropertyFieldId::IntersectionMergeEpsilon => "Intersection merge tolerance".into(),
         PropertyFieldId::AlongGuideDimensions => "Directions along guides".into(),
-        PropertyFieldId::AlongGuideIntervalMultiplier => "Along-guide interval multiplier".into(),
-        PropertyFieldId::AlongGuidePhase => "Along-guide phase".into(),
+        PropertyFieldId::AlongGuideIntervalMultiplier => "Spacing along guides".into(),
+        PropertyFieldId::AlongGuidePhase => "Offset along guides".into(),
         PropertyFieldId::RandomCharacter => "Random distribution".into(),
         PropertyFieldId::RandomEvenMinimumCenterDistance => "Even minimum center distance".into(),
         PropertyFieldId::RandomClusterDensity => "Cluster density".into(),
@@ -2271,31 +4172,53 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::ExclusionMinimumCenterDistance => {
             "Exclusion minimum center distance".into()
         }
+        PropertyFieldId::VisibleMarkMargin => "Visible mark margin".into(),
         PropertyFieldId::RandomMaximumAttempts => "Maximum random attempts".into(),
         PropertyFieldId::RandomMaximumNeighborChecks => "Maximum neighbor checks".into(),
-        PropertyFieldId::OutputSiteProduct => "Mark placement".into(),
-        PropertyFieldId::OutputPrototype => "Mark prototype".into(),
-        PropertyFieldId::OutputAuthoredClosedShape => "Closed shape reference".into(),
+        PropertyFieldId::OutputSiteProduct => "Sites to draw".into(),
+        PropertyFieldId::OutputPrototype => "Mark shape".into(),
+        PropertyFieldId::OutputAuthoredClosedShape => "Custom mark shape".into(),
         PropertyFieldId::OutputOrientation => "Mark orientation".into(),
-        PropertyFieldId::OutputOrientationDimension => "Orientation guide dimension".into(),
+        PropertyFieldId::OutputOrientationDimension => "Orientation guide".into(),
+        PropertyFieldId::OutputSiteUseFilterKind => "Use which sites?".into(),
+        PropertyFieldId::OutputSiteUseFilterReference => "Reference output".into(),
+        PropertyFieldId::ConnectionProgram => "Connection algorithm".into(),
+        PropertyFieldId::ConnectionMaximumDegree => "Maximum connections".into(),
+        PropertyFieldId::ConnectionMaximumDistance => "Maximum connection distance".into(),
+        PropertyFieldId::ConnectionMinimumDegree => "Minimum connections".into(),
+        PropertyFieldId::ConnectionSeed => "Connection seed".into(),
+        PropertyFieldId::MazeSeed => "Maze seed".into(),
         PropertyFieldId::RegionResizeAlgorithm => "Region resize".into(),
         PropertyFieldId::RegionSampling => "Region source sampling".into(),
         PropertyFieldId::RegionMinimumFill => "Minimum fill".into(),
         PropertyFieldId::RegionMaximumFill => "Maximum fill".into(),
-        _ => "Advanced pattern setting".into(),
+        PropertyFieldId::CurveMotifMirrorAlternateRows => "Mirror odd rows".into(),
+        PropertyFieldId::CurveMotifAlternateRowPhase => "Odd-row phase".into(),
+        PropertyFieldId::ParametricShape => "Spiral shape".into(),
+        PropertyFieldId::ParametricTurns => "Spiral turns".into(),
+        PropertyFieldId::ParametricRadialSpacing => "Growth per revolution".into(),
+        PropertyFieldId::ParametricPhase => "Spiral phase".into(),
+        PropertyFieldId::ParametricWinding => "Spiral winding".into(),
+        PropertyFieldId::ParametricRepetition => "Curve copies".into(),
+        PropertyFieldId::ParametricOffsetSpacing => "Parallel-copy spacing".into(),
+        PropertyFieldId::ParametricOffsetCleanup => "Parallel-copy cleanup".into(),
+        PropertyFieldId::ParametricStackDirection => "Copy direction".into(),
+        PropertyFieldId::ParametricStackSpacingMultiplier => "Copy spacing".into(),
+        PropertyFieldId::AlongParametricInterval => "Along-curve interval".into(),
+        PropertyFieldId::AlongParametricPhase => "Along-curve phase".into(),
     }
 }
 
-/// Projects authoritative density into the inverse artist-facing pattern zoom scale.
+/// Projects authoritative density into the inverse artist-facing pattern-size scale.
 ///
-/// Zoom `1.0` is the source-size-dependent document default. Values below one
-/// zoom out and therefore request more geometry, while values above one zoom in
-/// and request less. Other finite scalar fields pass through unchanged.
+/// Size `1.0` is the source-size-dependent document default. Values below one
+/// make a finer pattern, while values above one produce larger, coarser repeated
+/// geometry. Other finite scalar fields pass through unchanged.
 ///
 /// # Errors
 ///
 /// Returns domain canvas validation or a finite-positive diagnostic when the
-/// density authority cannot be represented as an artist-facing zoom level.
+/// density authority cannot be represented as an artist-facing pattern size.
 fn artist_numeric_value(
     document: &Document,
     field: PropertyFieldId,
@@ -2310,14 +4233,14 @@ fn artist_numeric_value(
     let default = DensityMetric2D::default_for_canvas(document.canvas())
         .map_err(|error| error.to_string())?
         .density;
-    let zoom = default / authority_value;
-    if !zoom.is_finite() || zoom <= 0.0 {
-        return Err("Pattern zoom level must be a finite number greater than zero.".to_owned());
+    let size = default / authority_value;
+    if !size.is_finite() || size <= 0.0 {
+        return Err("Pattern size must be a finite number greater than zero.".to_owned());
     }
-    Ok(zoom)
+    Ok(size)
 }
 
-/// Converts an artist-facing pattern zoom level back into density authority.
+/// Converts an artist-facing pattern size back into density authority.
 ///
 /// Pattern aspect and all unrelated scalar fields pass through unchanged; the
 /// returned density remains the sole value sent through document history and
@@ -2326,7 +4249,7 @@ fn artist_numeric_value(
 /// # Errors
 ///
 /// Returns domain canvas validation or a finite-positive diagnostic when the
-/// requested zoom cannot produce valid density authority.
+/// requested size cannot produce valid density authority.
 fn authority_numeric_value(
     document: &Document,
     field: PropertyFieldId,
@@ -2336,34 +4259,291 @@ fn authority_numeric_value(
         return Ok(artist_value);
     }
     if !artist_value.is_finite() || artist_value <= 0.0 {
-        return Err("Pattern zoom level must be a finite number greater than zero.".to_owned());
+        return Err("Pattern size must be a finite number greater than zero.".to_owned());
     }
     let default = DensityMetric2D::default_for_canvas(document.canvas())
         .map_err(|error| error.to_string())?
         .density;
     let density = default / artist_value;
     if !density.is_finite() || density <= 0.0 {
-        return Err("Pattern zoom level produces an invalid pattern density.".to_owned());
+        return Err("Pattern size produces an invalid pattern density.".to_owned());
     }
     Ok(density)
 }
 
-/// Returns presentation guidance for an authoritative inspector descriptor.
+/// Returns artist-facing guidance for one typed pattern setting.
 ///
-/// Density receives inverse zoom terminology while aspect preserves its stored
-/// width-to-height ratio semantics. Other fields retain descriptor-owned units
-/// and bounds.
-fn inspector_field_detail(descriptor: &PropertyDescriptor) -> String {
-    match descriptor.field {
+/// Applicability, bounds, choices, and command behavior remain descriptor and domain authority;
+/// this exhaustive mapping supplies only shared wizard, inspector, and transition vocabulary.
+fn inspector_field_guidance(field: PropertyFieldId) -> &'static str {
+    match field {
+        PropertyFieldId::SourceReference => "Chooses the artwork sampled by this channel.",
         PropertyFieldId::Density => {
-            "1.0 is the default scale; lower values zoom out for more geometry, and higher values zoom in for less geometry."
-                .to_owned()
+            "Controls the size of repeated marks and spaces. Smaller values make a finer, denser pattern; larger values make a larger, coarser pattern."
         }
         PropertyFieldId::DensityAspect => {
-            "1.0 is 1:1, 2.0 is 2:1, and 0.5 is 1:2.".to_owned()
+            "Adjusts width relative to height. 1.0 keeps equal proportions; values above 1 widen the pattern."
         }
-        _ => field_detail(descriptor.bounds, descriptor.unit),
+        PropertyFieldId::RotationDegrees => {
+            "Rotates the whole pattern around the artwork in degrees."
+        }
+        PropertyFieldId::TranslationX => {
+            "Moves the pattern left or right without changing its spacing."
+        }
+        PropertyFieldId::TranslationY => {
+            "Moves the pattern up or down without changing its spacing."
+        }
+        PropertyFieldId::MarkMinimumFill => {
+            "Sets the mark size at the low end of the selected source response. 0 allows marks to disappear."
+        }
+        PropertyFieldId::MarkMaximumFill => {
+            "Sets the mark size at the high end of the selected source response. 1 reaches the mark’s natural full size."
+        }
+        PropertyFieldId::ConnectedMinimumThickness => {
+            "Sets line thickness at the low end of the selected source response. 0 allows line portions to disappear."
+        }
+        PropertyFieldId::ConnectedMaximumThickness => {
+            "Sets line thickness at the high end of the selected source response."
+        }
+        PropertyFieldId::CurveResponseBias => {
+            "Biases visible stroke response toward the left or right normal of the curve’s authored start-to-end direction. 0 is centered; this never changes guides, sites, or connections."
+        }
+        PropertyFieldId::ShapeRotationDegrees => {
+            "Rotates each repeated mark around its own center."
+        }
+        PropertyFieldId::LegacyMappingComponent | PropertyFieldId::ModeledMappingComponent => {
+            "Chooses the artwork component that controls this output, such as luminance, alpha, or a color channel."
+        }
+        PropertyFieldId::LegacyMappingPlacement | PropertyFieldId::ModeledMappingPlacement => {
+            "Chooses how the source artwork is fitted to the pattern canvas before it is sampled."
+        }
+        PropertyFieldId::ModeledMappingInverted => {
+            "Reverses the source response so low values act like high values and high values act like low values."
+        }
+        PropertyFieldId::ModeledMappingGain => {
+            "Multiplies the source response before it controls the output."
+        }
+        PropertyFieldId::ModeledMappingBias => {
+            "Adds an offset to the source response before it controls the output."
+        }
+        PropertyFieldId::Paint => {
+            "Chooses whether the channel uses one solid color or colors sampled from the artwork."
+        }
+        PropertyFieldId::ColorRed => "Sets the red amount in the channel’s solid color.",
+        PropertyFieldId::ColorGreen => "Sets the green amount in the channel’s solid color.",
+        PropertyFieldId::ColorBlue => "Sets the blue amount in the channel’s solid color.",
+        PropertyFieldId::ColorAlpha => "Sets the transparency of the channel’s solid color.",
+        PropertyFieldId::Opacity => {
+            "Sets the overall visibility of this channel without changing its geometry."
+        }
+        PropertyFieldId::Visibility => "Shows or hides this channel.",
+        PropertyFieldId::DefinitionSelection => "Chooses the pattern design used by this channel.",
+        PropertyFieldId::CoverageGuardSteps => {
+            "Adds repeated guide rows beyond the artwork so rotated or curved guides continue cleanly through every edge."
+        }
+        PropertyFieldId::CoverageAdditionalMargin => {
+            "Adds extra coverage beyond the artwork edge. Increase it only if guide geometry leaves an edge uncovered."
+        }
+        PropertyFieldId::GuideBaselineAngle => "Sets this guide direction in degrees.",
+        PropertyFieldId::GuidePhase => {
+            "Slides this guide set across its spacing without changing its direction."
+        }
+        PropertyFieldId::GuideSpacingMultiplier => {
+            "Scales the spacing for this guide set relative to Pattern size."
+        }
+        PropertyFieldId::GuidePrototype => {
+            "Chooses whether this guide is a circular arc or a custom path."
+        }
+        PropertyFieldId::GuideAuthoredStructure => {
+            "Chooses the custom path used for this guide direction."
+        }
+        PropertyFieldId::GuideArcCenterX => {
+            "Moves the circular guide’s center left or right within the pattern."
+        }
+        PropertyFieldId::GuideArcCenterY => {
+            "Moves the circular guide’s center up or down within the pattern."
+        }
+        PropertyFieldId::GuideArcRadius => "Sets the circular guide’s radius.",
+        PropertyFieldId::GuideArcStartAngle => "Sets where the circular guide begins, in degrees.",
+        PropertyFieldId::GuideArcSweepAngle => {
+            "Sets how far the circular guide travels around its center, in degrees."
+        }
+        PropertyFieldId::GuideRepetition => {
+            "Chooses whether the guide is used once, stacked in a chosen direction, or copied along constant-gap offsets."
+        }
+        PropertyFieldId::GuideOffsetSpacing => {
+            "Sets the constant normal distance between adjacent guide copies."
+        }
+        PropertyFieldId::GuideOffsetCleanup => {
+            "Removes loops created where tightly curved parallel guides cross themselves."
+        }
+        PropertyFieldId::GuideStackDirection => {
+            "Sets the direction in which repeated guide copies are placed."
+        }
+        PropertyFieldId::GuideStackSpacingMultiplier => {
+            "Sets the distance between repeated guide copies relative to Pattern size."
+        }
+        PropertyFieldId::IntersectionDimensions => {
+            "Chooses which guide directions must cross to create sites."
+        }
+        PropertyFieldId::IntersectionMergeEpsilon => {
+            "Treats very close guide crossings as one site. Increase cautiously to merge near-duplicates."
+        }
+        PropertyFieldId::AlongGuideDimensions => {
+            "Chooses the guide directions that receive evenly spaced sites."
+        }
+        PropertyFieldId::AlongGuideIntervalMultiplier => {
+            "Sets the distance between sites along each guide relative to Pattern size."
+        }
+        PropertyFieldId::AlongGuidePhase => {
+            "Slides sites forward or backward along each guide without changing their spacing."
+        }
+        PropertyFieldId::RandomCharacter => {
+            "Chooses an unrestricted, evenly separated, or clustered random arrangement."
+        }
+        PropertyFieldId::RandomEvenMinimumCenterDistance => {
+            "Sets the minimum center-to-center spacing in an even random arrangement."
+        }
+        PropertyFieldId::RandomClusterDensity => {
+            "Sets how many cluster centers are distributed across the artwork."
+        }
+        PropertyFieldId::RandomClusterSpread => {
+            "Sets how far sites may spread away from each cluster center."
+        }
+        PropertyFieldId::RandomClusterStrength => {
+            "Sets how strongly sites gather around their cluster centers."
+        }
+        PropertyFieldId::RandomSeed => {
+            "Changes the repeatable random arrangement without changing the other distribution settings. ALL sends this seed to every compatible channel; a named channel can then use its own seed."
+        }
+        PropertyFieldId::RandomDensityModulation => {
+            "Chooses whether site density stays uniform or follows the artwork."
+        }
+        PropertyFieldId::ArtworkWeightMappingComponent => {
+            "Chooses the artwork component that attracts or repels randomly distributed sites."
+        }
+        PropertyFieldId::ArtworkWeightMappingPlacement => {
+            "Chooses how the artwork is fitted before its site-density influence is sampled."
+        }
+        PropertyFieldId::ArtworkWeightMappingInverted => {
+            "Reverses which artwork values attract more sites."
+        }
+        PropertyFieldId::ArtworkWeightMappingGain => {
+            "Multiplies the artwork’s influence on site density."
+        }
+        PropertyFieldId::ArtworkWeightMappingBias => {
+            "Offsets the artwork’s influence on site density."
+        }
+        PropertyFieldId::ArtworkWeightStrength => {
+            "Blends between uniform spacing and artwork-driven site density."
+        }
+        PropertyFieldId::ArtworkWeightResponse => {
+            "Chooses how artwork values are translated into site-density influence."
+        }
+        PropertyFieldId::RandomExclusion => {
+            "Chooses whether random sites keep a minimum spacing or stay far enough inside the visible artwork."
+        }
+        PropertyFieldId::ExclusionMinimumCenterDistance => {
+            "Sets the minimum center-to-center distance allowed between random sites."
+        }
+        PropertyFieldId::VisibleMarkMargin => {
+            "Keeps random mark centers far enough inside the artwork that their largest shape remains visible."
+        }
+        PropertyFieldId::RandomMaximumAttempts | PropertyFieldId::RandomMaximumNeighborChecks => {
+            "Limits distribution work for difficult spacing combinations. Higher values can improve completion but take longer."
+        }
+        PropertyFieldId::OutputSiteProduct => {
+            "Chooses which generated sites this visible output uses."
+        }
+        PropertyFieldId::OutputPrototype => "Chooses a circle or custom shape for marks.",
+        PropertyFieldId::OutputAuthoredClosedShape => {
+            "Chooses the custom closed shape used for marks."
+        }
+        PropertyFieldId::OutputOrientation => {
+            "Chooses whether marks keep a fixed angle or follow a guide’s tangent or normal direction."
+        }
+        PropertyFieldId::OutputOrientationDimension => {
+            "Chooses the guide direction that controls mark orientation."
+        }
+        PropertyFieldId::OutputSiteUseFilterKind => {
+            "Chooses whether this output uses every site, sites already used by another output, or the remaining sites."
+        }
+        PropertyFieldId::OutputSiteUseFilterReference => {
+            "Chooses the earlier output whose used or unused sites are selected."
+        }
+        PropertyFieldId::ConnectionProgram => "Chooses how sites are joined into paths.",
+        PropertyFieldId::ConnectionMaximumDegree => {
+            "Limits how many connections may meet at one site."
+        }
+        PropertyFieldId::ConnectionMaximumDistance => {
+            "Prevents connections longer than this artwork distance."
+        }
+        PropertyFieldId::ConnectionMinimumDegree => {
+            "Requests at least this many connections at each eligible site when the algorithm can supply them."
+        }
+        PropertyFieldId::ConnectionSeed => {
+            "Changes the repeatable random connection choices without moving the sites. ALL sends this seed to every compatible channel; a named channel can then use its own seed."
+        }
+        PropertyFieldId::MazeSeed => {
+            "Changes the repeatable maze route without changing the guide grid. ALL sends this seed to every compatible channel; a named channel can then use its own seed."
+        }
+        PropertyFieldId::CurveMotifMirrorAlternateRows => {
+            "Mirrors the motif on every other guide row."
+        }
+        PropertyFieldId::CurveMotifAlternateRowPhase => {
+            "Offsets every other guide row along its direction. Disable it to keep all rows aligned."
+        }
+        PropertyFieldId::ParametricShape => "Chooses a round or square spiral.",
+        PropertyFieldId::ParametricTurns => "Sets how many revolutions the spiral makes.",
+        PropertyFieldId::ParametricRadialSpacing => {
+            "Sets how far the spiral grows outward during each complete revolution."
+        }
+        PropertyFieldId::ParametricPhase => "Rotates the starting position of the spiral.",
+        PropertyFieldId::ParametricWinding => {
+            "Chooses whether the spiral turns clockwise or counterclockwise."
+        }
+        PropertyFieldId::ParametricRepetition => {
+            "Chooses whether the curve is used once, repeated in a chosen direction, or copied on parallel paths."
+        }
+        PropertyFieldId::ParametricOffsetSpacing => {
+            "Sets the distance between parallel copies of the curve."
+        }
+        PropertyFieldId::ParametricOffsetCleanup => {
+            "Removes loops created where tightly curved parallel copies cross themselves."
+        }
+        PropertyFieldId::ParametricStackDirection => {
+            "Sets the direction in which repeated curve copies are placed."
+        }
+        PropertyFieldId::ParametricStackSpacingMultiplier => {
+            "Sets the distance between repeated curve copies relative to Pattern size."
+        }
+        PropertyFieldId::AlongParametricInterval => {
+            "Sets the distance between sites along the spiral or other formula-drawn curve."
+        }
+        PropertyFieldId::AlongParametricPhase => {
+            "Slides sites along the formula-drawn curve without changing their spacing."
+        }
+        PropertyFieldId::RegionResizeAlgorithm => {
+            "Chooses whether each region scales around its center or moves its edges inward and outward evenly."
+        }
+        PropertyFieldId::RegionSampling => {
+            "Chooses whether a region responds to one point in the artwork or the average tone across its area."
+        }
+        PropertyFieldId::RegionMinimumFill => {
+            "Sets region size at the low end of the selected source response."
+        }
+        PropertyFieldId::RegionMaximumFill => {
+            "Sets region size at the high end of the selected source response."
+        }
     }
+}
+
+/// Returns presentation guidance for an authoritative inspector descriptor.
+///
+/// The descriptor supplies field identity while retaining all applicability, bounds, and command
+/// authority. Density receives inverse artist-facing Pattern size terminology.
+fn inspector_field_detail(descriptor: &PropertyDescriptor) -> String {
+    inspector_field_guidance(descriptor.field).to_owned()
 }
 
 /// Returns the static artist-facing label for one typed selector choice.
@@ -2396,27 +4576,42 @@ fn enum_choice_label(choice: PropertyEnumChoice) -> &'static str {
         }
         PropertyEnumChoice::DensityModulation(
             toniator_domain::DensityModulationKind::ArtworkWeighted,
-        ) => "Artwork weighted",
+        ) => "Follow artwork",
         PropertyEnumChoice::ArtworkWeightResponse(
             toniator_domain::ArtworkWeightResponse::Linear,
         ) => "Linear",
         PropertyEnumChoice::ArtworkWeightResponse(
             toniator_domain::ArtworkWeightResponse::Smoothstep,
-        ) => "Smoothstep",
+        ) => "Soft contrast",
         PropertyEnumChoice::Exclusion(toniator_domain::ExclusionKind::None) => "None",
         PropertyEnumChoice::Exclusion(toniator_domain::ExclusionKind::MinimumCenterDistance) => {
             "Minimum center distance"
         }
+        PropertyEnumChoice::Exclusion(toniator_domain::ExclusionKind::VisibleMarkMargin) => {
+            "Visible mark margin"
+        }
         PropertyEnumChoice::MarkPrototype(toniator_domain::MarkPrototypeKind::Circle) => "Circle",
         PropertyEnumChoice::MarkPrototype(
             toniator_domain::MarkPrototypeKind::AuthoredClosedShape,
-        ) => "Authored closed shape",
+        ) => "Custom shape",
         PropertyEnumChoice::MarkOrientation(MarkOrientationKind::Fixed) => "Fixed",
         PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideTangent) => "Guide tangent",
         PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideNormal) => "Guide normal",
+        PropertyEnumChoice::SiteUseFilter(SiteUseFilterKind::All) => "All sites",
+        PropertyEnumChoice::SiteUseFilter(SiteUseFilterKind::SitesUsedBy) => "Sites used by",
+        PropertyEnumChoice::SiteUseFilter(SiteUseFilterKind::SitesUnusedBy) => "Sites unused by",
+        PropertyEnumChoice::ConnectionProgram(
+            toniator_domain::ConnectionProgramKind::NearestLinks,
+        ) => "Nearest links",
+        PropertyEnumChoice::ConnectionProgram(
+            toniator_domain::ConnectionProgramKind::RandomLinks,
+        ) => "Random links",
+        PropertyEnumChoice::ConnectionProgram(
+            toniator_domain::ConnectionProgramKind::GridSpanningTree,
+        ) => "Branching tree",
         PropertyEnumChoice::GuidePrototype(
             toniator_domain::GuidePrototypeKind::AuthoredOpenPath,
-        ) => "Authored open path",
+        ) => "Custom path",
         PropertyEnumChoice::GuidePrototype(toniator_domain::GuidePrototypeKind::CircularArc) => {
             "Circular arc"
         }
@@ -2425,13 +4620,25 @@ fn enum_choice_label(choice: PropertyEnumChoice) -> &'static str {
         }
         PropertyEnumChoice::GuideRepetition(
             toniator_domain::GuideRepetitionKind::TransformStack,
-        ) => "Transform stack",
+        ) => "Stacked copies",
         PropertyEnumChoice::GuideRepetition(toniator_domain::GuideRepetitionKind::NormalOffset) => {
-            "Normal offset"
+            "Constant-gap copies"
         }
-        PropertyEnumChoice::OffsetSides(toniator_domain::OffsetSides::Left) => "Left",
-        PropertyEnumChoice::OffsetSides(toniator_domain::OffsetSides::Right) => "Right",
-        PropertyEnumChoice::OffsetSides(toniator_domain::OffsetSides::Both) => "Both",
+        PropertyEnumChoice::SpiralShape(toniator_domain::SpiralShape::Round) => "Round spiral",
+        PropertyEnumChoice::SpiralShape(toniator_domain::SpiralShape::Square) => "Square spiral",
+        PropertyEnumChoice::CurveWinding(toniator_domain::CurveWinding::Clockwise) => "Clockwise",
+        PropertyEnumChoice::CurveWinding(toniator_domain::CurveWinding::CounterClockwise) => {
+            "Counter-clockwise"
+        }
+        PropertyEnumChoice::CurveRepetition(toniator_domain::GuideRepetitionKind::Single) => {
+            "Single"
+        }
+        PropertyEnumChoice::CurveRepetition(
+            toniator_domain::GuideRepetitionKind::TransformStack,
+        ) => "Stacked copies",
+        PropertyEnumChoice::CurveRepetition(toniator_domain::GuideRepetitionKind::NormalOffset) => {
+            "Constant-gap copies"
+        }
         PropertyEnumChoice::OffsetCleanup(toniator_domain::OffsetCleanup::DissolveCrossings) => {
             "Dissolve crossings"
         }
@@ -2440,14 +4647,13 @@ fn enum_choice_label(choice: PropertyEnumChoice) -> &'static str {
         ) => "Scale",
         PropertyEnumChoice::RegionResizeAlgorithm(
             toniator_domain::RegionResizeAlgorithm::UniformOffset,
-        ) => "Uniform offset",
+        ) => "Even inset or outset",
         PropertyEnumChoice::RegionSampling(
             toniator_domain::RegionSamplingStrategy::ReferencePoint,
         ) => "Reference point",
         PropertyEnumChoice::RegionSampling(
             toniator_domain::RegionSamplingStrategy::AreaAverage,
         ) => "Area average",
-        _ => "Advanced pattern choice",
     }
 }
 
@@ -2465,7 +4671,7 @@ fn reference_label(reference: &PropertyReferenceValue) -> String {
         PropertyReferenceValue::Mechanism(_) => "Current placement".into(),
         PropertyReferenceValue::GuideDimension(_) => "Direction".into(),
         PropertyReferenceValue::OutputLayer(_) => "Pattern output".into(),
-        PropertyReferenceValue::AuthoredStructure(_) => "Authored open path".into(),
+        PropertyReferenceValue::AuthoredStructure(_) => "Custom curve".into(),
     }
 }
 
@@ -2644,17 +4850,6 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
                 );
             }
             let active_pattern_text = target_pattern_name(&document, target);
-            if state.inspector_runtime.pattern_candidate.is_none() {
-                state.inspector_runtime.pattern_candidate = Some(
-                    state
-                        .catalog
-                        .entries()
-                        .iter()
-                        .find(|entry| entry.preset.metadata.name == active_pattern_text)
-                        .map(|entry| PatternCandidate::Preset(entry.preset.metadata.id.clone()))
-                        .unwrap_or(PatternCandidate::Custom),
-                );
-            }
             let mut labels = vec!["ALL".to_owned()];
             labels.extend(ids.iter().map(|id| channel_display_name(&document, *id)));
             (labels, values, target, active_pattern_text)
@@ -2701,6 +4896,11 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
             .map(|index| index as u32 + 1)
             .unwrap_or(0),
     });
+    let channel_description = labels
+        .get(selector.selected() as usize)
+        .map(|label| format!("Current channel: {label}."))
+        .unwrap_or_else(|| "No channel is available.".to_owned());
+    selector.update_property(&[gtk::accessible::Property::Description(&channel_description)]);
     state.borrow_mut().syncing_inspector = false;
 
     if labels.is_empty() {
@@ -2720,11 +4920,8 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
     }));
     if catalog.first_child().is_none() {
         catalog.append(&active_pattern);
-        append_preset_catalog(state, &catalog);
-        append_pattern_editor_launch(state, &catalog);
+        append_pattern_gallery_launch(state, &catalog);
     }
-    sync_pattern_editor_launches(state, target);
-    sync_pattern_candidate_selector(state);
     let descriptor_focuses = values
         .iter()
         .map(|value| {
@@ -2744,36 +4941,6 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
     reconcile_descriptor_components(state, &descriptors, components);
     rebuild_pattern_editor(state);
     submit_draft_preview(state);
-}
-
-/// Synchronizes compact pattern actions from runtime candidate state without applying it.
-fn sync_pattern_candidate_selector(state: &Rc<RefCell<AppState>>) {
-    let (selector, apply, selected) = {
-        let mut app_state = state.borrow_mut();
-        app_state.syncing_inspector = true;
-        let selected = match app_state.inspector_runtime.pattern_candidate.as_ref() {
-            Some(PatternCandidate::Preset(id)) => app_state
-                .catalog
-                .entries()
-                .iter()
-                .position(|entry| &entry.preset.metadata.id == id)
-                .map(|index| index as u32 + 1)
-                .unwrap_or(0),
-            Some(PatternCandidate::Custom) | None => 0,
-        };
-        (
-            app_state.pattern_selector.clone(),
-            app_state.apply_pattern_button.clone(),
-            selected,
-        )
-    };
-    if let Some(selector) = selector {
-        selector.set_selected(selected);
-    }
-    if let Some(apply) = apply {
-        apply.set_sensitive(selected > 0);
-    }
-    state.borrow_mut().syncing_inspector = false;
 }
 
 /// Reconciles persistent sidebar rows against immutable channel descriptor VMs.
@@ -2809,21 +4976,29 @@ fn reconcile_descriptor_components(
     }
 
     let mut previous_group = None;
+    let mut previous_row: Option<gtk::Box> = None;
     for (value, focus) in values {
         let key = inspector_key(&value.descriptor);
         let group = inspector_group(value.descriptor.field);
         let presented_f64 = presented_inspector_f64(state, &value);
-        let replace = {
+        let mut retained = {
             let mut app_state = state.borrow_mut();
             app_state.syncing_inspector = true;
-            let updated = app_state
-                .descriptor_components
-                .get_mut(&key)
-                .map(|component| update_descriptor_component(component, &value, presented_f64))
-                .unwrap_or(false);
-            app_state.syncing_inspector = false;
-            !updated
+            app_state.descriptor_components.remove(&key)
         };
+        let updated = retained
+            .as_mut()
+            .is_some_and(|component| update_descriptor_component(component, &value, presented_f64));
+        {
+            let mut app_state = state.borrow_mut();
+            if let Some(component) = retained {
+                app_state
+                    .descriptor_components
+                    .insert(key.clone(), component);
+            }
+            app_state.syncing_inspector = false;
+        }
+        let replace = !updated;
         if replace {
             let old = state.borrow_mut().descriptor_components.remove(&key);
             if let Some(old) = old {
@@ -2850,6 +5025,8 @@ fn reconcile_descriptor_components(
         if row.parent().is_none() {
             container.append(&row);
         }
+        container.reorder_child_after(&row, previous_row.as_ref());
+        previous_row = Some(row);
         previous_group = Some(group);
     }
 }
@@ -2888,23 +5065,22 @@ fn update_descriptor_component(
     }
     let updated = match (&component.value.value, &value.value) {
         (PropertyCurrentValueKind::FiniteF64(_), PropertyCurrentValueKind::FiniteF64(next)) => {
-            if let Some(entry) = component.control.downcast_ref::<gtk::Entry>() {
-                if !entry.has_focus() {
-                    entry.set_text(&format!("{:.4}", presented_f64.unwrap_or(*next)));
-                }
-                true
+            if !component.control.has_focus() {
+                set_numeric_control_text(
+                    &component.control,
+                    &format!("{:.4}", presented_f64.unwrap_or(*next)),
+                )
             } else {
-                false
+                component.control.is::<gtk::Entry>()
+                    || component.control.is::<gtk::SpinButton>()
+                    || component.control.is::<gtk::Scale>()
             }
         }
         (PropertyCurrentValueKind::U32(_), PropertyCurrentValueKind::U32(next)) => {
-            if let Some(entry) = component.control.downcast_ref::<gtk::Entry>() {
-                if !entry.has_focus() {
-                    entry.set_text(&next.to_string());
-                }
-                true
+            if !component.control.has_focus() {
+                set_numeric_control_text(&component.control, &next.to_string())
             } else {
-                false
+                component.control.is::<gtk::Entry>() || component.control.is::<gtk::SpinButton>()
             }
         }
         (PropertyCurrentValueKind::Boolean(_), PropertyCurrentValueKind::Boolean(next)) => {
@@ -2933,6 +5109,16 @@ fn update_descriptor_component(
     };
     if updated {
         component.detail.set_label(&descriptor_detail_text(value));
+        let presented = match &value.value {
+            PropertyCurrentValueKind::FiniteF64(raw) => presented_f64.unwrap_or(*raw),
+            PropertyCurrentValueKind::U32(value) => *value as f64,
+            _ => f64::NAN,
+        };
+        update_descriptor_accessibility(
+            &component.control,
+            &value.descriptor,
+            presented.is_finite().then_some(presented),
+        );
         if let Some(reset) = component.reset.as_ref() {
             reset.set_sensitive(value.inheritance == PropertyInheritance::Explicit);
         }
@@ -2946,96 +5132,166 @@ fn update_descriptor_component(
 /// Units remain descriptor-owned and inheritance is reported only from the
 /// current document projection; the returned text carries no mutable UI state.
 fn descriptor_detail_text(current: &PropertyCurrentValue) -> String {
-    let unit_detail = inspector_field_detail(&current.descriptor);
-    let inheritance_detail = match current.inheritance {
+    match current.inheritance {
         PropertyInheritance::Inherited => "Inherited from ALL",
         PropertyInheritance::Explicit => "Override",
         PropertyInheritance::NotApplicable => "",
-    };
-    [unit_detail.as_str(), inheritance_detail]
-        .into_iter()
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ")
+    }
+    .to_owned()
 }
 
-/// Adds one compact non-mutating recipe selector and explicit pattern actions.
+/// Returns the stable accessible name for one descriptor-backed real GTK control.
 ///
-/// The dropdown stores runtime candidate selection only. A document transition
-/// occurs exclusively through Apply Pattern; Edit Pattern opens a captured private wizard.
-fn append_preset_catalog(state: &Rc<RefCell<AppState>>, inspector: &gtk::Box) {
-    let heading = gtk::Label::new(Some("Pattern"));
-    heading.set_xalign(0.0);
-    heading.add_css_class("heading");
-    inspector.append(&heading);
-    let entries = state
-        .borrow()
-        .catalog
-        .entries()
-        .iter()
-        .map(|entry| {
-            (
-                entry.preset.metadata.id.clone(),
-                entry.preset.metadata.name.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut labels = vec!["Custom pattern".to_owned()];
-    labels.extend(entries.iter().map(|(_, name)| name.clone()));
-    let model = gtk::StringList::new(&labels.iter().map(String::as_str).collect::<Vec<_>>());
-    let selector = gtk::DropDown::new(Some(model), gtk::Expression::NONE);
-    selector.set_hexpand(true);
-    selector.set_tooltip_text(Some(
-        "Choose a pattern candidate; selection does not change the artwork",
-    ));
-    let selector_entries = entries.clone();
-    let state_for_selection = Rc::clone(state);
-    selector.connect_selected_notify(move |selector| {
-        if state_for_selection.borrow().syncing_inspector {
-            return;
-        }
-        let candidate = selector
-            .selected()
-            .checked_sub(1)
-            .and_then(|index| selector_entries.get(index as usize))
-            .map(|(id, _)| PatternCandidate::Preset(id.clone()))
-            .unwrap_or(PatternCandidate::Custom);
-        let mut app_state = state_for_selection.borrow_mut();
-        app_state.inspector_runtime.pattern_candidate = Some(candidate.clone());
-        if let Some(button) = app_state.apply_pattern_button.as_ref() {
-            button.set_sensitive(matches!(candidate, PatternCandidate::Preset(_)));
-        }
-        set_inspector_status(
-            &mut app_state,
-            "Pattern candidate selected; artwork unchanged.",
-        );
-    });
-    inspector.append(&selector);
+/// The descriptor field remains the product vocabulary authority. This helper
+/// deliberately does not incorporate a row position, widget address, or a
+/// second applicability model, so the same active descriptor is discoverable
+/// across inspector rebuilds and layout changes.
+fn descriptor_accessible_name(descriptor: &PropertyDescriptor) -> String {
+    inspector_field_label(descriptor.field)
+}
 
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let apply = gtk::Button::with_mnemonic("_Apply Pattern");
-    let state_for_apply = Rc::clone(state);
-    apply.connect_clicked(move |_| apply_pattern_candidate(&state_for_apply));
-    let edit = gtk::Button::with_mnemonic("_Edit Pattern");
-    edit.set_sensitive(true);
-    let edit_explanation =
-        "Open the private Pattern Wizard. Changes do not affect the artwork until Apply.";
-    edit.set_tooltip_text(Some(edit_explanation));
-    edit.update_property(&[gtk::accessible::Property::Description(edit_explanation)]);
-    let state_for_edit = Rc::clone(state);
-    let edit_for_restore = edit.clone();
-    edit.connect_clicked(move |_| open_pattern_wizard(&state_for_edit, edit_for_restore.clone()));
-    actions.append(&apply);
-    actions.append(&edit);
-    inspector.append(&actions);
+/// Returns the complete authoritative numeric range available to a real GTK spin button.
+///
+/// Open-ended descriptor bounds remain open-ended in the domain and therefore
+/// return `None`; callers must keep those controls as entries instead of
+/// inventing an accessibility-only upper or lower limit.
+fn descriptor_finite_numeric_bounds(descriptor: &PropertyDescriptor) -> Option<(f64, f64)> {
+    let bounds = descriptor.bounds?;
+    let minimum = bounds.minimum?;
+    let maximum = bounds.maximum?;
+    (minimum.is_finite() && maximum.is_finite() && minimum <= maximum).then_some((minimum, maximum))
+}
+
+/// Projects descriptor identity and finite scalar metadata onto one real GTK widget.
+///
+/// The widget continues to own interaction and the domain continues to own
+/// validation. Accessibility properties only expose the current descriptor
+/// projection, including bounds when both authoritative limits are available;
+/// no synthetic range is invented for open-ended descriptors.
+fn update_descriptor_accessibility(
+    control: &gtk::Widget,
+    descriptor: &PropertyDescriptor,
+    value: Option<f64>,
+) {
+    let name = descriptor_accessible_name(descriptor);
+    let description = inspector_field_detail(descriptor);
+    let value_text = value
+        .filter(|value| value.is_finite())
+        .map(|value| value.to_string());
+    let mut properties = vec![gtk::accessible::Property::Label(&name)];
+    if !description.is_empty() {
+        properties.push(gtk::accessible::Property::Description(&description));
+    }
+    if let Some(value) = value.filter(|value| value.is_finite()) {
+        properties.push(gtk::accessible::Property::ValueNow(value));
+    }
+    if let Some(value_text) = value_text.as_deref() {
+        properties.push(gtk::accessible::Property::ValueText(value_text));
+    }
+    if let Some((minimum, maximum)) = descriptor_finite_numeric_bounds(descriptor) {
+        properties.push(gtk::accessible::Property::ValueMin(minimum));
+        properties.push(gtk::accessible::Property::ValueMax(maximum));
+    }
+    control.update_property(&properties);
+}
+
+/// Replaces only bounded numeric entries with GTK's real spin-button widget.
+///
+/// The adjustment mirrors descriptor-owned finite bounds and the returned
+/// control keeps the existing editable text/activate/focus-leave commit route.
+/// Open-ended descriptors retain their real entry because a made-up adjustment
+/// maximum would falsely claim a product constraint.
+fn bounded_numeric_spin_button(
+    descriptor: &PropertyDescriptor,
+    value: f64,
+    step: f64,
+    digits: u32,
+) -> Option<gtk::SpinButton> {
+    let (minimum, maximum) = descriptor_finite_numeric_bounds(descriptor)?;
+    let adjustment = gtk::Adjustment::new(value, minimum, maximum, step, step * 10.0, 0.0);
+    let control = gtk::SpinButton::new(Some(&adjustment), 0.0, digits);
+    control.set_numeric(false);
+    Some(control)
+}
+
+/// Replaces displayed text on either real numeric control retained by the inspector.
+///
+/// This presentation update preserves an artist's active edit at the caller
+/// and never changes descriptor/domain authority.
+fn set_numeric_control_text(control: &gtk::Widget, text: &str) -> bool {
+    if let Some(entry) = control.downcast_ref::<gtk::Entry>() {
+        entry.set_text(text);
+        true
+    } else if let Some(spin) = control.downcast_ref::<gtk::SpinButton>() {
+        if let Ok(value) = text.parse::<f64>() {
+            spin.set_value(value);
+        }
+        spin.set_text(text);
+        true
+    } else if let Some(scale) = control.downcast_ref::<gtk::Scale>() {
+        if let Ok(value) = text.parse::<f64>() {
+            scale.set_value(value);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+/// Returns the presentation range for Pattern size without clipping an existing valid document value.
+///
+/// The range is GTK-only and does not constrain density authority. Its ordinary bounds make the
+/// common finer-to-coarser adjustment reachable, while an outlying valid stored value expands the
+/// matching end so opening the inspector never changes or misrepresents it.
+fn pattern_size_slider_bounds(size: f64) -> (f64, f64) {
+    (
+        PATTERN_SIZE_SLIDER_MIN.min(size),
+        PATTERN_SIZE_SLIDER_MAX.max(size),
+    )
+}
+
+/// Links a visible descriptor label to its real interactive GTK control.
+///
+/// The mnemonic supplies normal keyboard reachability while the explicit
+/// relation lets AT-SPI report the same source-of-truth label to semantic
+/// tooling. This function only affects presentation metadata.
+fn relate_descriptor_label(control: &gtk::Widget, label: &gtk::Label) {
+    control.update_relation(&[gtk::accessible::Relation::LabelledBy(&[label.upcast_ref()])]);
+}
+
+/// Adds the single main-inspector entry point into the private pattern workflow.
+///
+/// The gallery owns preset selection, new-family choice, and final publication. This button
+/// only captures the current inspector scope and opens that private workflow; it never selects a
+/// preset or changes document history by itself.
+fn append_pattern_gallery_launch(state: &Rc<RefCell<AppState>>, inspector: &gtk::Box) {
+    let gallery = gtk::Button::with_mnemonic("Pattern _Gallery");
+    gallery.set_focusable(true);
+    let description = "Select a different halftone pattern, or create your own.";
+    gallery.set_tooltip_text(Some(description));
+    gallery.update_property(&[
+        gtk::accessible::Property::Label("Pattern Gallery"),
+        gtk::accessible::Property::Description(description),
+    ]);
+    let state_for_gallery = Rc::clone(state);
+    let gallery_for_restore = gallery.clone();
+    gallery.connect_clicked(move |_| {
+        open_pattern_wizard(&state_for_gallery, gallery_for_restore.clone())
+    });
+    inspector.append(&gallery);
 
     let advanced = gtk::Button::with_mnemonic("_Advanced Settings…");
+    let advanced_description = "Adjust less common source, output, appearance, and safety settings for the current pattern.";
+    advanced.set_tooltip_text(Some(advanced_description));
+    advanced.update_property(&[
+        gtk::accessible::Property::Label("Advanced Settings"),
+        gtk::accessible::Property::Description(advanced_description),
+    ]);
     let state_for_advanced = Rc::clone(state);
     advanced.connect_clicked(move |_| open_advanced_settings(&state_for_advanced));
     inspector.append(&advanced);
-    let mut app_state = state.borrow_mut();
-    app_state.pattern_selector = Some(selector);
-    app_state.apply_pattern_button = Some(apply);
 }
 
 /// Opens the one modal Pattern Wizard and captures the invoking target and compact candidate once.
@@ -3052,7 +5308,7 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
         window.present();
         return;
     }
-    let (draft, initial_document, sources, presentation, target, candidate, parent, epoch, catalog) = {
+    let (draft, initial_document, sources, presentation, target, parent, epoch, catalog) = {
         let mut app_state = state.borrow_mut();
         app_state.wizard_epoch = app_state.wizard_epoch.saturating_add(1);
         let epoch = app_state.wizard_epoch;
@@ -3065,10 +5321,6 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
             workspace.sources.clone(),
             workspace.source_presentation.clone(),
             app_state.inspector_runtime.target,
-            match &app_state.inspector_runtime.pattern_candidate {
-                Some(PatternCandidate::Preset(id)) => Some(id.clone()),
-                Some(PatternCandidate::Custom) | None => None,
-            },
             app_state.window.clone(),
             epoch,
             app_state.catalog.clone(),
@@ -3087,21 +5339,101 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
     breadcrumb.set_label(&wizard_breadcrumb(target, None));
     let status = shell.status();
     let picture = shell.preview();
+    let preview_description = "Quick black-to-white preview that makes the pattern structure easy to see. Your artwork and full Pattern size are used after Apply.";
+    picture.set_tooltip_text(Some(preview_description));
+    picture.update_property(&[
+        gtk::accessible::Property::Label("Pattern preview"),
+        gtk::accessible::Property::Description(preview_description),
+    ]);
     let spinner = shell.spinner();
+    let gallery_panel = shell.gallery_panel();
+    let page_panel = shell.page_panel();
+    let page_scroll = shell.page_scroll();
     let page = shell.page();
     let apply = gtk::Button::with_mnemonic("_Apply");
     apply.set_sensitive(false);
-    let back = gtk::Button::with_mnemonic("_Back");
+    apply.set_tooltip_text(Some(
+        "Apply the selected preset or reviewed pattern settings as one undoable change.",
+    ));
+    apply.update_property(&[
+        gtk::accessible::Property::Label("Apply"),
+        gtk::accessible::Property::Description(
+            "Apply the selected preset or reviewed pattern settings as one undoable change.",
+        ),
+    ]);
+    let back = gtk::Button::with_mnemonic("_Previous");
     back.set_sensitive(false);
+    back.set_tooltip_text(Some("Return to the previous wizard card."));
+    back.update_property(&[
+        gtk::accessible::Property::Label("Previous"),
+        gtk::accessible::Property::Description("Return to the previous wizard card."),
+    ]);
+    let undo = gtk::Button::with_mnemonic("_Undo");
+    undo.set_sensitive(false);
+    undo.set_tooltip_text(Some(
+        "Undo the latest change made in this wizard. The document is unchanged until Apply.",
+    ));
+    undo.update_property(&[
+        gtk::accessible::Property::Label("Undo"),
+        gtk::accessible::Property::Description(
+            "Undo the latest change made in this wizard. The document is unchanged until Apply.",
+        ),
+    ]);
+    let redo = gtk::Button::with_mnemonic("_Redo");
+    redo.set_sensitive(false);
+    redo.set_tooltip_text(Some(
+        "Redo the latest change made in this wizard. The document is unchanged until Apply.",
+    ));
+    redo.update_property(&[
+        gtk::accessible::Property::Label("Redo"),
+        gtk::accessible::Property::Description(
+            "Redo the latest change made in this wizard. The document is unchanged until Apply.",
+        ),
+    ]);
     let cancel = gtk::Button::with_mnemonic("_Cancel");
-    let review = gtk::Button::with_mnemonic("_Review");
+    cancel.set_tooltip_text(Some(
+        "Close the Pattern Wizard without applying its changes.",
+    ));
+    cancel.update_property(&[
+        gtk::accessible::Property::Label("Cancel"),
+        gtk::accessible::Property::Description(
+            "Close the Pattern Wizard without applying its changes.",
+        ),
+    ]);
+    let review = gtk::Button::with_mnemonic("_Next");
     review.set_sensitive(false);
+    review.set_tooltip_text(Some("Continue to the next pattern setup step."));
+    let edit = gtk::Button::with_mnemonic("_Edit");
+    edit.set_tooltip_text(Some(
+        "Open the selected preset or current pattern with all settings prefilled.",
+    ));
+    edit.update_property(&[
+        gtk::accessible::Property::Label("Edit"),
+        gtk::accessible::Property::Description(
+            "Open the selected preset or current pattern with all settings prefilled.",
+        ),
+    ]);
+    let new = gtk::Button::with_mnemonic("_New");
+    new.set_tooltip_text(Some(
+        "Start a new pattern by choosing its construction family.",
+    ));
+    new.update_property(&[
+        gtk::accessible::Property::Label("New"),
+        gtk::accessible::Property::Description(
+            "Start a new pattern by choosing its construction family.",
+        ),
+    ]);
     shell.append_action(&back);
+    shell.append_action(&undo);
+    shell.append_action(&redo);
     shell.append_action(&cancel);
     shell.append_action(&review);
+    shell.append_action(&edit);
+    shell.append_action(&new);
     shell.append_action(&apply);
     let layout = shell.layout();
-    reflow_wizard_layout_while_visible(&window, &layout);
+    let gallery = shell.gallery();
+    reflow_wizard_layout_while_visible(&window, &layout, &gallery);
     let scheduler =
         Arc::new(EvaluationScheduler::new().expect("Pattern Wizard private scheduler starts"));
     let preview_bridge_stop = Arc::new(AtomicBool::new(false));
@@ -3117,9 +5449,14 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
         draft,
         initial_document,
         target,
-        candidate,
-        materialized_candidate: None,
+        candidate: None,
+        editing_started: false,
+        starting_new: false,
         gallery_cards: BTreeMap::new(),
+        current_pattern_card: gtk::ToggleButton::new(),
+        gallery_panel,
+        page_panel,
+        page_scroll,
         preview_source,
         picture,
         spinner,
@@ -3128,13 +5465,49 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
         page,
         back: back.clone(),
         review: review.clone(),
+        cancel: cancel.clone(),
+        edit: edit.clone(),
+        new: new.clone(),
+        undo: undo.clone(),
+        redo: redo.clone(),
         apply: apply.clone(),
+        route: Vec::new(),
+        route_index: 0,
+        transition: None,
+        transition_invalid_control: None,
+        site_use_filter: None,
+        ordered_output_focus: None,
+        recipe_control_focus: None,
+        dropdown_action_generation: 0,
+        nested_focus_controls: BTreeMap::new(),
         scheduler,
         preview_submission: None,
+        preview_session: None,
         preview_bridge_stop,
         invoking_edit,
     });
-    let gallery_cards = append_wizard_gallery(state, epoch, &shell.gallery(), &catalog);
+    let current_pattern_card = gtk::ToggleButton::with_label("Current Pattern");
+    current_pattern_card.set_active(true);
+    current_pattern_card.set_tooltip_text(Some(
+        "Select the pattern currently used by this artwork without changing it.",
+    ));
+    current_pattern_card.update_property(&[
+        gtk::accessible::Property::Label("Current Pattern"),
+        gtk::accessible::Property::Description(
+            "Select the pattern currently used by this artwork without changing it.",
+        ),
+    ]);
+    let state_for_current_pattern = Rc::clone(state);
+    current_pattern_card.connect_toggled(move |card| {
+        if card.is_active() {
+            select_wizard_preset_candidate(&state_for_current_pattern, epoch, None);
+        }
+    });
+    current_pattern_card.set_size_request(WIZARD_PRESET_CARD_WIDTH_PX, -1);
+    current_pattern_card.set_hexpand(false);
+    gallery.append(&current_pattern_card);
+    let gallery_cards =
+        append_wizard_gallery(state, epoch, &gallery, &catalog, &current_pattern_card);
     if let Some(surface) = state
         .borrow_mut()
         .pattern_wizard
@@ -3142,16 +5515,25 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
         .filter(|surface| surface.epoch == epoch)
     {
         surface.gallery_cards = gallery_cards;
+        surface.current_pattern_card = current_pattern_card;
     }
     show_wizard_gallery_page(state, epoch);
     let state_for_back = Rc::clone(state);
-    back.connect_clicked(move |_| show_wizard_gallery_page(&state_for_back, epoch));
+    back.connect_clicked(move |_| wizard_go_back(&state_for_back, epoch));
     let state_for_review = Rc::clone(state);
-    review.connect_clicked(move |_| show_wizard_review_page(&state_for_review, epoch));
+    review.connect_clicked(move |_| wizard_advance_route(&state_for_review, epoch));
+    let state_for_undo = Rc::clone(state);
+    undo.connect_clicked(move |_| wizard_undo(&state_for_undo, epoch));
+    let state_for_redo = Rc::clone(state);
+    redo.connect_clicked(move |_| wizard_redo(&state_for_redo, epoch));
     let state_for_cancel = Rc::clone(state);
     cancel.connect_clicked(move |_| request_wizard_discard(&state_for_cancel, epoch));
     let state_for_apply = Rc::clone(state);
     apply.connect_clicked(move |_| apply_pattern_wizard(&state_for_apply, epoch));
+    let state_for_edit = Rc::clone(state);
+    edit.connect_clicked(move |_| wizard_edit_selection(&state_for_edit, epoch));
+    let state_for_new = Rc::clone(state);
+    new.connect_clicked(move |_| wizard_start_new_pattern(&state_for_new, epoch));
     let state_for_close = Rc::clone(state);
     window.connect_close_request(move |_| {
         if state_for_close
@@ -3171,43 +5553,34 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
     submit_wizard_preview(state, epoch);
 }
 
-/// Builds the only bounded private source proxy used by one Pattern Wizard lifetime.
+/// Builds the neutral source used by every private Pattern Wizard preview.
 ///
-/// The proxy preserves the source reference ID while reducing ordinary PNG/SVG bytes to the
-/// approved 256-pixel longest edge. Errors stay local to the modal and never request full bytes.
+/// The disposable resolved source retains the captured document source ID solely to satisfy the
+/// engine's authority check. Its bytes always come from the immutable bundled black-to-white SVG,
+/// never from live artwork, document storage, persistence, or main history.
 fn prepare_wizard_preview_source(
-    sources: &SourceBundle,
+    _sources: &SourceBundle,
     presentation: Option<&SourcePresentation>,
 ) -> WizardPreviewSource {
     let Some(presentation) = presentation else {
         return WizardPreviewSource::Unavailable("no source artwork is assigned".to_owned());
     };
-    let Some(source) = sources.get(&presentation.id) else {
-        return WizardPreviewSource::Unavailable("the source bundle is incomplete".to_owned());
-    };
-    reduced_preview_png(
-        source.bytes(),
-        presentation.format,
-        WIZARD_SOURCE_PROXY_LONGEST_EDGE,
+    gio::resources_lookup_data(
+        &format!("{RESOURCE_PREFIX}/preset-icon-source.svg"),
+        gio::ResourceLookupFlags::NONE,
     )
     .map_err(|error| error.to_string())
-    .and_then(|proxy| {
+    .and_then(|bytes| {
         ResolvedSource::new(
             presentation.id.clone(),
-            Arc::<[u8]>::from(proxy.png_bytes),
-            SourceFormatHint::Png,
+            Arc::<[u8]>::from(bytes.as_ref()),
+            SourceFormatHint::Svg,
         )
-        .map(|source| (source, proxy.width, proxy.height))
         .map_err(|error| error.to_string())
     })
-    .map_or_else(
-        WizardPreviewSource::Unavailable,
-        |(source, width, height)| WizardPreviewSource::Ready {
-            source,
-            width,
-            height,
-        },
-    )
+    .map_or_else(WizardPreviewSource::Unavailable, |source| {
+        WizardPreviewSource::Ready { source }
+    })
 }
 
 /// Returns the responsive wizard orientation for one actual allocated window width.
@@ -3223,8 +5596,19 @@ fn wizard_layout_orientation(width: i32) -> gtk::Orientation {
 }
 
 /// Renders one responsive wizard composition without changing navigation, draft, or focus state.
-fn apply_wizard_layout(layout: &gtk::Box, width: i32) {
+/// Returns the bounded responsive Presets grid column count for one wizard allocation.
+fn wizard_preset_columns(width: i32) -> u32 {
+    if width <= WIZARD_NARROW_MAX_WIDTH_PX {
+        1
+    } else {
+        3
+    }
+}
+
+/// Applies the shared wizard orientation and Presets grid count for one visible allocation.
+fn apply_wizard_layout(layout: &gtk::Box, gallery: &gtk::FlowBox, width: i32) {
     layout.set_orientation(wizard_layout_orientation(width));
+    gallery.set_max_children_per_line(wizard_preset_columns(width));
 }
 
 /// Tracks actual wizard allocation while the transient window is visible and reflows only on change.
@@ -3232,9 +5616,14 @@ fn apply_wizard_layout(layout: &gtk::Box, width: i32) {
 /// GTK default-size notifications do not describe ordinary interactive resizing. This bounded
 /// 100ms local tick reads the allocated `GtkWindow::width`, stops as soon as the wizard hides, and
 /// changes only the template-owned layout orientation without retaining document or scheduler state.
-fn reflow_wizard_layout_while_visible(window: &gtk::Window, layout: &gtk::Box) {
+fn reflow_wizard_layout_while_visible(
+    window: &gtk::Window,
+    layout: &gtk::Box,
+    gallery: &gtk::FlowBox,
+) {
     let window = window.clone();
     let layout = layout.clone();
+    let gallery = gallery.clone();
     let last_width = Rc::new(Cell::new(i32::MIN));
     let last_width_for_tick = Rc::clone(&last_width);
     glib::timeout_add_local(Duration::from_millis(100), move || {
@@ -3243,7 +5632,7 @@ fn reflow_wizard_layout_while_visible(window: &gtk::Window, layout: &gtk::Box) {
         }
         let width = window.width();
         if last_width_for_tick.replace(width) != width {
-            apply_wizard_layout(&layout, width);
+            apply_wizard_layout(&layout, &gallery, width);
         }
         glib::ControlFlow::Continue
     });
@@ -3261,23 +5650,16 @@ fn wizard_breadcrumb(target: InspectorTarget, category: Option<&str>) -> String 
     )
 }
 
-/// Returns the visible and therefore AT-SPI-surfaced Use action text for one catalog card.
-///
-/// The complete metadata name keeps repeated actions distinguishable without inventing a second
-/// identity. The Blueprint action column supplies the 255px gallery width required for wrapping.
-fn wizard_use_action_label(name: &str) -> String {
-    format!("Use {name} as is")
+/// Returns the artist-facing family name derived from recipe topology, never catalog grouping.
+fn wizard_family_label(family: PatternRecipeFamilyKind) -> &'static str {
+    match family {
+        PatternRecipeFamilyKind::Guides => "Guides",
+        PatternRecipeFamilyKind::Dispersion => "Dispersion",
+        PatternRecipeFamilyKind::Parametric => "Parametric curve",
+    }
 }
 
-/// Returns the visible and therefore AT-SPI-surfaced Edit action text for one catalog card.
-///
-/// Disabled buttons retain this exact unique text plus their available/unavailable description,
-/// so assistive technology does not need an ignored invisible label to identify the card action.
-fn wizard_edit_action_label(name: &str) -> String {
-    format!("Edit {name}")
-}
-
-/// Appends one accessible card for every entry in the shared layered catalog order.
+/// Appends one native exclusive selection card for every entry in the shared layered catalog order.
 ///
 /// Built-in resource thumbnails remain exact GResource SVGs for the authorized 17-item subset.
 /// Personal entries receive a canonical synthetic-source thumbnail instead. The
@@ -3286,63 +5668,51 @@ fn wizard_edit_action_label(name: &str) -> String {
 fn append_wizard_gallery(
     state: &Rc<RefCell<AppState>>,
     epoch: u64,
-    gallery: &gtk::Box,
+    gallery: &gtk::FlowBox,
     catalog: &LayeredPresetCatalog,
-) -> BTreeMap<String, components::ToniatorPatternWizardCard> {
+    current_pattern: &gtk::ToggleButton,
+) -> BTreeMap<String, gtk::ToggleButton> {
     let mut cards = BTreeMap::new();
     for entry in catalog.entries() {
+        let family = wizard_family_label(entry.preset.recipe.family_kind());
         let card = components::ToniatorPatternWizardCard::new();
         populate_wizard_card_thumbnail(&card, catalog, entry);
         card.set_name(&entry.preset.metadata.name);
         card.relate_accessible_name_to_card_title();
-        card.set_category(&entry.preset.metadata.category);
+        card.set_category(family);
         card.set_description(&entry.preset.metadata.description);
-        let use_action_label = wizard_use_action_label(&entry.preset.metadata.name);
-        let use_as_is = gtk::Button::with_label(&use_action_label);
-        use_as_is.update_property(&[
-            gtk::accessible::Property::Label(&use_action_label),
-            gtk::accessible::Property::Description(
-                "Materialize this recipe in the private draft and review it before Apply.",
-            ),
-        ]);
-        let state_for_use = Rc::clone(state);
-        let id_for_use = entry.preset.metadata.id.clone();
-        use_as_is
-            .connect_clicked(move |_| use_wizard_preset(&state_for_use, epoch, &id_for_use, false));
-        card.append_action(&use_as_is);
-        let edit_action_label = wizard_edit_action_label(&entry.preset.metadata.name);
-        let edit = gtk::Button::with_label(&edit_action_label);
-        let edit_available = wizard_edit_allowlisted(&entry.preset.metadata.id);
-        edit.set_sensitive(edit_available);
-        let explanation = if edit_available {
-            "Open this recipe’s capability-driven private edit page."
-        } else {
-            WIZARD_EDIT_UNAVAILABLE_EXPLANATION
-        };
-        edit.set_tooltip_text(Some(explanation));
-        edit.update_property(&[
-            gtk::accessible::Property::Label(&edit_action_label),
-            gtk::accessible::Property::Description(explanation),
-        ]);
-        let state_for_edit = Rc::clone(state);
-        let id_for_edit = entry.preset.metadata.id.clone();
-        edit.connect_clicked(move |_| {
-            use_wizard_preset(&state_for_edit, epoch, &id_for_edit, true)
-        });
-        card.append_action(&edit);
-        card.set_unavailable((!edit_available).then_some(explanation));
+        let card_description = format!(
+            "{} · {}. Select this preset, then choose Edit or Apply.",
+            family,
+            entry.preset.metadata.description.trim_end_matches('.')
+        );
         card.update_property(&[
-            gtk::accessible::Property::Label(&format!(
-                "{} pattern card",
-                entry.preset.metadata.name
-            )),
-            gtk::accessible::Property::Description(&format!(
-                "{} · {} · {}",
-                entry.preset.metadata.category, entry.preset.metadata.description, explanation
-            )),
+            gtk::accessible::Property::Label(&entry.preset.metadata.name),
+            gtk::accessible::Property::Description(&card_description),
         ]);
-        gallery.append(&card);
-        cards.insert(entry.preset.metadata.id.clone(), card);
+        let select = gtk::ToggleButton::new();
+        select.set_size_request(WIZARD_PRESET_CARD_WIDTH_PX, -1);
+        select.set_hexpand(false);
+        select.set_group(Some(current_pattern));
+        select.set_child(Some(&card));
+        select.set_tooltip_text(Some(&card_description));
+        select.update_property(&[
+            gtk::accessible::Property::Label(&entry.preset.metadata.name),
+            gtk::accessible::Property::Description(&card_description),
+        ]);
+        let state_for_select = Rc::clone(state);
+        let id_for_select = entry.preset.metadata.id.clone();
+        select.connect_toggled(move |select| {
+            if select.is_active() {
+                select_wizard_preset_candidate(
+                    &state_for_select,
+                    epoch,
+                    Some(id_for_select.clone()),
+                );
+            }
+        });
+        gallery.append(&select);
+        cards.insert(entry.preset.metadata.id.clone(), select);
     }
     cards
 }
@@ -3357,12 +5727,32 @@ fn wizard_card_is_current_candidate(card_id: &str, candidate: Option<&str>) -> b
 
 /// Updates visible and accessible candidate markers without changing any private draft content.
 fn update_wizard_candidate_cards(
-    cards: &BTreeMap<String, components::ToniatorPatternWizardCard>,
+    cards: &BTreeMap<String, gtk::ToggleButton>,
+    current_pattern: &gtk::ToggleButton,
     candidate: Option<&str>,
 ) {
+    current_pattern.set_active(candidate.is_none());
     for (id, card) in cards {
-        card.set_current_candidate(wizard_card_is_current_candidate(id, candidate));
+        card.set_active(wizard_card_is_current_candidate(id, candidate));
     }
+}
+
+/// Updates the selected Presets-card identity without changing the private draft or main history.
+fn select_wizard_preset_candidate(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    candidate: Option<String>,
+) {
+    let mut app_state = state.borrow_mut();
+    let Some(surface) = app_state
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    else {
+        return;
+    };
+    surface.candidate = candidate;
+    refresh_wizard_action_controls(surface);
 }
 
 /// Populates one static wizard-card thumbnail without changing renderer or ordinary SVG policy.
@@ -3426,20 +5816,16 @@ fn render_synthetic_catalog_thumbnail(
     texture_from_surface(result.raster()).ok()
 }
 
-/// Returns the temporary Gate 21B-2 stable-ID allowlist and no other behavioral selector.
-fn wizard_edit_allowlisted(id: &str) -> bool {
-    matches!(
-        id,
-        "curve-motif-rows" | "one-guide-lines" | "even-random-circles" | "round-spiral-line"
-    )
-}
-
 /// Materializes one selected catalog record in the captured private draft and opens Review or Edit.
 ///
 /// The target is the value captured at modal open, never the current sidebar selection. Failure
 /// leaves the previous private draft intact and visible; successful materialization schedules only
 /// the wizard scheduler and does not publish main history.
 fn use_wizard_preset(state: &Rc<RefCell<AppState>>, epoch: u64, id: &str, edit: bool) {
+    if let Err(error) = reset_wizard_private_draft(state, epoch) {
+        set_wizard_input_error(state, epoch, &error);
+        return;
+    }
     let result = {
         let app_state = state.borrow();
         let Some(surface) = app_state
@@ -3468,15 +5854,28 @@ fn use_wizard_preset(state: &Rc<RefCell<AppState>>, epoch: u64, id: &str, edit: 
                 .filter(|surface| surface.epoch == epoch)
             {
                 surface.candidate = Some(id.to_owned());
-                surface.materialized_candidate = Some(id.to_owned());
-                update_wizard_candidate_cards(&surface.gallery_cards, surface.candidate.as_deref());
+                surface.editing_started = true;
+                surface.starting_new = false;
+                update_wizard_candidate_cards(
+                    &surface.gallery_cards,
+                    &surface.current_pattern_card,
+                    surface.candidate.as_deref(),
+                );
                 surface.apply.set_sensitive(wizard_apply_enabled(
                     surface.draft.borrow().document(),
                     &surface.initial_document,
                 ));
             }
+            if let Err(error) = refresh_wizard_route(state, epoch) {
+                if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+                    surface.status.set_label(&format!(
+                        "Couldn’t open this pattern’s editing steps: {error}"
+                    ));
+                }
+                return;
+            }
             if edit {
-                show_wizard_edit_page(state, epoch);
+                show_wizard_current_route_page(state, epoch);
             } else {
                 show_wizard_review_page(state, epoch);
             }
@@ -3484,11 +5883,378 @@ fn use_wizard_preset(state: &Rc<RefCell<AppState>>, epoch: u64, id: &str, edit: 
         }
         Err(error) => {
             if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
-                surface.status.set_label(&format!(
-                    "Couldn’t use this recipe in the private draft: {error}"
-                ));
+                surface
+                    .status
+                    .set_label(&format!("Couldn’t load this pattern for editing: {error}"));
             }
         }
+    }
+}
+
+/// Resets the wizard's unpublished history to its captured main-history base.
+///
+/// The reset changes no document and leaves catalog selection as presentation-only state. It also
+/// clears incomplete frontend proposals because they cannot survive a different private base.
+fn reset_wizard_private_draft(state: &Rc<RefCell<AppState>>, epoch: u64) -> Result<(), String> {
+    let draft = {
+        let app_state = state.borrow();
+        let workspace = app_state
+            .workspace
+            .as_ref()
+            .ok_or_else(|| "No workspace is open.".to_owned())?;
+        Rc::new(RefCell::new(DocumentHistory::new_draft(&workspace.history)))
+    };
+    let mut app_state = state.borrow_mut();
+    let surface = app_state
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+        .ok_or_else(|| "Pattern Wizard is no longer open.".to_owned())?;
+    surface.draft = draft;
+    surface.editing_started = false;
+    surface.starting_new = false;
+    surface.route.clear();
+    surface.route_index = 0;
+    surface.transition = None;
+    surface.site_use_filter = None;
+    surface.ordered_output_focus = None;
+    Ok(())
+}
+
+/// Applies one ID-free family recipe as exactly one private command at the captured wizard scope.
+///
+/// # Errors
+///
+/// Returns the ordinary stale, validation, or materialization diagnostic without changing the
+/// private history when the target's current definition cannot accept the replacement.
+fn apply_wizard_recipe(
+    history: &mut DocumentHistory,
+    target: InspectorTarget,
+    recipe: PatternDefinitionRecipe,
+) -> Result<(), String> {
+    let base = history.document().pattern_settings().clone();
+    let command = match target {
+        InspectorTarget::DocumentAll => {
+            let base_definition = history
+                .document()
+                .pattern_definition_bundles()
+                .iter()
+                .find(|bundle| bundle.definition.id == base.definition_id)
+                .map(|bundle| bundle.definition.clone())
+                .ok_or_else(|| "The all-channel pattern is missing.".to_owned())?;
+            DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
+                base,
+                base_definition,
+                recipe,
+            }
+        }
+        InspectorTarget::Channel(channel_id) => {
+            let base_definition = history
+                .document()
+                .pattern_definition_for(channel_id)
+                .cloned()
+                .ok_or_else(|| "The selected channel is no longer available.".to_owned())?;
+            DocumentCommand::ReplaceChannelPatternDefinitionOverrideRecipe {
+                base,
+                channel_id,
+                base_definition,
+                recipe,
+            }
+        }
+    };
+    history
+        .apply(&command)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Builds one scope-correct guide-count replacement from reconstructed recipe authority.
+///
+/// Document-wide edits replace the private base definition in place so compatible channel deltas
+/// survive. Named-channel edits materialize a selected copy, preserving the established fresh-ID
+/// and fresh-resource boundary while the domain prunes only incompatible intent.
+///
+/// # Errors
+///
+/// Returns a stale target, reconstruction, topology, or recipe validation diagnostic without
+/// allocating IDs or changing history. `Ok(None)` identifies an exact no-op.
+#[cfg(test)]
+fn wizard_guide_count_command(
+    document: &Document,
+    target: InspectorTarget,
+    count: u8,
+) -> Result<Option<DocumentCommand>, String> {
+    let (_, recipe, _) = wizard_route_for_document(document, target)?;
+    let replacement = recipe
+        .with_guide_family_dimension_count(count)
+        .map_err(|error| error.to_string())?;
+    wizard_reconstructed_recipe_replacement_command(document, target, replacement)
+}
+
+/// Builds the scope-correct replacement command for one complete reconstructed recipe edit.
+///
+/// # Errors
+///
+/// Returns a stale definition, reconstruction, or scope diagnostic without allocating IDs or
+/// changing history. `Ok(None)` identifies a structurally exact no-op.
+fn wizard_reconstructed_recipe_replacement_command(
+    document: &Document,
+    target: InspectorTarget,
+    replacement: PatternDefinitionRecipe,
+) -> Result<Option<DocumentCommand>, String> {
+    let definition_id = match target {
+        InspectorTarget::DocumentAll => document.pattern_settings().definition_id,
+        InspectorTarget::Channel(channel_id) => {
+            document
+                .effective_channel_pattern(channel_id)
+                .map_err(|error| error.to_string())?
+                .definition_id
+        }
+    };
+    let base_definition = document
+        .pattern_definition_bundles()
+        .iter()
+        .find(|bundle| bundle.definition.id == definition_id)
+        .map(|bundle| bundle.definition.clone())
+        .ok_or_else(|| "The active guide pattern is no longer available.".to_owned())?;
+    let recipe = document
+        .reconstruct_pattern_definition_recipe(definition_id)
+        .map_err(|error| error.to_string())?;
+    if replacement == recipe {
+        return Ok(None);
+    }
+    Ok(Some(match target {
+        InspectorTarget::DocumentAll => DocumentCommand::ReplaceSharedPatternDefinitionRecipe {
+            definition_id,
+            base_definition,
+            recipe: replacement,
+        },
+        InspectorTarget::Channel(channel_id) => {
+            DocumentCommand::ReplaceChannelPatternDefinitionOverrideRecipe {
+                base: document.pattern_settings().clone(),
+                channel_id,
+                base_definition,
+                recipe: replacement,
+            }
+        }
+    }))
+}
+
+/// Applies one complete recipe transformation as exactly one private wizard-history entry.
+///
+/// The callback receives only the current reconstructed ID-free recipe. On success this function
+/// uses the captured ALL or named scope, refreshes the stable route, and schedules a neutral
+/// preview; it never publishes main history.
+fn commit_wizard_recipe_transform(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    failure_context: &str,
+    transform: impl FnOnce(&PatternDefinitionRecipe) -> Result<PatternDefinitionRecipe, String>,
+) {
+    let result = (|| -> Result<bool, String> {
+        let app_state = state.borrow();
+        let surface = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+            .ok_or_else(|| "Pattern Wizard is no longer open.".to_owned())?;
+        let mut draft = surface.draft.borrow_mut();
+        let (_, recipe, _) = wizard_route_for_document(draft.document(), surface.target)?;
+        let replacement = transform(&recipe)?;
+        let Some(command) = wizard_reconstructed_recipe_replacement_command(
+            draft.document(),
+            surface.target,
+            replacement,
+        )?
+        else {
+            return Ok(false);
+        };
+        draft.apply(&command).map_err(|error| error.to_string())?;
+        Ok(true)
+    })();
+    match result {
+        Ok(true) => {
+            if let Err(error) = refresh_wizard_route(state, epoch) {
+                set_wizard_input_error(
+                    state,
+                    epoch,
+                    &format!("Couldn’t update the wizard steps: {error}"),
+                );
+                return;
+            }
+            show_wizard_current_route_page(state, epoch);
+            submit_wizard_preview(state, epoch);
+        }
+        Ok(false) => {
+            if let Some(surface) = state
+                .borrow_mut()
+                .pattern_wizard
+                .as_mut()
+                .filter(|surface| surface.epoch == epoch)
+            {
+                surface.recipe_control_focus = None;
+            }
+        }
+        Err(error) => {
+            if let Some(surface) = state
+                .borrow_mut()
+                .pattern_wizard
+                .as_mut()
+                .filter(|surface| surface.epoch == epoch)
+            {
+                surface.recipe_control_focus = None;
+            }
+            set_wizard_input_error(
+                state,
+                epoch,
+                &format!("Couldn’t {failure_context}: {error}"),
+            );
+        }
+    }
+}
+
+/// Commits one valid guide-count choice as exactly one private wizard-history entry.
+///
+/// The current card and preview are rebuilt only after domain publication succeeds; a rejected
+/// topology leaves the invoking control and both parent histories unchanged.
+fn commit_wizard_guide_count(state: &Rc<RefCell<AppState>>, epoch: u64, count: u8) {
+    commit_wizard_recipe_transform(state, epoch, "change the number of guides", move |recipe| {
+        recipe
+            .with_guide_family_dimension_count(count)
+            .map_err(|error| error.to_string())
+    });
+}
+
+/// Opens the fixed-card workflow from the selected current pattern or immutable catalog record.
+fn wizard_edit_selection(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let candidate = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+        .and_then(|surface| surface.candidate.clone());
+    if let Err(error) = reset_wizard_private_draft(state, epoch) {
+        set_wizard_input_error(state, epoch, &error);
+        return;
+    }
+    if let Some(id) = candidate {
+        use_wizard_preset(state, epoch, &id, true);
+        return;
+    }
+    let result = {
+        let app_state = state.borrow();
+        let surface = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch);
+        surface.map(|surface| {
+            wizard_route_for_document(surface.draft.borrow().document(), surface.target)
+        })
+    };
+    match result {
+        Some(Ok((_, _, route))) => {
+            if let Some(surface) = state
+                .borrow_mut()
+                .pattern_wizard
+                .as_mut()
+                .filter(|surface| surface.epoch == epoch)
+            {
+                surface.route = route;
+                surface.route_index = 0;
+                surface.editing_started = true;
+                surface.starting_new = false;
+                refresh_wizard_action_controls(surface);
+            }
+            show_wizard_current_route_page(state, epoch);
+        }
+        Some(Err(error)) => set_wizard_input_error(state, epoch, &error),
+        None => {}
+    }
+}
+
+/// Starts a new private recipe at Pattern Family without selecting a family implicitly.
+fn wizard_start_new_pattern(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    if let Err(error) = reset_wizard_private_draft(state, epoch) {
+        set_wizard_input_error(state, epoch, &error);
+        return;
+    }
+    if let Some(surface) = state
+        .borrow_mut()
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.editing_started = true;
+        surface.starting_new = true;
+        surface.candidate = None;
+        surface.current_pattern_card.set_active(false);
+        for card in surface.gallery_cards.values() {
+            card.set_active(false);
+        }
+        surface.route = vec![
+            WizardRoutePage::PatternFamily,
+            WizardRoutePage::FamilySettings,
+            WizardRoutePage::SiteGeneration,
+            WizardRoutePage::Rendering,
+            WizardRoutePage::Review,
+        ];
+        surface.route_index = 0;
+        refresh_wizard_action_controls(surface);
+    }
+    show_wizard_current_route_page(state, epoch);
+}
+
+/// Materializes one explicitly selected domain family starter as a single private history entry.
+fn wizard_select_family(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    family: PatternRecipeFamilyKind,
+) {
+    let already_selected = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+        .and_then(|surface| {
+            (!wizard_new_family_is_unselected(
+                surface.starting_new,
+                surface.draft.borrow().document(),
+                &surface.initial_document,
+            ))
+            .then(|| {
+                wizard_route_for_document(surface.draft.borrow().document(), surface.target).ok()
+            })
+            .flatten()
+        })
+        .is_some_and(|(_, recipe, _)| recipe.family_kind() == family);
+    if already_selected {
+        return;
+    }
+    let result = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        apply_wizard_recipe(
+            &mut surface.draft.borrow_mut(),
+            surface.target,
+            PatternDefinitionRecipe::starter_for_family(family),
+        )
+    };
+    match result {
+        Ok(()) => {
+            if let Err(error) = refresh_wizard_route(state, epoch) {
+                set_wizard_input_error(state, epoch, &error);
+                return;
+            }
+            show_wizard_current_route_page(state, epoch);
+            submit_wizard_preview(state, epoch);
+        }
+        Err(error) => set_wizard_input_error(state, epoch, &error),
     }
 }
 
@@ -3507,9 +6273,199 @@ fn wizard_apply_enabled(draft: &Document, initial_document: &Document) -> bool {
     draft != initial_document
 }
 
+/// Reports whether the private draft is publishable from the current Review page.
+///
+/// This keeps the shell affordance aligned with terminal publication: a changed draft becomes
+/// publishable only after the captured route reaches Review, no frontend proposal is incomplete,
+/// and the domain can reconstruct the target's current recipe.
+fn wizard_apply_is_ready(surface: &PatternWizardSurface, current: WizardRoutePage) -> bool {
+    wizard_apply_admission(
+        surface.draft.borrow().document(),
+        &surface.initial_document,
+        surface.target,
+        current,
+        surface.transition.is_some() || surface.site_use_filter.is_some(),
+    )
+    .is_ok()
+}
+
+/// Returns active current values for the captured scope without creating a second descriptor model.
+fn wizard_active_values(
+    document: &Document,
+    target: InspectorTarget,
+    projection: &PatternCapabilityProjection,
+) -> Vec<PropertyCurrentValue> {
+    document
+        .property_values()
+        .into_iter()
+        .filter(|value| projection.active_controls.contains(&value.descriptor))
+        .filter(|value| match target {
+            InspectorTarget::DocumentAll => !matches!(
+                value.descriptor.target,
+                PropertyTarget::Channel(_) | PropertyTarget::ChannelOutput(_, _)
+            ),
+            InspectorTarget::Channel(channel_id) => !matches!(
+                value.descriptor.target,
+                PropertyTarget::Channel(other) | PropertyTarget::ChannelOutput(other, _) if other != channel_id
+            ),
+        })
+        .collect()
+}
+
+/// Reconstructs the current scoped definition before deriving its adaptive private wizard route.
+///
+/// # Errors
+///
+/// Returns capability or reconstruction diagnostics without mutating the private draft, route, or
+/// main history. This is the route's sole recipe authority.
+fn wizard_route_for_document(
+    document: &Document,
+    target: InspectorTarget,
+) -> Result<
+    (
+        PatternCapabilityProjection,
+        PatternDefinitionRecipe,
+        Vec<WizardRoutePage>,
+    ),
+    String,
+> {
+    let scope = match target {
+        InspectorTarget::DocumentAll => PatternCapabilityScope::DocumentBase,
+        InspectorTarget::Channel(channel_id) => PatternCapabilityScope::Channel(channel_id),
+    };
+    let projection = document
+        .pattern_capabilities(scope)
+        .map_err(|error| error.to_string())?;
+    let recipe = document
+        .reconstruct_pattern_definition_recipe(projection.definition_id)
+        .map_err(|error| error.to_string())?;
+    let route = wizard_route_plan(&projection, &recipe);
+    Ok((projection, recipe, route))
+}
+
+/// Updates private-history affordances and Next/Review vocabulary from the current route state.
+fn refresh_wizard_action_controls(surface: &PatternWizardSurface) {
+    if surface.route.is_empty() {
+        surface.back.set_visible(false);
+        surface.review.set_visible(false);
+        surface.undo.set_visible(false);
+        surface.redo.set_visible(false);
+        surface.edit.set_visible(true);
+        surface.new.set_visible(true);
+        surface.apply.set_visible(true);
+        surface.apply.set_sensitive(surface.candidate.is_some());
+        return;
+    }
+    surface.back.set_visible(true);
+    surface.review.set_visible(true);
+    surface.undo.set_visible(true);
+    surface.redo.set_visible(true);
+    surface.edit.set_visible(false);
+    surface.new.set_visible(false);
+    surface.apply.set_visible(true);
+    let can_undo = surface.draft.borrow().can_undo();
+    let can_redo = surface.draft.borrow().can_redo();
+    surface.undo.set_sensitive(can_undo);
+    surface.redo.set_sensitive(can_redo);
+    let current = surface
+        .route
+        .get(surface.route_index)
+        .copied()
+        .unwrap_or(WizardRoutePage::Review);
+    let new_family_required = wizard_new_family_is_unselected(
+        surface.starting_new,
+        surface.draft.borrow().document(),
+        &surface.initial_document,
+    ) && current == WizardRoutePage::PatternFamily;
+    surface
+        .apply
+        .set_sensitive(wizard_apply_is_ready(surface, current));
+    let is_last_edit_page = current != WizardRoutePage::Review
+        && surface.route_index.saturating_add(2) == surface.route.len();
+    let (label, description) = if current == WizardRoutePage::Review {
+        ("_Review", "Review is the current wizard page.")
+    } else if is_last_edit_page {
+        ("_Review", "Check the pattern settings and open Review.")
+    } else {
+        ("_Next", "Continue to the next pattern setup step.")
+    };
+    surface.review.set_label(label);
+    surface.review.set_tooltip_text(Some(description));
+    surface.review.update_property(&[
+        gtk::accessible::Property::Label(label.trim_start_matches('_')),
+        gtk::accessible::Property::Description(description),
+    ]);
+    surface.undo.update_property(&[
+        gtk::accessible::Property::Label("Undo"),
+        gtk::accessible::Property::Description(
+            "Undo the latest change made in this wizard. The document is unchanged until Apply.",
+        ),
+    ]);
+    surface.redo.update_property(&[
+        gtk::accessible::Property::Label("Redo"),
+        gtk::accessible::Property::Description(
+            "Redo the latest change made in this wizard. The document is unchanged until Apply.",
+        ),
+    ]);
+    if new_family_required || surface.transition.is_some() || surface.site_use_filter.is_some() {
+        surface.review.set_sensitive(false);
+        surface.apply.set_sensitive(false);
+    }
+}
+
+/// Recomputes the captured modal route after a private structural transition.
+fn refresh_wizard_route(state: &Rc<RefCell<AppState>>, epoch: u64) -> Result<(), String> {
+    let (target, document, old_route, old_index) = {
+        let app_state = state.borrow();
+        let surface = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+            .ok_or_else(|| "Pattern Wizard is no longer open.".to_owned())?;
+        (
+            surface.target,
+            surface.draft.borrow().document().clone(),
+            surface.route.clone(),
+            surface.route_index,
+        )
+    };
+    let (_, _, route) = wizard_route_for_document(&document, target)?;
+    let (route, route_index) = recompute_wizard_route(&old_route, old_index, route);
+    if let Some(surface) = state
+        .borrow_mut()
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.route = route;
+        surface.route_index = route_index;
+        refresh_wizard_action_controls(surface);
+    }
+    Ok(())
+}
+
 /// Shows the neutral Gallery page without discarding the private draft or its last successful preview.
 fn show_wizard_gallery_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
-    let (page, breadcrumb, status, candidate, catalog, target, cards, back, review, materialized) = {
+    invalidate_pending_wizard_dropdown_action(state, epoch);
+    let (
+        page,
+        breadcrumb,
+        status,
+        candidate,
+        catalog,
+        target,
+        cards,
+        current_pattern,
+        back,
+        review,
+        edit,
+        new,
+        undo,
+        redo,
+        apply,
+        cancel,
+        starting_new,
+    ) = {
         let app_state = state.borrow();
         let Some(surface) = app_state
             .pattern_wizard
@@ -3526,48 +6482,531 @@ fn show_wizard_gallery_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
             app_state.catalog.clone(),
             surface.target,
             surface.gallery_cards.clone(),
+            surface.current_pattern_card.clone(),
             surface.back.clone(),
             surface.review.clone(),
-            surface.materialized_candidate.is_some(),
+            surface.edit.clone(),
+            surface.new.clone(),
+            surface.undo.clone(),
+            surface.redo.clone(),
+            surface.apply.clone(),
+            surface.cancel.clone(),
+            surface.starting_new,
         )
     };
     clear_wizard_page(&page);
-    apply_wizard_navigation_sensitivity(
-        &back,
-        &review,
-        WizardNavigationPage::Gallery,
-        materialized,
-    );
-    update_wizard_candidate_cards(&cards, candidate.as_deref());
+    if let Some(surface) = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.gallery_panel.set_visible(true);
+        surface.page_panel.set_visible(false);
+    }
+    back.set_visible(false);
+    review.set_visible(false);
+    undo.set_visible(false);
+    redo.set_visible(false);
+    edit.set_visible(true);
+    new.set_visible(true);
+    apply.set_visible(true);
+    apply.set_sensitive(candidate.is_some());
+    if let Some(actions) = apply.parent().and_downcast::<gtk::Box>() {
+        actions.reorder_child_after(&apply, None::<&gtk::Widget>);
+        actions.reorder_child_after(&cancel, Some(&apply));
+        actions.reorder_child_after(&edit, Some(&cancel));
+        actions.reorder_child_after(&new, Some(&edit));
+    }
+    if starting_new {
+        current_pattern.set_active(false);
+        for card in cards.values() {
+            card.set_active(false);
+        }
+    } else {
+        update_wizard_candidate_cards(&cards, &current_pattern, candidate.as_deref());
+    }
     if let Some(entry) = candidate.as_deref().and_then(|id| catalog.find(id)) {
         breadcrumb.set_label(&wizard_breadcrumb(
             target,
-            Some(&entry.preset.metadata.category),
+            Some(wizard_family_label(entry.preset.recipe.family_kind())),
         ));
         status.set_label(&format!(
-            "{} is selected. Use as is keeps this choice private until Review and Apply.",
+            "{} is selected. Edit opens every setting; Apply uses the preset immediately.",
             entry.preset.metadata.name
         ));
     } else {
         breadcrumb.set_label(&wizard_breadcrumb(target, None));
-        status.set_label("Choose a pattern. Nothing changes until Apply.");
+        status.set_label(
+            "Current Pattern is selected. Choose Edit to adjust it, or New to start a family.",
+        );
+    }
+}
+
+/// Invalidates any dropdown callback whose originating widget is about to be replaced.
+fn invalidate_pending_wizard_dropdown_action(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    if let Some(surface) = state
+        .borrow_mut()
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.dropdown_action_generation = surface.dropdown_action_generation.wrapping_add(1);
+    }
+}
+
+/// Presents the currently selected adaptive page, falling back to Review only for its final route item.
+fn show_wizard_current_route_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let current = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+        .and_then(|surface| surface.route.get(surface.route_index).copied());
+    match current {
+        Some(WizardRoutePage::Review) => show_wizard_review_page(state, epoch),
+        Some(_) => show_wizard_route_page(state, epoch),
+        None => show_wizard_gallery_page(state, epoch),
+    }
+}
+
+/// Scrolls a newly entered wizard card to its preview-adjacent first setting.
+///
+/// Same-card descriptor rebuilds deliberately do not call this helper, so changing a setting deep
+/// in a card retains the artist's reading position while Previous, Next, and Review start at top.
+fn reset_wizard_page_scroll(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    if let Some(surface) = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.page_scroll.vadjustment().set_value(0.0);
+    }
+}
+
+/// Moves Back through the stable route without undoing a private draft command.
+fn wizard_go_back(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let destination = {
+        let mut app_state = state.borrow_mut();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        if surface.route_index == 0 {
+            None
+        } else {
+            surface.route_index -= 1;
+            refresh_wizard_action_controls(surface);
+            Some(())
+        }
+    };
+    if destination.is_some() {
+        reset_wizard_page_scroll(state, epoch);
+        show_wizard_current_route_page(state, epoch);
+        submit_wizard_preview(state, epoch);
+    } else {
+        show_wizard_gallery_page(state, epoch);
+        submit_wizard_preview(state, epoch);
+    }
+}
+
+/// Advances the stable route, validating reconstruction when entering Review.
+fn wizard_advance_route(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    if state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+        .is_some_and(|surface| {
+            wizard_new_family_is_unselected(
+                surface.starting_new,
+                surface.draft.borrow().document(),
+                &surface.initial_document,
+            ) && surface.route.get(surface.route_index) == Some(&WizardRoutePage::PatternFamily)
+        })
+    {
+        set_wizard_input_error(state, epoch, "Choose a Pattern Family before continuing.");
+        return;
+    }
+    if state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+        .is_some_and(|surface| surface.transition.is_some() || surface.site_use_filter.is_some())
+    {
+        set_wizard_input_error(
+            state,
+            epoch,
+            "Finish or cancel the pending choice before continuing.",
+        );
+        return;
+    }
+    let entering_review = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        surface
+            .route
+            .get(surface.route_index.saturating_add(1))
+            .is_some_and(|page| *page == WizardRoutePage::Review)
+    };
+    if entering_review && !wizard_review_is_valid(state, epoch) {
+        return;
+    }
+    let advanced = {
+        let mut app_state = state.borrow_mut();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        if surface.route_index.saturating_add(1) < surface.route.len() {
+            surface.route_index += 1;
+            refresh_wizard_action_controls(surface);
+            true
+        } else {
+            false
+        }
+    };
+    if advanced {
+        reset_wizard_page_scroll(state, epoch);
+        show_wizard_current_route_page(state, epoch);
+        submit_wizard_preview(state, epoch);
+    }
+}
+
+/// Undoes exactly one private history entry, then recomputes and redraws the adaptive route.
+fn wizard_undo(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let result = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        surface
+            .draft
+            .borrow_mut()
+            .undo()
+            .map_err(|error| error.to_string())
+    };
+    match result {
+        Ok(Some(_)) => {
+            clear_wizard_transition(state, epoch);
+            clear_wizard_site_use_filter(state, epoch);
+            if let Err(error) = refresh_wizard_route(state, epoch) {
+                set_wizard_input_error(
+                    state,
+                    epoch,
+                    &format!("Couldn’t restore the wizard step: {error}"),
+                );
+                return;
+            }
+            show_wizard_current_route_page(state, epoch);
+            submit_wizard_preview(state, epoch);
+        }
+        Ok(None) => {}
+        Err(error) => set_wizard_input_error(
+            state,
+            epoch,
+            &format!("Couldn’t undo the wizard change: {error}"),
+        ),
+    }
+}
+
+/// Redoes exactly one private history entry, then recomputes and redraws the adaptive route.
+fn wizard_redo(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let result = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        surface
+            .draft
+            .borrow_mut()
+            .redo()
+            .map_err(|error| error.to_string())
+    };
+    match result {
+        Ok(Some(_)) => {
+            clear_wizard_transition(state, epoch);
+            clear_wizard_site_use_filter(state, epoch);
+            if let Err(error) = refresh_wizard_route(state, epoch) {
+                set_wizard_input_error(
+                    state,
+                    epoch,
+                    &format!("Couldn’t restore the wizard step: {error}"),
+                );
+                return;
+            }
+            show_wizard_current_route_page(state, epoch);
+            submit_wizard_preview(state, epoch);
+        }
+        Ok(None) => {}
+        Err(error) => set_wizard_input_error(
+            state,
+            epoch,
+            &format!("Couldn’t redo the wizard change: {error}"),
+        ),
+    }
+}
+
+/// Validates Review's reconstructed private recipe and rejects an unchanged draft.
+///
+/// # Errors
+///
+/// Returns a no-op or domain reconstruction diagnostic without mutating either history.
+fn validate_wizard_review_recipe(
+    document: &Document,
+    initial_document: &Document,
+    target: InspectorTarget,
+) -> Result<(), String> {
+    if !wizard_apply_enabled(document, initial_document) {
+        return Err("No pattern settings have changed, so Review is unavailable.".to_owned());
+    }
+    wizard_route_for_document(document, target).map(|_| ())
+}
+
+/// Confirms that Review has a reconstructed, valid, non-no-op private recipe.
+fn wizard_review_is_valid(state: &Rc<RefCell<AppState>>, epoch: u64) -> bool {
+    let result = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return false;
+        };
+        validate_wizard_review_recipe(
+            surface.draft.borrow().document(),
+            &surface.initial_document,
+            surface.target,
+        )
+    };
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            set_wizard_input_error(state, epoch, &error);
+            false
+        }
+    }
+}
+
+/// Appends one accessible label/value row to the read-only Review summary.
+fn append_wizard_review_row(page: &gtk::Box, label_text: &str, value_text: &str) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let label = gtk::Label::new(Some(label_text));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let value = gtk::Label::new(Some(value_text));
+    value.set_xalign(1.0);
+    value.set_wrap(true);
+    value.update_property(&[
+        gtk::accessible::Property::Label(value_text),
+        gtk::accessible::Property::Description(&format!("{label_text}: {value_text}")),
+    ]);
+    row.append(&label);
+    row.append(&value);
+    page.append(&row);
+}
+
+/// Formats one current descriptor value with artist numeric and document-resolved reference vocabulary.
+///
+/// Pattern size is converted from persisted density by the same projection used on its editing
+/// card, so Review never exposes a contradictory authority-space number.
+fn wizard_review_value_text(
+    document: &Document,
+    descriptor: &PropertyDescriptor,
+    value: &PropertyCurrentValueKind,
+) -> String {
+    match value {
+        PropertyCurrentValueKind::FiniteF64(value) => {
+            artist_numeric_value(document, descriptor.field, *value)
+                .map(|value| format!("{value:.4}"))
+                .unwrap_or_else(|_| format!("{value:.4}"))
+        }
+        PropertyCurrentValueKind::Boolean(value) => if *value { "On" } else { "Off" }.to_owned(),
+        PropertyCurrentValueKind::Reference(reference) => {
+            wizard_reference_label_for_target(document, descriptor.target, reference)
+        }
+        PropertyCurrentValueKind::ReferenceCollection(references) => references
+            .iter()
+            .map(|reference| {
+                wizard_reference_label_for_target(document, descriptor.target, reference)
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => current_display(value),
+    }
+}
+
+/// Returns a concise family summary derived only from the reconstructed recipe and projection.
+fn wizard_review_family_text(
+    recipe: &PatternDefinitionRecipe,
+    projection: &PatternCapabilityProjection,
+) -> String {
+    let family = wizard_family_label(recipe.family_kind()).to_owned();
+    match &projection.family {
+        PatternFamilyCapabilityProjection::Grid(grid) => {
+            format!(
+                "{family} · {} guide direction{}",
+                grid.guides.count,
+                if grid.guides.count == 1 { "" } else { "s" }
+            )
+        }
+        PatternFamilyCapabilityProjection::Dispersion(_)
+        | PatternFamilyCapabilityProjection::Parametric(_) => family,
+    }
+}
+
+/// Summarizes the selected site construction without obscuring locked guide dependencies.
+fn wizard_review_site_text(recipe: &PatternDefinitionRecipe) -> String {
+    if recipe.has_locked_triangular_intersection_layout()
+        && recipe.site_generation_kind() == PatternRecipeSiteGenerationKind::GuideIntersections
+    {
+        "Guide intersections · Guides 1–3".to_owned()
+    } else {
+        wizard_site_generation_label(recipe.site_generation_kind()).to_owned()
+    }
+}
+
+/// Appends the workflow chain and every active setting in the same semantic card order used to edit it.
+fn append_wizard_review_summary(
+    page: &gtk::Box,
+    document: &Document,
+    target: InspectorTarget,
+    projection: &PatternCapabilityProjection,
+    recipe: &PatternDefinitionRecipe,
+) {
+    append_wizard_control_section(
+        page,
+        WizardControlSection::ReviewSummary,
+        &projection.family,
+    );
+    append_wizard_review_row(
+        page,
+        "Family",
+        &wizard_review_family_text(recipe, projection),
+    );
+    if recipe.has_locked_triangular_intersection_layout() {
+        append_wizard_review_row(
+            page,
+            "Guide layout",
+            "Locked 0° / 60° / 120° · equal spacing · shared phase",
+        );
+    }
+    append_wizard_review_row(page, "Sites", &wizard_review_site_text(recipe));
+    let outputs = recipe
+        .construction_kinds()
+        .map(|outputs| {
+            outputs
+                .into_iter()
+                .enumerate()
+                .map(|(index, kind)| match kind {
+                    PatternRecipeConstructionKind::Marks => "Marks".to_owned(),
+                    PatternRecipeConstructionKind::Connections => recipe
+                        .connection_method_kind(index)
+                        .ok()
+                        .flatten()
+                        .map(|method| {
+                            format!("Connections · {}", wizard_connection_method_label(method))
+                        })
+                        .unwrap_or_else(|| "Connections".to_owned()),
+                    PatternRecipeConstructionKind::Regions => recipe
+                        .region_method_kind(index)
+                        .ok()
+                        .flatten()
+                        .map(|method| format!("Regions · {}", wizard_region_method_label(method)))
+                        .unwrap_or_else(|| "Regions".to_owned()),
+                })
+                .collect::<Vec<_>>()
+                .join(" → ")
+        })
+        .unwrap_or_else(|_| "Unavailable".to_owned());
+    append_wizard_review_row(page, "Rendering", &outputs);
+
+    let mut values = wizard_active_values(document, target, projection);
+    values.retain(|value| {
+        value.descriptor.field != PropertyFieldId::DefinitionSelection
+            && !wizard_descriptor_is_locked_triangular(recipe, value.descriptor.field)
+    });
+    for route_page in [
+        WizardRoutePage::FamilySettings,
+        WizardRoutePage::SiteGeneration,
+        WizardRoutePage::Rendering,
+    ] {
+        let mut page_values = values
+            .iter()
+            .filter(|value| {
+                fixed_wizard_page_for_descriptor(&value.descriptor, &projection.family)
+                    == route_page
+            })
+            .collect::<Vec<_>>();
+        page_values.sort_by_key(|value| wizard_control_section(route_page, value.descriptor.field));
+        let mut current_section = None;
+        for value in page_values {
+            let section = wizard_control_section(route_page, value.descriptor.field);
+            if current_section != Some(section) {
+                append_wizard_control_section(page, section, &projection.family);
+                current_section = Some(section);
+            }
+            append_wizard_review_row(
+                page,
+                &wizard_descriptor_label(document, &value.descriptor),
+                &wizard_review_value_text(document, &value.descriptor, &value.value),
+            );
+        }
     }
 }
 
 /// Shows Review from the cloned history and enables Apply only for a valid non-no-op draft.
 fn show_wizard_review_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
-    let (
-        page,
-        breadcrumb,
-        status,
-        back,
-        review,
-        apply,
-        materialized_candidate,
-        catalog,
-        target,
-        dirty,
-    ) = {
+    invalidate_pending_wizard_dropdown_action(state, epoch);
+    if !wizard_review_is_valid(state, epoch) {
+        return;
+    }
+    if let Some(surface) = state
+        .borrow_mut()
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.route_index = surface
+            .route
+            .iter()
+            .position(|page| *page == WizardRoutePage::Review)
+            .unwrap_or(surface.route_index);
+        refresh_wizard_action_controls(surface);
+    }
+    if let Some(surface) = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.gallery_panel.set_visible(false);
+        surface.page_panel.set_visible(true);
+    }
+    let (page, breadcrumb, status, back, review, apply, target, document, dirty) = {
         let app_state = state.borrow();
         let Some(surface) = app_state
             .pattern_wizard
@@ -3583,15 +7022,17 @@ fn show_wizard_review_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
             surface.back.clone(),
             surface.review.clone(),
             surface.apply.clone(),
-            surface.materialized_candidate.clone(),
-            app_state.catalog.clone(),
             surface.target,
-            wizard_apply_enabled(surface.draft.borrow().document(), &surface.initial_document),
+            surface.draft.borrow().document().clone(),
+            wizard_apply_is_ready(
+                surface,
+                surface
+                    .route
+                    .get(surface.route_index)
+                    .copied()
+                    .unwrap_or(WizardRoutePage::Review),
+            ),
         )
-    };
-    let Some(candidate) = materialized_candidate else {
-        show_wizard_gallery_page(state, epoch);
-        return;
     };
     clear_wizard_page(&page);
     apply_wizard_navigation_sensitivity(&back, &review, WizardNavigationPage::Review, true);
@@ -3599,44 +7040,45 @@ fn show_wizard_review_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
     heading.add_css_class("heading");
     heading.set_xalign(0.0);
     page.append(&heading);
-    let Some(entry) = catalog.find(&candidate) else {
-        let no_choice = gtk::Label::new(Some("Choose a gallery card before review."));
-        no_choice.set_xalign(0.0);
-        no_choice.set_wrap(true);
-        page.append(&no_choice);
-        apply.set_sensitive(false);
-        status.set_label("Apply is unavailable until a valid private draft changes the document.");
-        return;
-    };
-    breadcrumb.set_label(&wizard_breadcrumb(
-        target,
-        Some(&entry.preset.metadata.category),
-    ));
+    breadcrumb.set_label(&wizard_breadcrumb(target, None));
     let review = gtk::Label::new(Some(&format!(
-        "{} will publish as one undoable {} change. Cancel discards this private draft.",
-        entry.preset.metadata.name,
+        "Apply will make one undoable {} change. Cancel leaves the document unchanged.",
         match target {
-            InspectorTarget::DocumentAll => "ALL/base-pattern",
-            InspectorTarget::Channel(_) => "selected-channel",
+            InspectorTarget::DocumentAll => "all-channel pattern",
+            InspectorTarget::Channel(_) => "selected-channel pattern",
         }
     )));
     review.set_xalign(0.0);
     review.set_wrap(true);
     page.append(&review);
+    match wizard_route_for_document(&document, target) {
+        Ok((projection, recipe, _)) => {
+            append_wizard_review_summary(&page, &document, target, &projection, &recipe);
+        }
+        Err(error) => {
+            status.set_label(&format!(
+                "Couldn’t summarize these pattern settings: {error}"
+            ));
+            apply.set_sensitive(false);
+            return;
+        }
+    }
     apply.set_sensitive(dirty);
     status.set_label(if dirty {
-        "Review ready. Apply is available even while a newer private preview is rendering."
+        "Review ready. You can Apply while a newer preview is still rendering."
     } else {
-        "This private draft matches the document, so Apply is unavailable."
+        "No pattern settings have changed, so Apply is unavailable."
     });
 }
 
-/// Shows the temporary four-record edit page using current capability and descriptor projections.
+/// Shows one capability-derived page while projecting unsupported C1 controls as explicitly read-only.
 ///
-/// Stable IDs only select the Gate 21B-2 allowlist. Controls are generated from active typed
-/// descriptors, so labels, categories, thumbnails, and names never determine actual editability.
-fn show_wizard_edit_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
-    let (page, breadcrumb, status, back, review, candidate, catalog, target, document) = {
+/// Catalog IDs, names, categories, and thumbnails never select this page or its command behavior.
+/// The page rebuilds from the private draft after every route or history movement so descriptor
+/// values and available controls remain authoritative.
+fn show_wizard_route_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    invalidate_pending_wizard_dropdown_action(state, epoch);
+    let (page, breadcrumb, status, back, review, target, document, route_page, transition) = {
         let app_state = state.borrow();
         let Some(surface) = app_state
             .pattern_wizard
@@ -3651,63 +7093,429 @@ fn show_wizard_edit_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
             surface.status.clone(),
             surface.back.clone(),
             surface.review.clone(),
-            surface.materialized_candidate.clone(),
-            app_state.catalog.clone(),
             surface.target,
             surface.draft.borrow().document().clone(),
+            surface
+                .route
+                .get(surface.route_index)
+                .copied()
+                .unwrap_or(WizardRoutePage::Review),
+            surface.transition.clone(),
         )
     };
+    if let Some(surface) = state
+        .borrow_mut()
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.transition_invalid_control = None;
+        surface.nested_focus_controls.clear();
+    }
+    if let Some(surface) = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.gallery_panel.set_visible(false);
+        surface.page_panel.set_visible(true);
+    }
     clear_wizard_page(&page);
-    let Some(entry) = candidate.as_deref().and_then(|id| catalog.find(id)) else {
-        show_wizard_gallery_page(state, epoch);
-        return;
-    };
-    if !wizard_edit_allowlisted(&entry.preset.metadata.id) {
-        let unavailable = gtk::Label::new(Some(WIZARD_EDIT_UNAVAILABLE_EXPLANATION));
-        unavailable.set_xalign(0.0);
-        unavailable.set_wrap(true);
-        unavailable.update_property(&[gtk::accessible::Property::Description(
-            "This card has no editable page in Gate 21B-2; the wizard has not entered a dead page.",
-        )]);
-        page.append(&unavailable);
-        status.set_label("Edit is unavailable for this card in Gate 21B-2.");
+    if route_page == WizardRoutePage::Review {
+        show_wizard_review_page(state, epoch);
         return;
     }
-    apply_wizard_navigation_sensitivity(&back, &review, WizardNavigationPage::Edit, true);
-    breadcrumb.set_label(&wizard_breadcrumb(
-        target,
-        Some(&entry.preset.metadata.category),
+    apply_wizard_navigation_sensitivity(
+        &back,
+        &review,
+        WizardNavigationPage::Route(route_page),
+        true,
+    );
+    if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+        refresh_wizard_action_controls(surface);
+    }
+    breadcrumb.set_label(&format!(
+        "{} · {}",
+        wizard_breadcrumb(target, None),
+        wizard_route_page_title(route_page)
     ));
-    let heading = gtk::Label::new(Some("Edit"));
+    let heading = gtk::Label::new(Some(wizard_route_page_title(route_page)));
     heading.add_css_class("heading");
     heading.set_xalign(0.0);
     page.append(&heading);
-    let explanation = gtk::Label::new(Some(
-        "These controls are derived from the current recipe’s active descriptors. They remain private until Apply.",
-    ));
-    explanation.set_xalign(0.0);
-    explanation.set_wrap(true);
-    explanation.add_css_class("dim-label");
-    page.append(&explanation);
-    let values = inline_inspector_values(&document, target);
+    if route_page == WizardRoutePage::PatternFamily {
+        let guidance_text = "Choose the basic structure used to build this pattern.";
+        let guidance = gtk::Label::new(Some(guidance_text));
+        guidance.set_xalign(0.0);
+        guidance.set_wrap(true);
+        guidance.set_tooltip_text(Some(guidance_text));
+        page.append(&guidance);
+        append_wizard_family_controls(state, epoch, &page, &document, target);
+        return;
+    }
+    let Ok((projection, recipe, _)) = wizard_route_for_document(&document, target) else {
+        status.set_label("Couldn’t load these pattern settings for editing.");
+        return;
+    };
+    let mut values = wizard_active_values(&document, target, &projection);
+    values.retain(|value| {
+        !wizard_descriptor_is_locked_triangular(&recipe, value.descriptor.field)
+            && wizard_value_has_meaningful_choice(&document, value)
+    });
+    values.sort_by_key(|value| wizard_control_section(route_page, value.descriptor.field));
     let mut count = 0;
-    for value in values {
-        if let PropertyCurrentValueKind::FiniteF64(current) = value.value {
-            append_wizard_numeric_control(state, epoch, &page, value.descriptor, current);
-            count += 1;
+    let mut current_section = None;
+    let mut transition_rendered = false;
+    if route_page == WizardRoutePage::FamilySettings {
+        let section = WizardControlSection::FamilyStructure;
+        append_wizard_control_section(&page, section, &projection.family);
+        current_section = Some(section);
+        count += append_wizard_guide_count_control(state, epoch, &page, &projection, &recipe);
+        count += append_wizard_guide_editor_control(state, epoch, &page, &projection, target);
+        if recipe.has_locked_triangular_intersection_layout() {
+            count += append_wizard_locked_triangular_layout(&page, route_page, &recipe);
         }
+    }
+    if route_page == WizardRoutePage::SiteGeneration {
+        let section = WizardControlSection::SitePlacement;
+        append_wizard_control_section(&page, section, &projection.family);
+        current_section = Some(section);
+        count += append_wizard_site_generation_control(state, epoch, &page, &recipe);
+        if recipe.has_locked_triangular_intersection_layout() {
+            count += append_wizard_locked_triangular_layout(&page, route_page, &recipe);
+        }
+        append_wizard_curve_motif_layout_explanation(&page, &projection);
+    }
+    if route_page == WizardRoutePage::Rendering {
+        let section = WizardControlSection::OutputConstruction;
+        append_wizard_control_section(&page, section, &projection.family);
+        current_section = Some(section);
+        count += append_wizard_output_construction_controls(state, epoch, &page, &recipe);
+    }
+    for value in values {
+        if value.descriptor.field == PropertyFieldId::DefinitionSelection {
+            continue;
+        }
+        if fixed_wizard_page_for_descriptor(&value.descriptor, &projection.family) != route_page {
+            continue;
+        }
+        let section = wizard_control_section(route_page, value.descriptor.field);
+        if current_section != Some(section) {
+            append_wizard_control_section(&page, section, &projection.family);
+            current_section = Some(section);
+        }
+        match value.value {
+            PropertyCurrentValueKind::FiniteF64(current) => {
+                let label = wizard_descriptor_label(&document, &value.descriptor);
+                match artist_numeric_value(&document, value.descriptor.field, current) {
+                    Ok(display_value) => {
+                        if value.descriptor.field == PropertyFieldId::CurveResponseBias {
+                            append_wizard_curve_response_bias_control(
+                                state,
+                                epoch,
+                                &page,
+                                value.descriptor,
+                                display_value,
+                                &label,
+                            );
+                        } else {
+                            append_wizard_numeric_control(
+                                state,
+                                epoch,
+                                &page,
+                                value.descriptor,
+                                display_value,
+                                &label,
+                            );
+                        }
+                    }
+                    Err(error) => set_wizard_input_error(state, epoch, &error),
+                }
+                count += 1;
+            }
+            PropertyCurrentValueKind::U32(current) => {
+                append_wizard_u32_control(state, epoch, &page, value.descriptor, current);
+                count += 1;
+            }
+            PropertyCurrentValueKind::Boolean(current) => {
+                append_wizard_boolean_control(state, epoch, &page, value.descriptor, current);
+                count += 1;
+            }
+            PropertyCurrentValueKind::OptionalFiniteF64(current) => {
+                append_wizard_optional_finite_control(
+                    state,
+                    epoch,
+                    &page,
+                    value.descriptor,
+                    current,
+                );
+                count += 1;
+            }
+            PropertyCurrentValueKind::EnumChoice(current)
+                if value.descriptor.field == PropertyFieldId::OutputSiteUseFilterKind =>
+            {
+                let PropertyEnumChoice::SiteUseFilter(kind) = current else {
+                    unreachable!("site-use selector has only site-use choices")
+                };
+                append_wizard_site_use_filter_control(
+                    state,
+                    epoch,
+                    &page,
+                    &document,
+                    value.descriptor,
+                    kind,
+                );
+                count += 1;
+            }
+            PropertyCurrentValueKind::EnumChoice(current)
+                if wizard_enum_is_editable(value.descriptor.field) =>
+            {
+                let pending_transition = transition
+                    .as_ref()
+                    .filter(|draft| draft.selector() == &value.descriptor)
+                    .cloned();
+                let selected = transition
+                    .as_ref()
+                    .filter(|draft| draft.selector() == &value.descriptor)
+                    .map(VariantTransitionDraft::choice)
+                    .unwrap_or(current);
+                let label = wizard_descriptor_label(&document, &value.descriptor);
+                append_wizard_enum_control(
+                    state,
+                    epoch,
+                    &page,
+                    value.descriptor,
+                    selected,
+                    &label,
+                    pending_transition.is_none(),
+                );
+                count += 1;
+                if let Some(pending_transition) = pending_transition {
+                    append_wizard_transition_editor(
+                        state,
+                        epoch,
+                        &page,
+                        &document,
+                        pending_transition,
+                    );
+                    transition_rendered = true;
+                    count += 1;
+                }
+            }
+            PropertyCurrentValueKind::EnumChoice(_) => {
+                unreachable!("all active enums are editable")
+            }
+            PropertyCurrentValueKind::Reference(current)
+                if value.descriptor.field != PropertyFieldId::OutputSiteUseFilterReference =>
+            {
+                append_wizard_reference_control(
+                    state,
+                    epoch,
+                    &page,
+                    &document,
+                    value.descriptor,
+                    current,
+                );
+                count += 1;
+            }
+            PropertyCurrentValueKind::Reference(_) => {}
+            PropertyCurrentValueKind::ReferenceCollection(current) => {
+                append_wizard_reference_collection_control(
+                    state,
+                    epoch,
+                    &page,
+                    &document,
+                    value.descriptor,
+                    current,
+                );
+                count += 1;
+            }
+        }
+    }
+    if !transition_rendered
+        && let Some(transition) = transition.as_ref().filter(|draft| {
+            fixed_wizard_page_for_descriptor(draft.selector(), &projection.family) == route_page
+        })
+    {
+        append_wizard_transition_editor(state, epoch, &page, &document, transition.clone());
+        count += 1;
+    }
+    if route_page == WizardRoutePage::Rendering {
+        append_wizard_curve_motif_route_explanation(&page, &projection);
+        count += append_wizard_motif_editor_controls(
+            state,
+            epoch,
+            &page,
+            &document,
+            target,
+            &projection,
+        );
+    }
+    if route_page == WizardRoutePage::Rendering
+        && reconstructed_ordered_output_count(&recipe.structure).is_some_and(|count| count > 1)
+    {
+        append_wizard_ordered_output_controls(state, epoch, &page, &projection.outputs);
+        count += projection.outputs.len();
     }
     if count == 0 {
         let unavailable = gtk::Label::new(Some(
-            "This valid recipe has no scalar controls in this first editing pass. Use as is remains available.",
+            "This step has no additional settings for the current pattern.",
         ));
         unavailable.set_xalign(0.0);
         unavailable.set_wrap(true);
         page.append(&unavailable);
     }
-    status.set_label(
-        "Edit the private draft, then choose Review. Pending preview work does not disable Apply.",
-    );
+    if let Some(transition) = transition.as_ref().filter(|draft| {
+        fixed_wizard_page_for_descriptor(draft.selector(), &projection.family) == route_page
+    }) {
+        status.set_label(&format!(
+            "Complete the {} settings below and choose Apply choice before continuing.",
+            enum_choice_label(transition.choice())
+        ));
+    } else {
+        status.set_label(
+            "Adjust the settings, then choose Next. The preview may update in the background.",
+        );
+    }
+}
+
+/// Appends the three domain-owned foundation choices and preselects the reconstructed private recipe.
+///
+/// A new wizard has no selected starter until the artist activates one choice. Existing and preset
+/// recipes merely project their derived family; selecting another family materializes its ID-free
+/// starter as one private command.
+fn append_wizard_family_controls(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    document: &Document,
+    target: InspectorTarget,
+) {
+    let new_without_starter = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+        .is_some_and(|surface| {
+            wizard_new_family_is_unselected(
+                surface.starting_new,
+                surface.draft.borrow().document(),
+                &surface.initial_document,
+            )
+        });
+    let selected = (!new_without_starter)
+        .then(|| {
+            wizard_route_for_document(document, target)
+                .ok()
+                .map(|(_, recipe, _)| recipe.family_kind())
+        })
+        .flatten();
+    let choices = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    choices.update_property(&[gtk::accessible::Property::Label("Pattern family choices")]);
+    let mut group: Option<gtk::ToggleButton> = None;
+    for (family, label, description) in [
+        (
+            PatternRecipeFamilyKind::Guides,
+            "Guides",
+            "Build the pattern from one or more straight, curved, or custom guides.",
+        ),
+        (
+            PatternRecipeFamilyKind::Dispersion,
+            "Dispersion",
+            "Scatter sites across the artwork with repeatable spacing, clustering, weighting, and exclusion controls.",
+        ),
+        (
+            PatternRecipeFamilyKind::Parametric,
+            "Parametric curve",
+            "Build the pattern from a spiral curve, with controls for its shape, repetition, and spacing.",
+        ),
+    ] {
+        let button = gtk::ToggleButton::with_label(label);
+        if let Some(group) = group.as_ref() {
+            button.set_group(Some(group));
+        } else {
+            group = Some(button.clone());
+        }
+        button.set_active(selected == Some(family));
+        button.set_tooltip_text(Some(description));
+        button.update_property(&[
+            gtk::accessible::Property::Label(label),
+            gtk::accessible::Property::Description(description),
+        ]);
+        let state_for_family = Rc::clone(state);
+        button.connect_toggled(move |button| {
+            if button.is_active() {
+                wizard_select_family(&state_for_family, epoch, family);
+            }
+        });
+        choices.append(&button);
+    }
+    page.append(&choices);
+}
+
+/// Appends the required one-guide Curve Motif layout guidance when its output makes Guide Layout visible.
+///
+/// This capability-derived disclosure explains why the otherwise empty structural page remains in
+/// the route; it does not fabricate a guide reference or change any domain-owned value.
+fn append_wizard_curve_motif_layout_explanation(
+    page: &gtk::Box,
+    projection: &PatternCapabilityProjection,
+) {
+    if !projection.outputs.iter().any(|output| {
+        matches!(
+            output.structural,
+            PatternOutputCapabilityProjection::CurveMotifPaths(_)
+        )
+    }) {
+        return;
+    }
+    let explanation = gtk::Label::new(Some(
+        "Curve Motif uses one continuous guide for each row. Set the row direction and spacing here; the next step controls how far apart motifs repeat along each row.",
+    ));
+    explanation.set_xalign(0.0);
+    explanation.set_wrap(true);
+    explanation.add_css_class("dim-label");
+    page.append(&explanation);
+}
+
+/// Appends the capability-derived Curve Motif workflow explanation without consulting preset presentation data.
+///
+/// The text describes the currently active structural output only. It neither adds controls nor
+/// changes the canonical adaptive page order, which remains derived from the projection and recipe.
+fn append_wizard_curve_motif_route_explanation(
+    page: &gtk::Box,
+    projection: &PatternCapabilityProjection,
+) {
+    if !projection.outputs.iter().any(|output| {
+        matches!(
+            output.structural,
+            PatternOutputCapabilityProjection::CurveMotifPaths(_)
+        )
+    }) {
+        return;
+    }
+    let explanation = gtk::Label::new(Some(CURVE_MOTIF_WORKFLOW_COPY));
+    explanation.set_xalign(0.0);
+    explanation.set_wrap(true);
+    explanation.add_css_class("dim-label");
+    page.append(&explanation);
+}
+
+/// Connects one wizard numeric entry to the same completed-edit callback for Enter and focus loss.
+///
+/// GTK sends focus loss after keyboard Tab, Shift+Tab, pointer focus changes, and accessibility
+/// focus actions. Sharing one callback keeps those paths equivalent to Enter; descriptor commits
+/// remain responsible for suppressing a later duplicate when Enter is followed by focus loss.
+fn connect_wizard_entry_completion(entry: &gtk::Entry, commit: impl Fn(&gtk::Entry) + 'static) {
+    let commit: Rc<dyn Fn(&gtk::Entry)> = Rc::new(commit);
+    let commit_for_activate = Rc::clone(&commit);
+    entry.connect_activate(move |entry| commit_for_activate(entry));
+    let focus = gtk::EventControllerFocus::new();
+    let commit_for_leave = Rc::clone(&commit);
+    let entry_for_leave = entry.clone();
+    focus.connect_leave(move |_| commit_for_leave(&entry_for_leave));
+    entry.add_controller(focus);
 }
 
 /// Appends one typed scalar entry sourced from a validated active descriptor projection.
@@ -3717,9 +7525,10 @@ fn append_wizard_numeric_control(
     page: &gtk::Box,
     descriptor: PropertyDescriptor,
     value: f64,
+    label_text: &str,
 ) {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let label = gtk::Label::new(Some(&inspector_field_label(descriptor.field)));
+    let label = gtk::Label::new(Some(label_text));
     label.set_xalign(0.0);
     label.set_hexpand(true);
     let entry = gtk::Entry::new();
@@ -3727,8 +7536,14 @@ fn append_wizard_numeric_control(
     entry.set_width_chars(10);
     entry.set_text(&format!("{value:.4}"));
     label.set_mnemonic_widget(Some(&entry));
+    let description = inspector_field_detail(&descriptor);
+    entry.set_tooltip_text(Some(&description));
+    entry.update_property(&[
+        gtk::accessible::Property::Label(label_text),
+        gtk::accessible::Property::Description(&description),
+    ]);
     let state_for_commit = Rc::clone(state);
-    entry.connect_activate(move |entry| {
+    connect_wizard_entry_completion(&entry, move |entry| {
         commit_wizard_numeric_entry(&state_for_commit, epoch, descriptor.clone(), entry);
     });
     row.append(&label);
@@ -3736,48 +7551,2035 @@ fn append_wizard_numeric_control(
     page.append(&row);
 }
 
-/// Commits one finite private wizard scalar through the established typed command builder.
-fn commit_wizard_numeric_entry(
+/// Builds the shared continuous response-bias slider from descriptor-authoritative vocabulary.
+///
+/// The range is the domain's normalized `-1..=1` contract. GTK owns only presentation and input;
+/// callers still route each requested value through their typed document-command boundary.
+fn curve_response_bias_scale(value: f64, label: &str, description: &str) -> gtk::Scale {
+    let adjustment = gtk::Adjustment::new(value, -1.0, 1.0, 0.05, 0.25, 0.0);
+    let scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&adjustment));
+    scale.set_draw_value(true);
+    scale.set_digits(2);
+    scale.set_hexpand(true);
+    scale.set_width_request(240);
+    scale.add_mark(-1.0, gtk::PositionType::Bottom, Some("Left"));
+    scale.add_mark(0.0, gtk::PositionType::Bottom, Some("Centered"));
+    scale.add_mark(1.0, gtk::PositionType::Bottom, Some("Right"));
+    scale.set_tooltip_text(Some(description));
+    scale.update_property(&[
+        gtk::accessible::Property::Label(label),
+        gtk::accessible::Property::Description(description),
+    ]);
+    scale
+}
+
+/// Appends the output-level curve-response bias slider to a wizard Rendering card.
+///
+/// Each GTK value request is validated and recorded by the private wizard history. The control
+/// never changes guide, site, or connection topology and does not invent a second bias model.
+fn append_wizard_curve_response_bias_control(
     state: &Rc<RefCell<AppState>>,
     epoch: u64,
+    page: &gtk::Box,
     descriptor: PropertyDescriptor,
-    entry: &gtk::Entry,
+    value: f64,
+    label_text: &str,
 ) {
-    let value = match entry.text().trim().parse::<f64>() {
-        Ok(value) if value.is_finite() => value,
-        _ => {
-            if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
-                surface.status.set_label("Enter a finite number.");
-            }
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let label = gtk::Label::new(Some(label_text));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let description = inspector_field_detail(&descriptor);
+    let scale = curve_response_bias_scale(value, label_text, &description);
+    label.set_mnemonic_widget(Some(&scale));
+    let state_for_commit = Rc::clone(state);
+    scale.connect_value_changed(move |scale| {
+        commit_wizard_input(
+            &state_for_commit,
+            epoch,
+            descriptor.clone(),
+            InspectorInput::FiniteF64(scale.value()),
+        );
+    });
+    row.append(&label);
+    row.append(&scale);
+    page.append(&row);
+}
+
+/// Appends one whole-number descriptor control through the same private command boundary.
+///
+/// The entry deliberately preserves typed domain validation rather than adding
+/// a wizard-only numeric range. Enter commits one private-history operation.
+fn append_wizard_u32_control(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    descriptor: PropertyDescriptor,
+    value: u32,
+) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let label = gtk::Label::new(Some(&inspector_field_label(descriptor.field)));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let entry = gtk::Entry::new();
+    entry.set_input_purpose(gtk::InputPurpose::Digits);
+    entry.set_width_chars(10);
+    entry.set_text(&value.to_string());
+    label.set_mnemonic_widget(Some(&entry));
+    let description = inspector_field_detail(&descriptor);
+    entry.set_tooltip_text(Some(&description));
+    entry.update_property(&[
+        gtk::accessible::Property::Label(&inspector_field_label(descriptor.field)),
+        gtk::accessible::Property::Description(&description),
+    ]);
+    let state_for_commit = Rc::clone(state);
+    connect_wizard_entry_completion(&entry, move |entry| {
+        match entry.text().trim().parse::<u32>() {
+            Ok(value) => commit_wizard_input(
+                &state_for_commit,
+                epoch,
+                descriptor.clone(),
+                InspectorInput::U32(value),
+            ),
+            Err(_) => set_wizard_input_error(&state_for_commit, epoch, "Enter a whole number."),
+        }
+    });
+    row.append(&label);
+    row.append(&entry);
+    page.append(&row);
+}
+
+/// Appends one real GTK switch for an active Boolean descriptor.
+///
+/// The control's state comes from the descriptor projection and its callback
+/// publishes exactly one command to the private draft, never main history.
+fn append_wizard_boolean_control(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    descriptor: PropertyDescriptor,
+    value: bool,
+) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let label = gtk::Label::new(Some(&inspector_field_label(descriptor.field)));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let control = gtk::Switch::new();
+    control.set_active(value);
+    label.set_mnemonic_widget(Some(&control));
+    let description = inspector_field_detail(&descriptor);
+    control.set_tooltip_text(Some(&description));
+    control.update_property(&[
+        gtk::accessible::Property::Label(&inspector_field_label(descriptor.field)),
+        gtk::accessible::Property::Description(&description),
+    ]);
+    let state_for_toggle = Rc::clone(state);
+    control.connect_state_set(move |_, active| {
+        commit_wizard_input(
+            &state_for_toggle,
+            epoch,
+            descriptor.clone(),
+            InspectorInput::Boolean(active),
+        );
+        glib::Propagation::Proceed
+    });
+    row.append(&label);
+    row.append(&control);
+    page.append(&row);
+}
+
+/// Appends the explicit enabled-state and finite-value controls for one optional descriptor.
+///
+/// Enabling an absent value exposes an empty finite entry without inventing a default. Disabling
+/// an existing value commits `None` through the same private command boundary; entering a finite
+/// value commits `Some(value)` as one history entry.
+fn append_wizard_optional_finite_control(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    descriptor: PropertyDescriptor,
+    value: Option<f64>,
+) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let label = gtk::Label::new(Some(&inspector_field_label(descriptor.field)));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let enabled = gtk::Switch::new();
+    enabled.set_active(value.is_some());
+    let enable_description = "Turn this optional setting on to enter a value, or off to remove it.";
+    enabled.set_tooltip_text(Some(enable_description));
+    enabled.update_property(&[
+        gtk::accessible::Property::Label(&format!(
+            "Enable {}",
+            inspector_field_label(descriptor.field)
+        )),
+        gtk::accessible::Property::Description(enable_description),
+    ]);
+    let entry = gtk::Entry::new();
+    entry.set_input_purpose(gtk::InputPurpose::Number);
+    entry.set_width_chars(10);
+    entry.set_text(&value.map(|value| format!("{value:.4}")).unwrap_or_default());
+    entry.set_sensitive(value.is_some());
+    let description = inspector_field_detail(&descriptor);
+    entry.set_tooltip_text(Some(&description));
+    entry.update_property(&[
+        gtk::accessible::Property::Label(&inspector_field_label(descriptor.field)),
+        gtk::accessible::Property::Description(&description),
+    ]);
+    label.set_mnemonic_widget(Some(&entry));
+    let entry_for_toggle = entry.clone();
+    let state_for_toggle = Rc::clone(state);
+    let descriptor_for_toggle = descriptor.clone();
+    enabled.connect_state_set(move |_, active| {
+        entry_for_toggle.set_sensitive(active);
+        if active {
+            entry_for_toggle.grab_focus();
+            set_wizard_input_error(
+                &state_for_toggle,
+                epoch,
+                "Enter a finite value, then press Enter to enable this setting.",
+            );
+        } else {
+            commit_wizard_input(
+                &state_for_toggle,
+                epoch,
+                descriptor_for_toggle.clone(),
+                InspectorInput::OptionalFiniteF64(None),
+            );
+        }
+        glib::Propagation::Proceed
+    });
+    let state_for_commit = Rc::clone(state);
+    connect_wizard_entry_completion(&entry, move |entry| {
+        match entry.text().trim().parse::<f64>() {
+            Ok(value) if value.is_finite() => commit_wizard_input(
+                &state_for_commit,
+                epoch,
+                descriptor.clone(),
+                InspectorInput::OptionalFiniteF64(Some(value)),
+            ),
+            _ => set_wizard_input_error(
+                &state_for_commit,
+                epoch,
+                "Enter a finite value before enabling this setting.",
+            ),
+        }
+    });
+    row.append(&label);
+    row.append(&enabled);
+    row.append(&entry);
+    page.append(&row);
+}
+
+/// Returns domain-advertised choices for one wizard stable-reference descriptor.
+///
+/// # Errors
+///
+/// Returns the current document diagnostic when the descriptor is stale, inactive, or no longer
+/// has compatible typed references. GTK never invents a choice when this fails.
+fn wizard_reference_choices(
+    document: &Document,
+    descriptor: &PropertyDescriptor,
+) -> Result<Vec<PropertyReferenceValue>, String> {
+    document
+        .property_reference_choices(descriptor)
+        .map_err(|error| error.to_string())
+}
+
+/// Formats one document-resolved typed reference without exposing allocation IDs to the artist.
+///
+/// The stable value is retained in the dropdown's closure; the label is only presentation and is
+/// rebuilt from the private document after every change.
+fn wizard_reference_label(document: &Document, reference: &PropertyReferenceValue) -> String {
+    match reference {
+        PropertyReferenceValue::Definition(definition_id) => document
+            .pattern_definition_bundles()
+            .iter()
+            .find(|bundle| bundle.definition.id == *definition_id)
+            .map(|bundle| bundle.definition.name.clone())
+            .unwrap_or_else(|| "Unavailable pattern".into()),
+        PropertyReferenceValue::Mechanism(mechanism_id) => document
+            .pattern_definition_bundles()
+            .iter()
+            .flat_map(|bundle| bundle.definition.mechanisms.iter())
+            .find(|mechanism| mechanism.id() == *mechanism_id)
+            .map(wizard_mechanism_reference_label)
+            .unwrap_or_else(|| "Unavailable pattern source".into()),
+        PropertyReferenceValue::GuideDimension(dimension_id) => document
+            .pattern_definition_bundles()
+            .iter()
+            .find_map(|bundle| {
+                bundle
+                    .definition
+                    .mechanisms
+                    .iter()
+                    .find_map(|mechanism| match mechanism {
+                        PatternMechanism::StraightGuideDimensions { dimensions, .. } => dimensions
+                            .iter()
+                            .position(|dimension| dimension.id == *dimension_id),
+                        PatternMechanism::GuideDimensions { dimensions, .. } => dimensions
+                            .iter()
+                            .position(|dimension| dimension.id == *dimension_id),
+                        _ => None,
+                    })
+            })
+            .map(|index| format!("Guide {}", index + 1))
+            .unwrap_or_else(|| "Unavailable guide".into()),
+        PropertyReferenceValue::OutputLayer(output_layer_id) => document
+            .pattern_definition_bundles()
+            .iter()
+            .find_map(|bundle| {
+                bundle
+                    .definition
+                    .output_layers
+                    .iter()
+                    .position(|output| output.id() == *output_layer_id)
+            })
+            .map(|index| format!("Pattern output {}", index + 1))
+            .unwrap_or_else(|| "Unavailable pattern output".into()),
+        PropertyReferenceValue::AuthoredStructure(structure_id) => document
+            .authored_structures()
+            .iter()
+            .position(|structure| structure.id() == *structure_id)
+            .map(|index| format!("Authored path {}", index + 1))
+            .unwrap_or_else(|| "Unavailable custom path".into()),
+        PropertyReferenceValue::Source(_) => reference_label(reference),
+    }
+}
+
+/// Formats a typed reference inside the definition addressed by its owning descriptor target.
+///
+/// Mechanism, guide-dimension, and output IDs are definition-scoped. Resolving them against the
+/// whole document can therefore select an earlier definition with the same local ID and leak
+/// misleading ordinals such as `Pattern source 6`. The descriptor remains the scope authority;
+/// references without definition-local identity retain the ordinary document-resolved label.
+fn wizard_reference_label_for_target(
+    document: &Document,
+    target: PropertyTarget,
+    reference: &PropertyReferenceValue,
+) -> String {
+    let Some(definition_id) = target_definition_id(target) else {
+        return wizard_reference_label(document, reference);
+    };
+    let Some(definition) = document
+        .pattern_definition_bundles()
+        .iter()
+        .find(|bundle| bundle.definition.id == definition_id)
+        .map(|bundle| &bundle.definition)
+    else {
+        return wizard_reference_label(document, reference);
+    };
+    match reference {
+        PropertyReferenceValue::Mechanism(mechanism_id) => definition
+            .mechanisms
+            .iter()
+            .find(|mechanism| mechanism.id() == *mechanism_id)
+            .map(wizard_mechanism_reference_label)
+            .unwrap_or_else(|| "Unavailable pattern source".into()),
+        PropertyReferenceValue::GuideDimension(dimension_id) => definition
+            .mechanisms
+            .iter()
+            .find_map(|mechanism| match mechanism {
+                PatternMechanism::StraightGuideDimensions { dimensions, .. } => dimensions
+                    .iter()
+                    .position(|dimension| dimension.id == *dimension_id),
+                PatternMechanism::GuideDimensions { dimensions, .. } => dimensions
+                    .iter()
+                    .position(|dimension| dimension.id == *dimension_id),
+                _ => None,
+            })
+            .map(|index| format!("Guide {}", index + 1))
+            .unwrap_or_else(|| "Unavailable guide".into()),
+        PropertyReferenceValue::OutputLayer(output_layer_id) => definition
+            .output_layers
+            .iter()
+            .position(|output| output.id() == *output_layer_id)
+            .map(|index| format!("Pattern output {}", index + 1))
+            .unwrap_or_else(|| "Unavailable pattern output".into()),
+        PropertyReferenceValue::Definition(_)
+        | PropertyReferenceValue::AuthoredStructure(_)
+        | PropertyReferenceValue::Source(_) => wizard_reference_label(document, reference),
+    }
+}
+
+/// Names one typed mechanism by its artist-visible role in the current recipe.
+///
+/// The label deliberately omits allocated identity and definition-wide ordinals. References stay
+/// typed in control closures, while the UI describes whether the value is guide geometry, a site
+/// product, a parametric source, or one stage of the dispersion pipeline.
+fn wizard_mechanism_reference_label(mechanism: &PatternMechanism) -> String {
+    match mechanism {
+        PatternMechanism::StraightGuides { .. }
+        | PatternMechanism::StraightGuideDimensions { .. }
+        | PatternMechanism::GuideDimensions { .. } => "Guide geometry",
+        PatternMechanism::GuideIntersections { .. }
+        | PatternMechanism::SelectedGuideIntersections { .. } => "Guide intersections",
+        PatternMechanism::AlongGuideSites { .. } => "Sites along guides",
+        PatternMechanism::ParametricCurveSource { .. } => "Parametric curve",
+        PatternMechanism::AlongParametricCurveSites { .. } => "Sites along curve",
+        PatternMechanism::RandomSiteProcess { .. } => "Random candidates",
+        PatternMechanism::SiteDensityModulation { .. } => "Weighted random candidates",
+        PatternMechanism::SiteExclusion { .. } => "Filtered random candidates",
+        PatternMechanism::RandomSiteProduct { .. } => "Random sites",
+    }
+    .to_owned()
+}
+
+/// Appends one singular stable-reference dropdown using domain-advertised choices only.
+fn append_wizard_reference_control(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    document: &Document,
+    descriptor: PropertyDescriptor,
+    current: PropertyReferenceValue,
+) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let label_text = wizard_descriptor_label(document, &descriptor);
+    let label = gtk::Label::new(Some(&label_text));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let choices = match wizard_reference_choices(document, &descriptor) {
+        Ok(choices) => choices,
+        Err(error) => {
+            set_wizard_input_error(state, epoch, &error);
             return;
         }
     };
-    let result = {
+    let labels = choices
+        .iter()
+        .map(|reference| wizard_reference_label_for_target(document, descriptor.target, reference))
+        .collect::<Vec<_>>();
+    let label_slices = labels.iter().map(String::as_str).collect::<Vec<_>>();
+    let control = accessible_string_dropdown(&label_slices);
+    let Some(selected) = choices.iter().position(|reference| reference == &current) else {
+        set_wizard_input_error(
+            state,
+            epoch,
+            "The selected item is no longer available for this setting.",
+        );
+        return;
+    };
+    control.set_selected(selected as u32);
+    label.set_mnemonic_widget(Some(&control));
+    let guidance = inspector_field_detail(&descriptor);
+    let description = wizard_dropdown_description(&labels[selected], &guidance);
+    control.set_tooltip_text(Some(&guidance));
+    control.update_property(&[
+        gtk::accessible::Property::Label(&label_text),
+        gtk::accessible::Property::Description(&description),
+    ]);
+    let focus = WizardRecipeControlFocus::Descriptor(descriptor.target, descriptor.field);
+    let state_for_change = Rc::clone(state);
+    let descriptor_for_change = descriptor.clone();
+    control.connect_selected_notify(move |control| {
+        let selected = control.selected() as usize;
+        let (Some(reference), Some(selection)) = (
+            choices.get(selected).cloned(),
+            labels.get(selected).cloned(),
+        ) else {
+            return;
+        };
+        set_wizard_recipe_control_focus(&state_for_change, epoch, focus);
+        let state_for_commit = Rc::clone(&state_for_change);
+        let descriptor_for_commit = descriptor_for_change.clone();
+        defer_wizard_dropdown_action(
+            &state_for_change,
+            epoch,
+            control,
+            &selection,
+            &guidance,
+            move || {
+                commit_wizard_input(
+                    &state_for_commit,
+                    epoch,
+                    descriptor_for_commit,
+                    InspectorInput::Reference(reference),
+                );
+            },
+        );
+    });
+    row.append(&label);
+    row.append(&control);
+    let purpose = match (descriptor.field, current) {
+        (
+            PropertyFieldId::GuideAuthoredStructure,
+            PropertyReferenceValue::AuthoredStructure(id),
+        ) => Some((PatternEditorPurpose::Guide, id, "Edit guide path…")),
+        (
+            PropertyFieldId::OutputAuthoredClosedShape,
+            PropertyReferenceValue::AuthoredStructure(id),
+        ) => Some((PatternEditorPurpose::Shape, id, "Edit shape…")),
+        _ => None,
+    };
+    if let Some((purpose, structure_id, label)) = purpose {
+        let focus_target = match (purpose, descriptor.target) {
+            (
+                PatternEditorPurpose::Guide,
+                PropertyTarget::GuideDimension(_, mechanism_id, dimension_id),
+            ) => Some(NestedEditorFocusTarget::Guide {
+                mechanism_id,
+                dimension_id,
+            }),
+            (PatternEditorPurpose::Shape, PropertyTarget::OutputLayer(_, output_layer_id)) => {
+                Some(NestedEditorFocusTarget::Shape { output_layer_id })
+            }
+            _ => None,
+        };
+        let edit = gtk::Button::with_mnemonic(label);
+        edit.set_focusable(true);
+        let edit_description = "Edit the curve used by this document. Apply returns one change to the Pattern Wizard; Cancel changes nothing.";
+        edit.set_tooltip_text(Some(edit_description));
+        edit.update_property(&[
+            gtk::accessible::Property::Label(label),
+            gtk::accessible::Property::Description(edit_description),
+        ]);
+        let state_for_edit = Rc::clone(state);
+        let invoking_control = edit.clone().upcast::<gtk::Widget>();
+        edit.connect_clicked(move |_| {
+            open_wizard_authored_editor(
+                &state_for_edit,
+                epoch,
+                purpose,
+                structure_id,
+                invoking_control.clone(),
+            )
+        });
+        if let Some(target) = focus_target {
+            register_wizard_nested_focus_control(
+                state,
+                epoch,
+                NestedEditorFocusToken {
+                    wizard_epoch: epoch,
+                    target,
+                },
+                edit.clone().upcast::<gtk::Widget>(),
+            );
+        }
+        row.append(&edit);
+    }
+    page.append(&row);
+    restore_wizard_recipe_control_focus(state, epoch, focus, &control);
+}
+
+/// Appends one child-editor launch for each current Curve Motif output in structural order.
+///
+/// The capability projection supplies ordered output identities; the document resolves the exact
+/// authored structure ID. No preset presentation data or output ordinal becomes edit authority.
+fn append_wizard_motif_editor_controls(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    document: &Document,
+    target: InspectorTarget,
+    projection: &PatternCapabilityProjection,
+) -> usize {
+    let definition_id = match target {
+        InspectorTarget::DocumentAll => document.pattern_settings().definition_id,
+        InspectorTarget::Channel(channel_id) => {
+            match document.effective_channel_pattern(channel_id) {
+                Ok(effective) => effective.definition_id,
+                Err(_) => return 0,
+            }
+        }
+    };
+    let Some(definition) = document
+        .pattern_definition_bundles()
+        .iter()
+        .find(|bundle| bundle.definition.id == definition_id)
+        .map(|bundle| &bundle.definition)
+    else {
+        return 0;
+    };
+    let mut count = 0;
+    for output in projection.outputs.iter().filter(|output| {
+        matches!(
+            output.structural,
+            PatternOutputCapabilityProjection::CurveMotifPaths(_)
+        )
+    }) {
+        let Some(layer) = definition
+            .output_layers
+            .iter()
+            .find(|layer| layer.id() == output.output_layer_id)
+        else {
+            continue;
+        };
+        let PatternOutputRealization::CurveMotifPaths { structure_id, .. } = &layer.realization
+        else {
+            continue;
+        };
+        let button = gtk::Button::with_mnemonic("Edit Curve _Motif…");
+        button.set_focusable(true);
+        let description = "Edit the curve motif used by this pattern.";
+        button.set_tooltip_text(Some(description));
+        button.update_property(&[
+            gtk::accessible::Property::Label("Edit Curve Motif"),
+            gtk::accessible::Property::Description(description),
+        ]);
+        let state_for_open = Rc::clone(state);
+        let invoking_control = button.clone().upcast::<gtk::Widget>();
+        let structure_id = *structure_id;
+        button.connect_clicked(move |_| {
+            open_wizard_authored_editor(
+                &state_for_open,
+                epoch,
+                PatternEditorPurpose::Motif,
+                structure_id,
+                invoking_control.clone(),
+            )
+        });
+        register_wizard_nested_focus_control(
+            state,
+            epoch,
+            NestedEditorFocusToken {
+                wizard_epoch: epoch,
+                target: NestedEditorFocusTarget::Motif {
+                    output_layer_id: output.output_layer_id,
+                },
+            },
+            button.clone().upcast::<gtk::Widget>(),
+        );
+        page.append(&button);
+        count += 1;
+    }
+    count
+}
+
+/// Returns a numbered artist-facing label for one ordered guide choice.
+///
+/// Only the two domain-advertised ordered guide collections reach this control. The fallback keeps
+/// a future valid collection understandable while descriptor validation remains authoritative.
+fn wizard_reference_collection_item_label(field: PropertyFieldId, index: usize) -> String {
+    match field {
+        PropertyFieldId::IntersectionDimensions => format!("Intersecting guide {}", index + 1),
+        PropertyFieldId::AlongGuideDimensions => format!("Guide direction {}", index + 1),
+        _ => format!("Choice {}", index + 1),
+    }
+}
+
+/// Appends the ordered collection controls for one descriptor without creating a parallel list model.
+fn append_wizard_reference_collection_control(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    document: &Document,
+    descriptor: PropertyDescriptor,
+    current: Vec<PropertyReferenceValue>,
+) {
+    let choices = match wizard_reference_choices(document, &descriptor) {
+        Ok(choices) => choices,
+        Err(error) => {
+            set_wizard_input_error(state, epoch, &error);
+            return;
+        }
+    };
+    let PropertyReferenceConstraint::OrderedUniqueCollection {
+        minimum_items,
+        maximum_items,
+    } = descriptor.reference_constraint
+    else {
+        unreachable!("collection value has an ordered collection reference contract")
+    };
+    let heading = gtk::Label::new(Some(&inspector_field_label(descriptor.field)));
+    heading.set_xalign(0.0);
+    page.append(&heading);
+    for (index, current_reference) in current.iter().cloned().enumerate() {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let item_label = wizard_reference_collection_item_label(descriptor.field, index);
+        let label = gtk::Label::new(Some(&item_label));
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        let permitted = choices
+            .iter()
+            .filter(|candidate| *candidate == &current_reference || !current.contains(candidate))
+            .cloned()
+            .collect::<Vec<_>>();
+        let labels = permitted
+            .iter()
+            .map(|reference| {
+                wizard_reference_label_for_target(document, descriptor.target, reference)
+            })
+            .collect::<Vec<_>>();
+        let label_slices = labels.iter().map(String::as_str).collect::<Vec<_>>();
+        let control = accessible_string_dropdown(&label_slices);
+        let Some(selected) = permitted
+            .iter()
+            .position(|reference| reference == &current_reference)
+        else {
+            set_wizard_input_error(
+                state,
+                epoch,
+                "The selected item is no longer available for this setting.",
+            );
+            return;
+        };
+        control.set_selected(selected as u32);
+        label.set_mnemonic_widget(Some(&control));
+        let guidance = inspector_field_detail(&descriptor);
+        let description = wizard_dropdown_description(&labels[selected], &guidance);
+        control.set_tooltip_text(Some(&guidance));
+        control.update_property(&[
+            gtk::accessible::Property::Label(&item_label),
+            gtk::accessible::Property::Description(&description),
+        ]);
+        let focus = WizardRecipeControlFocus::ReferenceCollection(
+            descriptor.target,
+            descriptor.field,
+            index,
+        );
+        let state_for_change = Rc::clone(state);
+        let descriptor_for_change = descriptor.clone();
+        let references_for_change = current.clone();
+        control.connect_selected_notify(move |control| {
+            let selected = control.selected() as usize;
+            let (Some(reference), Some(selection)) = (
+                permitted.get(selected).cloned(),
+                labels.get(selected).cloned(),
+            ) else {
+                return;
+            };
+            let mut replacement = references_for_change.clone();
+            replacement[index] = reference;
+            set_wizard_recipe_control_focus(&state_for_change, epoch, focus);
+            let state_for_commit = Rc::clone(&state_for_change);
+            let descriptor_for_commit = descriptor_for_change.clone();
+            defer_wizard_dropdown_action(
+                &state_for_change,
+                epoch,
+                control,
+                &selection,
+                &guidance,
+                move || {
+                    commit_wizard_input(
+                        &state_for_commit,
+                        epoch,
+                        descriptor_for_commit,
+                        InspectorInput::ReferenceCollection(replacement),
+                    );
+                },
+            );
+        });
+        row.append(&label);
+        row.append(&control);
+        if index > 0 {
+            let up = gtk::Button::with_mnemonic("Move _earlier");
+            up.update_property(&[
+                gtk::accessible::Property::Label(&format!("Move selection {} earlier", index + 1)),
+                gtk::accessible::Property::Description(
+                    "Move this selected direction one place earlier.",
+                ),
+            ]);
+            let state_for_move = Rc::clone(state);
+            let descriptor_for_move = descriptor.clone();
+            let references_for_move = current.clone();
+            up.connect_clicked(move |_| {
+                let mut replacement = references_for_move.clone();
+                replacement.swap(index - 1, index);
+                commit_wizard_input(
+                    &state_for_move,
+                    epoch,
+                    descriptor_for_move.clone(),
+                    InspectorInput::ReferenceCollection(replacement),
+                );
+            });
+            row.append(&up);
+        }
+        if index + 1 < current.len() {
+            let down = gtk::Button::with_mnemonic("Move _later");
+            down.update_property(&[
+                gtk::accessible::Property::Label(&format!("Move selection {} later", index + 1)),
+                gtk::accessible::Property::Description(
+                    "Move this selected direction one place later.",
+                ),
+            ]);
+            let state_for_move = Rc::clone(state);
+            let descriptor_for_move = descriptor.clone();
+            let references_for_move = current.clone();
+            down.connect_clicked(move |_| {
+                let mut replacement = references_for_move.clone();
+                replacement.swap(index, index + 1);
+                commit_wizard_input(
+                    &state_for_move,
+                    epoch,
+                    descriptor_for_move.clone(),
+                    InspectorInput::ReferenceCollection(replacement),
+                );
+            });
+            row.append(&down);
+        }
+        if current.len() > usize::from(minimum_items) {
+            let remove = gtk::Button::with_mnemonic("_Remove");
+            remove.update_property(&[
+                gtk::accessible::Property::Label(&format!("Remove selection {}", index + 1)),
+                gtk::accessible::Property::Description(
+                    "Remove this direction while keeping the minimum number required by the pattern.",
+                ),
+            ]);
+            let state_for_remove = Rc::clone(state);
+            let descriptor_for_remove = descriptor.clone();
+            let references_for_remove = current.clone();
+            remove.connect_clicked(move |_| {
+                let mut replacement = references_for_remove.clone();
+                replacement.remove(index);
+                commit_wizard_input(
+                    &state_for_remove,
+                    epoch,
+                    descriptor_for_remove.clone(),
+                    InspectorInput::ReferenceCollection(replacement),
+                );
+            });
+            row.append(&remove);
+        }
+        page.append(&row);
+        restore_wizard_recipe_control_focus(state, epoch, focus, &control);
+    }
+    if current.len() < usize::from(maximum_items) {
+        let available = choices
+            .iter()
+            .filter(|reference| !current.contains(reference))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !available.is_empty() {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let label = gtk::Label::new(Some("Add selection"));
+            label.set_xalign(0.0);
+            label.set_hexpand(true);
+            let mut labels = vec!["Choose a compatible direction".to_owned()];
+            labels.extend(available.iter().map(|reference| {
+                wizard_reference_label_for_target(document, descriptor.target, reference)
+            }));
+            let label_slices = labels.iter().map(String::as_str).collect::<Vec<_>>();
+            let control = accessible_string_dropdown(&label_slices);
+            control.set_selected(0);
+            label.set_mnemonic_widget(Some(&control));
+            let guidance = "Add another direction that works with the current pattern.";
+            let description = wizard_dropdown_description(&labels[0], guidance);
+            control.update_property(&[
+                gtk::accessible::Property::Label(&format!(
+                    "Add {}",
+                    inspector_field_label(descriptor.field)
+                )),
+                gtk::accessible::Property::Description(&description),
+            ]);
+            control.set_tooltip_text(Some(guidance));
+            let focus = WizardRecipeControlFocus::AppendReferenceCollection(
+                descriptor.target,
+                descriptor.field,
+            );
+            let state_for_add = Rc::clone(state);
+            control.connect_selected_notify(move |control| {
+                let selected = control.selected();
+                if selected == 0 {
+                    return;
+                }
+                if let Some(reference) = available.get(selected as usize - 1).cloned() {
+                    let mut replacement = current.clone();
+                    replacement.push(reference);
+                    set_wizard_recipe_control_focus(&state_for_add, epoch, focus);
+                    let state_for_commit = Rc::clone(&state_for_add);
+                    let descriptor_for_commit = descriptor.clone();
+                    let selection = labels
+                        .get(selected as usize)
+                        .cloned()
+                        .unwrap_or_else(|| "Compatible direction".to_owned());
+                    defer_wizard_dropdown_action(
+                        &state_for_add,
+                        epoch,
+                        control,
+                        &selection,
+                        guidance,
+                        move || {
+                            commit_wizard_input(
+                                &state_for_commit,
+                                epoch,
+                                descriptor_for_commit,
+                                InspectorInput::ReferenceCollection(replacement),
+                            );
+                        },
+                    );
+                }
+            });
+            row.append(&label);
+            row.append(&control);
+            page.append(&row);
+            restore_wizard_recipe_control_focus(state, epoch, focus, &control);
+        }
+    }
+}
+
+/// Returns the selected compatible output stored in one active dependent site-use filter.
+fn current_wizard_site_use_filter_target(
+    document: &Document,
+    descriptor: &PropertyDescriptor,
+) -> Option<PatternOutputLayerId> {
+    document
+        .property_values()
+        .into_iter()
+        .find(|value| {
+            value.descriptor.field == PropertyFieldId::OutputSiteUseFilterReference
+                && value.descriptor.target == descriptor.target
+        })
+        .and_then(|value| match value.value {
+            PropertyCurrentValueKind::Reference(PropertyReferenceValue::OutputLayer(id)) => {
+                Some(id)
+            }
+            _ => None,
+        })
+}
+
+/// Appends the atomic site-use filter selector and its pending compatible-output proposal.
+fn append_wizard_site_use_filter_control(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    document: &Document,
+    descriptor: PropertyDescriptor,
+    current: SiteUseFilterKind,
+) {
+    let pending = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+        .and_then(|surface| surface.site_use_filter.clone())
+        .filter(|draft| draft.descriptor == descriptor);
+    let selected = pending.as_ref().map(|draft| draft.kind).unwrap_or(current);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let control_label = wizard_descriptor_label(document, &descriptor);
+    let label = gtk::Label::new(Some(&control_label));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let choices = descriptor.choices.to_vec();
+    let labels = choices
+        .iter()
+        .copied()
+        .map(enum_choice_label)
+        .collect::<Vec<_>>();
+    let control = accessible_string_dropdown(&labels);
+    let selected_index = choices
+        .iter()
+        .position(|choice| *choice == PropertyEnumChoice::SiteUseFilter(selected))
+        .unwrap_or(0);
+    control.set_selected(selected_index as u32);
+    label.set_mnemonic_widget(Some(&control));
+    let guidance = "Use every site, or use sites according to whether another pattern output already uses them.";
+    let description = wizard_dropdown_description(labels[selected_index], guidance);
+    control.set_tooltip_text(Some(guidance));
+    control.update_property(&[
+        gtk::accessible::Property::Label(&control_label),
+        gtk::accessible::Property::Description(&description),
+    ]);
+    let focus = WizardRecipeControlFocus::SiteUseFilter(descriptor.target);
+    let has_pending = pending.is_some();
+    let state_for_change = Rc::clone(state);
+    let descriptor_for_change = descriptor.clone();
+    control.connect_selected_notify(move |control| {
+        let selected = control.selected() as usize;
+        let (Some(PropertyEnumChoice::SiteUseFilter(kind)), Some(selection)) = (
+            choices.get(selected).copied(),
+            labels.get(selected).cloned(),
+        ) else {
+            return;
+        };
+        set_wizard_recipe_control_focus(&state_for_change, epoch, focus);
+        let state_for_begin = Rc::clone(&state_for_change);
+        let descriptor_for_begin = descriptor_for_change.clone();
+        defer_wizard_dropdown_action(
+            &state_for_change,
+            epoch,
+            control,
+            selection,
+            guidance,
+            move || {
+                begin_wizard_site_use_filter_choice(
+                    &state_for_begin,
+                    epoch,
+                    descriptor_for_begin,
+                    kind,
+                );
+            },
+        );
+    });
+    row.append(&label);
+    row.append(&control);
+    page.append(&row);
+    if !has_pending {
+        restore_wizard_recipe_control_focus(state, epoch, focus, &control);
+    }
+    let Some(pending) = pending else {
+        return;
+    };
+    let candidates = match document.site_use_filter_targets(&descriptor) {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            set_wizard_input_error(state, epoch, &error.to_string());
+            return;
+        }
+    };
+    let mut target_labels = vec!["Choose a compatible pattern output".to_owned()];
+    target_labels.extend(candidates.iter().map(|reference| {
+        wizard_reference_label_for_target(document, descriptor.target, reference)
+    }));
+    let target_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let target_label = gtk::Label::new(Some("Compatible pattern output"));
+    target_label.set_xalign(0.0);
+    target_label.set_hexpand(true);
+    let target_label_slices = target_labels.iter().map(String::as_str).collect::<Vec<_>>();
+    let target = accessible_string_dropdown(&target_label_slices);
+    let selected_target_index = pending
+        .target
+        .and_then(|selected| {
+            candidates
+                .iter()
+                .position(|candidate| *candidate == PropertyReferenceValue::OutputLayer(selected))
+        })
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    target.set_selected(selected_target_index as u32);
+    target_label.set_mnemonic_widget(Some(&target));
+    let target_guidance = "Choose the other output whose site usage controls this output.";
+    let target_description =
+        wizard_dropdown_description(&target_labels[selected_target_index], target_guidance);
+    target.set_tooltip_text(Some(target_guidance));
+    target.update_property(&[
+        gtk::accessible::Property::Label("Compatible pattern output"),
+        gtk::accessible::Property::Description(&target_description),
+    ]);
+    let target_focus = WizardRecipeControlFocus::SiteUseFilterTarget(descriptor.target);
+    let state_for_target = Rc::clone(state);
+    target.connect_selected_notify(move |control| {
+        let selected = control.selected();
+        let target = if selected == 0 {
+            None
+        } else {
+            candidates
+                .get(selected as usize - 1)
+                .and_then(|reference| match reference {
+                    PropertyReferenceValue::OutputLayer(id) => Some(*id),
+                    _ => None,
+                })
+        };
+        let selection = target_labels
+            .get(selected as usize)
+            .cloned()
+            .unwrap_or_else(|| "Compatible pattern output".to_owned());
+        set_wizard_recipe_control_focus(&state_for_target, epoch, target_focus);
+        let state_for_update = Rc::clone(&state_for_target);
+        defer_wizard_dropdown_action(
+            &state_for_target,
+            epoch,
+            control,
+            &selection,
+            target_guidance,
+            move || {
+                update_wizard_site_use_filter_target(&state_for_update, epoch, target);
+            },
+        );
+    });
+    target_row.append(&target_label);
+    target_row.append(&target);
+    page.append(&target_row);
+    if pending.target.is_none() {
+        let target_for_focus = target.clone();
+        glib::idle_add_local_once(move || {
+            target_for_focus.grab_focus();
+        });
+    } else {
+        restore_wizard_recipe_control_focus(state, epoch, target_focus, &target);
+    }
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let apply = gtk::Button::with_mnemonic("Apply site-use _filter");
+    apply.set_sensitive(pending.target.is_some());
+    apply.set_tooltip_text(Some(
+        "Apply the site-use rule and selected output as one wizard change.",
+    ));
+    apply.update_property(&[
+        gtk::accessible::Property::Label("Apply site-use filter"),
+        gtk::accessible::Property::Description(
+            "Apply the site-use rule and selected output as one wizard change.",
+        ),
+    ]);
+    let state_for_apply = Rc::clone(state);
+    apply.connect_clicked(move |_| finalize_wizard_site_use_filter(&state_for_apply, epoch));
+    let cancel = gtk::Button::with_mnemonic("Cancel site-use filter");
+    cancel.set_tooltip_text(Some(
+        "Cancel this site-use rule without changing the pattern.",
+    ));
+    cancel.update_property(&[
+        gtk::accessible::Property::Label("Cancel site-use filter"),
+        gtk::accessible::Property::Description(
+            "Cancel this site-use rule without changing the pattern.",
+        ),
+    ]);
+    let state_for_cancel = Rc::clone(state);
+    let filter_focus = WizardRecipeControlFocus::SiteUseFilter(descriptor.target);
+    cancel.connect_clicked(move |_| {
+        set_wizard_recipe_control_focus(&state_for_cancel, epoch, filter_focus);
+        clear_wizard_site_use_filter(&state_for_cancel, epoch);
+        show_wizard_current_route_page(&state_for_cancel, epoch);
+    });
+    actions.append(&apply);
+    actions.append(&cancel);
+    page.append(&actions);
+}
+
+/// Begins a private site-use filter proposal or directly applies the complete `All` alternative.
+fn begin_wizard_site_use_filter_choice(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    descriptor: PropertyDescriptor,
+    kind: SiteUseFilterKind,
+) {
+    if kind == SiteUseFilterKind::All {
+        let already_all = state
+            .borrow()
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+            .is_some_and(|surface| {
+                surface
+                    .draft
+                    .borrow()
+                    .document()
+                    .property_values()
+                    .into_iter()
+                    .any(|value| {
+                        value.descriptor == descriptor
+                            && value.value
+                                == PropertyCurrentValueKind::EnumChoice(
+                                    PropertyEnumChoice::SiteUseFilter(SiteUseFilterKind::All),
+                                )
+                    })
+            });
+        clear_wizard_site_use_filter(state, epoch);
+        if already_all {
+            show_wizard_current_route_page(state, epoch);
+            return;
+        }
+        commit_wizard_site_use_filter(state, epoch, descriptor, SiteUseFilter::All);
+        return;
+    }
+    let result: Result<(), String> = {
+        let mut app_state = state.borrow_mut();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        let document = surface.draft.borrow().document().clone();
+        let existing = current_wizard_site_use_filter_target(&document, &descriptor);
+        let target = document
+            .site_use_filter_targets(&descriptor)
+            .ok()
+            .and_then(|choices| {
+                existing.filter(|id| choices.contains(&PropertyReferenceValue::OutputLayer(*id)))
+            });
+        surface.transition = None;
+        surface.transition_invalid_control = None;
+        surface.site_use_filter = Some(WizardSiteUseFilterDraft {
+            descriptor,
+            kind,
+            target,
+        });
+        Ok(())
+    };
+    match result {
+        Ok(()) => show_wizard_current_route_page(state, epoch),
+        Err(error) => set_wizard_input_error(state, epoch, &error),
+    }
+}
+
+/// Updates one pending compatible site-use output without touching any history cursor.
+fn update_wizard_site_use_filter_target(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    target: Option<PatternOutputLayerId>,
+) {
+    if let Some(draft) = state
+        .borrow_mut()
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+        .and_then(|surface| surface.site_use_filter.as_mut())
+    {
+        draft.target = target;
+    }
+    show_wizard_current_route_page(state, epoch);
+}
+
+/// Clears one private site-use filter proposal without mutating document or history state.
+fn clear_wizard_site_use_filter(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    if let Some(surface) = state
+        .borrow_mut()
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.site_use_filter = None;
+    }
+}
+
+/// Finalizes one complete pending site-use filter as one typed private bundle command.
+fn finalize_wizard_site_use_filter(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let pending = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+        .and_then(|surface| surface.site_use_filter.clone());
+    let Some(pending) = pending else {
+        return;
+    };
+    let Some(output_layer_id) = pending.target else {
+        set_wizard_input_error(state, epoch, "Choose a compatible pattern output first.");
+        return;
+    };
+    let source_filter = match pending.kind {
+        SiteUseFilterKind::All => SiteUseFilter::All,
+        SiteUseFilterKind::SitesUsedBy => SiteUseFilter::SitesUsedBy { output_layer_id },
+        SiteUseFilterKind::SitesUnusedBy => SiteUseFilter::SitesUnusedBy { output_layer_id },
+    };
+    set_wizard_recipe_control_focus(
+        state,
+        epoch,
+        WizardRecipeControlFocus::SiteUseFilter(pending.descriptor.target),
+    );
+    commit_wizard_site_use_filter(state, epoch, pending.descriptor, source_filter);
+}
+
+/// Commits one complete site-use filter through the private bundle-command boundary.
+fn commit_wizard_site_use_filter(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    descriptor: PropertyDescriptor,
+    source_filter: SiteUseFilter,
+) {
+    let result = (|| -> Result<(), String> {
         let app_state = state.borrow();
         let Some(surface) = app_state
             .pattern_wizard
             .as_ref()
             .filter(|surface| surface.epoch == epoch)
         else {
-            return;
+            return Err("Pattern Wizard is no longer open.".to_owned());
         };
         let mut draft = surface.draft.borrow_mut();
-        command_for_inspector_input(
+        let command = wizard_site_use_filter_command(
             draft.document(),
-            surface.target.channel_id(),
-            DefinitionEditScope::SelectedCopy,
+            surface.target,
             &descriptor,
-            InspectorInput::FiniteF64(value),
-        )
-        .and_then(|command| {
-            draft
-                .apply(&command)
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        })
+            source_filter,
+        )?;
+        draft.apply(&command).map_err(|error| error.to_string())?;
+        Ok(())
+    })();
+    match result {
+        Ok(_) => {
+            clear_wizard_site_use_filter(state, epoch);
+            if let Err(error) = refresh_wizard_route(state, epoch) {
+                set_wizard_input_error(state, epoch, &error);
+                return;
+            }
+            show_wizard_current_route_page(state, epoch);
+            submit_wizard_preview(state, epoch);
+        }
+        Err(error) => set_wizard_input_error(
+            state,
+            epoch,
+            &format!("Couldn’t apply site-use filter: {error}"),
+        ),
+    }
+}
+
+/// Builds one typed private bundle command for an active site-use filter descriptor.
+///
+/// # Errors
+///
+/// Returns a stable display message when the descriptor, definition, or output target no longer
+/// exists. Domain command application remains responsible for final cycle and compatibility checks.
+fn wizard_site_use_filter_command(
+    document: &Document,
+    target: InspectorTarget,
+    descriptor: &PropertyDescriptor,
+    source_filter: SiteUseFilter,
+) -> Result<DocumentCommand, String> {
+    let PropertyTarget::OutputLayer(definition_id, output_layer_id) = descriptor.target else {
+        return Err("Site-use filtering requires an output-layer descriptor.".to_owned());
     };
+    let base_bundle = document
+        .pattern_definition_bundles()
+        .iter()
+        .find(|bundle| bundle.definition.id == definition_id)
+        .cloned()
+        .ok_or_else(|| "The pattern output used by this rule is missing.".to_owned())?;
+    let edit = PatternDefinitionBundleEdit::SetSiteUseFilter {
+        output_layer_id,
+        source_filter,
+    };
+    Ok(match target {
+        InspectorTarget::DocumentAll => DocumentCommand::EditSharedPatternDefinitionBundle {
+            definition_id,
+            base_bundle,
+            edit,
+        },
+        InspectorTarget::Channel(channel_id) => {
+            DocumentCommand::EditSelectedChannelPatternDefinitionBundle {
+                channel_id,
+                base_bundle,
+                edit,
+            }
+        }
+    })
+}
+
+/// Returns artist-facing structural vocabulary for one ordered output record.
+fn wizard_ordered_output_label(output: &PatternOutputCapabilityRecord) -> &'static str {
+    match output.structural {
+        PatternOutputCapabilityProjection::Marks(_) => "Marks",
+        PatternOutputCapabilityProjection::GuidePaths(_) => "Guide paths",
+        PatternOutputCapabilityProjection::CurveMotifPaths(_) => "Curve Motif paths",
+        PatternOutputCapabilityProjection::ConnectionPaths(_) => "Connections",
+        PatternOutputCapabilityProjection::MazeWalls(_) => "Maze walls",
+        PatternOutputCapabilityProjection::Regions(_) => "Regions",
+    }
+}
+
+/// Appends one stable painter-order row for every reconstructed ordered output.
+fn append_wizard_ordered_output_controls(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    outputs: &[PatternOutputCapabilityRecord],
+) {
+    let focused = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+        .and_then(|surface| surface.ordered_output_focus);
+    for output in outputs {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let label = gtk::Label::new(Some(&format!(
+            "{} · {}",
+            output.painter_index + 1,
+            wizard_ordered_output_label(output)
+        )));
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        row.append(&label);
+        let earlier = gtk::Button::with_mnemonic("Move _earlier");
+        earlier.set_sensitive(output.painter_index > 0);
+        earlier.set_tooltip_text(Some(
+            "Draw this output one position earlier in the pattern stack.",
+        ));
+        earlier.update_property(&[
+            gtk::accessible::Property::Label(&format!(
+                "Move {} earlier",
+                wizard_ordered_output_label(output)
+            )),
+            gtk::accessible::Property::Description(
+                "Draw this output one position earlier in the pattern stack.",
+            ),
+        ]);
+        let state_for_earlier = Rc::clone(state);
+        let output_id = output.output_layer_id;
+        let earlier_index = output.painter_index.saturating_sub(1);
+        earlier.connect_clicked(move |_| {
+            commit_wizard_output_move(&state_for_earlier, epoch, output_id, earlier_index)
+        });
+        let later = gtk::Button::with_mnemonic("Move _later");
+        later.set_sensitive(output.painter_index + 1 < outputs.len());
+        later.set_tooltip_text(Some(
+            "Draw this output one position later in the pattern stack.",
+        ));
+        later.update_property(&[
+            gtk::accessible::Property::Label(&format!(
+                "Move {} later",
+                wizard_ordered_output_label(output)
+            )),
+            gtk::accessible::Property::Description(
+                "Draw this output one position later in the pattern stack.",
+            ),
+        ]);
+        let state_for_later = Rc::clone(state);
+        let output_id = output.output_layer_id;
+        let later_index = output.painter_index + 1;
+        later.connect_clicked(move |_| {
+            commit_wizard_output_move(&state_for_later, epoch, output_id, later_index)
+        });
+        if focused == Some(output.output_layer_id) {
+            if earlier.is_sensitive() {
+                earlier.grab_focus();
+            } else {
+                later.grab_focus();
+            }
+        }
+        row.append(&earlier);
+        row.append(&later);
+        page.append(&row);
+    }
+}
+
+/// Commits one typed bundle painter move as exactly one private wizard-history entry.
+fn commit_wizard_output_move(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    output_layer_id: PatternOutputLayerId,
+    painter_index: usize,
+) {
+    let result = (|| -> Result<(), String> {
+        let app_state = state.borrow();
+        let surface = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+            .ok_or_else(|| "Pattern Wizard is no longer open.".to_owned())?;
+        let mut draft = surface.draft.borrow_mut();
+        let command = wizard_output_move_command(
+            draft.document(),
+            surface.target,
+            output_layer_id,
+            painter_index,
+        )?;
+        draft.apply(&command).map_err(|error| error.to_string())?;
+        Ok(())
+    })();
     match result {
         Ok(()) => {
+            if let Some(surface) = state
+                .borrow_mut()
+                .pattern_wizard
+                .as_mut()
+                .filter(|surface| surface.epoch == epoch)
+            {
+                surface.ordered_output_focus = Some(output_layer_id);
+            }
+            if let Err(error) = refresh_wizard_route(state, epoch) {
+                set_wizard_input_error(state, epoch, &error);
+                return;
+            }
+            show_wizard_current_route_page(state, epoch);
+            submit_wizard_preview(state, epoch);
+        }
+        Err(error) => {
+            set_wizard_input_error(state, epoch, &format!("Couldn’t move output: {error}"))
+        }
+    }
+}
+
+/// Builds one typed private bundle move command from a stable output identity.
+///
+/// # Errors
+///
+/// Returns a stable missing-definition diagnostic before the domain validates output identity,
+/// painter bounds, no-op moves, and selected-copy remapping atomically.
+fn wizard_output_move_command(
+    document: &Document,
+    target: InspectorTarget,
+    output_layer_id: PatternOutputLayerId,
+    painter_index: usize,
+) -> Result<DocumentCommand, String> {
+    let definition_id = match target {
+        InspectorTarget::DocumentAll => document.pattern_settings().definition_id,
+        InspectorTarget::Channel(channel_id) => {
+            document
+                .effective_channel_pattern(channel_id)
+                .map_err(|error| error.to_string())?
+                .definition_id
+        }
+    };
+    let base_bundle = document
+        .pattern_definition_bundles()
+        .iter()
+        .find(|bundle| bundle.definition.id == definition_id)
+        .cloned()
+        .ok_or_else(|| "The pattern outputs are no longer available.".to_owned())?;
+    let edit = PatternDefinitionBundleEdit::MoveOutputLayer {
+        output_layer_id,
+        painter_index,
+    };
+    Ok(match target {
+        InspectorTarget::DocumentAll => DocumentCommand::EditSharedPatternDefinitionBundle {
+            definition_id,
+            base_bundle,
+            edit,
+        },
+        InspectorTarget::Channel(channel_id) => {
+            DocumentCommand::EditSelectedChannelPatternDefinitionBundle {
+                channel_id,
+                base_bundle,
+                edit,
+            }
+        }
+    })
+}
+
+/// Appends one descriptor-owned enum dropdown and begins a domain transition when needed.
+fn append_wizard_enum_control(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    descriptor: PropertyDescriptor,
+    selected: PropertyEnumChoice,
+    label_text: &str,
+    restore_focus: bool,
+) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let label = gtk::Label::new(Some(label_text));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let choices = descriptor.choices.to_vec();
+    let labels = choices
+        .iter()
+        .copied()
+        .map(enum_choice_label)
+        .collect::<Vec<_>>();
+    let control = accessible_string_dropdown(&labels);
+    control.set_selected(
+        choices
+            .iter()
+            .position(|choice| *choice == selected)
+            .unwrap_or(0) as u32,
+    );
+    label.set_mnemonic_widget(Some(&control));
+    let guidance = inspector_field_detail(&descriptor);
+    let description = wizard_dropdown_description(enum_choice_label(selected), &guidance);
+    control.set_tooltip_text(Some(&guidance));
+    control.update_property(&[
+        gtk::accessible::Property::Label(&inspector_field_label(descriptor.field)),
+        gtk::accessible::Property::Description(&description),
+    ]);
+    let focus = WizardRecipeControlFocus::Descriptor(descriptor.target, descriptor.field);
+    let state_for_change = Rc::clone(state);
+    control.connect_selected_notify(move |control| {
+        if let Some(choice) = choices.get(control.selected() as usize).copied() {
+            let state_for_begin = Rc::clone(&state_for_change);
+            let descriptor_for_begin = descriptor.clone();
+            set_wizard_recipe_control_focus(&state_for_change, epoch, focus);
+            defer_wizard_dropdown_action(
+                &state_for_change,
+                epoch,
+                control,
+                enum_choice_label(choice),
+                &guidance,
+                move || {
+                    begin_wizard_enum_choice(&state_for_begin, epoch, descriptor_for_begin, choice);
+                },
+            );
+        }
+    });
+    row.append(&label);
+    row.append(&control);
+    page.append(&row);
+    if restore_focus {
+        restore_wizard_recipe_control_focus(state, epoch, focus, &control);
+    }
+}
+
+/// Starts, replaces, or cancels a frontend-only domain transition draft for one enum choice.
+///
+/// Non-compound selectors continue directly through the established typed command builder. A
+/// compound selector remains private and uncommitted until its complete domain draft is confirmed.
+/// When a New mark has no authored shape to reference, choosing Custom shape creates the domain’s
+/// fresh default closed-shape output so its nested editor becomes immediately available.
+fn begin_wizard_enum_choice(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    descriptor: PropertyDescriptor,
+    choice: PropertyEnumChoice,
+) {
+    let create_custom_shape = if matches!(
+        choice,
+        PropertyEnumChoice::MarkPrototype(toniator_domain::MarkPrototypeKind::AuthoredClosedShape)
+    ) {
+        let app_state = state.borrow();
+        app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+            .and_then(|surface| {
+                let document = surface.draft.borrow().document().clone();
+                let transition = document
+                    .variant_transition_draft(&descriptor, choice)
+                    .ok()?;
+                let needs_fresh_shape = transition.fields().iter().any(|field| {
+                    field.field == PropertyFieldId::OutputAuthoredClosedShape
+                        && field.reference_choices.is_empty()
+                });
+                if !needs_fresh_shape {
+                    return None;
+                }
+                let PropertyTarget::OutputLayer(definition_id, output_layer_id) = descriptor.target
+                else {
+                    return None;
+                };
+                document
+                    .pattern_definition_bundles()
+                    .iter()
+                    .find(|bundle| bundle.definition.id == definition_id)
+                    .and_then(|bundle| {
+                        bundle
+                            .definition
+                            .output_layers
+                            .iter()
+                            .position(|output| output.id() == output_layer_id)
+                    })
+            })
+    } else {
+        None
+    };
+    if let Some(output_index) = create_custom_shape {
+        commit_wizard_recipe_transform(state, epoch, "create a custom mark shape", move |recipe| {
+            recipe
+                .with_output_kind(output_index, PatternRecipeOutputKind::CustomShapeMarks)
+                .map_err(|error| error.to_string())
+        });
+        return;
+    }
+    let result = {
+        let mut app_state = state.borrow_mut();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        let document = surface.draft.borrow().document().clone();
+        if wizard_input_matches_current(&document, &descriptor, &InspectorInput::EnumChoice(choice))
+        {
+            surface.transition = None;
+            surface.transition_invalid_control = None;
+            Ok(false)
+        } else {
+            match document.variant_transition_draft(&descriptor, choice) {
+                Ok(transition) => {
+                    surface.transition = Some(transition);
+                    surface.transition_invalid_control = None;
+                    Ok(false)
+                }
+                Err(_) => Err(document),
+            }
+        }
+    };
+    match result {
+        Ok(_) => show_wizard_current_route_page(state, epoch),
+        Err(_) => commit_wizard_input(state, epoch, descriptor, InspectorInput::EnumChoice(choice)),
+    }
+}
+
+/// Returns descriptor-authoritative explanatory text for one transition payload field.
+fn wizard_transition_field_description(field: &VariantTransitionField) -> String {
+    inspector_field_guidance(field.field).to_owned()
+}
+
+/// Appends all domain-required payload controls for one pending compound enum transition.
+fn append_wizard_transition_editor(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    document: &Document,
+    transition: VariantTransitionDraft,
+) {
+    let choice_label = enum_choice_label(transition.choice());
+    let heading = gtk::Label::new(Some(&format!("Complete: {choice_label}")));
+    heading.add_css_class("heading");
+    heading.set_xalign(0.0);
+    page.append(&heading);
+    let detail = gtk::Label::new(Some(&format!(
+        "These settings belong to {choice_label}. Review them, then choose Apply choice before continuing."
+    )));
+    detail.set_xalign(0.0);
+    detail.set_wrap(true);
+    detail.add_css_class("dim-label");
+    page.append(&detail);
+    for field in transition.fields().iter().cloned() {
+        append_wizard_transition_field(state, epoch, page, document, field);
+    }
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let apply = gtk::Button::with_mnemonic("Apply _choice");
+    apply.set_tooltip_text(Some(
+        "Check the required settings and apply this choice as one wizard change.",
+    ));
+    apply.update_property(&[
+        gtk::accessible::Property::Label("Apply choice"),
+        gtk::accessible::Property::Description(
+            "Check the required settings and apply this choice as one wizard change.",
+        ),
+    ]);
+    let state_for_apply = Rc::clone(state);
+    apply.connect_clicked(move |_| finalize_wizard_transition(&state_for_apply, epoch));
+    let cancel = gtk::Button::with_mnemonic("Cancel choice");
+    cancel.set_tooltip_text(Some("Cancel this choice without changing the pattern."));
+    cancel.update_property(&[
+        gtk::accessible::Property::Label("Cancel choice"),
+        gtk::accessible::Property::Description("Cancel this choice without changing the pattern."),
+    ]);
+    let state_for_cancel = Rc::clone(state);
+    cancel.connect_clicked(move |_| {
+        clear_wizard_transition(&state_for_cancel, epoch);
+        show_wizard_current_route_page(&state_for_cancel, epoch);
+    });
+    actions.append(&apply);
+    actions.append(&cancel);
+    page.append(&actions);
+}
+
+/// Appends one domain transition payload field without constructing a second pattern model.
+fn append_wizard_transition_field(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    document: &Document,
+    field: VariantTransitionField,
+) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let label = gtk::Label::new(Some(&inspector_field_label(field.field)));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let description = wizard_transition_field_description(&field);
+    match field.value.clone() {
+        VariantTransitionValue::FiniteF64(value) => {
+            let control = gtk::Entry::new();
+            control.set_input_purpose(gtk::InputPurpose::Number);
+            control.set_width_chars(10);
+            control.set_text(&format!("{value:.4}"));
+            label.set_mnemonic_widget(Some(&control));
+            control.set_tooltip_text(Some(&description));
+            control.update_property(&[
+                gtk::accessible::Property::Label(&inspector_field_label(field.field)),
+                gtk::accessible::Property::Description(&description),
+            ]);
+            let state_for_change = Rc::clone(state);
+            connect_wizard_entry_completion(&control, move |control| {
+                match control.text().trim().parse::<f64>() {
+                    Ok(value) if value.is_finite() => update_wizard_transition_field(
+                        &state_for_change,
+                        epoch,
+                        VariantTransitionFieldUpdate {
+                            field: field.field,
+                            target: field.target,
+                            value: VariantTransitionValue::FiniteF64(value),
+                        },
+                    ),
+                    _ => set_wizard_input_error(
+                        &state_for_change,
+                        epoch,
+                        "Enter a number for this required setting.",
+                    ),
+                }
+            });
+            row.append(&label);
+            row.append(&control);
+        }
+        VariantTransitionValue::U32(value) => {
+            let control = gtk::Entry::new();
+            control.set_input_purpose(gtk::InputPurpose::Digits);
+            control.set_width_chars(10);
+            control.set_text(&value.to_string());
+            label.set_mnemonic_widget(Some(&control));
+            control.set_tooltip_text(Some(&description));
+            control.update_property(&[
+                gtk::accessible::Property::Label(&inspector_field_label(field.field)),
+                gtk::accessible::Property::Description(&description),
+            ]);
+            let state_for_change = Rc::clone(state);
+            connect_wizard_entry_completion(&control, move |control| {
+                match control.text().trim().parse::<u32>() {
+                    Ok(value) => update_wizard_transition_field(
+                        &state_for_change,
+                        epoch,
+                        VariantTransitionFieldUpdate {
+                            field: field.field,
+                            target: field.target,
+                            value: VariantTransitionValue::U32(value),
+                        },
+                    ),
+                    Err(_) => set_wizard_input_error(
+                        &state_for_change,
+                        epoch,
+                        "Enter a whole number for this required setting.",
+                    ),
+                }
+            });
+            row.append(&label);
+            row.append(&control);
+        }
+        VariantTransitionValue::Boolean(value) => {
+            let control = gtk::Switch::new();
+            control.set_active(value);
+            label.set_mnemonic_widget(Some(&control));
+            control.set_tooltip_text(Some(&description));
+            control.update_property(&[
+                gtk::accessible::Property::Label(&inspector_field_label(field.field)),
+                gtk::accessible::Property::Description(&description),
+            ]);
+            let state_for_change = Rc::clone(state);
+            control.connect_state_set(move |_, value| {
+                update_wizard_transition_field(
+                    &state_for_change,
+                    epoch,
+                    VariantTransitionFieldUpdate {
+                        field: field.field,
+                        target: field.target,
+                        value: VariantTransitionValue::Boolean(value),
+                    },
+                );
+                glib::Propagation::Proceed
+            });
+            row.append(&label);
+            row.append(&control);
+        }
+        VariantTransitionValue::EnumChoice(value) => {
+            let choices = field.contract.choices.to_vec();
+            let labels = choices
+                .iter()
+                .copied()
+                .map(enum_choice_label)
+                .collect::<Vec<_>>();
+            let control = accessible_string_dropdown(&labels);
+            control.set_selected(
+                choices
+                    .iter()
+                    .position(|choice| *choice == value)
+                    .unwrap_or(0) as u32,
+            );
+            label.set_mnemonic_widget(Some(&control));
+            let accessible_description =
+                wizard_dropdown_description(enum_choice_label(value), &description);
+            control.set_tooltip_text(Some(&description));
+            control.update_property(&[
+                gtk::accessible::Property::Label(&inspector_field_label(field.field)),
+                gtk::accessible::Property::Description(&accessible_description),
+            ]);
+            let state_for_change = Rc::clone(state);
+            control.connect_selected_notify(move |control| {
+                if let Some(value) = choices.get(control.selected() as usize).copied() {
+                    let selected_description =
+                        wizard_dropdown_description(enum_choice_label(value), &description);
+                    control.update_property(&[gtk::accessible::Property::Description(
+                        &selected_description,
+                    )]);
+                    update_wizard_transition_field(
+                        &state_for_change,
+                        epoch,
+                        VariantTransitionFieldUpdate {
+                            field: field.field,
+                            target: field.target,
+                            value: VariantTransitionValue::EnumChoice(value),
+                        },
+                    );
+                }
+            });
+            row.append(&label);
+            row.append(&control);
+        }
+        VariantTransitionValue::StableReference(value) => {
+            let choices = field.reference_choices.clone();
+            let mut labels = vec!["Choose a compatible reference".to_owned()];
+            labels.extend(
+                choices.iter().map(|choice| {
+                    wizard_reference_label_for_target(document, field.target, choice)
+                }),
+            );
+            let control =
+                accessible_string_dropdown(&labels.iter().map(String::as_str).collect::<Vec<_>>());
+            control.set_selected(
+                value
+                    .as_ref()
+                    .and_then(|value| choices.iter().position(|choice| choice == value))
+                    .map(|index| index as u32 + 1)
+                    .unwrap_or(0),
+            );
+            label.set_mnemonic_widget(Some(&control));
+            let selected_label = value
+                .as_ref()
+                .and_then(|value| choices.iter().position(|choice| choice == value))
+                .and_then(|index| labels.get(index + 1))
+                .map(String::as_str)
+                .unwrap_or("Choose a compatible reference");
+            let accessible_description = wizard_dropdown_description(selected_label, &description);
+            control.set_tooltip_text(Some(&description));
+            control.update_property(&[
+                gtk::accessible::Property::Label(&inspector_field_label(field.field)),
+                gtk::accessible::Property::Description(&accessible_description),
+            ]);
+            if value.is_none() {
+                set_wizard_transition_invalid_control(state, epoch, control.clone().upcast());
+                let control_for_focus = control.clone();
+                glib::idle_add_local_once(move || {
+                    control_for_focus.grab_focus();
+                });
+            }
+            let state_for_change = Rc::clone(state);
+            control.connect_selected_notify(move |control| {
+                let selected = control.selected();
+                let selected_label = labels
+                    .get(selected as usize)
+                    .map(String::as_str)
+                    .unwrap_or("Choose a compatible reference");
+                let selected_description =
+                    wizard_dropdown_description(selected_label, &description);
+                control.update_property(&[gtk::accessible::Property::Description(
+                    &selected_description,
+                )]);
+                update_wizard_transition_field(
+                    &state_for_change,
+                    epoch,
+                    VariantTransitionFieldUpdate {
+                        field: field.field,
+                        target: field.target,
+                        value: VariantTransitionValue::StableReference(
+                            selected
+                                .checked_sub(1)
+                                .and_then(|index| choices.get(index as usize).cloned()),
+                        ),
+                    },
+                );
+            });
+            row.append(&label);
+            row.append(&control);
+        }
+    }
+    page.append(&row);
+}
+
+/// Replaces one validated frontend transition payload field without moving any history cursor.
+fn update_wizard_transition_field(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    update: VariantTransitionFieldUpdate,
+) {
+    let result = {
+        let mut app_state = state.borrow_mut();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        let Some(transition) = surface.transition.as_ref() else {
+            return;
+        };
+        transition
+            .with_updates(&[update])
+            .map(|transition| {
+                surface.transition = Some(transition);
+                surface.transition_invalid_control = None;
+            })
+            .map_err(|error| error.to_string())
+    };
+    match result {
+        Ok(()) => {}
+        Err(error) => set_wizard_input_error(
+            state,
+            epoch,
+            &format!("Couldn’t update this required setting: {error}"),
+        ),
+    }
+}
+
+/// Clears one frontend-only transition proposal without changing any document or history state.
+fn clear_wizard_transition(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    if let Some(surface) = state
+        .borrow_mut()
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.transition = None;
+        surface.transition_invalid_control = None;
+    }
+}
+
+/// Stores the first incomplete transition widget so failed confirmation can retain visible focus.
+fn set_wizard_transition_invalid_control(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    control: gtk::Widget,
+) {
+    if let Some(surface) = state
+        .borrow_mut()
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+        && surface.transition_invalid_control.is_none()
+    {
+        surface.transition_invalid_control = Some(control);
+    }
+}
+
+/// Builds one typed command from a complete domain transition without changing a history owner.
+fn wizard_transition_command(
+    document: &Document,
+    target: InspectorTarget,
+    transition: &VariantTransitionDraft,
+) -> Result<DocumentCommand, String> {
+    let edit = transition
+        .finalize(document)
+        .map_err(|error| error.to_string())?;
+    let definition_id = target_definition_id(transition.selector().target)
+        .ok_or_else(|| "This choice no longer applies to the current pattern.".to_owned())?;
+    let base_definition = document
+        .pattern_definition_bundles()
+        .iter()
+        .find(|bundle| bundle.definition.id == definition_id)
+        .map(|bundle| bundle.definition.clone())
+        .ok_or_else(|| "The pattern needed by this choice is no longer available.".to_owned())?;
+    Ok(match target {
+        InspectorTarget::DocumentAll => DocumentCommand::EditSharedPatternDefinition {
+            definition_id,
+            base_definition,
+            edit,
+        },
+        InspectorTarget::Channel(channel_id) => {
+            DocumentCommand::EditSelectedChannelPatternDefinition {
+                channel_id,
+                base_definition,
+                edit,
+            }
+        }
+    })
+}
+
+/// Finalizes the complete transition as one domain command and one private-history entry.
+fn finalize_wizard_transition(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let result = (|| -> Result<(), String> {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return Err("Pattern Wizard is no longer open.".to_owned());
+        };
+        let Some(transition) = surface.transition.as_ref() else {
+            return Err("No unfinished wizard choice is waiting to be applied.".to_owned());
+        };
+        let document = surface.draft.borrow().document().clone();
+        let command = wizard_transition_command(&document, surface.target, transition)?;
+        surface
+            .draft
+            .borrow_mut()
+            .apply(&command)
+            .map_err(|error| error.to_string())
+            .map(|_| ())
+    })();
+    match result {
+        Ok(()) => {
+            clear_wizard_transition(state, epoch);
+            if let Err(error) = refresh_wizard_route(state, epoch) {
+                set_wizard_input_error(
+                    state,
+                    epoch,
+                    &format!("Couldn’t update the wizard steps: {error}"),
+                );
+                return;
+            }
             if let Some(surface) = state
                 .borrow_mut()
                 .pattern_wizard
@@ -3789,13 +9591,199 @@ fn commit_wizard_numeric_entry(
                     &surface.initial_document,
                 ));
             }
+            show_wizard_current_route_page(state, epoch);
             submit_wizard_preview(state, epoch);
         }
+        Err(error) => {
+            let invalid = state
+                .borrow()
+                .pattern_wizard
+                .as_ref()
+                .filter(|surface| surface.epoch == epoch)
+                .and_then(|surface| surface.transition_invalid_control.clone());
+            if let Some(control) = invalid {
+                control.grab_focus();
+            }
+            set_wizard_input_error(
+                state,
+                epoch,
+                &format!("Finish the highlighted required setting. {error}"),
+            );
+        }
+    }
+}
+
+/// Reports one local parse or command error without changing a private draft.
+fn set_wizard_input_error(state: &Rc<RefCell<AppState>>, epoch: u64, message: &str) {
+    if let Some(surface) = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.status.set_label(message);
+    }
+}
+
+/// Commits one finite private wizard scalar through the established typed command builder.
+fn commit_wizard_numeric_entry(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    descriptor: PropertyDescriptor,
+    entry: &gtk::Entry,
+) {
+    let artist_value = match entry.text().trim().parse::<f64>() {
+        Ok(value) if value.is_finite() => value,
+        _ => {
+            if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+                surface.status.set_label("Enter a finite number.");
+            }
+            return;
+        }
+    };
+    let authority_value = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        match authority_numeric_value(
+            surface.draft.borrow().document(),
+            descriptor.field,
+            artist_value,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                surface.status.set_label(&error);
+                return;
+            }
+        }
+    };
+    commit_wizard_input(
+        state,
+        epoch,
+        descriptor,
+        InspectorInput::FiniteF64(authority_value),
+    );
+}
+
+/// Reports whether one requested scalar already equals the captured private document value.
+fn wizard_input_matches_current(
+    document: &Document,
+    descriptor: &PropertyDescriptor,
+    input: &InspectorInput,
+) -> bool {
+    document
+        .property_values()
+        .into_iter()
+        .find(|value| value.descriptor == *descriptor)
+        .is_some_and(|value| match (&value.value, input) {
+            (PropertyCurrentValueKind::FiniteF64(current), InspectorInput::FiniteF64(next)) => {
+                current == next
+            }
+            (
+                PropertyCurrentValueKind::OptionalFiniteF64(current),
+                InspectorInput::OptionalFiniteF64(next),
+            ) => current == next,
+            (PropertyCurrentValueKind::U32(current), InspectorInput::U32(next)) => current == next,
+            (PropertyCurrentValueKind::Boolean(current), InspectorInput::Boolean(next)) => {
+                current == next
+            }
+            (PropertyCurrentValueKind::EnumChoice(current), InspectorInput::EnumChoice(next)) => {
+                current == next
+            }
+            _ => false,
+        })
+}
+
+/// Reports whether one wizard input can change the capability-derived card structure.
+///
+/// Scalar values never add or remove pages or controls, so retaining their current card preserves
+/// natural Tab traversal and the artist's live text. Choices and references can change topology or
+/// applicability and therefore continue through full route recomputation.
+fn wizard_input_requires_route_rebuild(input: &InspectorInput) -> bool {
+    !matches!(
+        input,
+        InspectorInput::FiniteF64(_)
+            | InspectorInput::OptionalFiniteF64(_)
+            | InspectorInput::U32(_)
+    )
+}
+
+/// Applies one descriptor input to the captured private draft and schedules only its preview.
+///
+/// Every successful call produces one `DocumentHistory` entry. The captured
+/// wizard scope remains authoritative even if the main inspector selection
+/// changes while the modal is open.
+fn commit_wizard_input(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    descriptor: PropertyDescriptor,
+    input: InspectorInput,
+) {
+    let rebuild_route = wizard_input_requires_route_rebuild(&input);
+    let result = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        let mut draft = surface.draft.borrow_mut();
+        if wizard_input_matches_current(draft.document(), &descriptor, &input) {
+            Ok(false)
+        } else {
+            command_for_inspector_input(
+                draft.document(),
+                surface.target.channel_id(),
+                match surface.target {
+                    InspectorTarget::DocumentAll => DefinitionEditScope::DocumentBase,
+                    InspectorTarget::Channel(_) => DefinitionEditScope::SelectedCopy,
+                },
+                &descriptor,
+                input,
+            )
+            .and_then(|command| {
+                draft
+                    .apply(&command)
+                    .map(|_| true)
+                    .map_err(|error| error.to_string())
+            })
+        }
+    };
+    match result {
+        Ok(true) => {
+            if rebuild_route {
+                if let Err(error) = refresh_wizard_route(state, epoch) {
+                    set_wizard_input_error(
+                        state,
+                        epoch,
+                        &format!("Couldn’t update the wizard steps: {error}"),
+                    );
+                    return;
+                }
+                show_wizard_current_route_page(state, epoch);
+            } else if let Some(surface) = state
+                .borrow()
+                .pattern_wizard
+                .as_ref()
+                .filter(|surface| surface.epoch == epoch)
+            {
+                refresh_wizard_action_controls(surface);
+            }
+            submit_wizard_preview(state, epoch);
+        }
+        Ok(false) => {}
         Err(error) => {
             if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
                 surface
                     .status
-                    .set_label(&format!("Couldn’t update this private value: {error}"));
+                    .set_label(&format!("Couldn’t update this pattern setting: {error}"));
             }
         }
     }
@@ -3821,7 +9809,7 @@ fn submit_wizard_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
             };
             surface
                 .status
-                .set_label(&format!("Private preview unavailable: {error}"));
+                .set_label(&format!("Pattern preview unavailable: {error}"));
             return;
         };
         let target = toniator_engine::PreviewRasterTarget::new(
@@ -3829,29 +9817,465 @@ fn submit_wizard_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
             WIZARD_PREVIEW_TARGET_PX,
         )
         .expect("fixed Pattern Wizard preview target is valid");
-        let request = EvaluationRequest::with_preview_target(
-            surface
-                .draft
-                .borrow()
-                .session()
-                .document_evaluation_snapshot(),
-            source.clone(),
-            target,
-        );
+        surface.preview_session = None;
+        let session =
+            match wizard_preview_session(surface.draft.borrow().document(), surface.target) {
+                Ok(session) => session,
+                Err(error) => {
+                    surface
+                        .status
+                        .set_label(&format!("Pattern preview unavailable: {error}"));
+                    return;
+                }
+            };
+        let snapshot = session.document_evaluation_snapshot();
+        let request = EvaluationRequest::with_preview_target(snapshot, source.clone(), target);
         match surface.scheduler.submit(request) {
             Ok(ticket) => {
                 surface.preview_submission = Some(ticket.value());
+                surface.preview_session = Some(session);
                 surface.spinner.set_visible(true);
                 surface.spinner.start();
-                surface.status.set_label("Rendering private preview…");
+                surface.status.set_label("Updating pattern preview…");
             }
             Err(error) => {
                 surface
                     .status
-                    .set_label(&format!("Private preview unavailable: {error}"));
+                    .set_label(&format!("Pattern preview unavailable: {error}"));
             }
         }
     };
+}
+
+/// Builds the neutral one-channel preview projection without mutating a wizard or main draft.
+///
+/// The captured selected channel is retained when present; document-wide editing deterministically
+/// uses the first authoritative channel. Every other channel is hidden in a disposable clone and
+/// the visible channel receives solid black plus a bounded, relative density projection through
+/// typed document commands.
+///
+/// # Errors
+///
+/// Returns a validation or history diagnostic when the cloned document cannot apply its preview
+/// projection. Neither the wizard draft nor main workspace is changed.
+fn wizard_preview_session(
+    document: &Document,
+    target: InspectorTarget,
+) -> Result<DocumentSession, String> {
+    let projection = wizard_preview_document(document, target)?;
+    DocumentSession::new(projection).map_err(|error| error.to_string())
+}
+
+/// Rebuilds one validated document on the fixed editor-local preview canvas.
+///
+/// Channel topology, deltas, mappings, and presentation values are cloned exactly. The disposable
+/// canvas retains the original aspect ratio, and workspace-local Guide resources receive the same
+/// uniform scale. If one open path is also a tile-local Motif, the projection privately duplicates
+/// and retargets only its Guide uses so the two coordinate spaces remain faithful without changing
+/// the wizard draft's alias graph.
+///
+/// # Errors
+///
+/// Returns a finite-positive canvas or complete-document validation diagnostic without changing
+/// the input document, wizard draft, main history, persistence, or export authority.
+fn wizard_preview_canvas_document(
+    document: &Document,
+    longest_edge: f64,
+) -> Result<Document, String> {
+    let longest = document.canvas().width.max(document.canvas().height);
+    if !longest.is_finite() || longest <= 0.0 || !longest_edge.is_finite() || longest_edge <= 0.0 {
+        return Err("The pattern preview canvas must have a valid positive size.".to_owned());
+    }
+    let scale = longest_edge / longest;
+    let canvas = CanvasSpec {
+        width: document.canvas().width * scale,
+        height: document.canvas().height * scale,
+    };
+    let mut bundles = document.pattern_definition_bundles().to_vec();
+    let settings = document.pattern_settings().clone();
+    let mut guide_structure_ids = BTreeSet::new();
+    let mut output_structure_ids = BTreeSet::new();
+    for bundle in &bundles {
+        for mechanism in &bundle.definition.mechanisms {
+            if let PatternMechanism::GuideDimensions { dimensions, .. } = mechanism {
+                for dimension in dimensions {
+                    if let toniator_domain::GuidePrototype::AuthoredOpenPath { structure_id } =
+                        &dimension.prototype
+                    {
+                        guide_structure_ids.insert(*structure_id);
+                    }
+                }
+            }
+        }
+        for output in &bundle.definition.output_layers {
+            match &output.realization {
+                PatternOutputRealization::MarkPrototype {
+                    prototype: MarkPrototype::AuthoredClosedShape { structure_id },
+                    ..
+                }
+                | PatternOutputRealization::CurveMotifPaths { structure_id, .. } => {
+                    output_structure_ids.insert(*structure_id);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mixed_structure_ids = guide_structure_ids
+        .intersection(&output_structure_ids)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut structures = document
+        .authored_structures()
+        .iter()
+        .map(|structure| {
+            if guide_structure_ids.contains(&structure.id())
+                && !mixed_structure_ids.contains(&structure.id())
+            {
+                scale_wizard_preview_guide_structure(structure, structure.id(), scale)
+            } else {
+                Ok(structure.clone())
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if scale.to_bits() != 1.0_f64.to_bits() {
+        let mut next_id = document
+            .authored_structures()
+            .iter()
+            .map(|structure| structure.id().0)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| "Pattern preview resource IDs are exhausted.".to_owned())?;
+        let mut retargets = BTreeMap::new();
+        for source_id in mixed_structure_ids {
+            let source = document.authored_structure(source_id).ok_or_else(|| {
+                "The pattern preview references a missing shared guide resource.".to_owned()
+            })?;
+            let target_id = AuthoredStructureId(next_id);
+            next_id = next_id
+                .checked_add(1)
+                .ok_or_else(|| "Pattern preview resource IDs are exhausted.".to_owned())?;
+            structures.push(scale_wizard_preview_guide_structure(
+                source, target_id, scale,
+            )?);
+            retargets.insert(source_id, target_id);
+        }
+        retarget_wizard_preview_guide_structures(&mut bundles, &retargets);
+    }
+    if let (Some(model), Some(topology)) = (document.channel_model(), document.channel_topology()) {
+        Document::with_source_topology_and_authored_structures(
+            document.id(),
+            canvas,
+            document.source().clone(),
+            bundles,
+            settings,
+            model,
+            topology.clone(),
+            structures,
+        )
+        .map_err(|error| error.to_string())
+    } else if let Some(channels) = document.channels() {
+        Document::with_source_and_authored_structures(
+            document.id(),
+            canvas,
+            document.source().clone(),
+            bundles,
+            settings,
+            channels.to_vec(),
+            structures,
+        )
+        .map_err(|error| error.to_string())
+    } else {
+        Err("The pattern preview has no available color channel.".to_owned())
+    }
+}
+
+/// Retargets only Guide consumers to disposable scaled resource copies.
+///
+/// Output consumers deliberately retain the original ID and tile-local payload. The mapping is
+/// preview-local and never reaches the wizard draft, history, persistence, or export authority.
+fn retarget_wizard_preview_guide_structures(
+    bundles: &mut [toniator_domain::PatternDefinitionBundle],
+    retargets: &BTreeMap<AuthoredStructureId, AuthoredStructureId>,
+) {
+    for bundle in bundles {
+        for mechanism in &mut bundle.definition.mechanisms {
+            let PatternMechanism::GuideDimensions { dimensions, .. } = mechanism else {
+                continue;
+            };
+            for dimension in dimensions {
+                let toniator_domain::GuidePrototype::AuthoredOpenPath { structure_id } =
+                    &mut dimension.prototype
+                else {
+                    continue;
+                };
+                if let Some(target_id) = retargets.get(structure_id) {
+                    *structure_id = *target_id;
+                }
+            }
+        }
+    }
+}
+
+/// Uniformly scales one workspace-local guide resource for the disposable preview canvas.
+///
+/// Guide prototypes use centered document-distance coordinates, unlike tile-local motifs and
+/// normalized mark shapes. Scaling only resources with an authoritative Guide use preserves the
+/// recipe's workspace-relative curve while leaving the wizard draft and reusable output geometry
+/// untouched.
+///
+/// # Errors
+///
+/// Returns an authored-structure validation diagnostic if scaling produces invalid geometry.
+fn scale_wizard_preview_guide_structure(
+    structure: &AuthoredStructure,
+    target_id: AuthoredStructureId,
+    scale: f64,
+) -> Result<AuthoredStructure, String> {
+    let point = |point: AuthoredPoint2| AuthoredPoint2 {
+        x: point.x * scale,
+        y: point.y * scale,
+    };
+    let segments = structure
+        .segments()
+        .iter()
+        .map(|segment| match segment {
+            AuthoredCurveSegment::Line { start, end } => AuthoredCurveSegment::Line {
+                start: point(*start),
+                end: point(*end),
+            },
+            AuthoredCurveSegment::CubicBezier {
+                start,
+                control_1,
+                control_2,
+                end,
+            } => AuthoredCurveSegment::CubicBezier {
+                start: point(*start),
+                control_1: point(*control_1),
+                control_2: point(*control_2),
+                end: point(*end),
+            },
+        })
+        .collect();
+    AuthoredStructure::new(target_id, structure.kind(), segments).map_err(|error| error.to_string())
+}
+
+/// Creates the disposable neutral document used by every Pattern Wizard page.
+///
+/// # Errors
+///
+/// Returns a cloned-document validation or command diagnostic without changing the input document
+/// or either history. The returned document has exactly one visible channel with solid black paint
+/// and a capability-derived neutral-preview-only density budget; no recipe or draft value is changed.
+fn wizard_preview_document(
+    document: &Document,
+    target: InspectorTarget,
+) -> Result<Document, String> {
+    let channel_ids = authoritative_channel_ids(document);
+    let visible = match target {
+        InspectorTarget::Channel(channel_id) if channel_ids.contains(&channel_id) => channel_id,
+        InspectorTarget::Channel(_) | InspectorTarget::DocumentAll => *channel_ids
+            .first()
+            .ok_or_else(|| "The pattern preview has no color channel to render.".to_owned())?,
+    };
+    let capabilities = document
+        .pattern_capabilities(match target {
+            InspectorTarget::DocumentAll => PatternCapabilityScope::DocumentBase,
+            InspectorTarget::Channel(channel_id) => PatternCapabilityScope::Channel(channel_id),
+        })
+        .map_err(|error| error.to_string())?;
+    let connection_backed = capabilities.outputs.iter().any(|output| {
+        matches!(
+            output.structural,
+            PatternOutputCapabilityProjection::ConnectionPaths(_)
+        )
+    });
+    let preview_longest_edge = if connection_backed {
+        WIZARD_PREVIEW_CANVAS_LONGEST_EDGE
+    } else {
+        f64::from(WIZARD_NEUTRAL_SOURCE_EDGE_PX)
+    };
+    let preview_document = wizard_preview_canvas_document(document, preview_longest_edge)?;
+    let channel_ids = authoritative_channel_ids(&preview_document);
+    let mut projection = DocumentHistory::new(
+        DocumentSession::new(preview_document.clone()).map_err(|error| error.to_string())?,
+    );
+    if target == InspectorTarget::DocumentAll {
+        let instance = projection
+            .document()
+            .channel_pattern_instance(visible)
+            .cloned()
+            .ok_or_else(|| {
+                "The pattern preview cannot find the selected channel pattern.".to_owned()
+            })?;
+        if instance.definition_override.is_some() {
+            projection
+                .apply(&DocumentCommand::ResetChannelPatternDefinitionOverride {
+                    base: projection.document().pattern_settings().clone(),
+                    channel_id: visible,
+                })
+                .map_err(|error| error.to_string())?;
+        }
+        let instance = projection
+            .document()
+            .channel_pattern_instance(visible)
+            .cloned()
+            .ok_or_else(|| {
+                "The pattern preview cannot find the selected channel pattern.".to_owned()
+            })?;
+        if instance.layout_delta.density.is_some() {
+            projection
+                .apply(&DocumentCommand::ResetChannelDensityDelta {
+                    base: projection.document().pattern_settings().clone(),
+                    channel_id: visible,
+                })
+                .map_err(|error| error.to_string())?;
+        }
+        if instance.layout_delta.rotation_degrees.is_some() {
+            projection
+                .apply(&DocumentCommand::ResetChannelPatternRotationDelta {
+                    base: projection.document().pattern_settings().clone(),
+                    channel_id: visible,
+                })
+                .map_err(|error| error.to_string())?;
+        }
+        if instance.shape_rotation_delta_degrees.is_some() {
+            projection
+                .apply(&DocumentCommand::ResetChannelShapeRotationDelta {
+                    base: projection.document().pattern_settings().clone(),
+                    channel_id: visible,
+                })
+                .map_err(|error| error.to_string())?;
+        }
+        if instance.layout_delta.translation_x != 0.0 {
+            projection
+                .apply(&DocumentCommand::SetTranslationAxis {
+                    channel_id: visible,
+                    edited_axis: TranslationEditedAxis::X,
+                    value: 0.0,
+                })
+                .map_err(|error| error.to_string())?;
+        }
+        if instance.layout_delta.translation_y != 0.0 {
+            projection
+                .apply(&DocumentCommand::SetTranslationAxis {
+                    channel_id: visible,
+                    edited_axis: TranslationEditedAxis::Y,
+                    value: 0.0,
+                })
+                .map_err(|error| error.to_string())?;
+        }
+        let output_deltas = projection
+            .document()
+            .channel_pattern_instance(visible)
+            .map(|instance| instance.output_response_deltas.clone())
+            .unwrap_or_default();
+        for delta in output_deltas {
+            let command = projection
+                .document()
+                .reset_channel_output_response_delta(visible, delta.output_layer_id)
+                .map_err(|error| error.to_string())?;
+            projection
+                .apply(&command)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    for channel_id in channel_ids {
+        let desired = channel_id == visible;
+        let current = preview_document
+            .modeled_channel(channel_id)
+            .map(|channel| channel.visible)
+            .or_else(|| {
+                preview_document
+                    .channel(channel_id)
+                    .map(|channel| channel.appearance.visible)
+            })
+            .ok_or_else(|| "The pattern preview cannot find the selected channel.".to_owned())?;
+        if current != desired {
+            projection
+                .apply(&DocumentCommand::SetVisibility {
+                    channel_id,
+                    visible: desired,
+                })
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    let black = ColorValue {
+        red: 0.0,
+        green: 0.0,
+        blue: 0.0,
+        alpha: 1.0,
+    };
+    if preview_document.modeled_channel(visible).is_some() {
+        if preview_document
+            .modeled_channel(visible)
+            .is_some_and(|channel| channel.paint != ChannelPaint::Solid(black.clone()))
+        {
+            projection
+                .apply(&DocumentCommand::SetChannelPaint {
+                    channel_id: visible,
+                    paint: ChannelPaint::Solid(black),
+                })
+                .map_err(|error| error.to_string())?;
+        }
+    } else {
+        for (component, value) in [
+            (ColorComponent::Red, 0.0),
+            (ColorComponent::Green, 0.0),
+            (ColorComponent::Blue, 0.0),
+            (ColorComponent::Alpha, 1.0),
+        ] {
+            projection
+                .apply(&DocumentCommand::SetColorComponent {
+                    channel_id: visible,
+                    component,
+                    value,
+                })
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    let effective_density = match target {
+        InspectorTarget::DocumentAll => document.pattern_settings().density.clone(),
+        InspectorTarget::Channel(channel_id) => {
+            document
+                .effective_channel_pattern(channel_id)
+                .map_err(|error| error.to_string())?
+                .density
+        }
+    };
+    let baseline = DensityMetric2D::default_for_canvas(document.canvas())
+        .map_err(|error| error.to_string())?
+        .density;
+    let (preview_base, preview_minimum, preview_maximum) = if connection_backed {
+        (
+            WIZARD_CONNECTION_PREVIEW_BASE_DENSITY,
+            WIZARD_CONNECTION_PREVIEW_MIN_DENSITY,
+            WIZARD_CONNECTION_PREVIEW_MAX_DENSITY,
+        )
+    } else {
+        (
+            WIZARD_PREVIEW_BASE_DENSITY,
+            WIZARD_PREVIEW_MIN_DENSITY,
+            WIZARD_PREVIEW_MAX_DENSITY,
+        )
+    };
+    let preview_density = (preview_base * effective_density.density / baseline)
+        .clamp(preview_minimum, preview_maximum);
+    let density_command = projection
+        .session()
+        .snapshot()
+        .set_channel_density_for_effective(
+            visible,
+            DensityMetric2D {
+                density: preview_density,
+                aspect: effective_density.aspect,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    projection
+        .apply(&density_command)
+        .map_err(|error| error.to_string())?;
+    Ok(projection.session().snapshot())
 }
 
 /// Bridges scheduler progress through the captured wizard epoch without installing texture state.
@@ -3872,7 +10296,7 @@ fn handle_wizard_preview_progress(
         return;
     };
     surface.status.set_label(&format!(
-        "Rendering private preview: {} · {:.0}%",
+        "Updating pattern preview: {} · {:.0}%",
         preview_progress_stage_label(progress.stage()).trim_end_matches('…'),
         progress.fraction().clamp(0.0, 1.0) * 100.0
     ));
@@ -3897,11 +10321,15 @@ fn handle_wizard_preview_completion(
         return;
     }
     surface.preview_submission = None;
+    let preview_session = surface.preview_session.take();
     surface.spinner.stop();
     surface.spinner.set_visible(false);
+    let Some(preview_session) = preview_session else {
+        return;
+    };
     match surface
         .scheduler
-        .accept_completion(&completion, surface.draft.borrow().session())
+        .accept_completion(&completion, &preview_session)
     {
         Ok(true) => match completion
             .result()
@@ -3909,15 +10337,7 @@ fn handle_wizard_preview_completion(
         {
             Some(texture) => {
                 surface.picture.set_paintable(Some(&texture));
-                let (width, height) = match &surface.preview_source {
-                    WizardPreviewSource::Ready { width, height, .. } => (*width, *height),
-                    WizardPreviewSource::Unavailable(_) => {
-                        unreachable!("completed wizard preview requires a proxy")
-                    }
-                };
-                surface.status.set_label(&format!(
-                    "Private preview updated ({width} × {height} proxy → {WIZARD_PREVIEW_TARGET_PX} × {WIZARD_PREVIEW_TARGET_PX})."
-                ));
+                surface.status.set_label("Pattern preview updated.");
             }
             None => surface
                 .status
@@ -3932,6 +10352,34 @@ fn handle_wizard_preview_completion(
 
 /// Applies exactly one valid changed wizard history squash to its captured main-workspace target.
 fn apply_pattern_wizard(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let preset_shortcut = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| {
+            surface.epoch == epoch
+                && wizard_direct_preset_apply_admission(
+                    surface.gallery_panel.is_visible(),
+                    surface.candidate.as_deref(),
+                )
+        })
+        .and_then(|surface| surface.candidate.clone());
+    if let Some(id) = preset_shortcut {
+        use_wizard_preset(state, epoch, &id, false);
+        let ready = state
+            .borrow()
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+            .is_some_and(|surface| {
+                surface.route.get(surface.route_index) == Some(&WizardRoutePage::Review)
+                    && wizard_apply_is_ready(surface, WizardRoutePage::Review)
+            });
+        if ready {
+            apply_pattern_wizard(state, epoch);
+        }
+        return;
+    }
     let draft = {
         let app_state = state.borrow();
         let Some(surface) = app_state
@@ -3941,10 +10389,20 @@ fn apply_pattern_wizard(state: &Rc<RefCell<AppState>>, epoch: u64) {
         else {
             return;
         };
-        if !wizard_apply_enabled(surface.draft.borrow().document(), &surface.initial_document) {
-            surface
-                .status
-                .set_label("Apply is unavailable because this private draft makes no change.");
+        let current = surface
+            .route
+            .get(surface.route_index)
+            .copied()
+            .unwrap_or(WizardRoutePage::Review);
+        let admission = wizard_apply_admission(
+            surface.draft.borrow().document(),
+            &surface.initial_document,
+            surface.target,
+            current,
+            surface.transition.is_some() || surface.site_use_filter.is_some(),
+        );
+        if let Err(error) = admission {
+            surface.status.set_label(&error);
             return;
         }
         Rc::clone(&surface.draft)
@@ -3974,17 +10432,50 @@ fn apply_pattern_wizard(state: &Rc<RefCell<AppState>>, epoch: u64) {
             if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
                 surface
                     .status
-                    .set_label("Apply is unavailable because this private draft makes no change.");
+                    .set_label("Apply is unavailable because no pattern settings changed.");
             }
         }
         Err(error) => {
             if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
                 surface
                     .status
-                    .set_label(&format!("Couldn’t apply this private draft: {error}"));
+                    .set_label(&format!("Couldn’t apply these pattern settings: {error}"));
             }
         }
     }
+}
+
+/// Validates terminal publication without changing either the private or main history.
+///
+/// # Errors
+///
+/// Returns a user-facing reason when publication is attempted before Review, while a required
+/// frontend proposal remains incomplete, for an unchanged draft, or when the domain cannot
+/// reconstruct the current captured recipe.
+fn wizard_apply_admission(
+    document: &Document,
+    initial_document: &Document,
+    target: InspectorTarget,
+    current: WizardRoutePage,
+    has_pending_proposal: bool,
+) -> Result<(), String> {
+    if current != WizardRoutePage::Review {
+        return Err("Apply is available only from Review.".to_owned());
+    }
+    if has_pending_proposal {
+        return Err("Complete or cancel the pending choice before Apply.".to_owned());
+    }
+    validate_wizard_review_recipe(document, initial_document, target)
+        .map_err(|error| format!("Couldn’t validate these pattern settings for Apply: {error}"))
+}
+
+/// Returns whether the visible Presets card may use its direct immutable-preset Apply shortcut.
+///
+/// Route history is deliberately irrelevant: Previous may reveal Presets after a fixed-card route
+/// has already been constructed. Current Pattern has no catalog identity and therefore remains
+/// unavailable to this shortcut.
+fn wizard_direct_preset_apply_admission(presets_visible: bool, candidate: Option<&str>) -> bool {
+    presets_visible && candidate.is_some()
 }
 
 /// Requests disposal of the private wizard, confirming only when its cloned history changed.
@@ -4013,8 +10504,9 @@ fn request_wizard_discard(state: &Rc<RefCell<AppState>>, epoch: u64) {
         .modal(true)
         .build();
     let content = components::ToniatorConfirmationContent::new();
-    content
-        .set_detail("Discard this private Pattern Wizard draft? Your document remains unchanged.");
+    content.set_detail(
+        "Discard the changes made in this Pattern Wizard? Your document remains unchanged.",
+    );
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let keep = gtk::Button::with_label("Keep editing");
     let discard = gtk::Button::with_label("Discard changes");
@@ -4052,8 +10544,97 @@ fn close_pattern_wizard(state: &Rc<RefCell<AppState>>, epoch: u64) {
     };
     if let Some(surface) = surface {
         surface.preview_bridge_stop.store(true, Ordering::Release);
+        let invoking_edit = surface.invoking_edit.clone().upcast::<gtk::Widget>();
+        if let Some(parent_window) = invoking_edit.root().and_downcast::<gtk::Window>() {
+            gtk::prelude::GtkWindowExt::set_focus(&parent_window, Some(&invoking_edit));
+        }
         surface.window.close();
-        surface.invoking_edit.grab_focus();
+        restore_focus_after_modal_close(invoking_edit.clone());
+        // A dirty-close confirmation tears down one modal after the wizard itself closes. Repeat
+        // the exact-control restoration after that second Wayland activation has settled.
+        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            restore_focus_after_modal_close(invoking_edit);
+        });
+    }
+}
+
+/// Reactivates one modal parent before restoring its exact invoking control.
+///
+/// Wayland activation and GTK modal teardown settle asynchronously. The timeout callback waits for
+/// the parent to be active and the control to be mapped before assigning focus, so the compositor's
+/// later activation event cannot clear the request. A bounded timeout is used instead of a frame
+/// callback because an otherwise idle main window may not schedule a frame after its modal closes.
+/// The fallback still assigns logical GTK focus when a compositor does not expose activation
+/// promptly. This helper changes presentation state only; it never changes document or draft
+/// history.
+fn restore_focus_after_modal_close(invoking_control: gtk::Widget) {
+    let Some(parent_window) = invoking_control.root().and_downcast::<gtk::Window>() else {
+        return;
+    };
+    parent_window.present();
+    let attempts = Cell::new(0_u8);
+    let focus_requests = Cell::new(0_u8);
+    let parent_for_focus = parent_window.clone();
+    glib::timeout_add_local(Duration::from_millis(25), move || {
+        attempts.set(attempts.get().saturating_add(1));
+        let ready = parent_for_focus.is_active() && invoking_control.is_mapped();
+        if ready || attempts.get() >= 60 {
+            gtk::prelude::GtkWindowExt::set_focus(&parent_for_focus, Some(&invoking_control));
+            invoking_control.grab_focus();
+            focus_requests.set(focus_requests.get().saturating_add(1));
+        }
+        if focus_requests.get() >= 12 || attempts.get() >= 72 {
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+}
+
+/// Registers one live child-editor invoker for focus restoration after a wizard-page rebuild.
+///
+/// The map is presentation-only and is cleared before every page rebuild. A stale epoch or token
+/// cannot register into a replacement wizard and no document identifier is allocated or changed.
+fn register_wizard_nested_focus_control(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    token: NestedEditorFocusToken,
+    control: gtk::Widget,
+) {
+    if token.wizard_epoch != epoch {
+        return;
+    }
+    if let Some(surface) = state
+        .borrow_mut()
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.nested_focus_controls.insert(token, control);
+    }
+}
+
+/// Restores focus to the rebuilt live invoker for one stable authored-resource use.
+///
+/// Missing or stale tokens fail closed without focusing an unrelated control. The helper changes
+/// only GTK focus after the current wizard page has been reconstructed from its private document.
+/// A delayed second request survives the compositor's later modal-close activation transition.
+fn restore_rebuilt_wizard_nested_focus(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    token: NestedEditorFocusToken,
+) {
+    let control = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch && token.wizard_epoch == epoch)
+        .and_then(|surface| surface.nested_focus_controls.get(&token).cloned());
+    if let Some(control) = control {
+        restore_focus_after_modal_close(control.clone());
+        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            restore_focus_after_modal_close(control);
+        });
     }
 }
 
@@ -4062,140 +10643,6 @@ fn take_pattern_wizard_for_workspace_change(state: &mut AppState) -> Option<Patt
     state.pattern_wizard.take().inspect(|surface| {
         surface.preview_bridge_stop.store(true, Ordering::Release);
     })
-}
-
-/// Applies the current runtime recipe candidate to ALL or one named channel.
-fn apply_pattern_candidate(state: &Rc<RefCell<AppState>>) {
-    let (id, name, target, affected) = {
-        let app_state = state.borrow();
-        let Some(PatternCandidate::Preset(id)) =
-            app_state.inspector_runtime.pattern_candidate.as_ref()
-        else {
-            return;
-        };
-        let Some(entry) = app_state.catalog.find(id) else {
-            return;
-        };
-        let affected = app_state
-            .workspace
-            .as_ref()
-            .filter(|_| app_state.inspector_runtime.target == InspectorTarget::DocumentAll)
-            .map(|workspace| {
-                workspace
-                    .document()
-                    .channels_with_pattern_replacement_intent()
-            })
-            .unwrap_or_default();
-        (
-            id.clone(),
-            entry.preset.metadata.name.clone(),
-            app_state.inspector_runtime.target,
-            affected,
-        )
-    };
-    if target == InspectorTarget::DocumentAll && !affected.is_empty() {
-        confirm_all_pattern_apply(state, id, name, affected);
-    } else {
-        perform_pattern_apply(state, &id, &name, target);
-    }
-}
-
-/// Applies one confirmed bundled recipe through the target-aware registry boundary.
-fn perform_pattern_apply(
-    state: &Rc<RefCell<AppState>>,
-    id: &str,
-    name: &str,
-    target: InspectorTarget,
-) {
-    let result = {
-        let mut app_state = state.borrow_mut();
-        let catalog = app_state.catalog.clone();
-        let Some(workspace) = app_state.workspace.as_mut() else {
-            return;
-        };
-        match target {
-            InspectorTarget::DocumentAll => {
-                catalog.apply_to_document_base(&mut workspace.history, id)
-            }
-            InspectorTarget::Channel(channel_id) => {
-                catalog.apply_to_selected(&mut workspace.history, channel_id, id)
-            }
-        }
-    };
-    match result {
-        Ok(_) => {
-            let mut app_state = state.borrow_mut();
-            set_preview_pending(&mut app_state);
-            set_inspector_status(
-                &mut app_state,
-                match target {
-                    InspectorTarget::DocumentAll => {
-                        format!("{name} applied to ALL as the document base.")
-                    }
-                    InspectorTarget::Channel(_) => {
-                        format!("{name} applied to the selected channel.")
-                    }
-                },
-            );
-            app_state.inspector_runtime.pattern_candidate =
-                Some(PatternCandidate::Preset(id.to_owned()));
-            emit_automation_state(&mut app_state, "preset_applied", None);
-            sync_ui(&mut app_state);
-            drop(app_state);
-            rebuild_inspector(state);
-            schedule_main_preview_submission(state);
-        }
-        Err(error) => {
-            let mut app_state = state.borrow_mut();
-            set_inspector_status(&mut app_state, format!("Couldn’t apply {name}: {error}"));
-        }
-    }
-}
-
-/// Discloses channels whose pattern-relative intent will be cleared before ALL applies.
-fn confirm_all_pattern_apply(
-    state: &Rc<RefCell<AppState>>,
-    id: String,
-    name: String,
-    affected: Vec<ChannelId>,
-) {
-    let channel_names = {
-        let app_state = state.borrow();
-        let Some(document) = app_state.workspace.as_ref().map(Workspace::document) else {
-            return;
-        };
-        affected
-            .iter()
-            .map(|channel_id| channel_display_name(document, *channel_id))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let dialog = gtk::Window::builder()
-        .title("Apply pattern to ALL?")
-        .transient_for(&state.borrow().window)
-        .modal(true)
-        .build();
-    let content = components::ToniatorConfirmationContent::new();
-    content.set_detail(&format!(
-        "Applying {name} clears pattern, density/aspect, rotation, shape-rotation, and output-response overrides for: {channel_names}. Translation and appearance/source settings stay unchanged."
-    ));
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    actions.set_halign(gtk::Align::End);
-    let cancel = gtk::Button::with_label("Cancel");
-    let apply = gtk::Button::with_label("Apply to ALL");
-    actions.append(&cancel);
-    actions.append(&apply);
-    content.append(&actions);
-    dialog.set_child(Some(&content));
-    let dialog_for_cancel = dialog.clone();
-    cancel.connect_clicked(move |_| dialog_for_cancel.close());
-    let state_for_apply = Rc::clone(state);
-    let dialog_for_apply = dialog.clone();
-    apply.connect_clicked(move |_| {
-        perform_pattern_apply(&state_for_apply, &id, &name, InspectorTarget::DocumentAll);
-        dialog_for_apply.close();
-    });
-    dialog.present();
 }
 
 /// Returns capability-valid Source and Output values for the private advanced editor.
@@ -4239,6 +10686,7 @@ fn advanced_settings_values(
                     | PropertyFieldId::MarkMaximumFill
                     | PropertyFieldId::ConnectedMinimumThickness
                     | PropertyFieldId::ConnectedMaximumThickness
+                    | PropertyFieldId::CurveResponseBias
                     | PropertyFieldId::RegionResizeAlgorithm
                     | PropertyFieldId::RegionSampling
                     | PropertyFieldId::RegionMinimumFill
@@ -4373,15 +10821,15 @@ fn resolve_advanced_value_from_values(
     let mut matches = values
         .iter()
         .filter(|value| advanced_descriptor_matches(value, locator, &output_anchor_for));
-    let current = matches.next().ok_or_else(|| {
-        "this setting is no longer active in the current private pattern draft".to_owned()
-    })?;
+    let current = matches
+        .next()
+        .ok_or_else(|| "this setting is no longer available in the current pattern".to_owned())?;
     matches
         .next()
         .is_none()
         .then_some(current.clone())
         .ok_or_else(|| {
-            "this repeated output setting cannot be safely resolved after a structural edit"
+            "this repeated output setting cannot be found after the pattern structure changed"
                 .to_owned()
         })
 }
@@ -4469,6 +10917,27 @@ const fn advanced_descriptor_target_kind(target: PropertyTarget) -> AdvancedDesc
     }
 }
 
+/// Installs conventional Escape cancellation and default-action behavior on one private dialog.
+///
+/// The dialog retains its existing close-request handler as the sole authority
+/// for discard and cleanup. This controller only translates ordinary keyboard
+/// conventions into that real close path; it does not create global shortcuts
+/// or mutate draft/document state directly.
+fn configure_private_dialog_keyboard(window: &gtk::Window, default: &gtk::Button) {
+    window.set_default_widget(Some(default));
+    let keys = gtk::EventControllerKey::new();
+    let close_window = window.clone();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk::gdk::Key::Escape {
+            close_window.close();
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    window.add_controller(keys);
+}
+
 /// Opens the Blueprint-owned private Advanced Settings history and canonical preview.
 fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
     if let Some(window) = state
@@ -4541,7 +11010,7 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
                 "Select a named channel to edit source mapping, paint/color, and compatible response settings. ALL continues to own pattern and layout authority in the main window."
             }
             InspectorTarget::Channel(_) => {
-                "This pattern has no additional capability-valid Source or Output controls."
+                "This pattern has no additional Source or Output controls."
             }
         }));
         explanation.set_xalign(0.0);
@@ -4564,6 +11033,7 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
                     | PropertyFieldId::MarkMaximumFill
                     | PropertyFieldId::ConnectedMinimumThickness
                     | PropertyFieldId::ConnectedMaximumThickness
+                    | PropertyFieldId::CurveResponseBias
                     | PropertyFieldId::RegionResizeAlgorithm
                     | PropertyFieldId::RegionSampling
                     | PropertyFieldId::RegionMinimumFill
@@ -4584,6 +11054,7 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
 
     let cancel = gtk::Button::with_mnemonic("_Cancel");
     let apply = gtk::Button::with_mnemonic("_Apply");
+    configure_private_dialog_keyboard(&window, &apply);
     shell.append_action(&cancel);
     shell.append_action(&apply);
     let window_for_cancel = window.clone();
@@ -4617,12 +11088,12 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
                 window_for_apply.close();
             }
             Err(error) => {
-                status_for_apply.set_label(&format!("Couldn’t apply this private draft: {error}"))
+                status_for_apply.set_label(&format!("Couldn’t apply these changes: {error}"))
             }
         }
     });
     window.set_child(Some(&shell));
-    status.set_label("Preparing private preview…");
+    status.set_label("Preparing preview…");
     let scheduler =
         Arc::new(EvaluationScheduler::new().expect("Advanced Settings private scheduler starts"));
     let preview_bridge_stop = Arc::new(AtomicBool::new(false));
@@ -4705,13 +11176,13 @@ fn advanced_descriptor_row(
         advanced_descriptor_locator(draft.borrow().document(), target, &current.descriptor)
     else {
         let unavailable = gtk::Label::new(Some(
-            "This setting is no longer available in the private pattern draft.",
+            "This setting is no longer available in the current pattern.",
         ));
         unavailable.add_css_class("dim-label");
         unavailable.set_wrap(true);
         unavailable.set_xalign(1.0);
         unavailable.update_property(&[gtk::accessible::Property::Description(
-            "The current private pattern draft does not expose a stable structural route for this setting.",
+            "This setting can no longer find the pattern output it controls.",
         )]);
         row.append(&unavailable);
         return row;
@@ -4783,7 +11254,7 @@ fn advanced_descriptor_row(
                 .copied()
                 .map(enum_choice_label)
                 .collect::<Vec<_>>();
-            let dropdown = gtk::DropDown::from_strings(&labels);
+            let dropdown = accessible_string_dropdown(&labels);
             dropdown.set_selected(
                 choices
                     .iter()
@@ -4833,6 +11304,9 @@ fn advanced_descriptor_description(field: PropertyFieldId) -> Option<&'static st
         ),
         PropertyFieldId::ConnectedMinimumThickness => Some(
             "Lower bound of source-driven stroke width; setting it to zero only removes strokes where sampled ink is zero.",
+        ),
+        PropertyFieldId::CurveResponseBias => Some(
+            "Moves visible curve width toward the left or right normal of authored travel. Centered keeps equal width on both sides without changing guide topology.",
         ),
         _ => None,
     }
@@ -4957,7 +11431,7 @@ fn submit_advanced_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
         };
         surface
             .status
-            .set_label(&format!("Private preview unavailable: {error}"));
+            .set_label(&format!("Settings preview unavailable: {error}"));
         return;
     };
     let target = match toniator_engine::PreviewRasterTarget::new(420, 240) {
@@ -4979,14 +11453,12 @@ fn submit_advanced_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
     match surface.scheduler.submit(request) {
         Ok(ticket) => {
             surface.preview_submission = Some(ticket.value());
-            surface.status.set_label("Rendering private preview… · 0%");
-            surface
-                .picture
-                .set_tooltip_text(Some("Rendering private preview…"));
+            surface.status.set_label("Updating preview… · 0%");
+            surface.picture.set_tooltip_text(Some("Updating preview…"));
         }
         Err(error) => surface
             .status
-            .set_label(&format!("Private preview unavailable: {error}")),
+            .set_label(&format!("Settings preview unavailable: {error}")),
     }
 }
 
@@ -5215,71 +11687,235 @@ fn choose_shared_preset_replacement(
     dialog.present();
 }
 
-/// Adds separate selected-channel affordances for the purpose-specific private editors.
+/// Opens one wizard-owned authored resource editor from the exact invoking control.
 ///
-/// The sidebar retains channel-instance controls only. Neither action creates a definition,
-/// chooses shared scope, or mutates document/history state before the artist confirms a draft edit.
-fn append_pattern_editor_launch(state: &Rc<RefCell<AppState>>, inspector: &gtk::Box) {
-    let grid = gtk::Button::with_mnemonic("Edit _guide paths…");
-    let grid_description =
-        "Edit authored guide-path resources used by the selected channel in a private draft.";
-    grid.set_tooltip_text(Some(grid_description));
-    grid.update_property(&[gtk::accessible::Property::Description(grid_description)]);
-    let state_for_grid = Rc::clone(state);
-    grid.connect_clicked(move |_| {
-        dispatch_ui_intent(&state_for_grid, UiIntent::OpenGridPatternEditor)
-    });
-    let mark = gtk::Button::with_mnemonic("Edit _mark shapes…");
-    let mark_description =
-        "Edit authored mark-shape resources used by the selected channel in a private draft.";
-    mark.set_tooltip_text(Some(mark_description));
-    mark.update_property(&[gtk::accessible::Property::Description(mark_description)]);
-    let state_for_mark = Rc::clone(state);
-    mark.connect_clicked(move |_| dispatch_ui_intent(&state_for_mark, UiIntent::OpenMarkEditor));
-    inspector.append(&grid);
-    inspector.append(&mark);
-    let mut app_state = state.borrow_mut();
-    app_state.guide_editor_button = Some(grid);
-    app_state.mark_editor_button = Some(mark);
+/// # Errors
+///
+/// Reports a visible wizard error when the captured resource is stale, has the wrong topology, or
+/// no longer has a typed use in the wizard draft. It never creates a resource or advances history.
+fn open_wizard_authored_editor(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    purpose: PatternEditorPurpose,
+    structure_id: AuthoredStructureId,
+    invoking_control: gtk::Widget,
+) {
+    let launch = {
+        let app_state = state.borrow();
+        let Some(wizard) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        let document = wizard.draft.borrow().document().clone();
+        let Some(structure) = document.authored_structure(structure_id) else {
+            wizard
+                .status
+                .set_label("This curve is no longer used by the current pattern.");
+            return;
+        };
+        if structure.kind() != purpose.structure_kind() {
+            wizard
+                .status
+                .set_label("This editor cannot edit the selected curve type.");
+            return;
+        }
+        let use_value = document
+            .authored_structure_uses()
+            .into_iter()
+            .find(|use_value| {
+                use_value.structure_id() == structure_id
+                    && matches!(
+                        (purpose, use_value),
+                        (
+                            PatternEditorPurpose::Guide,
+                            AuthoredStructureUse::Guide { .. }
+                        ) | (
+                            PatternEditorPurpose::Shape,
+                            AuthoredStructureUse::Mark { .. }
+                        ) | (
+                            PatternEditorPurpose::Motif,
+                            AuthoredStructureUse::Motif { .. }
+                        )
+                    )
+            });
+        let Some(use_value) = use_value else {
+            wizard
+                .status
+                .set_label("The selected curve is no longer used in a compatible place.");
+            return;
+        };
+        PatternEditorLaunch {
+            parent: PatternEditorParent::Wizard {
+                epoch,
+                focus_token: nested_editor_focus_token(epoch, use_value),
+                invoking_control,
+            },
+            selected_channel: authored_use_channel(&use_value),
+            selected_structure: Some(structure_id),
+            invoking_use: Some(use_value),
+            preparation_command: None,
+        }
+    };
+    open_pattern_editor_with_launch(state, purpose, launch);
 }
 
-/// Synchronizes provisional nested-editor affordances with the real inspector target.
+/// Resolves the first authored guide slot in one prepared scope without using resource order as authority.
 ///
-/// Stage 21A retains the accepted Stage 20F implementations for their Stage 21B
-/// integration, while preventing ALL from appearing to target a fabricated channel.
-fn sync_pattern_editor_launches(state: &Rc<RefCell<AppState>>, target: InspectorTarget) {
-    let app_state = state.borrow();
-    let enabled = target.channel_id().is_some();
-    for (button, selected_description) in [
-        (
-            app_state.guide_editor_button.as_ref(),
-            "Edit authored guide-path resources used by the selected channel in a private draft.",
-        ),
-        (
-            app_state.mark_editor_button.as_ref(),
-            "Edit authored mark-shape resources used by the selected channel in a private draft.",
-        ),
-    ] {
-        let Some(button) = button else {
-            continue;
+/// # Errors
+///
+/// Returns a stale target, missing definition, non-authored guide, or missing effective-use
+/// diagnostic. The document remains unchanged.
+fn first_authored_guide_use_for_target(
+    document: &Document,
+    target: InspectorTarget,
+) -> Result<AuthoredStructureUse, String> {
+    let (definition_id, selected_channel) = match target {
+        InspectorTarget::DocumentAll => {
+            let definition_id = document.pattern_settings().definition_id;
+            let selected_channel = document
+                .linked_channels(definition_id)
+                .first()
+                .copied()
+                .ok_or_else(|| "The all-channel guide pattern has no linked channel.".to_owned())?;
+            (definition_id, selected_channel)
+        }
+        InspectorTarget::Channel(channel_id) => {
+            let definition_id = document
+                .effective_channel_pattern(channel_id)
+                .map_err(|error| error.to_string())?
+                .definition_id;
+            (definition_id, channel_id)
+        }
+    };
+    let definition = document
+        .pattern_definition_bundles()
+        .iter()
+        .find(|bundle| bundle.definition.id == definition_id)
+        .map(|bundle| &bundle.definition)
+        .ok_or_else(|| "The prepared guide definition is missing.".to_owned())?;
+    let (mechanism_id, dimension_id, structure_id) = definition
+        .mechanisms
+        .iter()
+        .find_map(|mechanism| {
+            let PatternMechanism::GuideDimensions { id, dimensions } = mechanism else {
+                return None;
+            };
+            dimensions.first().and_then(|dimension| {
+                let toniator_domain::GuidePrototype::AuthoredOpenPath { structure_id } =
+                    dimension.prototype
+                else {
+                    return None;
+                };
+                Some((*id, dimension.id, structure_id))
+            })
+        })
+        .ok_or_else(|| "The prepared guide pattern has no editable curve.".to_owned())?;
+    document
+        .authored_structure_uses()
+        .into_iter()
+        .find(|use_value| {
+            matches!(
+                use_value,
+                AuthoredStructureUse::Guide {
+                    channel_id,
+                    definition_id: use_definition_id,
+                    mechanism_id: use_mechanism_id,
+                    dimension_id: use_dimension_id,
+                    structure_id: use_structure_id,
+                } if *channel_id == selected_channel
+                    && *use_definition_id == definition_id
+                    && *use_mechanism_id == mechanism_id
+                    && *use_dimension_id == dimension_id
+                    && *use_structure_id == structure_id
+            )
+        })
+        .ok_or_else(|| "The prepared guide curve has no effective document use.".to_owned())
+}
+
+/// Builds the child-only recipe replacement and its deterministic post-allocation guide use.
+///
+/// # Errors
+///
+/// Returns reconstruction, topology, allocation, or typed-use diagnostics without mutating the
+/// supplied document. `Document::apply_command` is used only to inspect the validated candidate.
+fn wizard_editable_guide_preparation(
+    document: &Document,
+    target: InspectorTarget,
+) -> Result<(DocumentCommand, AuthoredStructureUse), String> {
+    let (_, recipe, _) = wizard_route_for_document(document, target)?;
+    let replacement = recipe
+        .with_editable_guide_paths(document.canvas().clone())
+        .map_err(|error| error.to_string())?;
+    let command = wizard_reconstructed_recipe_replacement_command(document, target, replacement)?
+        .ok_or_else(|| "The current guides are already editable.".to_owned())?;
+    let (prepared, _) = document
+        .apply_command(&command)
+        .map_err(|error| error.to_string())?;
+    let use_value = first_authored_guide_use_for_target(&prepared, target)?;
+    Ok((command, use_value))
+}
+
+/// Opens a child Guide Editor that privately converts straight guides into authored curves.
+///
+/// A validated candidate supplies the post-allocation typed use and focus token. The identical
+/// command is then applied only inside the child history; Apply squashes conversion plus geometry
+/// as one wizard entry, while Cancel or confirmed close drops the exact child snapshot.
+fn open_wizard_new_guide_editor(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    target: InspectorTarget,
+    invoking_control: gtk::Widget,
+) {
+    let launch = (|| -> Result<PatternEditorLaunch, String> {
+        let document = {
+            let app_state = state.borrow();
+            let wizard = app_state
+                .pattern_wizard
+                .as_ref()
+                .filter(|surface| surface.epoch == epoch)
+                .ok_or_else(|| "Pattern Wizard is no longer open.".to_owned())?;
+            if wizard.target != target {
+                return Err("The guide editor target changed before it opened.".to_owned());
+            }
+            wizard.draft.borrow().document().clone()
         };
-        let description = if enabled {
-            selected_description
-        } else {
-            "Select a named channel to use this provisional editor; Pattern Wizard integration arrives in Stage 21B."
-        };
-        button.set_sensitive(enabled);
-        button.set_tooltip_text(Some(description));
-        button.update_property(&[gtk::accessible::Property::Description(description)]);
+        let (command, use_value) = wizard_editable_guide_preparation(&document, target)?;
+        Ok(PatternEditorLaunch {
+            parent: PatternEditorParent::Wizard {
+                epoch,
+                focus_token: nested_editor_focus_token(epoch, use_value),
+                invoking_control,
+            },
+            selected_channel: authored_use_channel(&use_value),
+            selected_structure: Some(use_value.structure_id()),
+            invoking_use: Some(use_value),
+            preparation_command: Some(command),
+        })
+    })();
+    match launch {
+        Ok(launch) => open_pattern_editor_with_launch(state, PatternEditorPurpose::Guide, launch),
+        Err(error) => set_wizard_input_error(
+            state,
+            epoch,
+            &format!("Couldn’t open the Guide Editor: {error}"),
+        ),
     }
 }
 
-/// Opens or raises one purpose-specific transient editor for the current stable channel.
+/// Opens one reusable authored-path editor from a standalone or wizard private-history owner.
 ///
-/// The editor owns a cloned private document/history. It can inspect and edit its matching
-/// resource purpose, but it has no route back to the main workspace, savepoint, or filesystem;
-/// closing always discards the private session.
-fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurpose) {
+/// The selected launch carries typed document references only. A Wizard launch derives its child
+/// history directly from the current wizard draft, while the established standalone launch derives
+/// from main history; neither path can write a personal-library record.
+fn open_pattern_editor_with_launch(
+    state: &Rc<RefCell<AppState>>,
+    purpose: PatternEditorPurpose,
+    launch: PatternEditorLaunch,
+) {
+    let selected_structure = launch.selected_structure;
     let existing_editor = {
         let app_state = state.borrow();
         app_state.pattern_editor.as_ref().map(|surface| {
@@ -5306,30 +11942,70 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurp
     }
     let (parent, draft) = {
         let mut app_state = state.borrow_mut();
-        let Some(selected_channel) = app_state.inspector_runtime.target.channel_id() else {
-            return;
-        };
-        let (document, presentation, sources, history) = {
+        let (document, presentation, sources, history, parent_window) = {
             let Some(workspace) = app_state.workspace.as_ref() else {
                 return;
             };
             let Some(presentation) = workspace.source_presentation.clone() else {
                 return;
             };
+            let (document, mut history, parent_window) = match &launch.parent {
+                PatternEditorParent::Workspace => (
+                    workspace.document().clone(),
+                    DocumentHistory::new_draft(&workspace.history),
+                    app_state.window.clone().upcast::<gtk::Window>(),
+                ),
+                PatternEditorParent::Wizard { epoch, .. } => {
+                    let Some(wizard) = app_state
+                        .pattern_wizard
+                        .as_ref()
+                        .filter(|surface| surface.epoch == *epoch)
+                    else {
+                        return;
+                    };
+                    (
+                        wizard.draft.borrow().document().clone(),
+                        DocumentHistory::new_draft(&wizard.draft.borrow()),
+                        wizard.window.clone(),
+                    )
+                }
+            };
+            if let Some(command) = launch.preparation_command.as_ref()
+                && let Err(error) = history.apply(command)
+            {
+                if let PatternEditorParent::Wizard { epoch, .. } = &launch.parent
+                    && let Some(wizard) = app_state
+                        .pattern_wizard
+                        .as_ref()
+                        .filter(|surface| surface.epoch == *epoch)
+                {
+                    wizard.status.set_label(&format!(
+                        "Couldn’t prepare this editable guide curve: {error}"
+                    ));
+                }
+                return;
+            }
             (
-                workspace.document().clone(),
+                document,
                 presentation,
                 workspace.sources.clone(),
-                DocumentHistory::new_draft(&workspace.history),
+                history,
+                parent_window,
             )
         };
         app_state.draft_epoch = app_state.draft_epoch.saturating_add(1);
         let epoch = app_state.draft_epoch;
+        let mut geometry_editor = stage20f_editor::Stage20fEditorState::default();
+        geometry_editor.configure_mode(
+            purpose.editor_mode(),
+            document.canvas().width,
+            document.canvas().height,
+        );
         (
-            app_state.window.clone(),
+            parent_window,
             Rc::new(RefCell::new(PatternEditorDraft {
                 history,
-                selected_channel,
+                selected_channel: launch.selected_channel,
                 initial_document: document,
                 discard_confirmed: false,
                 sources,
@@ -5339,15 +12015,17 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurp
                 ),
                 preview_submission: None,
                 epoch,
-                geometry_editor: stage20f_editor::Stage20fEditorState::default(),
+                geometry_editor,
                 construction_attachment: None,
                 pending_shared_edit: None,
+                invoking_use: launch.invoking_use,
             })),
         )
     };
+    let initial_width = parent.width().clamp(560, 980);
     let window = gtk::Window::builder()
         .title(purpose.title())
-        .default_width(980)
+        .default_width(initial_width)
         .default_height(760)
         .transient_for(&parent)
         .modal(true)
@@ -5367,18 +12045,53 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurp
     let resource_list = shell.resource_list();
     let new_structure = shell.new_structure();
     new_structure.set_label(purpose.construction_action_label());
+    let construction_canvas_heading = shell.construction_canvas_heading();
     let construction_canvas = shell.construction_canvas();
-    construction_canvas.update_property(&[gtk::accessible::Property::Description(
-        CONSTRUCTION_CANVAS_GESTURE_HINT,
-    )]);
+    construction_canvas.set_accessible_role(CONSTRUCTION_CANVAS_ACCESSIBLE_ROLE);
+    construction_canvas.update_property(&[
+        gtk::accessible::Property::Label("Curve preview"),
+        gtk::accessible::Property::Description(CONSTRUCTION_CANVAS_GESTURE_HINT),
+    ]);
+    construction_canvas.update_relation(&[gtk::accessible::Relation::LabelledBy(&[
+        construction_canvas_heading.upcast_ref(),
+    ])]);
     let coordinate_x = shell.coordinate_x();
     let coordinate_y = shell.coordinate_y();
+    let selected_point_label = shell.selected_point_label();
     let make_curve = shell.make_curve();
     let make_line = shell.make_line();
     let insert_node = shell.insert_node();
     let delete_node = shell.delete_node();
+    let motif_direction_row = shell.motif_direction_row();
+    let smooth_direction = shell.smooth_direction();
+    let corner_direction = shell.corner_direction();
+    let motif_terminal_handle_row = shell.motif_terminal_handle_row();
+    let edit_left_terminal_handle = shell.edit_left_terminal_handle();
+    let edit_right_terminal_handle = shell.edit_right_terminal_handle();
+    motif_direction_row.set_visible(purpose == PatternEditorPurpose::Motif);
+    smooth_direction.update_property(&[
+        gtk::accessible::Property::Label(MOTIF_SMOOTH_DIRECTION_LABEL),
+        gtk::accessible::Property::Description(MOTIF_SMOOTH_DIRECTION_DESCRIPTION),
+    ]);
+    corner_direction.update_property(&[
+        gtk::accessible::Property::Label(MOTIF_CORNER_DIRECTION_LABEL),
+        gtk::accessible::Property::Description(MOTIF_CORNER_DIRECTION_DESCRIPTION),
+    ]);
+    motif_terminal_handle_row.set_visible(purpose == PatternEditorPurpose::Motif);
+    edit_left_terminal_handle.update_property(&[
+        gtk::accessible::Property::Label("Left end handle"),
+        gtk::accessible::Property::Description(
+            "Select the left end handle. If the end is a straight line, add a curve handle first.",
+        ),
+    ]);
+    edit_right_terminal_handle.update_property(&[
+        gtk::accessible::Property::Label("Right end handle"),
+        gtk::accessible::Property::Description(
+            "Select the right end handle. If the end is a straight line, add a curve handle first.",
+        ),
+    ]);
     apply_pattern_editor_width_policy(
-        980,
+        initial_width,
         &construction_layout,
         &construction_sidebar,
         &construction_canvas,
@@ -5411,7 +12124,23 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurp
         let Some(surface) = app_state.pattern_editor.as_ref() else {
             return;
         };
-        let draft = surface.draft.borrow();
+        let mut draft = surface.draft.borrow_mut();
+        draft.geometry_editor.set_guide_canvas_allocation(
+            f64::from(width),
+            f64::from(height),
+            12.0,
+        );
+        if let Some((top_left, bottom_right)) = draft.geometry_editor.frame_screen_bounds() {
+            context.set_source_rgba(0.55, 0.68, 0.95, 0.55);
+            context.rectangle(
+                top_left.x,
+                top_left.y,
+                bottom_right.x - top_left.x,
+                bottom_right.y - top_left.y,
+            );
+            context.set_line_width(1.0);
+            let _ = context.stroke();
+        }
         if let Some(points) = draft.geometry_editor.construction_points() {
             let point = |point: toniator_geometry::Point2| draft.geometry_editor.to_screen(point);
             if let Some(first) = points.first().copied() {
@@ -5485,16 +12214,30 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurp
             }
             let _ = context.stroke();
         }
-        for segment in path.segments() {
+        for (index, segment) in path.segments().iter().enumerate() {
             let anchor = point(segment.start());
             context.set_source_rgb(1.0, 1.0, 1.0);
             context.arc(anchor.x, anchor.y, 4.0, 0.0, std::f64::consts::TAU);
             let _ = context.fill();
             if let toniator_geometry::CurveSegment::CubicBezier(cubic) = segment {
-                for control in [cubic.control_1(), cubic.control_2()] {
+                for (target, control) in [
+                    (
+                        stage20f_editor::NumericTarget::Control1(index),
+                        cubic.control_1(),
+                    ),
+                    (
+                        stage20f_editor::NumericTarget::Control2(index),
+                        cubic.control_2(),
+                    ),
+                ] {
                     let control = point(control);
-                    context.set_source_rgb(0.65, 0.78, 1.0);
-                    context.arc(control.x, control.y, 3.0, 0.0, std::f64::consts::TAU);
+                    if draft.geometry_editor.selected_target == Some(target) {
+                        context.set_source_rgb(1.0, 0.65, 0.2);
+                        context.arc(control.x, control.y, 5.0, 0.0, std::f64::consts::TAU);
+                    } else {
+                        context.set_source_rgb(0.65, 0.78, 1.0);
+                        context.arc(control.x, control.y, 3.0, 0.0, std::f64::consts::TAU);
+                    }
                     let _ = context.fill();
                 }
             }
@@ -5815,10 +12558,15 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurp
     cancel.connect_clicked(move |_| {
         dispatch_ui_intent(&state_for_cancel, UiIntent::DiscardPatternEditor)
     });
-    let apply = gtk::Button::with_mnemonic("_Apply");
-    apply.set_tooltip_text(Some(
-        "Publish this valid private draft as one main undo step.",
+    let apply_presentation = pattern_editor_apply_presentation(matches!(
+        &launch.parent,
+        PatternEditorParent::Wizard { .. }
     ));
+    let apply = gtk::Button::with_mnemonic(apply_presentation.mnemonic_label);
+    apply.set_tooltip_text(Some(apply_presentation.description));
+    apply.update_property(&[gtk::accessible::Property::Description(
+        apply_presentation.description,
+    )]);
     let state_for_apply = Rc::clone(state);
     apply.connect_clicked(move |_| apply_pattern_editor_draft(&state_for_apply));
     shell.append_action(&undo);
@@ -5847,6 +12595,7 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurp
     });
     state.borrow_mut().pattern_editor = Some(PatternEditorSurface {
         purpose,
+        parent: launch.parent,
         window: window.clone(),
         status,
         picture,
@@ -5858,17 +12607,33 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurp
         primary,
         advanced_rows,
         descriptor_components: BTreeMap::new(),
+        undo,
+        redo,
         apply,
         resource_list,
         construction_canvas,
         coordinate_x,
         coordinate_y,
+        selected_point_label,
         numeric_commit_active: Rc::new(Cell::new(false)),
         make_curve,
         make_line,
         insert_node,
         delete_node,
+        smooth_direction: smooth_direction.clone(),
+        corner_direction: corner_direction.clone(),
+        edit_left_terminal_handle: edit_left_terminal_handle.clone(),
+        edit_right_terminal_handle: edit_right_terminal_handle.clone(),
     });
+    if let Some(structure_id) = selected_structure
+        && let Some(surface) = state.borrow().pattern_editor.as_ref()
+    {
+        surface
+            .draft
+            .borrow_mut()
+            .geometry_editor
+            .select_structure(structure_id);
+    }
     let state_for_x = Rc::clone(state);
     let x = state
         .borrow()
@@ -5916,6 +12681,34 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurp
     let state_for_make_line = Rc::clone(state);
     make_line.connect_clicked(move |_| {
         apply_edited_path(&state_for_make_line, stage20f_editor::PathEdit::MakeLine);
+    });
+    let state_for_left_terminal = Rc::clone(state);
+    edit_left_terminal_handle.connect_clicked(move |_| {
+        select_motif_terminal_handle(
+            &state_for_left_terminal,
+            stage20f_editor::MotifTerminalHandle::Left,
+        );
+    });
+    let state_for_right_terminal = Rc::clone(state);
+    edit_right_terminal_handle.connect_clicked(move |_| {
+        select_motif_terminal_handle(
+            &state_for_right_terminal,
+            stage20f_editor::MotifTerminalHandle::Right,
+        );
+    });
+    let state_for_smooth_direction = Rc::clone(state);
+    smooth_direction.connect_clicked(move |_| {
+        set_motif_terminal_direction(
+            &state_for_smooth_direction,
+            stage20f_editor::MotifTerminalDirection::Smooth,
+        );
+    });
+    let state_for_corner_direction = Rc::clone(state);
+    corner_direction.connect_clicked(move |_| {
+        set_motif_terminal_direction(
+            &state_for_corner_direction,
+            stage20f_editor::MotifTerminalDirection::Corner,
+        );
     });
     let insert_node = state
         .borrow()
@@ -6073,7 +12866,32 @@ fn commit_selected_numeric(state: &Rc<RefCell<AppState>>) {
 fn authored_use_channel(use_value: &toniator_domain::AuthoredStructureUse) -> ChannelId {
     match use_value {
         toniator_domain::AuthoredStructureUse::Guide { channel_id, .. }
-        | toniator_domain::AuthoredStructureUse::Mark { channel_id, .. } => *channel_id,
+        | toniator_domain::AuthoredStructureUse::Mark { channel_id, .. }
+        | toniator_domain::AuthoredStructureUse::Motif { channel_id, .. } => *channel_id,
+    }
+}
+
+/// Converts one exact document-owned authored use into the matching fresh-resource attachment.
+///
+/// The conversion keeps the resource owner and target explicit. It cannot represent the standalone
+/// custom-guide construction branch, which has no existing use and therefore cannot insert a
+/// personal library snapshot.
+fn authored_use_attachment(use_value: AuthoredStructureUse) -> AuthoredStructureAttachment {
+    match use_value {
+        AuthoredStructureUse::Guide {
+            mechanism_id,
+            dimension_id,
+            ..
+        } => AuthoredStructureAttachment::Guide {
+            mechanism_id,
+            dimension_id,
+        },
+        AuthoredStructureUse::Mark {
+            output_layer_id, ..
+        } => AuthoredStructureAttachment::Mark { output_layer_id },
+        AuthoredStructureUse::Motif {
+            output_layer_id, ..
+        } => AuthoredStructureAttachment::Motif { output_layer_id },
     }
 }
 
@@ -6084,7 +12902,7 @@ fn authored_use_summary(
 ) -> String {
     let structure_id = use_value.structure_id();
     let Some(structure) = document.authored_structure(structure_id) else {
-        return "Unavailable authored-resource use".to_owned();
+        return "Unavailable curve use".to_owned();
     };
     let ordinal = document
         .authored_structures()
@@ -6099,6 +12917,9 @@ fn authored_use_summary(
         }
         toniator_domain::AuthoredStructureUse::Mark { .. } => {
             format!("Mark shape {ordinal} used by {name}")
+        }
+        toniator_domain::AuthoredStructureUse::Motif { .. } => {
+            format!("Curve motif {ordinal} used by {name}")
         }
     }
 }
@@ -6118,25 +12939,49 @@ fn request_path_replacement(
         let Some(surface) = app.pattern_editor.as_ref() else {
             return false;
         };
+        let document_base_scope = match &surface.parent {
+            PatternEditorParent::Wizard { epoch, .. } => app
+                .pattern_wizard
+                .as_ref()
+                .filter(|wizard| wizard.epoch == *epoch)
+                .is_some_and(|wizard| wizard.target == InspectorTarget::DocumentAll),
+            PatternEditorParent::Workspace => false,
+        };
         let mut draft = surface.draft.borrow_mut();
         if draft.pending_shared_edit.is_some() {
             surface
                 .status
-                .set_label("Choose how to edit this shared resource before making another change.");
+                .set_label("Choose how to edit this shared curve before making another change.");
             return false;
         }
-        let uses: Vec<_> = draft
+        let effective_uses: Vec<_> = draft
             .history
             .document()
             .authored_structure_uses()
             .into_iter()
             .filter(|use_value| use_value.structure_id() == base_structure.id())
             .collect();
+        let uses = if document_base_scope {
+            document_base_authored_uses(&effective_uses)
+        } else {
+            effective_uses.clone()
+        };
         if uses.len() > 1 && !draft.geometry_editor.is_shared_armed(base_structure.id()) {
-            let active_use = uses
-                .iter()
-                .find(|use_value| authored_use_channel(use_value) == draft.selected_channel)
-                .copied()
+            let active_use = draft
+                .invoking_use
+                .filter(|use_value| {
+                    use_value.structure_id() == base_structure.id()
+                        && effective_uses.contains(use_value)
+                        && (!document_base_scope
+                            || uses.iter().any(|candidate| {
+                                authored_use_slot(candidate) == authored_use_slot(use_value)
+                            }))
+                })
+                .or_else(|| {
+                    uses.iter()
+                        .find(|use_value| authored_use_channel(use_value) == draft.selected_channel)
+                        .copied()
+                })
                 .unwrap_or(uses[0]);
             let summaries: Vec<String> = uses
                 .iter()
@@ -6185,81 +13030,127 @@ fn show_shared_resource_choice(
         .map(|surface| surface.window.clone())
         .expect("shared resource choice belongs to a live Pattern Editor");
     let dialog = gtk::Window::builder()
-        .title("Shared resource")
+        .title("Shared curve")
         .transient_for(&parent)
         .modal(true)
         .build();
     let content = components::ToniatorConfirmationContent::new();
     content.set_detail(&format!(
-        "This authored resource has multiple uses:\n{}\n\nThis editor is changing: {active_summary}",
+        "This curve is used in several places:\n{}\n\nThis editor is changing: {active_summary}",
         summaries.join("\n")
     ));
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     actions.set_halign(gtk::Align::End);
-    let edit_all = gtk::Button::with_label("Edit all uses");
+    let edit_all = gtk::Button::with_label("Edit All Uses");
+    edit_all.set_focusable(true);
     edit_all.set_tooltip_text(Some(
         "Keep the shared resource and change every listed use.",
     ));
-    let copy = gtk::Button::with_label("Make a copy for this use");
+    edit_all.update_property(&[
+        gtk::accessible::Property::Label("Edit All Uses"),
+        gtk::accessible::Property::Description("Change the shared curve everywhere it is listed."),
+    ]);
+    let copy = gtk::Button::with_label("Edit a Copy");
+    copy.set_focusable(true);
     copy.set_tooltip_text(Some(
-        "Retarget only the listed current use to a newly copied resource.",
+        "Make a separate copy for the place currently being edited.",
     ));
-    actions.append(&edit_all);
+    copy.update_property(&[
+        gtk::accessible::Property::Label("Edit a Copy"),
+        gtk::accessible::Property::Description(
+            "Default action: make a separate copy for the place currently being edited.",
+        ),
+    ]);
     actions.append(&copy);
+    actions.append(&edit_all);
     content.append(&actions);
     dialog.set_child(Some(&content));
     let edit_all_dialog = dialog.clone();
     let edit_all_state = Rc::clone(state);
     edit_all.connect_clicked(move |_| {
-        if resolve_shared_path_choice(&edit_all_state, false) {
+        if resolve_shared_path_choice(&edit_all_state, SharedPathEditPolicy::EditAllUses) {
             edit_all_dialog.close();
         }
     });
     let copy_dialog = dialog.clone();
     let copy_state = Rc::clone(state);
     copy.connect_clicked(move |_| {
-        if resolve_shared_path_choice(&copy_state, true) {
+        if resolve_shared_path_choice(&copy_state, SharedPathEditPolicy::EditCopy) {
             copy_dialog.close();
+        }
+    });
+    let purpose = state
+        .borrow()
+        .pattern_editor
+        .as_ref()
+        .map(|surface| surface.purpose)
+        .expect("shared-resource disclosure retains the active editor");
+    let focus_target = match default_shared_path_edit_policy(purpose) {
+        SharedPathEditPolicy::EditCopy => copy.clone(),
+        SharedPathEditPolicy::EditAllUses => edit_all.clone(),
+    };
+    dialog.set_default_widget(Some(&focus_target));
+    let focus_target_for_activation = focus_target.clone();
+    dialog.connect_is_active_notify(move |window| {
+        if window.is_active() {
+            gtk::prelude::GtkWindowExt::set_focus(window, Some(&focus_target_for_activation));
+            focus_target_for_activation.grab_focus();
         }
     });
     dialog.present();
 }
 
 /// Resolves one disclosed shared-resource policy atomically and keeps the pending replacement on failure.
-fn resolve_shared_path_choice(state: &Rc<RefCell<AppState>>, make_copy: bool) -> bool {
+fn resolve_shared_path_choice(state: &Rc<RefCell<AppState>>, policy: SharedPathEditPolicy) -> bool {
     let changed = {
         let app = state.borrow();
         let Some(surface) = app.pattern_editor.as_ref() else {
             return false;
+        };
+        let document_base_scope = match &surface.parent {
+            PatternEditorParent::Wizard { epoch, .. } => app
+                .pattern_wizard
+                .as_ref()
+                .filter(|wizard| wizard.epoch == *epoch)
+                .is_some_and(|wizard| wizard.target == InspectorTarget::DocumentAll),
+            PatternEditorParent::Workspace => false,
         };
         let mut draft = surface.draft.borrow_mut();
         let Some(pending) = draft.pending_shared_edit.take() else {
             return false;
         };
         let original_id = pending.base_structure.id();
-        let result = if make_copy {
-            draft
+        let result = match shared_path_edit_command(policy) {
+            SharedPathEditCommand::DuplicateRetargetAndReplace if document_base_scope => draft
+                .history
+                .duplicate_retarget_shared_definition_and_replace_authored_structure(
+                    pending.selected_use,
+                    pending.replacement.clone(),
+                ),
+            SharedPathEditCommand::DuplicateRetargetAndReplace => draft
                 .history
                 .duplicate_retarget_and_replace_authored_structure(
                     pending.selected_use,
                     pending.replacement.clone(),
-                )
-        } else {
-            draft.geometry_editor.arm_shared_resource(original_id);
-            draft
-                .history
-                .apply(&DocumentCommand::ReplaceAuthoredStructure {
-                    base_structure: pending.base_structure.clone(),
-                    replacement: pending.replacement.clone(),
-                })
+                ),
+            SharedPathEditCommand::ReplaceAllUses => {
+                draft.geometry_editor.arm_shared_resource(original_id);
+                draft
+                    .history
+                    .apply(&DocumentCommand::ReplaceAuthoredStructure {
+                        base_structure: pending.base_structure.clone(),
+                        replacement: pending.replacement.clone(),
+                    })
+            }
         };
         match result {
             Ok(result) => {
-                if make_copy {
+                if policy == SharedPathEditPolicy::EditCopy {
                     let structure_id = result
                         .created_authored_structure_id
                         .expect("grouped copy reports its exact allocated structure ID");
                     draft.geometry_editor.selected_structure = Some(structure_id);
+                    draft.geometry_editor.arm_shared_resource(structure_id);
                 }
                 draft.geometry_editor.arm_shared_resource(original_id);
                 true
@@ -6304,7 +13195,7 @@ fn apply_edited_path(state: &Rc<RefCell<AppState>>, edit: stage20f_editor::PathE
         let Ok(path) = toniator_geometry::CurvePath::from_authored_structure(&structure) else {
             surface
                 .status
-                .set_label("The selected authored structure cannot be edited as a path.");
+                .set_label("The selected curve cannot be edited as a path.");
             return;
         };
         let payload = match draft.geometry_editor.edit_path(&path, edit) {
@@ -6321,6 +13212,12 @@ fn apply_edited_path(state: &Rc<RefCell<AppState>>, edit: stage20f_editor::PathE
                     .set_label("Select a segment before using that action.");
                 return;
             }
+            Err(stage20f_editor::PathEditError::EndpointLocked) => {
+                surface.status.set_label(
+                    "Curve Motif tile endpoints stay fixed at the left and right edge centers.",
+                );
+                return;
+            }
             Err(stage20f_editor::PathEditError::Geometry(error)) => {
                 surface.status.set_label(error.message());
                 return;
@@ -6335,22 +13232,146 @@ fn apply_edited_path(state: &Rc<RefCell<AppState>>, edit: stage20f_editor::PathE
     }
 }
 
+/// Changes the local next-handle direction policy for the active Curve Motif without mutating geometry.
+///
+/// Smooth and Corner are intentionally editor-local presentation choices. A user action affects the
+/// next terminal-handle edit only; it neither persists a seam-mode flag nor changes an opened path.
+fn set_motif_terminal_direction(
+    state: &Rc<RefCell<AppState>>,
+    direction: stage20f_editor::MotifTerminalDirection,
+) {
+    let app = state.borrow();
+    let Some(surface) = app.pattern_editor.as_ref() else {
+        return;
+    };
+    if surface.purpose != PatternEditorPurpose::Motif {
+        return;
+    }
+    surface
+        .draft
+        .borrow_mut()
+        .geometry_editor
+        .set_motif_terminal_direction(direction);
+    surface.status.set_label(match direction {
+        stage20f_editor::MotifTerminalDirection::Smooth => {
+            "Smooth direction is active for the next end-handle edit."
+        }
+        stage20f_editor::MotifTerminalDirection::Corner => {
+            "Corner is active for the next end-handle edit."
+        }
+    });
+    drop(app);
+    rebuild_pattern_editor(state);
+}
+
+/// Selects one Curve Motif terminal handle, explicitly converting only its terminal line when needed.
+///
+/// A cubic terminal changes only local selection and never writes history. A line terminal becomes
+/// a canonical cubic through the existing one-entry authored-resource replacement path before the
+/// control target is selected. Fixed tile anchors are never selected or moved by this action.
+fn select_motif_terminal_handle(
+    state: &Rc<RefCell<AppState>>,
+    handle: stage20f_editor::MotifTerminalHandle,
+) {
+    let mutation = {
+        let app = state.borrow();
+        let Some(surface) = app.pattern_editor.as_ref() else {
+            return;
+        };
+        if surface.purpose != PatternEditorPurpose::Motif {
+            return;
+        }
+        let mut draft = surface.draft.borrow_mut();
+        let Some(structure) = draft
+            .geometry_editor
+            .selected_structure
+            .and_then(|id| draft.history.document().authored_structure(id))
+            .cloned()
+        else {
+            surface
+                .status
+                .set_label("Select a Curve Motif before editing an end handle.");
+            return;
+        };
+        let Ok(path) = toniator_geometry::CurvePath::from_authored_structure(&structure) else {
+            surface
+                .status
+                .set_label("The selected Curve Motif cannot be edited as a path.");
+            return;
+        };
+        match draft
+            .geometry_editor
+            .select_motif_terminal_handle(&path, handle)
+        {
+            Ok(Some(payload)) => Some((structure, payload)),
+            Ok(None) => None,
+            Err(error) => {
+                surface
+                    .status
+                    .set_label(&format!("Couldn’t add an end handle: {error:?}"));
+                return;
+            }
+        }
+    };
+    if let Some((base_structure, replacement)) = mutation {
+        if request_path_replacement(state, base_structure, replacement) {
+            rebuild_pattern_editor(state);
+            submit_draft_preview(state);
+        }
+    } else {
+        rebuild_pattern_editor(state);
+    }
+}
+
 /// Detaches and closes the private Pattern Editor only after discard is chosen.
 ///
 /// The window leaves `AppState` under a short borrow before GTK destruction can
 /// synchronously signal `close-request`, avoiding a nested `RefCell` borrow.
 fn close_pattern_editor(state: &Rc<RefCell<AppState>>) {
-    let window = {
+    close_pattern_editor_after_terminal(state, NestedEditorTerminal::Cancel);
+}
+
+/// Detaches one editor after a named terminal outcome and restores its exact wizard invoker.
+///
+/// The terminal name carries no document authority: the caller has already squashed Apply or
+/// confirmed Cancel/close. It only keeps focus restoration auditable and testable.
+fn close_pattern_editor_after_terminal(
+    state: &Rc<RefCell<AppState>>,
+    terminal: NestedEditorTerminal,
+) {
+    let surface = {
         let mut state = state.borrow_mut();
-        state.pattern_editor.take().map(|surface| {
+        state.pattern_editor.take().inspect(|surface| {
             surface.draft.borrow_mut().preview_submission = None;
             surface.preview_spinner.stop();
             surface.preview_spinner.set_visible(false);
-            surface.window
         })
     };
-    if let Some(window) = window {
-        window.close();
+    if let Some(surface) = surface {
+        let restoring_control = match &surface.parent {
+            PatternEditorParent::Wizard {
+                invoking_control, ..
+            } if nested_editor_focus_after_terminal(&surface.parent, terminal).is_some()
+                && terminal != NestedEditorTerminal::Apply =>
+            {
+                Some(invoking_control.clone())
+            }
+            _ => None,
+        };
+        if let Some(invoking_control) = restoring_control.as_ref()
+            && let Some(parent_window) = invoking_control.root().and_downcast::<gtk::Window>()
+        {
+            gtk::prelude::GtkWindowExt::set_focus(&parent_window, Some(invoking_control));
+        }
+        surface.window.close();
+        if let Some(invoking_control) = restoring_control {
+            restore_focus_after_modal_close(invoking_control.clone());
+            if terminal == NestedEditorTerminal::ConfirmedClose {
+                glib::timeout_add_local_once(Duration::from_millis(250), move || {
+                    restore_focus_after_modal_close(invoking_control);
+                });
+            }
+        }
     }
 }
 
@@ -6409,9 +13430,9 @@ fn rebuild_pattern_editor(state: &Rc<RefCell<AppState>>) {
     };
     window.set_title(Some(&format!("{} — {name}", purpose.title())));
     status.set_label(if dirty {
-        "Unsaved changes. Previewing draft…"
+        "Unsaved changes. Updating preview…"
     } else {
-        "Draft preview updated."
+        "Preview updated."
     });
     {
         let app_state = state.borrow();
@@ -6421,10 +13442,12 @@ fn rebuild_pattern_editor(state: &Rc<RefCell<AppState>>) {
             .expect("live draft surface survives rebuild");
         surface.introduction.set_visible(true);
         surface.history.set_label(&format!(
-            "Draft history: {}undo, {}redo",
-            if can_undo { "" } else { "no " },
-            if can_redo { "" } else { "no " }
+            "Undo {} · Redo {}",
+            if can_undo { "available" } else { "unavailable" },
+            if can_redo { "available" } else { "unavailable" }
         ));
+        surface.undo.set_sensitive(can_undo);
+        surface.redo.set_sensitive(can_redo);
         surface.current_pattern.set_label(&format!(
             "Current pattern: {}",
             draft_pattern_summary(&values, purpose)
@@ -6432,93 +13455,171 @@ fn rebuild_pattern_editor(state: &Rc<RefCell<AppState>>) {
         surface
             .apply
             .set_sensitive(draft.borrow().geometry_editor.apply_ready(dirty));
-        let coordinate = {
-            let draft = draft.borrow();
-            let structure = draft
+        let (
+            coordinate,
+            can_make_curve,
+            can_make_line,
+            can_insert_node,
+            can_delete_node,
+            motif_direction,
+            motif_controls,
+            motif_left_terminal,
+            motif_right_terminal,
+        ) = {
+            let mut draft = draft.borrow_mut();
+            let path = draft
                 .geometry_editor
                 .selected_structure
-                .and_then(|id| draft.history.document().authored_structure(id));
-            structure
+                .and_then(|id| draft.history.document().authored_structure(id))
                 .and_then(|structure| {
                     toniator_geometry::CurvePath::from_authored_structure(structure).ok()
+                });
+            if let Some(path) = path.as_ref() {
+                draft.geometry_editor.inspect_motif_terminal_direction(path);
+            }
+            let coordinate = path.as_ref().and_then(|path| {
+                draft.geometry_editor.selected_target.and_then(|target| {
+                    draft
+                        .geometry_editor
+                        .coordinate(path, target)
+                        .map(|point| (target, point))
                 })
-                .and_then(|path| {
-                    draft.geometry_editor.selected_target.and_then(|target| {
-                        draft
-                            .geometry_editor
-                            .coordinate(&path, target)
-                            .map(|point| (target, point))
-                    })
-                })
-        };
-        let (can_make_curve, can_make_line, can_insert_node, can_delete_node) = {
-            let draft = draft.borrow();
-            let structure = draft
-                .geometry_editor
-                .selected_structure
-                .and_then(|id| draft.history.document().authored_structure(id));
-            let path = structure.and_then(|structure| {
-                toniator_geometry::CurvePath::from_authored_structure(structure).ok()
             });
             let segment = draft
                 .geometry_editor
                 .selected_segment
                 .and_then(|index| path.as_ref().and_then(|path| path.segments().get(index)));
+            let selected_node = draft.geometry_editor.selected_node;
+            let delete_locked = purpose == PatternEditorPurpose::Motif
+                && path.as_ref().is_some_and(|path| {
+                    path.closure() == toniator_geometry::PathClosure::Open
+                        && selected_node
+                            .is_some_and(|node| node == 0 || node == path.segments().len())
+                });
+            let motif_direction = path
+                .as_ref()
+                .map(|path| draft.geometry_editor.motif_terminal_direction(path));
+            let motif_controls = path
+                .as_ref()
+                .is_some_and(|path| draft.geometry_editor.motif_terminal_controls_editable(path));
+            let terminal_segment_is_editable =
+                |segment: Option<&toniator_geometry::CurveSegment>| {
+                    matches!(
+                        segment,
+                        Some(toniator_geometry::CurveSegment::Line(_))
+                            | Some(toniator_geometry::CurveSegment::CubicBezier(_))
+                    )
+                };
+            let motif_left_terminal = purpose == PatternEditorPurpose::Motif
+                && path
+                    .as_ref()
+                    .is_some_and(|path| terminal_segment_is_editable(path.segments().first()));
+            let motif_right_terminal = purpose == PatternEditorPurpose::Motif
+                && path
+                    .as_ref()
+                    .is_some_and(|path| terminal_segment_is_editable(path.segments().last()));
             (
+                coordinate,
                 matches!(segment, Some(toniator_geometry::CurveSegment::Line(_))),
                 matches!(
                     segment,
                     Some(toniator_geometry::CurveSegment::CubicBezier(_))
                 ),
                 segment.is_some(),
-                draft.geometry_editor.selected_node.is_some(),
+                selected_node.is_some() && !delete_locked,
+                motif_direction,
+                motif_controls,
+                motif_left_terminal,
+                motif_right_terminal,
             )
         };
         surface.make_curve.set_sensitive(can_make_curve);
         surface.make_line.set_sensitive(can_make_line);
         surface.insert_node.set_sensitive(can_insert_node);
         surface.delete_node.set_sensitive(can_delete_node);
+        let show_motif_controls = purpose == PatternEditorPurpose::Motif;
+        surface.smooth_direction.set_visible(show_motif_controls);
+        surface.corner_direction.set_visible(show_motif_controls);
+        surface.smooth_direction.set_sensitive(motif_controls);
+        surface.corner_direction.set_sensitive(motif_controls);
+        surface
+            .edit_left_terminal_handle
+            .set_sensitive(motif_left_terminal);
+        surface
+            .edit_right_terminal_handle
+            .set_sensitive(motif_right_terminal);
+        let smooth_active =
+            motif_direction == Some(stage20f_editor::MotifTerminalDirection::Smooth);
+        surface.smooth_direction.set_active(smooth_active);
+        surface
+            .corner_direction
+            .set_active(!smooth_active && motif_direction.is_some());
         if let Some((target, point)) = coordinate {
             let target_name = match target {
                 stage20f_editor::NumericTarget::Anchor(index) => format!("Anchor {}", index + 1),
+                stage20f_editor::NumericTarget::Control1(0)
+                    if purpose == PatternEditorPurpose::Motif =>
+                {
+                    "Left end handle".to_owned()
+                }
                 stage20f_editor::NumericTarget::Control1(index) => {
                     format!("Segment {} Control 1", index + 1)
+                }
+                stage20f_editor::NumericTarget::Control2(index)
+                    if purpose == PatternEditorPurpose::Motif =>
+                {
+                    let _ = index;
+                    "Right end handle".to_owned()
                 }
                 stage20f_editor::NumericTarget::Control2(index) => {
                     format!("Segment {} Control 2", index + 1)
                 }
             };
-            surface
-                .coordinate_x
-                .update_property(&[gtk::accessible::Property::Label(&format!(
-                    "{target_name} X coordinate"
-                ))]);
-            surface
-                .coordinate_y
-                .update_property(&[gtk::accessible::Property::Label(&format!(
-                    "{target_name} Y coordinate"
-                ))]);
+            surface.coordinate_x.update_property(&[
+                gtk::accessible::Property::Label(&format!("{target_name} X coordinate")),
+                gtk::accessible::Property::Description(&format!(
+                    "Edit the {target_name} X coordinate."
+                )),
+            ]);
+            surface.coordinate_y.update_property(&[
+                gtk::accessible::Property::Label(&format!("{target_name} Y coordinate")),
+                gtk::accessible::Property::Description(&format!(
+                    "Edit the {target_name} Y coordinate."
+                )),
+            ]);
             surface.coordinate_x.set_sensitive(true);
             surface.coordinate_y.set_sensitive(true);
+            surface
+                .selected_point_label
+                .set_label(&format!("Selected point: {target_name}"));
             if !surface.coordinate_x.has_focus() {
-                surface.coordinate_x.set_text(&point.x.to_string());
+                surface
+                    .coordinate_x
+                    .set_text(&format_pattern_editor_coordinate(point.x));
             }
             if !surface.coordinate_y.has_focus() {
-                surface.coordinate_y.set_text(&point.y.to_string());
+                surface
+                    .coordinate_y
+                    .set_text(&format_pattern_editor_coordinate(point.y));
             }
         } else {
-            surface
-                .coordinate_x
-                .update_property(&[gtk::accessible::Property::Label(
-                    "No selected point X coordinate",
-                )]);
-            surface
-                .coordinate_y
-                .update_property(&[gtk::accessible::Property::Label(
-                    "No selected point Y coordinate",
-                )]);
+            surface.coordinate_x.update_property(&[
+                gtk::accessible::Property::Label("No selected point X coordinate"),
+                gtk::accessible::Property::Description(
+                    "Select an anchor or handle before editing its X coordinate.",
+                ),
+            ]);
+            surface.coordinate_y.update_property(&[
+                gtk::accessible::Property::Label("No selected point Y coordinate"),
+                gtk::accessible::Property::Description(
+                    "Select an anchor or handle before editing its Y coordinate.",
+                ),
+            ]);
             surface.coordinate_x.set_sensitive(false);
             surface.coordinate_y.set_sensitive(false);
+            surface
+                .selected_point_label
+                .set_label("Selected point: none");
             if !surface.coordinate_x.has_focus() {
                 surface.coordinate_x.set_text("");
             }
@@ -6542,6 +13643,22 @@ fn rebuild_pattern_editor(state: &Rc<RefCell<AppState>>) {
     reconcile_draft_descriptor_components(state, selected, primary_values, advanced_values);
 }
 
+/// Formats one finite editor coordinate for deliberate numeric adjustment without binary noise.
+///
+/// Canonical geometry retains its full `f64` value; this four-decimal presentation is reparsed only
+/// when the artist explicitly edits and commits the entry. Tiny rounded values display as `0`.
+fn format_pattern_editor_coordinate(value: f64) -> String {
+    let value = if value.abs() < 0.00005 { 0.0 } else { value };
+    let mut text = format!("{value:.4}");
+    while text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    text
+}
+
 /// Projects one purpose's authored resources into a stable artist-facing group without raw IDs.
 ///
 /// The domain remains authoritative for structure order and typed uses; this helper assigns only
@@ -6559,8 +13676,9 @@ fn rebuild_authored_resource_list(
     let uses = document.authored_structure_uses();
     let kind = purpose.structure_kind();
     let heading = gtk::Label::new(Some(match purpose {
-        PatternEditorPurpose::Grid => "Guide paths",
-        PatternEditorPurpose::Mark => "Mark shapes",
+        PatternEditorPurpose::Grid | PatternEditorPurpose::Guide => "Guide paths",
+        PatternEditorPurpose::Mark | PatternEditorPurpose::Shape => "Mark shapes",
+        PatternEditorPurpose::Motif => "Curve Motifs",
     }));
     heading.set_xalign(0.0);
     heading.add_css_class("heading");
@@ -6576,17 +13694,39 @@ fn rebuild_authored_resource_list(
             .filter(|usage| usage.structure_id() == structure.id())
             .count();
         let label = match purpose {
-            PatternEditorPurpose::Grid => format!(
-                "Guide path {} — {} node segments; {} use{}",
+            PatternEditorPurpose::Grid | PatternEditorPurpose::Guide => format!(
+                "Guide path {} — {} curve section{}; {} use{}",
                 ordinal + 1,
                 structure.segments().len(),
+                if structure.segments().len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
                 count,
                 if count == 1 { "" } else { "s" }
             ),
-            PatternEditorPurpose::Mark => format!(
-                "Mark shape {} — {} node segments; {} use{}",
+            PatternEditorPurpose::Mark | PatternEditorPurpose::Shape => format!(
+                "Mark shape {} — {} curve section{}; {} use{}",
                 ordinal + 1,
                 structure.segments().len(),
+                if structure.segments().len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+                count,
+                if count == 1 { "" } else { "s" }
+            ),
+            PatternEditorPurpose::Motif => format!(
+                "Curve Motif {} — {} curve section{}; {} use{}",
+                ordinal + 1,
+                structure.segments().len(),
+                if structure.segments().len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
                 count,
                 if count == 1 { "" } else { "s" }
             ),
@@ -6603,6 +13743,101 @@ fn rebuild_authored_resource_list(
         let structure_id = structure.id();
         row.connect_clicked(move |_| select_authored_resource(&state_for_row, structure_id));
         list.append(&row);
+    }
+    let personal_kind = match purpose {
+        PatternEditorPurpose::Shape => Some(PersonalAuthoredResourceKind::Shape),
+        PatternEditorPurpose::Motif => Some(PersonalAuthoredResourceKind::Motif),
+        PatternEditorPurpose::Grid | PatternEditorPurpose::Mark | PatternEditorPurpose::Guide => {
+            None
+        }
+    };
+    let personal = personal_kind.map(|kind| {
+        state
+            .borrow()
+            .personal_authored_insertions
+            .iter()
+            .filter(|entry| entry.kind == kind)
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    if let Some(personal) = personal.filter(|entries| !entries.is_empty()) {
+        let heading = gtk::Label::new(Some("Personal library — insert a document copy"));
+        heading.set_xalign(0.0);
+        heading.set_margin_top(12);
+        heading.add_css_class("heading");
+        list.append(&heading);
+        for entry in personal {
+            let button = gtk::Button::with_label(&format!("Insert {}", entry.name));
+            button.update_property(&[
+                gtk::accessible::Property::Label(&format!("Insert {}", entry.name)),
+                gtk::accessible::Property::Description(
+                    "Insert a separate editable copy in this document. The saved library item remains unchanged.",
+                ),
+            ]);
+            let state_for_insert = Rc::clone(state);
+            button.connect_clicked(move |_| {
+                insert_personal_authored_resource(&state_for_insert, entry.clone())
+            });
+            list.append(&button);
+        }
+    }
+}
+
+/// Copies one scanned personal Shape or Motif payload into the active child draft and retargets its use.
+///
+/// The retained insertion snapshot has no writable-library state. This function requires the exact
+/// invoking use and therefore rejects standalone editors, stale resources, wrong kinds, and absent
+/// targets atomically through `DocumentHistory::add_and_attach_authored_structure`.
+fn insert_personal_authored_resource(
+    state: &Rc<RefCell<AppState>>,
+    insertion: PersonalAuthoredInsertionSnapshot,
+) {
+    let result = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state.pattern_editor.as_ref() else {
+            return;
+        };
+        let mut draft = surface.draft.borrow_mut();
+        let Some(use_value) = draft.invoking_use else {
+            surface.status.set_label(
+                "Personal resources can only be inserted for an invoking Shape or Curve Motif.",
+            );
+            return;
+        };
+        if insertion.kind.structure_kind() != surface.purpose.structure_kind() {
+            surface
+                .status
+                .set_label("This saved curve cannot be used in this editor.");
+            return;
+        }
+        draft.history.add_and_attach_authored_structure(
+            authored_use_channel(&use_value),
+            authored_use_attachment(use_value),
+            insertion.draft,
+        )
+    };
+    match result {
+        Ok(result) => {
+            if let Some(surface) = state.borrow().pattern_editor.as_ref() {
+                surface
+                    .draft
+                    .borrow_mut()
+                    .geometry_editor
+                    .selected_structure = result.created_authored_structure_id;
+                surface
+                    .status
+                    .set_label("Inserted a separate editable copy in this document.");
+            }
+            rebuild_pattern_editor(state);
+            submit_draft_preview(state);
+        }
+        Err(error) => {
+            if let Some(surface) = state.borrow().pattern_editor.as_ref() {
+                surface
+                    .status
+                    .set_label(&format!("Couldn’t insert this personal resource: {error}"));
+            }
+        }
     }
 }
 
@@ -6702,7 +13937,7 @@ fn show_custom_along_guide_confirmation(state: &Rc<RefCell<AppState>>) {
         .build();
     let content = components::ToniatorConfirmationContent::new();
     content.set_detail(
-        "This channel will switch to a private custom along-guide layout when the new guide is completed. Linked channels remain unchanged.",
+        "Completing the new guide will give this channel its own along-guide layout. Linked channels remain unchanged.",
     );
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     actions.set_halign(gtk::Align::End);
@@ -6755,6 +13990,15 @@ fn authored_attachment_target(
                 _ => None,
             })
             .flatten()
+            .chain(definition.output_layers.iter().filter_map(|layer| {
+                matches!(
+                    layer.realization,
+                    PatternOutputRealization::CurveMotifPaths { .. }
+                )
+                .then_some(AuthoredStructureAttachment::Motif {
+                    output_layer_id: layer.id(),
+                })
+            }))
             .collect::<Vec<_>>(),
         toniator_domain::AuthoredStructureKind::ClosedShape => definition
             .output_layers
@@ -6835,45 +14079,90 @@ fn attach_completed_authored_structure(
 /// A stale or invalid draft remains open and leaves both histories untouched. Successful publication
 /// closes the private surface, refreshes the main UI, and schedules the existing main preview path.
 fn apply_pattern_editor_draft(state: &Rc<RefCell<AppState>>) {
-    let result = {
-        let mut app_state = state.borrow_mut();
-        let Some(draft) = app_state
-            .pattern_editor
-            .as_ref()
-            .map(|surface| Rc::clone(&surface.draft))
-        else {
+    let (draft, parent) = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state.pattern_editor.as_ref() else {
             return;
         };
-        let Some(workspace) = app_state.workspace.as_mut() else {
-            return;
-        };
-        workspace.history.squash_draft(&draft.borrow().history)
+        (Rc::clone(&surface.draft), surface.parent.clone())
+    };
+    let result = match &parent {
+        PatternEditorParent::Workspace => {
+            let mut app_state = state.borrow_mut();
+            let Some(workspace) = app_state.workspace.as_mut() else {
+                return;
+            };
+            workspace.history.squash_draft(&draft.borrow().history)
+        }
+        PatternEditorParent::Wizard { epoch, .. } => {
+            let app_state = state.borrow();
+            let Some(wizard) = app_state
+                .pattern_wizard
+                .as_ref()
+                .filter(|surface| surface.epoch == *epoch)
+            else {
+                if let Some(surface) = app_state.pattern_editor.as_ref() {
+                    surface
+                        .status
+                        .set_label("The parent Pattern Wizard is no longer available.");
+                }
+                return;
+            };
+            squash_pattern_editor_child_draft(
+                &mut wizard.draft.borrow_mut(),
+                &draft.borrow().history,
+            )
+        }
     };
     match result {
         Ok(summary) if summary.unchanged => {
             if let Some(surface) = state.borrow().pattern_editor.as_ref() {
-                surface.status.set_label("No draft changes to apply.");
+                surface.status.set_label("No curve changes to apply.");
             }
         }
         Ok(_) => {
-            close_pattern_editor(state);
-            let mut app_state = state.borrow_mut();
-            set_preview_pending(&mut app_state);
-            set_inspector_status(&mut app_state, "Pattern draft applied.");
-            emit_automation_state(&mut app_state, "draft_applied", None);
-            sync_ui(&mut app_state);
-            drop(app_state);
-            rebuild_inspector(state);
-            schedule_main_preview_submission(state);
+            close_pattern_editor_after_terminal(state, NestedEditorTerminal::Apply);
+            match parent {
+                PatternEditorParent::Workspace => {
+                    let mut app_state = state.borrow_mut();
+                    set_preview_pending(&mut app_state);
+                    set_inspector_status(&mut app_state, "Pattern changes applied.");
+                    emit_automation_state(&mut app_state, "draft_applied", None);
+                    sync_ui(&mut app_state);
+                    drop(app_state);
+                    rebuild_inspector(state);
+                    schedule_main_preview_submission(state);
+                }
+                PatternEditorParent::Wizard {
+                    epoch, focus_token, ..
+                } => {
+                    show_wizard_current_route_page(state, epoch);
+                    restore_rebuilt_wizard_nested_focus(state, epoch, focus_token);
+                    submit_wizard_preview(state, epoch);
+                }
+            }
         }
         Err(error) => {
             if let Some(surface) = state.borrow().pattern_editor.as_ref() {
                 surface
                     .status
-                    .set_label(&format!("Couldn’t apply this draft: {error}"));
+                    .set_label(&format!("Couldn’t apply these curve changes: {error}"));
             }
         }
     }
+}
+
+/// Squashes one accepted nested-editor draft into its current Pattern Wizard parent as one entry.
+///
+/// # Errors
+///
+/// Returns the ordinary stale-root, invalid-document, or revision error without advancing either
+/// private history. Main history is deliberately absent from this helper.
+fn squash_pattern_editor_child_draft(
+    wizard_draft: &mut DocumentHistory,
+    child_draft: &DocumentHistory,
+) -> Result<toniator_domain::DraftSquashResult, toniator_domain::DocumentSessionError> {
+    wizard_draft.squash_draft(child_draft)
 }
 
 /// Projects a concise purpose-specific readout without exposing recipe internals.
@@ -6889,6 +14178,9 @@ fn draft_pattern_summary(
         }
         PatternEditorPurpose::Grid => "Simple XY Grid",
         PatternEditorPurpose::Mark => "Mark appearance",
+        PatternEditorPurpose::Guide => "Custom guide path",
+        PatternEditorPurpose::Shape => "Custom mark shape",
+        PatternEditorPurpose::Motif => "Curve Motif path",
     }
 }
 
@@ -6974,7 +14266,7 @@ fn append_draft_descriptor_control(
             control.set_text(&format!("{value:.4}"));
             control.set_input_purpose(gtk::InputPurpose::Number);
             control.set_tooltip_text(Some(&format!(
-                "{artist_label}. Press Enter or leave this field to update the draft."
+                "{artist_label}. Press Enter or leave this field to update the pattern."
             )));
             let state_for_activate = Rc::clone(state);
             let descriptor_for_activate = descriptor.clone();
@@ -7021,7 +14313,7 @@ fn append_draft_descriptor_control(
             control.set_text(&value.to_string());
             control.set_input_purpose(gtk::InputPurpose::Digits);
             control.set_tooltip_text(Some(&format!(
-                "{artist_label}. Press Enter or leave this field to update the draft."
+                "{artist_label}. Press Enter or leave this field to update the pattern."
             )));
             let state_for_activate = Rc::clone(state);
             let descriptor_for_activate = descriptor.clone();
@@ -7080,7 +14372,7 @@ fn append_draft_descriptor_control(
                 .iter()
                 .map(|choice| enum_choice_label(*choice))
                 .collect::<Vec<_>>();
-            let control = gtk::DropDown::from_strings(&labels);
+            let control = accessible_string_dropdown(&labels);
             control.set_selected(
                 choices
                     .iter()
@@ -7110,7 +14402,7 @@ fn append_draft_descriptor_control(
             let choices = draft_reference_choices(state, &descriptor);
             let labels = choices.iter().map(reference_label).collect::<Vec<_>>();
             let control =
-                gtk::DropDown::from_strings(&labels.iter().map(String::as_str).collect::<Vec<_>>());
+                accessible_string_dropdown(&labels.iter().map(String::as_str).collect::<Vec<_>>());
             control.set_selected(
                 choices
                     .iter()
@@ -7144,7 +14436,7 @@ fn append_draft_descriptor_control(
                 let direction = gtk::Label::new(Some(&format!("Direction {}", index + 1)));
                 direction.set_xalign(0.0);
                 let labels = choices.iter().map(reference_label).collect::<Vec<_>>();
-                let select = gtk::DropDown::from_strings(
+                let select = accessible_string_dropdown(
                     &labels.iter().map(String::as_str).collect::<Vec<_>>(),
                 );
                 select.set_selected(
@@ -7558,7 +14850,7 @@ fn private_compound_transition_command(
     let base_definition = document
         .pattern_definition_for(selected_channel)
         .cloned()
-        .ok_or_else(|| "The selected draft pattern is no longer available.".to_owned())?;
+        .ok_or_else(|| "The selected pattern is no longer available.".to_owned())?;
     Ok(DocumentCommand::EditSelectedChannelPatternDefinition {
         channel_id: selected_channel,
         base_definition,
@@ -7584,7 +14876,7 @@ fn apply_draft_history_navigation(state: &Rc<RefCell<AppState>>, redo: bool) {
         if let Some(surface) = state.borrow().pattern_editor.as_ref() {
             surface
                 .status
-                .set_label(&format!("Couldn’t update this draft: {error}"));
+                .set_label(&format!("Couldn’t update this pattern: {error}"));
         }
         return;
     }
@@ -7637,7 +14929,7 @@ fn submit_draft_preview(state: &Rc<RefCell<AppState>>) {
             }
         };
         draft.preview_submission = Some(ticket.value());
-        surface.status.set_label("Previewing draft…");
+        surface.status.set_label("Updating preview…");
         surface.preview_spinner.set_visible(true);
         surface.preview_spinner.start();
         (
@@ -7688,8 +14980,7 @@ fn request_draft_discard(state: &Rc<RefCell<AppState>>) {
         .modal(true)
         .build();
     let content = components::ToniatorConfirmationContent::new();
-    content
-        .set_detail("Discarding closes this private draft. Your current document stays unchanged.");
+    content.set_detail("Discard these curve changes? Your current document stays unchanged.");
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     actions.set_halign(gtk::Align::End);
     let keep_editing = gtk::Button::with_label("Keep editing");
@@ -7707,7 +14998,10 @@ fn request_draft_discard(state: &Rc<RefCell<AppState>>) {
         if let Some(surface) = state_for_discard.borrow().pattern_editor.as_ref() {
             surface.draft.borrow_mut().discard_confirmed = true;
         }
-        close_pattern_editor(&state_for_discard);
+        close_pattern_editor_after_terminal(
+            &state_for_discard,
+            NestedEditorTerminal::ConfirmedClose,
+        );
         dialog_for_discard.close();
     });
     dialog.present();
@@ -7734,7 +15028,7 @@ fn reject_stale_shared_edit_before_command(_state: &Rc<RefCell<AppState>>) -> bo
 
 /// Resolves one artist-facing finite scalar against the active document canvas.
 ///
-/// Only Pattern zoom level is inverted into density authority. The helper is
+/// Only Pattern size is inverted into density authority. The helper is
 /// read-only and does not create history or schedule evaluation.
 ///
 /// # Errors
@@ -7755,15 +15049,15 @@ fn authority_inspector_f64(
     authority_numeric_value(document, descriptor.field, artist_value)
 }
 
-/// Parses and commits one ordinary numeric descriptor entry through the shared
+/// Parses and commits one ordinary numeric descriptor control through the shared
 /// typed command route. Enter and focus-leave both invoke this helper, preserving identical finite/whole-number parsing, draft retention,
 /// focus, invalidation, and history behavior. Invalid text never mutates the
 /// document; domain rejection remains status-only until a valid command applies.
-fn commit_numeric_descriptor_entry(
+fn commit_numeric_descriptor_control(
     state: &Rc<RefCell<AppState>>,
     descriptor: PropertyDescriptor,
     focus: InspectorFocusIdentity,
-    control: &gtk::Entry,
+    control: &impl IsA<gtk::Editable>,
 ) {
     let text = control.text().to_string();
     match descriptor.value_kind {
@@ -7916,7 +15210,7 @@ fn append_descriptor_control(
                 .iter()
                 .map(|choice| enum_choice_label(*choice))
                 .collect::<Vec<_>>();
-            let control = gtk::DropDown::from_strings(&choice_labels);
+            let control = accessible_string_dropdown(&choice_labels);
             control.set_selected(
                 descriptor
                     .choices
@@ -7948,92 +15242,253 @@ fn append_descriptor_control(
             control.upcast()
         }
         (PropertyValueKind::FiniteF64, PropertyCurrentValueKind::FiniteF64(value)) => {
-            let control = gtk::Entry::new();
             let displayed_value = presented_f64.unwrap_or(*value);
-            control.set_text(&draft_text(
+            let displayed_text = draft_text(
                 state,
                 &inspector_key(&descriptor),
                 &format!("{displayed_value:.4}"),
-            ));
-            control.set_input_purpose(gtk::InputPurpose::Number);
-            control.set_width_chars(8);
-            control.set_tooltip_text(Some(&inspector_field_detail(&descriptor)));
-            label.set_mnemonic_widget(Some(&control));
-            let state_for_callback = Rc::clone(state);
-            let descriptor_for_callback = descriptor.clone();
-            let focus_for_callback = focus.clone();
-            control.connect_activate(move |control| {
-                commit_numeric_descriptor_entry(
-                    &state_for_callback,
-                    descriptor_for_callback.clone(),
-                    focus_for_callback.clone(),
-                    control,
+            );
+            if descriptor.field == PropertyFieldId::CurveResponseBias {
+                let description = inspector_field_detail(&descriptor);
+                let control = curve_response_bias_scale(
+                    displayed_value,
+                    &inspector_field_label(descriptor.field),
+                    &description,
                 );
-            });
-            let focus_controller = gtk::EventControllerFocus::new();
-            let state_for_leave = Rc::clone(state);
-            let descriptor_for_leave = descriptor.clone();
-            let focus_for_leave = focus.clone();
-            let control_for_leave = control.clone();
-            focus_controller.connect_leave(move |_| {
-                commit_numeric_descriptor_entry(
-                    &state_for_leave,
-                    descriptor_for_leave.clone(),
-                    focus_for_leave.clone(),
-                    &control_for_leave,
-                );
-            });
-            control.add_controller(focus_controller);
-            row.append(&labels);
-            row.append(&control);
-            schedule_inspector_focus(state, focus, &control);
-            control.upcast()
+                label.set_mnemonic_widget(Some(&control));
+                let state_for_callback = Rc::clone(state);
+                let descriptor_for_callback = descriptor.clone();
+                let focus_for_callback = focus.clone();
+                control.connect_value_changed(move |control| {
+                    let Ok(app_state) = state_for_callback.try_borrow() else {
+                        return;
+                    };
+                    if app_state.syncing_inspector {
+                        return;
+                    }
+                    drop(app_state);
+                    let value = control.value();
+                    if main_numeric_input_matches_current(
+                        &state_for_callback,
+                        &descriptor_for_callback,
+                        &InspectorInput::FiniteF64(value),
+                    ) {
+                        return;
+                    }
+                    commit_inspector_input_with_focus(
+                        &state_for_callback,
+                        descriptor_for_callback.clone(),
+                        InspectorInput::FiniteF64(value),
+                        focus_for_callback.clone(),
+                    );
+                });
+                row.append(&labels);
+                row.append(&control);
+                schedule_inspector_focus(state, focus, &control);
+                control.upcast()
+            } else if descriptor.field == PropertyFieldId::Density {
+                let (minimum, maximum) = pattern_size_slider_bounds(displayed_value);
+                let adjustment =
+                    gtk::Adjustment::new(displayed_value, minimum, maximum, 0.025, 0.25, 0.0);
+                let control = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&adjustment));
+                control.set_draw_value(true);
+                control.set_digits(3);
+                control.set_hexpand(true);
+                control.set_tooltip_text(Some(&inspector_field_detail(&descriptor)));
+                label.set_mnemonic_widget(Some(&control));
+                let state_for_callback = Rc::clone(state);
+                let descriptor_for_callback = descriptor.clone();
+                let focus_for_callback = focus.clone();
+                control.connect_value_changed(move |control| {
+                    let Ok(app_state) = state_for_callback.try_borrow() else {
+                        return;
+                    };
+                    if app_state.syncing_inspector {
+                        return;
+                    }
+                    drop(app_state);
+                    let value = control.value();
+                    let Ok(authority_value) = authority_inspector_f64(
+                        &state_for_callback,
+                        &descriptor_for_callback,
+                        value,
+                    ) else {
+                        return;
+                    };
+                    if main_numeric_input_matches_current(
+                        &state_for_callback,
+                        &descriptor_for_callback,
+                        &InspectorInput::FiniteF64(authority_value),
+                    ) {
+                        return;
+                    }
+                    commit_inspector_input_with_focus(
+                        &state_for_callback,
+                        descriptor_for_callback.clone(),
+                        InspectorInput::FiniteF64(authority_value),
+                        focus_for_callback.clone(),
+                    );
+                });
+                row.append(&labels);
+                row.append(&control);
+                schedule_inspector_focus(state, focus, &control);
+                control.upcast()
+            } else if let Some(control) =
+                bounded_numeric_spin_button(&descriptor, displayed_value, 0.01, 4)
+            {
+                control.set_text(&displayed_text);
+                control.set_width_chars(8);
+                control.set_tooltip_text(Some(&inspector_field_detail(&descriptor)));
+                label.set_mnemonic_widget(Some(&control));
+                let state_for_callback = Rc::clone(state);
+                let descriptor_for_callback = descriptor.clone();
+                let focus_for_callback = focus.clone();
+                let control_for_activate = control.clone();
+                control.connect_local("activate", false, move |_| {
+                    commit_numeric_descriptor_control(
+                        &state_for_callback,
+                        descriptor_for_callback.clone(),
+                        focus_for_callback.clone(),
+                        &control_for_activate,
+                    );
+                    None
+                });
+                let focus_controller = gtk::EventControllerFocus::new();
+                let state_for_leave = Rc::clone(state);
+                let descriptor_for_leave = descriptor.clone();
+                let focus_for_leave = focus.clone();
+                let control_for_leave = control.clone();
+                focus_controller.connect_leave(move |_| {
+                    commit_numeric_descriptor_control(
+                        &state_for_leave,
+                        descriptor_for_leave.clone(),
+                        focus_for_leave.clone(),
+                        &control_for_leave,
+                    );
+                });
+                control.add_controller(focus_controller);
+                row.append(&labels);
+                row.append(&control);
+                schedule_inspector_focus(state, focus, &control);
+                control.upcast()
+            } else {
+                let control = gtk::Entry::new();
+                control.set_text(&displayed_text);
+                control.set_input_purpose(gtk::InputPurpose::Number);
+                control.set_width_chars(8);
+                control.set_tooltip_text(Some(&inspector_field_detail(&descriptor)));
+                label.set_mnemonic_widget(Some(&control));
+                let state_for_callback = Rc::clone(state);
+                let descriptor_for_callback = descriptor.clone();
+                let focus_for_callback = focus.clone();
+                control.connect_activate(move |control| {
+                    commit_numeric_descriptor_control(
+                        &state_for_callback,
+                        descriptor_for_callback.clone(),
+                        focus_for_callback.clone(),
+                        control,
+                    );
+                });
+                let focus_controller = gtk::EventControllerFocus::new();
+                let state_for_leave = Rc::clone(state);
+                let descriptor_for_leave = descriptor.clone();
+                let focus_for_leave = focus.clone();
+                let control_for_leave = control.clone();
+                focus_controller.connect_leave(move |_| {
+                    commit_numeric_descriptor_control(
+                        &state_for_leave,
+                        descriptor_for_leave.clone(),
+                        focus_for_leave.clone(),
+                        &control_for_leave,
+                    );
+                });
+                control.add_controller(focus_controller);
+                row.append(&labels);
+                row.append(&control);
+                schedule_inspector_focus(state, focus, &control);
+                control.upcast()
+            }
         }
         (PropertyValueKind::U32, PropertyCurrentValueKind::U32(value)) => {
-            let control = gtk::Entry::new();
-            control.set_text(&draft_text(
-                state,
-                &inspector_key(&descriptor),
-                &value.to_string(),
-            ));
-            control.set_input_purpose(gtk::InputPurpose::Digits);
-            control.set_width_chars(8);
-            control.set_tooltip_text(Some(&inspector_field_detail(&descriptor)));
-            label.set_mnemonic_widget(Some(&control));
-            let state_for_callback = Rc::clone(state);
-            let descriptor_for_callback = descriptor.clone();
-            let focus_for_callback = focus.clone();
-            control.connect_activate(move |control| {
-                commit_numeric_descriptor_entry(
-                    &state_for_callback,
-                    descriptor_for_callback.clone(),
-                    focus_for_callback.clone(),
-                    control,
-                );
-            });
-            let focus_controller = gtk::EventControllerFocus::new();
-            let state_for_leave = Rc::clone(state);
-            let descriptor_for_leave = descriptor.clone();
-            let focus_for_leave = focus.clone();
-            let control_for_leave = control.clone();
-            focus_controller.connect_leave(move |_| {
-                commit_numeric_descriptor_entry(
-                    &state_for_leave,
-                    descriptor_for_leave.clone(),
-                    focus_for_leave.clone(),
-                    &control_for_leave,
-                );
-            });
-            control.add_controller(focus_controller);
-            row.append(&labels);
-            row.append(&control);
-            schedule_inspector_focus(state, focus, &control);
-            control.upcast()
+            let displayed_text = draft_text(state, &inspector_key(&descriptor), &value.to_string());
+            if let Some(control) = bounded_numeric_spin_button(&descriptor, *value as f64, 1.0, 0) {
+                control.set_text(&displayed_text);
+                control.set_width_chars(8);
+                control.set_tooltip_text(Some(&inspector_field_detail(&descriptor)));
+                label.set_mnemonic_widget(Some(&control));
+                let state_for_callback = Rc::clone(state);
+                let descriptor_for_callback = descriptor.clone();
+                let focus_for_callback = focus.clone();
+                let control_for_activate = control.clone();
+                control.connect_local("activate", false, move |_| {
+                    commit_numeric_descriptor_control(
+                        &state_for_callback,
+                        descriptor_for_callback.clone(),
+                        focus_for_callback.clone(),
+                        &control_for_activate,
+                    );
+                    None
+                });
+                let focus_controller = gtk::EventControllerFocus::new();
+                let state_for_leave = Rc::clone(state);
+                let descriptor_for_leave = descriptor.clone();
+                let focus_for_leave = focus.clone();
+                let control_for_leave = control.clone();
+                focus_controller.connect_leave(move |_| {
+                    commit_numeric_descriptor_control(
+                        &state_for_leave,
+                        descriptor_for_leave.clone(),
+                        focus_for_leave.clone(),
+                        &control_for_leave,
+                    );
+                });
+                control.add_controller(focus_controller);
+                row.append(&labels);
+                row.append(&control);
+                schedule_inspector_focus(state, focus, &control);
+                control.upcast()
+            } else {
+                let control = gtk::Entry::new();
+                control.set_text(&displayed_text);
+                control.set_input_purpose(gtk::InputPurpose::Digits);
+                control.set_width_chars(8);
+                control.set_tooltip_text(Some(&inspector_field_detail(&descriptor)));
+                label.set_mnemonic_widget(Some(&control));
+                let state_for_callback = Rc::clone(state);
+                let descriptor_for_callback = descriptor.clone();
+                let focus_for_callback = focus.clone();
+                control.connect_activate(move |control| {
+                    commit_numeric_descriptor_control(
+                        &state_for_callback,
+                        descriptor_for_callback.clone(),
+                        focus_for_callback.clone(),
+                        control,
+                    );
+                });
+                let focus_controller = gtk::EventControllerFocus::new();
+                let state_for_leave = Rc::clone(state);
+                let descriptor_for_leave = descriptor.clone();
+                let focus_for_leave = focus.clone();
+                let control_for_leave = control.clone();
+                focus_controller.connect_leave(move |_| {
+                    commit_numeric_descriptor_control(
+                        &state_for_leave,
+                        descriptor_for_leave.clone(),
+                        focus_for_leave.clone(),
+                        &control_for_leave,
+                    );
+                });
+                control.add_controller(focus_controller);
+                row.append(&labels);
+                row.append(&control);
+                schedule_inspector_focus(state, focus, &control);
+                control.upcast()
+            }
         }
         (_, PropertyCurrentValueKind::Reference(reference)) => {
             let choices = reference_choices(state, &descriptor);
             let reference_labels = choices.iter().map(reference_label).collect::<Vec<_>>();
-            let control = gtk::DropDown::from_strings(
+            let control = accessible_string_dropdown(
                 &reference_labels
                     .iter()
                     .map(String::as_str)
@@ -8075,7 +15530,7 @@ fn append_descriptor_control(
                 let direction = gtk::Label::new(Some(&format!("Direction {}", index + 1)));
                 direction.set_xalign(0.0);
                 let reference_labels = choices.iter().map(reference_label).collect::<Vec<_>>();
-                let select = gtk::DropDown::from_strings(
+                let select = accessible_string_dropdown(
                     &reference_labels
                         .iter()
                         .map(String::as_str)
@@ -8128,6 +15583,17 @@ fn append_descriptor_control(
             control.upcast()
         }
     };
+    let presented = match &current.value {
+        PropertyCurrentValueKind::FiniteF64(value) => presented_f64.unwrap_or(*value),
+        PropertyCurrentValueKind::U32(value) => *value as f64,
+        _ => f64::NAN,
+    };
+    update_descriptor_accessibility(
+        &control,
+        &current.descriptor,
+        presented.is_finite().then_some(presented),
+    );
+    relate_descriptor_label(&control, &label);
     let reset = if current.descriptor.reset_capable {
         let reset = gtk::Button::with_label("Reset");
         reset.set_valign(gtk::Align::Center);
@@ -8168,33 +15634,6 @@ fn append_descriptor_control(
         reset,
         value: current,
     }
-}
-
-/// Maps a supported semantic unit to concise artist-facing helper text.
-///
-/// Raw descriptor bounds and unit tokens never reach product vocabulary.
-/// Empty text intentionally means that the setting needs no extra helper.
-fn unit_message(unit: toniator_domain::PropertyUnit) -> &'static str {
-    match unit {
-        toniator_domain::PropertyUnit::None => "",
-        toniator_domain::PropertyUnit::Density => "Density",
-        toniator_domain::PropertyUnit::Degrees => "Degrees",
-        toniator_domain::PropertyUnit::Phase => "Offset",
-        toniator_domain::PropertyUnit::DocumentDistance => "Canvas distance",
-        toniator_domain::PropertyUnit::NormalizedComponent => "Channel amount",
-        toniator_domain::PropertyUnit::Count => "Count",
-    }
-}
-
-/// Produces non-authoritative helper text without exposing domain bounds.
-///
-/// The ignored bounds remain domain validation authority; UI text never
-/// advertises raw comparator strings that would read as backend vocabulary.
-fn field_detail(
-    _bounds: Option<toniator_domain::PropertyBounds>,
-    unit: toniator_domain::PropertyUnit,
-) -> String {
-    unit_message(unit).to_owned()
 }
 
 fn draft_text(state: &Rc<RefCell<AppState>>, key: &str, authoritative: &str) -> String {
@@ -8461,6 +15900,52 @@ fn apply_inspector_command(
     }
 }
 
+/// Applies one ALL-channel seed propagation as a single authoritative history entry.
+///
+/// The domain maps the base descriptor to compatible seed slots in channel-specific definition
+/// copies. GTK only clears its draft, retains focus, and schedules the ordinary preview after the
+/// grouped operation succeeds.
+fn apply_all_pattern_seed(
+    state: &Rc<RefCell<AppState>>,
+    descriptor: &PropertyDescriptor,
+    seed: u32,
+    focus: InspectorFocusIdentity,
+) -> bool {
+    let state_handle = Rc::clone(state);
+    let mut app_state = state.borrow_mut();
+    let Some(workspace) = app_state.workspace.as_mut() else {
+        return false;
+    };
+    match workspace.history.set_all_pattern_seed(descriptor, seed) {
+        Ok(_) => {
+            app_state
+                .inspector_runtime
+                .drafts
+                .remove(&inspector_key(descriptor));
+            app_state.inspector_runtime.focus = focus_after_command_attempt(
+                app_state.inspector_runtime.focus.clone(),
+                Some(focus),
+                true,
+            );
+            set_preview_pending(&mut app_state);
+            set_inspector_status(&mut app_state, "Rendering preview…");
+            sync_ui(&mut app_state);
+            drop(app_state);
+            schedule_main_preview_submission(&state_handle);
+            true
+        }
+        Err(error) => {
+            app_state.inspector_runtime.focus = focus_after_command_attempt(
+                app_state.inspector_runtime.focus.clone(),
+                Some(focus),
+                false,
+            );
+            set_inspector_status(&mut app_state, error.to_string());
+            false
+        }
+    }
+}
+
 fn definition_for_target(
     document: &Document,
     target: PropertyTarget,
@@ -8544,6 +16029,27 @@ fn commit_inspector_input_with_focus(
         rebuild_pattern_editor(state);
         return;
     }
+    let target = state.borrow().inspector_runtime.target;
+    if target == InspectorTarget::DocumentAll
+        && matches!(
+            descriptor.field,
+            PropertyFieldId::RandomSeed
+                | PropertyFieldId::ConnectionSeed
+                | PropertyFieldId::MazeSeed
+        )
+    {
+        let InspectorInput::U32(seed) = input else {
+            set_inspector_status(
+                &mut state.borrow_mut(),
+                "A random seed must be a whole number.".to_owned(),
+            );
+            return;
+        };
+        if apply_all_pattern_seed(state, &descriptor, seed, focus) {
+            rebuild_inspector(state);
+        }
+        return;
+    }
     let command = {
         let state = state.borrow();
         let Some(workspace) = state.workspace.as_ref() else {
@@ -8551,8 +16057,11 @@ fn commit_inspector_input_with_focus(
         };
         command_for_inspector_input(
             workspace.document(),
-            state.inspector_runtime.target.channel_id(),
-            state.inspector_runtime.scope.clone(),
+            target.channel_id(),
+            match target {
+                InspectorTarget::DocumentAll => DefinitionEditScope::DocumentBase,
+                InspectorTarget::Channel(_) => DefinitionEditScope::SelectedCopy,
+            },
             &descriptor,
             input,
         )
@@ -8591,6 +16100,45 @@ fn commit_inspector_reset(state: &Rc<RefCell<AppState>>, descriptor: PropertyDes
         }
         Err(error) => set_inspector_status(&mut state.borrow_mut(), error),
     }
+}
+
+/// Wraps one validated base-output response edit at the captured pattern scope.
+///
+/// ALL retains the shared definition and bundle identity. A named-channel edit creates or updates
+/// only that channel's selected pattern copy through the existing atomic bundle command.
+///
+/// # Errors
+///
+/// Returns a displayable stale-pattern or missing-channel diagnostic without changing history.
+fn output_response_bundle_command(
+    document: &Document,
+    selected_channel: Option<ChannelId>,
+    scope: DefinitionEditScope,
+    definition_id: PatternDefinitionId,
+    edit: PatternOutputSettingsEdit,
+) -> Result<DocumentCommand, String> {
+    let base_bundle = document
+        .pattern_definition_bundles()
+        .iter()
+        .find(|bundle| bundle.definition.id == definition_id)
+        .cloned()
+        .ok_or_else(|| "The active pattern output settings are missing.".to_owned())?;
+    Ok(match scope {
+        DefinitionEditScope::DocumentBase => DocumentCommand::EditSharedPatternDefinitionBundle {
+            definition_id,
+            base_bundle,
+            edit: PatternDefinitionBundleEdit::OutputSettings(edit),
+        },
+        DefinitionEditScope::SelectedCopy => {
+            DocumentCommand::EditSelectedChannelPatternDefinitionBundle {
+                channel_id: selected_channel.ok_or_else(|| {
+                    "Select a channel before editing its pattern output.".to_owned()
+                })?,
+                base_bundle,
+                edit: PatternDefinitionBundleEdit::OutputSettings(edit),
+            }
+        }
+    })
 }
 
 /// Builds the stale-aware reset command advertised by one reset-capable descriptor.
@@ -8646,6 +16194,12 @@ fn command_for_inspector_input(
         InspectorInput::FiniteF64(value) if value.is_finite() => Ok(value),
         _ => Err("Expected a finite numeric value.".to_owned()),
     };
+    let optional_f64_value = |input: InspectorInput| match input {
+        InspectorInput::OptionalFiniteF64(value) if value.is_none_or(|value| value.is_finite()) => {
+            Ok(value)
+        }
+        _ => Err("Expected an enabled finite number or Disabled.".to_owned()),
+    };
     let boolean = |input: InspectorInput| match input {
         InspectorInput::Boolean(value) => Ok(value),
         _ => Err("Expected a Boolean value.".to_owned()),
@@ -8656,7 +16210,7 @@ fn command_for_inspector_input(
     };
     let reference = |input: InspectorInput| match input {
         InspectorInput::Reference(value) => Ok(value),
-        _ => Err("Expected a stable reference.".to_owned()),
+        _ => Err("Expected a compatible selection.".to_owned()),
     };
     let channel_id =
         || channel_id.ok_or_else(|| "This field requires a selected channel.".to_owned());
@@ -8730,10 +16284,43 @@ fn command_for_inspector_input(
                         edit,
                     )
                     .map_err(|error| error.to_string()),
+                PropertyTarget::OutputLayer(definition_id, output_layer_id) => {
+                    let PatternGeometryResponse::Marks(mut response) = document
+                        .pattern_definition_bundles()
+                        .iter()
+                        .find(|bundle| bundle.definition.id == definition_id)
+                        .and_then(|bundle| {
+                            bundle
+                                .output_settings
+                                .iter()
+                                .find(|setting| setting.output_layer_id == output_layer_id)
+                        })
+                        .map(|setting| setting.response.clone())
+                        .ok_or_else(|| "The active mark output is missing.".to_owned())?
+                    else {
+                        return Err("Mark controls require a mark output.".to_owned());
+                    };
+                    match edit {
+                        MarkGeometryFieldEdit::MinimumFill(value) => response.minimum_fill = value,
+                        MarkGeometryFieldEdit::MaximumFill(value) => response.maximum_fill = value,
+                    }
+                    output_response_bundle_command(
+                        document,
+                        selected_channel,
+                        scope,
+                        definition_id,
+                        PatternOutputSettingsEdit::SetMarkResponse {
+                            output_layer_id,
+                            response,
+                        },
+                    )
+                }
                 _ => Err("Mark response requires document or channel authority.".to_owned()),
             }
         }
-        PropertyFieldId::ConnectedMinimumThickness | PropertyFieldId::ConnectedMaximumThickness => {
+        PropertyFieldId::ConnectedMinimumThickness
+        | PropertyFieldId::ConnectedMaximumThickness
+        | PropertyFieldId::CurveResponseBias => {
             let value = f64_value(input)?;
             match descriptor.target {
                 PropertyTarget::ChannelOutput(channel_id, output_layer_id) => {
@@ -8760,6 +16347,7 @@ fn command_for_inspector_input(
                         PropertyFieldId::ConnectedMaximumThickness => {
                             response.maximum_thickness = value;
                         }
+                        PropertyFieldId::CurveResponseBias => response.bias = value,
                         _ => unreachable!("connected response arm owns only connected fields"),
                     }
                     document
@@ -8769,6 +16357,43 @@ fn command_for_inspector_input(
                             PatternGeometryResponse::Connected(response),
                         )
                         .map_err(|error| error.to_string())
+                }
+                PropertyTarget::OutputLayer(definition_id, output_layer_id) => {
+                    let PatternGeometryResponse::Connected(mut response) = document
+                        .pattern_definition_bundles()
+                        .iter()
+                        .find(|bundle| bundle.definition.id == definition_id)
+                        .and_then(|bundle| {
+                            bundle
+                                .output_settings
+                                .iter()
+                                .find(|setting| setting.output_layer_id == output_layer_id)
+                        })
+                        .map(|setting| setting.response.clone())
+                        .ok_or_else(|| "The active path output is missing.".to_owned())?
+                    else {
+                        return Err("Thickness controls require a path output.".to_owned());
+                    };
+                    match descriptor.field {
+                        PropertyFieldId::ConnectedMinimumThickness => {
+                            response.minimum_thickness = value;
+                        }
+                        PropertyFieldId::ConnectedMaximumThickness => {
+                            response.maximum_thickness = value;
+                        }
+                        PropertyFieldId::CurveResponseBias => response.bias = value,
+                        _ => unreachable!("connected response arm owns only connected fields"),
+                    }
+                    output_response_bundle_command(
+                        document,
+                        selected_channel,
+                        scope,
+                        definition_id,
+                        PatternOutputSettingsEdit::SetConnectedResponse {
+                            output_layer_id,
+                            response,
+                        },
+                    )
                 }
                 _ => Err("Connected response requires document or channel authority.".to_owned()),
             }
@@ -8788,10 +16413,85 @@ fn command_for_inspector_input(
                         edit,
                     )
                     .map_err(|error| error.to_string()),
+                PropertyTarget::OutputLayer(definition_id, output_layer_id) => {
+                    let PatternGeometryResponse::Regions(mut response) = document
+                        .pattern_definition_bundles()
+                        .iter()
+                        .find(|bundle| bundle.definition.id == definition_id)
+                        .and_then(|bundle| {
+                            bundle
+                                .output_settings
+                                .iter()
+                                .find(|setting| setting.output_layer_id == output_layer_id)
+                        })
+                        .map(|setting| setting.response.clone())
+                        .ok_or_else(|| "The active region output is missing.".to_owned())?
+                    else {
+                        return Err("Fill controls require a region output.".to_owned());
+                    };
+                    match edit {
+                        RegionGeometryFieldEdit::MinimumFill(value) => {
+                            response.minimum_fill = value
+                        }
+                        RegionGeometryFieldEdit::MaximumFill(value) => {
+                            response.maximum_fill = value
+                        }
+                    }
+                    output_response_bundle_command(
+                        document,
+                        selected_channel,
+                        scope,
+                        definition_id,
+                        PatternOutputSettingsEdit::SetRegionResponse {
+                            output_layer_id,
+                            response,
+                        },
+                    )
+                }
                 _ => Err("Region fill requires one channel output authority.".to_owned()),
             }
         }
         PropertyFieldId::RegionResizeAlgorithm | PropertyFieldId::RegionSampling => {
+            if let (
+                DefinitionEditScope::DocumentBase,
+                PropertyTarget::OutputLayer(definition_id, output_layer_id),
+            ) = (&scope, descriptor.target)
+            {
+                let response = document
+                    .pattern_definition_bundles()
+                    .iter()
+                    .find(|bundle| bundle.definition.id == definition_id)
+                    .and_then(|bundle| {
+                        bundle
+                            .output_settings
+                            .iter()
+                            .find(|setting| setting.output_layer_id == output_layer_id)
+                    })
+                    .and_then(|setting| match &setting.response {
+                        PatternGeometryResponse::Regions(response) => Some(response.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| "The active region output is missing.".to_owned())?;
+                let mut response = response;
+                match (descriptor.field, choice(input)?) {
+                    (
+                        PropertyFieldId::RegionResizeAlgorithm,
+                        PropertyEnumChoice::RegionResizeAlgorithm(algorithm),
+                    ) => response.algorithm = algorithm,
+                    (
+                        PropertyFieldId::RegionSampling,
+                        PropertyEnumChoice::RegionSampling(sampling),
+                    ) => response.sampling = sampling,
+                    _ => return Err("Expected a compatible region response choice.".to_owned()),
+                }
+                return document
+                    .set_shared_region_response_for_definition(
+                        definition_id,
+                        output_layer_id,
+                        response,
+                    )
+                    .map_err(|error| error.to_string());
+            }
             let channel_id = selected_channel
                 .ok_or_else(|| "Region response requires a selected channel.".to_owned())?;
             let output_layer_id = target_output_layer_id(descriptor.target)
@@ -8848,6 +16548,41 @@ fn command_for_inspector_input(
                 _ => Err("Shape rotation requires document or channel authority.".to_owned()),
             }
         }
+        PropertyFieldId::CurveMotifAlternateRowPhase => {
+            let output_layer_id = target_output_layer_id(descriptor.target)
+                .ok_or_else(|| "Odd-row phase requires an active Curve Motif output.".to_owned())?;
+            let definition_id = target_definition_id(descriptor.target).ok_or_else(|| {
+                "Odd-row phase is not available for the current pattern.".to_owned()
+            })?;
+            let base_definition = document
+                .pattern_definition_bundles()
+                .iter()
+                .find(|bundle| bundle.definition.id == definition_id)
+                .map(|bundle| bundle.definition.clone())
+                .ok_or_else(|| "The active pattern is missing.".to_owned())?;
+            let edit = PatternDefinitionEdit::SetCurveMotifAlternateRowPhase {
+                output_layer_id,
+                alternate_row_phase: optional_f64_value(input)?,
+            };
+            match scope {
+                DefinitionEditScope::DocumentBase => {
+                    Ok(DocumentCommand::EditSharedPatternDefinition {
+                        definition_id,
+                        base_definition,
+                        edit,
+                    })
+                }
+                DefinitionEditScope::SelectedCopy => {
+                    Ok(DocumentCommand::EditSelectedChannelPatternDefinition {
+                        channel_id: selected_channel.ok_or_else(|| {
+                            "Select a channel before editing this output.".to_owned()
+                        })?,
+                        base_definition,
+                        edit,
+                    })
+                }
+            }
+        }
         PropertyFieldId::ColorRed => Ok(DocumentCommand::SetColorComponent {
             channel_id: channel_id()?,
             component: ColorComponent::Red,
@@ -8901,7 +16636,7 @@ fn command_for_inspector_input(
                 }
                 _ => Err("Definition selection requires document or channel authority.".to_owned()),
             },
-            _ => Err("Expected a pattern definition reference.".to_owned()),
+            _ => Err("Expected a pattern selection.".to_owned()),
         },
         PropertyFieldId::LegacyMappingComponent => match choice(input)? {
             PropertyEnumChoice::SourceMappingComponent(component) => {
@@ -9003,7 +16738,7 @@ fn structural_command_for_input(
     input: InspectorInput,
 ) -> Result<DocumentCommand, String> {
     let definition_id = target_definition_id(descriptor.target)
-        .ok_or_else(|| "This field is not structural.".to_owned())?;
+        .ok_or_else(|| "This setting does not change the pattern structure.".to_owned())?;
     let mechanism_id = target_mechanism_id(descriptor.target);
     let output_layer_id = target_output_layer_id(descriptor.target);
     let number = |input: InspectorInput| match input {
@@ -9024,13 +16759,98 @@ fn structural_command_for_input(
     };
     let reference = |input: InspectorInput| match input {
         InspectorInput::Reference(value) => Ok(value),
-        _ => Err("Expected a stable reference.".to_owned()),
+        _ => Err("Expected a compatible selection.".to_owned()),
     };
     let mechanism_id =
-        || mechanism_id.ok_or_else(|| "This field requires an active mechanism.".to_owned());
+        || mechanism_id.ok_or_else(|| "This setting requires an active pattern source.".to_owned());
     let output_layer_id =
         || output_layer_id.ok_or_else(|| "This field requires an active output layer.".to_owned());
+    let dimension_id = || match descriptor.target {
+        PropertyTarget::GuideDimension(_, _, id) => Ok(id),
+        _ => Err("This setting requires an active guide.".to_owned()),
+    };
     let edit = match descriptor.field {
+        PropertyFieldId::ParametricShape => match choice(input)? {
+            PropertyEnumChoice::SpiralShape(shape) => PatternDefinitionEdit::SetParametricShape {
+                mechanism_id: mechanism_id()?,
+                shape,
+            },
+            _ => return Err("Expected a spiral shape.".to_owned()),
+        },
+        PropertyFieldId::ParametricTurns => PatternDefinitionEdit::SetParametricTurns {
+            mechanism_id: mechanism_id()?,
+            turns: number(input)?,
+        },
+        PropertyFieldId::ParametricRadialSpacing => {
+            PatternDefinitionEdit::SetParametricRadialSpacing {
+                mechanism_id: mechanism_id()?,
+                radial_spacing: number(input)?,
+            }
+        }
+        PropertyFieldId::ParametricPhase => PatternDefinitionEdit::SetParametricPhase {
+            mechanism_id: mechanism_id()?,
+            phase_degrees: number(input)?,
+        },
+        PropertyFieldId::ParametricWinding => match choice(input)? {
+            PropertyEnumChoice::CurveWinding(winding) => {
+                PatternDefinitionEdit::SetParametricWinding {
+                    mechanism_id: mechanism_id()?,
+                    winding,
+                }
+            }
+            _ => return Err("Expected a spiral winding direction.".to_owned()),
+        },
+        PropertyFieldId::ParametricRepetition => match choice(input)? {
+            PropertyEnumChoice::CurveRepetition(toniator_domain::GuideRepetitionKind::Single) => {
+                PatternDefinitionEdit::SetParametricRepetition {
+                    mechanism_id: mechanism_id()?,
+                    repetition: toniator_domain::CurveRepetition::Single,
+                }
+            }
+            _ => {
+                return Err(
+                    "Complete and apply the required settings shown for this repetition choice."
+                        .to_owned(),
+                );
+            }
+        },
+        PropertyFieldId::ParametricOffsetSpacing => {
+            PatternDefinitionEdit::SetParametricOffsetSpacing {
+                mechanism_id: mechanism_id()?,
+                spacing: number(input)?,
+            }
+        }
+        PropertyFieldId::ParametricOffsetCleanup => match choice(input)? {
+            PropertyEnumChoice::OffsetCleanup(cleanup) => {
+                PatternDefinitionEdit::SetParametricOffsetCleanup {
+                    mechanism_id: mechanism_id()?,
+                    cleanup,
+                }
+            }
+            _ => return Err("Expected an offset cleanup choice.".to_owned()),
+        },
+        PropertyFieldId::ParametricStackDirection => {
+            PatternDefinitionEdit::SetParametricStackDirection {
+                mechanism_id: mechanism_id()?,
+                value: number(input)?,
+            }
+        }
+        PropertyFieldId::ParametricStackSpacingMultiplier => {
+            PatternDefinitionEdit::SetParametricStackSpacingMultiplier {
+                mechanism_id: mechanism_id()?,
+                value: number(input)?,
+            }
+        }
+        PropertyFieldId::AlongParametricInterval => {
+            PatternDefinitionEdit::SetAlongParametricInterval {
+                mechanism_id: mechanism_id()?,
+                interval: number(input)?,
+            }
+        }
+        PropertyFieldId::AlongParametricPhase => PatternDefinitionEdit::SetAlongParametricPhase {
+            mechanism_id: mechanism_id()?,
+            phase: number(input)?,
+        },
         PropertyFieldId::CoverageGuardSteps => PatternDefinitionEdit::SetCoverageGuardSteps {
             guard_steps: count(input)?,
         },
@@ -9065,6 +16885,58 @@ fn structural_command_for_input(
                 spacing_multiplier: number(input)?,
             }
         }
+        PropertyFieldId::GuideArcCenterX => PatternDefinitionEdit::SetGuideArcCenterX {
+            mechanism_id: mechanism_id()?,
+            dimension_id: dimension_id()?,
+            value: number(input)?,
+        },
+        PropertyFieldId::GuideArcCenterY => PatternDefinitionEdit::SetGuideArcCenterY {
+            mechanism_id: mechanism_id()?,
+            dimension_id: dimension_id()?,
+            value: number(input)?,
+        },
+        PropertyFieldId::GuideArcRadius => PatternDefinitionEdit::SetGuideArcRadius {
+            mechanism_id: mechanism_id()?,
+            dimension_id: dimension_id()?,
+            value: number(input)?,
+        },
+        PropertyFieldId::GuideArcStartAngle => PatternDefinitionEdit::SetGuideArcStartAngle {
+            mechanism_id: mechanism_id()?,
+            dimension_id: dimension_id()?,
+            value: number(input)?,
+        },
+        PropertyFieldId::GuideArcSweepAngle => PatternDefinitionEdit::SetGuideArcSweepAngle {
+            mechanism_id: mechanism_id()?,
+            dimension_id: dimension_id()?,
+            value: number(input)?,
+        },
+        PropertyFieldId::GuideRepetition => match choice(input)? {
+            PropertyEnumChoice::GuideRepetition(toniator_domain::GuideRepetitionKind::Single) => {
+                PatternDefinitionEdit::SetGuideRepetition {
+                    mechanism_id: mechanism_id()?,
+                    dimension_id: dimension_id()?,
+                    repetition: toniator_domain::GuideRepetition::Single,
+                }
+            }
+            _ => {
+                return Err(
+                    "Complete and apply the required settings shown for this repetition choice."
+                        .to_owned(),
+                );
+            }
+        },
+        PropertyFieldId::GuideStackDirection => PatternDefinitionEdit::SetGuideStackDirection {
+            mechanism_id: mechanism_id()?,
+            dimension_id: dimension_id()?,
+            value: number(input)?,
+        },
+        PropertyFieldId::GuideStackSpacingMultiplier => {
+            PatternDefinitionEdit::SetGuideStackSpacingMultiplier {
+                mechanism_id: mechanism_id()?,
+                dimension_id: dimension_id()?,
+                value: number(input)?,
+            }
+        }
         PropertyFieldId::GuideOffsetSpacing => PatternDefinitionEdit::SetGuideOffsetSpacing {
             mechanism_id: mechanism_id()?,
             dimension_id: match descriptor.target {
@@ -9072,17 +16944,6 @@ fn structural_command_for_input(
                 _ => return Err("Guide dimension target is required.".to_owned()),
             },
             spacing: number(input)?,
-        },
-        PropertyFieldId::GuideOffsetSides => match choice(input)? {
-            PropertyEnumChoice::OffsetSides(sides) => PatternDefinitionEdit::SetGuideOffsetSides {
-                mechanism_id: mechanism_id()?,
-                dimension_id: match descriptor.target {
-                    PropertyTarget::GuideDimension(_, _, id) => id,
-                    _ => return Err("Guide dimension target is required.".to_owned()),
-                },
-                sides,
-            },
-            _ => return Err("Expected an offset-side choice.".to_owned()),
         },
         PropertyFieldId::GuideOffsetCleanup => match choice(input)? {
             PropertyEnumChoice::OffsetCleanup(cleanup) => {
@@ -9180,8 +17041,62 @@ fn structural_command_for_input(
                     site_mechanism_id,
                 }
             }
-            _ => return Err("Expected a site-product mechanism reference.".to_owned()),
+            _ => return Err("Expected a site source selection.".to_owned()),
         },
+        PropertyFieldId::GuideAuthoredStructure => match reference(input)? {
+            PropertyReferenceValue::AuthoredStructure(structure_id) => {
+                PatternDefinitionEdit::SetGuideAuthoredStructure {
+                    mechanism_id: mechanism_id()?,
+                    dimension_id: match descriptor.target {
+                        PropertyTarget::GuideDimension(_, _, id) => id,
+                        _ => return Err("Guide dimension target is required.".to_owned()),
+                    },
+                    structure_id,
+                }
+            }
+            _ => return Err("Expected a custom open path selection.".to_owned()),
+        },
+        PropertyFieldId::OutputAuthoredClosedShape => match reference(input)? {
+            PropertyReferenceValue::AuthoredStructure(structure_id) => {
+                PatternDefinitionEdit::SetOutputAuthoredClosedShape {
+                    output_layer_id: output_layer_id()?,
+                    structure_id,
+                }
+            }
+            _ => return Err("Expected a custom closed shape selection.".to_owned()),
+        },
+        PropertyFieldId::ConnectionMaximumDegree => {
+            PatternDefinitionEdit::SetConnectionMaximumDegree {
+                output_layer_id: output_layer_id()?,
+                maximum_degree: count(input)?,
+            }
+        }
+        PropertyFieldId::ConnectionMaximumDistance => {
+            PatternDefinitionEdit::SetConnectionMaximumDistance {
+                output_layer_id: output_layer_id()?,
+                maximum_distance: number(input)?,
+            }
+        }
+        PropertyFieldId::ConnectionMinimumDegree => {
+            PatternDefinitionEdit::SetConnectionMinimumDegree {
+                output_layer_id: output_layer_id()?,
+                minimum_degree: count(input)?,
+            }
+        }
+        PropertyFieldId::ConnectionSeed => PatternDefinitionEdit::SetConnectionSeed {
+            output_layer_id: output_layer_id()?,
+            seed: count(input)?,
+        },
+        PropertyFieldId::MazeSeed => PatternDefinitionEdit::SetMazeSeed {
+            output_layer_id: output_layer_id()?,
+            seed: count(input)?,
+        },
+        PropertyFieldId::CurveMotifMirrorAlternateRows => {
+            PatternDefinitionEdit::SetCurveMotifMirrorAlternateRows {
+                output_layer_id: output_layer_id()?,
+                mirror_alternate_rows: boolean(input)?,
+            }
+        }
         PropertyFieldId::OutputOrientationDimension => match reference(input)? {
             PropertyReferenceValue::GuideDimension(dimension_id) => {
                 PatternDefinitionEdit::SetOutputOrientationDimension {
@@ -9196,8 +17111,7 @@ fn structural_command_for_input(
         | PropertyFieldId::RandomExclusion
         | PropertyFieldId::OutputOrientation => {
             return Err(
-                "This compound selector requires the visible transition draft and confirmation."
-                    .to_owned(),
+                "Complete and apply the required settings shown for this choice.".to_owned(),
             );
         }
         PropertyFieldId::ArtworkWeightMappingComponent => match choice(input)? {
@@ -9236,7 +17150,7 @@ fn structural_command_for_input(
         },
         PropertyFieldId::IntersectionDimensions | PropertyFieldId::AlongGuideDimensions => {
             let InspectorInput::ReferenceCollection(references) = input else {
-                return Err("Expected an ordered stable-reference collection.".to_owned());
+                return Err("Expected an ordered list of compatible choices.".to_owned());
             };
             let dimensions = references
                 .into_iter()
@@ -9264,14 +17178,22 @@ fn structural_command_for_input(
         .iter()
         .find(|definition| definition.id == definition_id)
         .map(|bundle| bundle.definition.clone())
-        .ok_or_else(|| "The active definition is missing.".to_owned())?;
-    let _ = (scope, definition_id);
-    Ok(DocumentCommand::EditSelectedChannelPatternDefinition {
-        channel_id: selected_channel
-            .ok_or_else(|| "Select a channel before editing its definition.".to_owned())?,
-        base_definition,
-        edit,
-    })
+        .ok_or_else(|| "The active pattern is missing.".to_owned())?;
+    match scope {
+        DefinitionEditScope::DocumentBase => Ok(DocumentCommand::EditSharedPatternDefinition {
+            definition_id,
+            base_definition,
+            edit,
+        }),
+        DefinitionEditScope::SelectedCopy => {
+            Ok(DocumentCommand::EditSelectedChannelPatternDefinition {
+                channel_id: selected_channel
+                    .ok_or_else(|| "Select a channel before editing its pattern.".to_owned())?,
+                base_definition,
+                edit,
+            })
+        }
+    }
 }
 
 fn request_lifecycle(state: &Rc<RefCell<AppState>>, action: LifecycleAction) {
@@ -9942,7 +17864,14 @@ fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
             state.borrow_mut().pending_load = false;
             match *result {
                 Ok(workspace) => install_workspace(state, workspace),
-                Err(error) => show_error(&mut state.borrow_mut(), error),
+                Err(error) => {
+                    let mut app_state = state.borrow_mut();
+                    show_error(&mut app_state, error);
+                    // `start_load` disabled lifecycle actions while the worker was pending. A
+                    // rejected container retains the old workspace, so project that restored
+                    // non-busy state immediately instead of leaving the File menu disabled.
+                    sync_ui(&mut app_state);
+                }
             }
         }
         AppEvent::Save {
@@ -10180,7 +18109,7 @@ fn handle_draft_preview_completion(
             Some(result) => match texture_from_surface(result.raster()) {
                 Ok(texture) => {
                     surface.picture.set_paintable(Some(&texture));
-                    surface.status.set_label("Draft preview updated.");
+                    surface.status.set_label("Pattern preview updated.");
                     drop(draft);
                     drop(app_state);
                     emit_draft_automation_state(
@@ -10227,13 +18156,13 @@ fn handle_advanced_preview_progress(
     let stage = preview_progress_stage_label(progress.stage());
     let fraction = progress.fraction().clamp(0.0, 1.0);
     surface.status.set_label(&format!(
-        "Private preview: {} · {:.0}%",
+        "Settings preview: {} · {:.0}%",
         stage.trim_end_matches('…'),
         fraction * 100.0
     ));
     surface
         .picture
-        .set_tooltip_text(Some(&format!("Rendering private preview: {stage}")));
+        .set_tooltip_text(Some(&format!("Updating preview: {stage}")));
 }
 
 /// Installs one newest Advanced Settings result after modal-epoch, ticket, and document checks.
@@ -10268,7 +18197,7 @@ fn handle_advanced_preview_completion(
                     surface.picture.set_paintable(Some(&texture));
                     surface
                         .picture
-                        .set_tooltip_text(Some("Private preview updated."));
+                        .set_tooltip_text(Some("Settings preview updated."));
                     let (width, height) = match &surface.preview_source {
                         AdvancedPreviewSource::Ready { width, height, .. } => (*width, *height),
                         AdvancedPreviewSource::Unavailable(_) => unreachable!(
@@ -10276,15 +18205,15 @@ fn handle_advanced_preview_completion(
                         ),
                     };
                     surface.status.set_label(&format!(
-                        "Private preview ({width} × {height} source proxy) updated. Apply publishes one undoable change."
+                        "Preview updated from a quick {width} × {height} source. Apply makes one undoable change."
                     ));
                 }
                 Err(error) => surface
                     .status
-                    .set_label(&format!("Private preview unavailable: {error}")),
+                    .set_label(&format!("Settings preview unavailable: {error}")),
             },
             None => surface.status.set_label(&format!(
-                "Private preview unavailable: {}",
+                "Settings preview unavailable: {}",
                 completion.error().map_or_else(
                     || "evaluation did not produce a result".to_owned(),
                     ToString::to_string
@@ -10294,7 +18223,7 @@ fn handle_advanced_preview_completion(
         Ok(false) => {}
         Err(error) => surface
             .status
-            .set_label(&format!("Private preview unavailable: {error}")),
+            .set_label(&format!("Settings preview unavailable: {error}")),
     }
 }
 
@@ -10668,12 +18597,9 @@ fn emit_draft_automation_state(state: &mut AppState, event: &str, ticket: Option
     }
 }
 
+/// Resolves the current GTK 4.12 logical widget size and scale into one preview raster target.
 fn preview_target_for(stack: &gtk::Stack) -> Option<toniator_engine::PreviewRasterTarget> {
-    preview_target_from_allocation(
-        stack.allocated_width(),
-        stack.allocated_height(),
-        stack.scale_factor(),
-    )
+    preview_target_from_allocation(stack.width(), stack.height(), stack.scale_factor())
 }
 
 fn preview_target_from_allocation(
@@ -10880,13 +18806,13 @@ mod tests {
         );
     }
 
-    /// Proves the GTK zoom projection is inverse, finite-positive, and lossless.
+    /// Proves the GTK Pattern size projection is inverse, finite-positive, and lossless.
     ///
     /// The test does not mutate document authority: Density remains the schema
     /// and evaluator input while the main inspector exposes the requested
-    /// artist-facing zoom direction and Pattern aspect terminology.
+    /// artist-facing size direction and Pattern aspect terminology.
     #[test]
-    fn pattern_zoom_level_projects_density_with_artist_facing_direction() {
+    fn pattern_size_projects_density_with_artist_facing_direction() {
         let document = Document::new_default_document(DEFAULT_CANVAS, SourceReference::Unassigned)
             .expect("default zoom projection document");
         let default_density = DensityMetric2D::default_for_canvas(document.canvas())
@@ -10909,6 +18835,20 @@ mod tests {
             artist_numeric_value(&document, PropertyFieldId::Density, default_density * 2.0),
             Ok(0.5)
         );
+        let density_descriptor = document
+            .property_values()
+            .into_iter()
+            .find(|value| value.descriptor.field == PropertyFieldId::Density)
+            .expect("default document projects Pattern size")
+            .descriptor;
+        assert_eq!(
+            wizard_review_value_text(
+                &document,
+                &density_descriptor,
+                &PropertyCurrentValueKind::FiniteF64(default_density * 2.0),
+            ),
+            "0.5000"
+        );
         assert_eq!(
             authority_numeric_value(&document, PropertyFieldId::DensityAspect, 2.0),
             Ok(2.0)
@@ -10916,7 +18856,7 @@ mod tests {
         assert!(authority_numeric_value(&document, PropertyFieldId::Density, 0.0).is_err());
         assert_eq!(
             inspector_field_label(PropertyFieldId::Density),
-            "Pattern zoom level"
+            "Pattern size"
         );
         assert_eq!(
             inspector_field_label(PropertyFieldId::DensityAspect),
@@ -10924,11 +18864,11 @@ mod tests {
         );
     }
 
-    /// Verifies fresh and direct workspaces use aspect-normalized zoom while loaded documents retain stored density.
+    /// Verifies fresh and direct workspaces use aspect-normalized Pattern size while loaded documents retain stored density.
     ///
     /// # Panics
     ///
-    /// Panics when source dimensions alter the normalized zoom contract or a
+    /// Panics when source dimensions alter the normalized Pattern size contract or a
     /// container open rewrites its already authored density intent.
     #[test]
     fn fresh_direct_and_persisted_workspaces_keep_density_authority_distinct() {
@@ -10965,7 +18905,7 @@ mod tests {
         );
     }
 
-    /// Verifies the build-compiled GTK-only Blueprint templates are registered and loadable.
+    /// Verifies compiled GTK templates retain their loadable and accessible static hierarchy.
     ///
     /// This check exercises the normal GResource boundary without creating a display, document,
     /// history, scheduler, or file side effect. A missing resource or an accidental Adwaita type
@@ -11017,6 +18957,19 @@ mod tests {
                     "main canvas exposes dismissible errors and staged determinate progress"
                 );
             }
+            if resource == "pattern-editor.ui" {
+                assert!(
+                    template.contains("id=\"construction_canvas_heading\"")
+                        && template.contains("Curve preview"),
+                    "the visible curve-preview heading remains a stable accessibility relation source"
+                );
+                assert!(
+                    template.contains("GtkToggleButton")
+                        && template.contains("smooth_direction")
+                        && template.contains("corner_direction"),
+                    "terminal direction remains a native GTK toggle group rather than CSS-only state"
+                );
+            }
         }
         for resource in WIZARD_IMAGE_RESOURCE_PATHS {
             let data = gio::resources_lookup_data(resource, gio::ResourceLookupFlags::NONE)
@@ -11028,7 +18981,7 @@ mod tests {
         }
     }
 
-    /// Proves the GTK-only private-editor policy stacks its static construction layout at 700px.
+    /// Proves the private editor retains narrow reflow, keyboard hints, and Curve Motif field labels.
     ///
     /// The pure boundary has no GTK allocation, draft, document, scheduler, or file side effect;
     /// runtime presentation applies this policy to the template-owned layout and scroll surface.
@@ -11041,6 +18994,19 @@ mod tests {
         assert!(CONSTRUCTION_CANVAS_GESTURE_HINT.contains("middle-button drag pans"));
         assert!(CONSTRUCTION_CANVAS_GESTURE_HINT.contains("Enter completes"));
         assert!(CONSTRUCTION_CANVAS_GESTURE_HINT.contains("Escape cancels"));
+        assert_eq!(
+            CONSTRUCTION_CANVAS_ACCESSIBLE_ROLE,
+            gtk::AccessibleRole::Group,
+            "the interactive canvas uses a concrete GTK role rather than the abstract Widget role"
+        );
+        assert_eq!(
+            inspector_field_label(PropertyFieldId::CurveMotifMirrorAlternateRows),
+            "Mirror odd rows"
+        );
+        assert_eq!(
+            inspector_field_label(PropertyFieldId::CurveMotifAlternateRowPhase),
+            "Odd-row phase"
+        );
     }
 
     /// Proves active channel settings retain a usable bounded width across supported windows.
@@ -11174,6 +19140,7 @@ mod tests {
                     toniator_domain::ConnectedGeometryResponse {
                         minimum_thickness: 0.25,
                         maximum_thickness: 1.0,
+                        bias: 0.0,
                     },
                 ),
             }],
@@ -11370,22 +19337,16 @@ mod tests {
     #[test]
     fn stage20d_guide_variants_have_inspector_labels() {
         let fields = [
-            (PropertyFieldId::GuidePrototype, "Guide prototype"),
-            (
-                PropertyFieldId::GuideAuthoredStructure,
-                "Authored open path",
-            ),
+            (PropertyFieldId::GuidePrototype, "Guide shape"),
+            (PropertyFieldId::GuideAuthoredStructure, "Custom guide path"),
             (PropertyFieldId::GuideArcCenterX, "Arc center X"),
             (PropertyFieldId::GuideArcCenterY, "Arc center Y"),
             (PropertyFieldId::GuideArcRadius, "Arc radius"),
             (PropertyFieldId::GuideArcStartAngle, "Arc start angle"),
             (PropertyFieldId::GuideArcSweepAngle, "Arc sweep angle"),
-            (PropertyFieldId::GuideRepetition, "Guide repetition"),
-            (PropertyFieldId::GuideStackDirection, "Stack direction"),
-            (
-                PropertyFieldId::GuideStackSpacingMultiplier,
-                "Stack spacing multiplier",
-            ),
+            (PropertyFieldId::GuideRepetition, "Guide copies"),
+            (PropertyFieldId::GuideStackDirection, "Copy direction"),
+            (PropertyFieldId::GuideStackSpacingMultiplier, "Copy spacing"),
         ];
         for (field, expected) in fields {
             assert_eq!(inspector_field_label(field), expected);
@@ -11396,7 +19357,7 @@ mod tests {
                 PropertyEnumChoice::GuidePrototype(
                     toniator_domain::GuidePrototypeKind::AuthoredOpenPath,
                 ),
-                "Authored open path",
+                "Custom path",
             ),
             (
                 PropertyEnumChoice::GuidePrototype(
@@ -11412,13 +19373,13 @@ mod tests {
                 PropertyEnumChoice::GuideRepetition(
                     toniator_domain::GuideRepetitionKind::TransformStack,
                 ),
-                "Transform stack",
+                "Stacked copies",
             ),
             (
                 PropertyEnumChoice::GuideRepetition(
                     toniator_domain::GuideRepetitionKind::NormalOffset,
                 ),
-                "Normal offset",
+                "Constant-gap copies",
             ),
         ];
         for (choice, expected) in choices {
@@ -11429,7 +19390,7 @@ mod tests {
             reference_label(&PropertyReferenceValue::AuthoredStructure(
                 toniator_domain::AuthoredStructureId(7),
             )),
-            "Authored open path"
+            "Custom curve"
         );
     }
 
@@ -11591,6 +19552,250 @@ mod tests {
         assert_eq!(main.can_undo(), main_can_undo);
     }
 
+    /// Proves one nested authored-path child draft isolates Undo/Redo and squashes once to its wizard parent.
+    ///
+    /// # Panics
+    ///
+    /// Panics when child navigation changes the wizard or main histories, a discarded dirty child
+    /// leaks a mutation, a stale child applies, or one accepted child does not undo as one parent entry.
+    #[test]
+    fn stage21b_c3_nested_editor_child_history_isolated_cancelable_and_one_entry() {
+        let main = private_draft_main_history();
+        let before_main = main.document().clone();
+        let mut wizard = DocumentHistory::new_draft(&main);
+        let before_wizard = wizard.document().clone();
+        let mut child = DocumentHistory::new_draft(&wizard);
+        child
+            .apply(&DocumentCommand::SetVisibility {
+                channel_id: ChannelId(1),
+                visible: false,
+            })
+            .expect("nested child mutation applies privately");
+        let child_after = child.document().clone();
+        child.undo().expect("nested child Undo succeeds");
+        assert_eq!(child.document(), &before_wizard);
+        assert_eq!(wizard.document(), &before_wizard);
+        assert_eq!(main.document(), &before_main);
+        child.redo().expect("nested child Redo succeeds");
+        assert_eq!(child.document(), &child_after);
+        let wizard_revision = wizard.revision();
+        squash_pattern_editor_child_draft(&mut wizard, &child)
+            .expect("accepted child squashes into wizard");
+        assert_eq!(wizard.revision().0, wizard_revision.0 + 1);
+        assert_eq!(wizard.document(), &child_after);
+        assert_eq!(main.document(), &before_main);
+        wizard
+            .undo()
+            .expect("one parent Undo restores the exact wizard root");
+        assert_eq!(wizard.document(), &before_wizard);
+        wizard
+            .redo()
+            .expect("one parent Redo restores the child result");
+        assert_eq!(wizard.document(), &child_after);
+
+        let parent_before_cancel = wizard.document().clone();
+        {
+            let mut discarded = DocumentHistory::new_draft(&wizard);
+            discarded
+                .apply(&DocumentCommand::SetOpacity {
+                    channel_id: ChannelId(1),
+                    opacity: 0.5,
+                })
+                .expect("dirty child can be discarded");
+        }
+        assert_eq!(wizard.document(), &parent_before_cancel);
+        assert_eq!(main.document(), &before_main);
+
+        let mut stale_child = DocumentHistory::new_draft(&wizard);
+        stale_child
+            .apply(&DocumentCommand::SetOpacity {
+                channel_id: ChannelId(1),
+                opacity: 0.5,
+            })
+            .expect("stale child gets one private mutation");
+        wizard
+            .apply(&DocumentCommand::SetVisibility {
+                channel_id: ChannelId(1),
+                visible: true,
+            })
+            .expect("parent advances independently before stale child Apply");
+        let parent_after_advance = wizard.document().clone();
+        assert!(squash_pattern_editor_child_draft(&mut wizard, &stale_child).is_err());
+        assert_eq!(wizard.document(), &parent_after_advance);
+        assert_eq!(main.document(), &before_main);
+    }
+
+    /// Proves all reusable authored modes default shared edits to a copy and retain their exact focus token.
+    ///
+    /// # Panics
+    ///
+    /// Panics when Guide, Shape, or Motif defaults to shared mutation, or any terminal nested
+    /// lifecycle outcome loses the invoker token required for GTK focus restoration.
+    #[test]
+    fn stage21b_c3_shared_copy_policy_and_focus_tokens_are_exact() {
+        for purpose in [
+            PatternEditorPurpose::Guide,
+            PatternEditorPurpose::Shape,
+            PatternEditorPurpose::Motif,
+        ] {
+            assert_eq!(
+                default_shared_path_edit_policy(purpose),
+                SharedPathEditPolicy::EditCopy,
+                "{purpose:?} starts at the explicit copy policy"
+            );
+            assert_eq!(
+                shared_path_edit_command(default_shared_path_edit_policy(purpose)),
+                SharedPathEditCommand::DuplicateRetargetAndReplace,
+                "{purpose:?} default selects one grouped copy-and-retarget command"
+            );
+        }
+        assert_eq!(
+            shared_path_edit_command(SharedPathEditPolicy::EditAllUses),
+            SharedPathEditCommand::ReplaceAllUses,
+            "shared replacement requires the explicit all-uses policy"
+        );
+        let token = NestedEditorFocusToken {
+            wizard_epoch: 42,
+            target: NestedEditorFocusTarget::Motif {
+                output_layer_id: PatternOutputLayerId(17),
+            },
+        };
+        for terminal in [
+            NestedEditorTerminal::Apply,
+            NestedEditorTerminal::Cancel,
+            NestedEditorTerminal::ConfirmedClose,
+        ] {
+            assert_eq!(
+                nested_editor_focus_token_after_terminal(Some(token), terminal),
+                Some(token),
+                "{terminal:?} restores the exact invoking control token"
+            );
+        }
+        assert_eq!(
+            nested_editor_focus_token_after_terminal(None, NestedEditorTerminal::Cancel),
+            None,
+            "standalone editors have no wizard focus token"
+        );
+    }
+
+    /// Proves ALL scope counts one shared definition slot once across linked channels.
+    ///
+    /// The bundled Curve Motif definition is shared by every source channel in the direct
+    /// workspace. Effective use projection therefore contains one row per channel, while the
+    /// document-base editor must see the single persisted motif slot that it actually changes.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the fixture stops sharing one motif definition across channels, when ALL scope
+    /// would disclose a copy choice for those duplicate projections, or when the surviving use no
+    /// longer identifies the original resource.
+    #[test]
+    fn stage21b_all_scope_collapses_linked_channel_projections_for_shared_curve_policy() {
+        let workspace = direct_png_workspace();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        PresetRegistry::bundled()
+            .apply_to_document_base(&mut draft, "curve-motif-rows")
+            .expect("Curve Motif materializes as the document-base definition");
+        let motif_use = draft
+            .document()
+            .authored_structure_uses()
+            .into_iter()
+            .find(|use_value| matches!(use_value, AuthoredStructureUse::Motif { .. }))
+            .expect("Curve Motif exposes one typed motif use");
+        let effective_uses: Vec<_> = draft
+            .document()
+            .authored_structure_uses()
+            .into_iter()
+            .filter(|use_value| use_value.structure_id() == motif_use.structure_id())
+            .collect();
+        assert_eq!(
+            effective_uses.len(),
+            authoritative_channel_ids(draft.document()).len(),
+            "effective projection retains one truthful use per linked channel"
+        );
+        let document_base_uses = document_base_authored_uses(&effective_uses);
+        assert_eq!(
+            document_base_uses.len(),
+            1,
+            "ALL scope presents one persisted motif slot instead of a false sharing choice"
+        );
+        assert_eq!(
+            document_base_uses[0].structure_id(),
+            motif_use.structure_id()
+        );
+    }
+
+    /// Proves personal Shape and Motif snapshots insert exact fresh document payloads without a library route.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a scanned personal payload changes topology or segments, reuses the source
+    /// document ID, fails to retarget the typed invoking use, or mutates the wizard parent directly.
+    #[test]
+    fn stage21b_c3_personal_shape_and_motif_insertions_are_fresh_child_draft_copies() {
+        let workspace = direct_png_workspace();
+        let registry = PresetRegistry::bundled();
+        for (preset_id, expected_kind) in [
+            (
+                "triagrid-custom-shape-marks",
+                PersonalAuthoredResourceKind::Shape,
+            ),
+            ("curve-motif-rows", PersonalAuthoredResourceKind::Motif),
+        ] {
+            let mut wizard = DocumentHistory::new_draft(&workspace.history);
+            registry
+                .apply_to_document_base(&mut wizard, preset_id)
+                .expect("personal insertion fixture materializes in a private wizard");
+            let use_value = wizard
+                .document()
+                .authored_structure_uses()
+                .into_iter()
+                .find(|use_value| match expected_kind {
+                    PersonalAuthoredResourceKind::Shape => {
+                        matches!(use_value, AuthoredStructureUse::Mark { .. })
+                    }
+                    PersonalAuthoredResourceKind::Motif => {
+                        matches!(use_value, AuthoredStructureUse::Motif { .. })
+                    }
+                })
+                .expect("fixture exposes the exact typed authored use");
+            let source = wizard
+                .document()
+                .authored_structure(use_value.structure_id())
+                .expect("typed use resolves its document-owned resource")
+                .clone();
+            let snapshot = PersonalAuthoredInsertionSnapshot {
+                name: "Read-only snapshot witness".to_owned(),
+                kind: expected_kind,
+                draft: AuthoredStructureDraft::new(source.kind(), source.segments().to_vec())
+                    .expect("existing document geometry remains a valid exact payload"),
+            };
+            let before_wizard = wizard.document().clone();
+            let mut child = DocumentHistory::new_draft(&wizard);
+            let result = child
+                .add_and_attach_authored_structure(
+                    authored_use_channel(&use_value),
+                    authored_use_attachment(use_value),
+                    snapshot.draft.clone(),
+                )
+                .expect("exact personal payload inserts and retargets privately");
+            let fresh_id = result
+                .created_authored_structure_id
+                .expect("insertion allocates one fresh document-owned resource");
+            assert_ne!(fresh_id, source.id());
+            let fresh = child
+                .document()
+                .authored_structure(fresh_id)
+                .expect("fresh resource is document owned");
+            assert_eq!(fresh.kind(), snapshot.draft.kind());
+            assert_eq!(fresh.segments(), snapshot.draft.segments());
+            assert_eq!(wizard.document(), &before_wizard);
+            squash_pattern_editor_child_draft(&mut wizard, &child)
+                .expect("child insertion becomes one wizard entry on Apply");
+            assert_ne!(wizard.document(), &before_wizard);
+        }
+    }
+
     /// Proves a changed numeric anchor reaches the private replacement command as one history entry.
     ///
     /// This app boundary witnesses the same `commit_selected_numeric` payload and
@@ -11685,6 +19890,30 @@ mod tests {
         assert!(!accepts_numeric_commit_callback(&active));
         active.set(false);
         assert!(accepts_numeric_commit_callback(&active));
+    }
+
+    /// Keeps nested editor Apply wording aligned with its wizard-history boundary.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a wizard child promises main-history publication instead of one parent-draft
+    /// squash, or when the provisional standalone editor loses its existing publication wording.
+    #[test]
+    fn nested_pattern_editor_apply_copy_names_the_actual_history_owner() {
+        assert_eq!(
+            pattern_editor_apply_presentation(true),
+            PatternEditorApplyPresentation {
+                mnemonic_label: "Apply to _Pattern",
+                description: "Apply these curve changes to the pattern as one wizard step.",
+            }
+        );
+        assert_eq!(
+            pattern_editor_apply_presentation(false),
+            PatternEditorApplyPresentation {
+                mnemonic_label: "_Apply",
+                description: "Apply these curve changes as one undoable document change.",
+            }
+        );
     }
 
     /// Proves a zero-motion target drag cannot reach private replacement history while a moved drag does.
@@ -13345,7 +21574,7 @@ mod tests {
             enum_choice_label(PropertyEnumChoice::RegionResizeAlgorithm(
                 toniator_domain::RegionResizeAlgorithm::UniformOffset
             )),
-            "Uniform offset"
+            "Even inset or outset"
         );
         assert_eq!(
             enum_choice_label(PropertyEnumChoice::RegionSampling(
@@ -13520,7 +21749,6 @@ mod tests {
     fn inspector_runtime_resets_document_scoped_transients_but_not_ordinary_selection_logic() {
         let mut runtime = InspectorRuntime {
             target: InspectorTarget::Channel(ChannelId(44)),
-            pattern_candidate: Some(PatternCandidate::Preset("test-preset".into())),
             scope: DefinitionEditScope::SelectedCopy,
             drafts: BTreeMap::from([("opacity".into(), "1.5".into())]),
             expanded_groups: BTreeSet::from(["Active family".into()]),
@@ -13709,16 +21937,8 @@ mod tests {
             PropertyFieldId::RandomSeed
         ));
         assert_eq!(
-            field_detail(
-                Some(toniator_domain::PropertyBounds {
-                    minimum: Some(0.0),
-                    minimum_inclusive: true,
-                    maximum: None,
-                    maximum_inclusive: true,
-                }),
-                toniator_domain::PropertyUnit::Count,
-            ),
-            "Count"
+            inspector_field_guidance(PropertyFieldId::RandomMaximumAttempts),
+            "Limits distribution work for difficult spacing combinations. Higher values can improve completion but take longer."
         );
         assert_eq!(page_while_preview_pending(true), Page::Success);
         assert_eq!(page_while_preview_pending(false), Page::Success);
@@ -13793,6 +22013,35 @@ mod tests {
                 "every active descriptor/value pair routes for {model:?}"
             );
         }
+    }
+
+    /// Keeps numeric accessibility names and finite ranges derived from descriptors.
+    ///
+    /// This witness reads the source-backed document contract without creating
+    /// GTK controls, ensuring the app never manufactures an accessibility-only
+    /// label or bound for the real inspector widget.
+    #[test]
+    fn descriptor_accessibility_reuses_product_labels_and_authoritative_bounds() {
+        let workspace = load_workspace(&asset("raster-sample.toniator")).unwrap();
+        let density = workspace
+            .document()
+            .property_values()
+            .iter()
+            .find(|value| value.descriptor.field == PropertyFieldId::Density)
+            .expect("source-backed document exposes density")
+            .descriptor
+            .clone();
+        let opacity = workspace
+            .document()
+            .property_values()
+            .iter()
+            .find(|value| value.descriptor.field == PropertyFieldId::Opacity)
+            .expect("source-backed document exposes opacity")
+            .descriptor
+            .clone();
+        assert_eq!(descriptor_accessible_name(&density), "Pattern size");
+        assert_eq!(descriptor_finite_numeric_bounds(&density), None);
+        assert_eq!(descriptor_finite_numeric_bounds(&opacity), Some((0.0, 1.0)));
     }
 
     #[test]
@@ -13999,21 +22248,12 @@ mod tests {
         );
     }
 
-    /// Proves the temporary four-record edit gate, unavailable identities, and responsive layout policy.
+    /// Proves catalog identity does not gate capability-projected wizard editing.
     ///
-    /// This pure policy test fixes only the permitted stable-ID allowlist. The actual descriptor
-    /// projection remains independently covered by the document-backed edit-page helpers.
+    /// This pure policy witness retains only responsive presentation and
+    /// captured-scope facts; descriptor projections remain the edit authority.
     #[test]
     fn stage21b_wizard_edit_gate_and_breadcrumb_remain_bounded() {
-        for id in [
-            "curve-motif-rows",
-            "one-guide-lines",
-            "even-random-circles",
-            "round-spiral-line",
-        ] {
-            assert!(wizard_edit_allowlisted(id));
-        }
-        assert!(!wizard_edit_allowlisted("straight-grid-circles"));
         assert_eq!(
             wizard_breadcrumb(InspectorTarget::DocumentAll, Some("Guides")),
             "Pattern Wizard · ALL · Guides"
@@ -14022,13 +22262,9 @@ mod tests {
             wizard_breadcrumb(InspectorTarget::Channel(ChannelId(7)), None),
             "Pattern Wizard · Selected channel"
         );
-        assert_eq!(WIZARD_SOURCE_PROXY_LONGEST_EDGE, 256);
-        assert_eq!(WIZARD_PREVIEW_TARGET_PX, 512);
+        assert_eq!(WIZARD_NEUTRAL_SOURCE_EDGE_PX, 100);
+        assert_eq!(WIZARD_PREVIEW_TARGET_PX, 256);
         assert_eq!(WIZARD_NARROW_MAX_WIDTH_PX, 760);
-        assert_eq!(
-            WIZARD_EDIT_UNAVAILABLE_EXPLANATION,
-            "Editing this recipe arrives in the next Pattern Wizard gate; Use as is is available now."
-        );
         assert_eq!(
             wizard_layout_orientation(WIZARD_NARROW_MAX_WIDTH_PX),
             gtk::Orientation::Vertical
@@ -14037,17 +22273,215 @@ mod tests {
             wizard_layout_orientation(WIZARD_NARROW_MAX_WIDTH_PX + 1),
             gtk::Orientation::Horizontal
         );
+        assert_eq!(wizard_preset_columns(WIZARD_NARROW_MAX_WIDTH_PX), 1);
+        assert_eq!(wizard_preset_columns(WIZARD_NARROW_MAX_WIDTH_PX + 1), 3);
         assert_eq!(
-            wizard_use_action_label("Clustered Connections"),
-            "Use Clustered Connections as is"
+            wizard_route_page_title(WizardRoutePage::PatternFamily),
+            "Family"
         );
         assert_eq!(
-            wizard_edit_action_label("Clustered Connections"),
-            "Edit Clustered Connections"
+            wizard_route_page_title(WizardRoutePage::Rendering),
+            "Rendering"
         );
     }
 
-    /// Proves Gallery navigation needs a materialized draft and candidate markers use stable IDs only.
+    /// Proves Review derives a disposable black single-channel preview without changing its draft.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the cloned review projection leaves multiple channels visible, does not blacken
+    /// its one selected channel, or mutates the source document used by private history.
+    #[test]
+    fn stage21b_review_preview_is_one_black_channel_without_draft_mutation() {
+        let workspace = direct_png_workspace();
+        let document = workspace.document().clone();
+        let selected = authoritative_channel_ids(&document)[0];
+        let preview = wizard_preview_document(&document, InspectorTarget::Channel(selected))
+            .expect("selected review preview projection validates");
+        assert_eq!(
+            workspace.document(),
+            &document,
+            "preview leaves main history untouched"
+        );
+        let channels = preview
+            .channel_topology()
+            .expect("direct workspace uses a modeled channel topology")
+            .channels();
+        assert_eq!(channels.iter().filter(|channel| channel.visible).count(), 1);
+        let visible = channels
+            .iter()
+            .find(|channel| channel.visible)
+            .expect("one review channel remains visible");
+        assert_eq!(visible.id, selected);
+        let ChannelPaint::Solid(color) = &visible.paint else {
+            panic!("review projection uses solid black paint")
+        };
+        assert_eq!(
+            (color.red, color.green, color.blue, color.alpha),
+            (0.0, 0.0, 0.0, 1.0)
+        );
+    }
+
+    /// Proves New requires an explicit starter even when it matches the current recipe family.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an untouched New draft projects a family, choosing the base's own family fails
+    /// to create one private history entry, or Undo/Redo loses the no-selection/selection states.
+    #[test]
+    fn stage21b_new_family_state_requires_explicit_choice_and_tracks_undo_redo() {
+        let workspace = direct_png_workspace();
+        let initial = workspace.document().clone();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        assert!(wizard_new_family_is_unselected(
+            true,
+            draft.document(),
+            &initial
+        ));
+        let current_family =
+            wizard_route_for_document(draft.document(), InspectorTarget::DocumentAll)
+                .expect("current recipe reconstructs")
+                .1
+                .family_kind();
+        apply_wizard_recipe(
+            &mut draft,
+            InspectorTarget::DocumentAll,
+            PatternDefinitionRecipe::starter_for_family(current_family),
+        )
+        .expect("explicit same-family starter applies as one private command");
+        assert!(!wizard_new_family_is_unselected(
+            true,
+            draft.document(),
+            &initial
+        ));
+        assert_eq!(
+            wizard_route_for_document(draft.document(), InspectorTarget::DocumentAll)
+                .expect("starter recipe reconstructs")
+                .1
+                .family_kind(),
+            current_family
+        );
+        draft.undo().expect("private starter Undo succeeds");
+        assert!(wizard_new_family_is_unselected(
+            true,
+            draft.document(),
+            &initial
+        ));
+        draft.redo().expect("private starter Redo succeeds");
+        assert!(!wizard_new_family_is_unselected(
+            true,
+            draft.document(),
+            &initial
+        ));
+    }
+
+    /// Proves an existing-pattern family replacement does not acquire New's unselected state.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an Edit replacement or its Undo makes the reconstructed original family vanish
+    /// merely because its recipe temporarily matches the captured document again.
+    #[test]
+    fn stage21b_existing_edit_family_switch_undo_retains_the_original_family_projection() {
+        let workspace = direct_png_workspace();
+        let initial = workspace.document().clone();
+        let original = wizard_route_for_document(&initial, InspectorTarget::DocumentAll)
+            .expect("current recipe reconstructs")
+            .1
+            .family_kind();
+        let replacement = match original {
+            PatternRecipeFamilyKind::Guides => PatternRecipeFamilyKind::Dispersion,
+            _ => PatternRecipeFamilyKind::Guides,
+        };
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        apply_wizard_recipe(
+            &mut draft,
+            InspectorTarget::DocumentAll,
+            PatternDefinitionRecipe::starter_for_family(replacement),
+        )
+        .expect("Edit family replacement applies privately");
+        draft.undo().expect("Edit family replacement Undo succeeds");
+        assert!(!wizard_new_family_is_unselected(
+            false,
+            draft.document(),
+            &initial
+        ));
+        assert_eq!(
+            wizard_route_for_document(draft.document(), InspectorTarget::DocumentAll)
+                .expect("original recipe reconstructs after Undo")
+                .1
+                .family_kind(),
+            original
+        );
+    }
+
+    /// Proves direct preset Apply follows visible Presets state rather than retained route history.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a selected catalog record cannot use visible Presets Apply after a retained
+    /// route, or Current Pattern accidentally acquires direct-Apply admission.
+    #[test]
+    fn stage21b_visible_presets_direct_apply_admission_ignores_retained_route() {
+        assert!(wizard_direct_preset_apply_admission(
+            true,
+            Some("curve-motif-rows")
+        ));
+        assert!(!wizard_direct_preset_apply_admission(true, None));
+        assert!(!wizard_direct_preset_apply_admission(
+            false,
+            Some("curve-motif-rows")
+        ));
+    }
+
+    /// Proves every authoritative field and every currently projected enum choice has product vocabulary.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a field returns the retired generic label or a current built-in projects a
+    /// generic choice label instead of the exhaustive shared inspector vocabulary.
+    #[test]
+    fn stage21b_descriptor_vocabulary_has_no_generic_advanced_fallbacks() {
+        for field in toniator_domain::PROPERTY_FIELD_IDS {
+            assert!(
+                !inspector_field_label(*field).contains("Advanced"),
+                "{field:?} has explicit product vocabulary"
+            );
+        }
+        let workspace = direct_png_workspace();
+        for entry in PresetRegistry::bundled().entries() {
+            let mut draft = DocumentHistory::new_draft(&workspace.history);
+            PresetRegistry::bundled()
+                .apply_to_document_base(&mut draft, &entry.metadata.id)
+                .expect("current built-in materializes for vocabulary coverage");
+            let projection = draft
+                .document()
+                .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+                .expect("materialized built-in projects current descriptors");
+            for value in
+                wizard_active_values(draft.document(), InspectorTarget::DocumentAll, &projection)
+            {
+                if let PropertyCurrentValueKind::EnumChoice(choice) = value.value {
+                    assert!(
+                        !enum_choice_label(choice).contains("Advanced"),
+                        "{} {:?} has explicit choice vocabulary",
+                        entry.metadata.id,
+                        choice
+                    );
+                }
+                for choice in value.descriptor.choices {
+                    assert!(
+                        !enum_choice_label(*choice).contains("Advanced"),
+                        "{} {:?} has explicit advertised choice vocabulary",
+                        entry.metadata.id,
+                        choice
+                    );
+                }
+            }
+        }
+    }
+
+    /// Proves Presets navigation remains separate from fixed-card editing and markers use stable IDs only.
     ///
     /// A compact candidate may be captured at modal open, but it never grants Review navigation
     /// before Use or Edit has changed the private history. Marker equality deliberately ignores
@@ -14069,7 +22503,10 @@ mod tests {
             }
         );
         assert_eq!(
-            wizard_navigation_sensitivity(WizardNavigationPage::Edit, true),
+            wizard_navigation_sensitivity(
+                WizardNavigationPage::Route(WizardRoutePage::GridArrangement),
+                true,
+            ),
             WizardNavigationSensitivity {
                 back_enabled: true,
                 review_enabled: true,
@@ -14096,7 +22533,61 @@ mod tests {
         ));
     }
 
-    /// Verifies each permitted edit branch derives controls from its materialized capability projection.
+    /// Proves stale delayed dropdown work cannot survive a newer choice or card navigation.
+    ///
+    /// # Panics
+    ///
+    /// Panics when generation or route identity stops participating in deferred-action admission.
+    #[test]
+    fn stage21b_deferred_dropdown_tokens_reject_rapid_and_cross_card_stale_actions() {
+        let pending = WizardDropdownActionToken {
+            generation: 7,
+            route_index: 2,
+        };
+        assert!(wizard_dropdown_action_is_current(pending, pending));
+        assert!(!wizard_dropdown_action_is_current(
+            pending,
+            WizardDropdownActionToken {
+                generation: 8,
+                route_index: 2,
+            },
+        ));
+        assert!(!wizard_dropdown_action_is_current(
+            pending,
+            WizardDropdownActionToken {
+                generation: 7,
+                route_index: 3,
+            },
+        ));
+    }
+
+    /// Proves gallery grouping follows recipe family and editor coordinates omit binary noise.
+    ///
+    /// # Panics
+    ///
+    /// Panics when layered guide outputs regain a misleading catalog family or coordinate
+    /// presentation exposes more than four deliberate decimal places.
+    #[test]
+    fn stage21b_gallery_family_and_editor_coordinate_presentation_are_artist_facing() {
+        let registry = PresetRegistry::bundled();
+        let layered = registry
+            .entries()
+            .iter()
+            .find(|entry| entry.metadata.id == "residual-sites-along-guide")
+            .expect("layered guide preset remains in the built-in catalog");
+        assert_eq!(wizard_family_label(layered.recipe.family_kind()), "Guides");
+        assert_eq!(
+            format_pattern_editor_coordinate(0.10666666666666667),
+            "0.1067"
+        );
+        assert_eq!(
+            format_pattern_editor_coordinate(0.09000000000000001),
+            "0.09"
+        );
+        assert_eq!(format_pattern_editor_coordinate(-0.000001), "0");
+    }
+
+    /// Verifies every bundled edit branch derives controls from its materialized capability projection.
     ///
     /// The test intentionally never uses card names, categories, thumbnails, or presentation text as
     /// an editability selector. Each recipe is materialized only in a fresh private history for both
@@ -14107,15 +22598,48 @@ mod tests {
         let before = workspace.document().clone();
         let catalog = LayeredPresetCatalog::new(&PresetRegistry::bundled(), Vec::new()).unwrap();
         let channel = authoritative_channel_ids(workspace.document())[0];
-        for id in [
-            "curve-motif-rows",
-            "one-guide-lines",
-            "even-random-circles",
-            "round-spiral-line",
-        ] {
+        for id in catalog
+            .entries()
+            .iter()
+            .map(|entry| entry.preset.metadata.id.as_str())
+        {
             let mut all_draft = DocumentHistory::new_draft(&workspace.history);
             catalog.apply_to_document_base(&mut all_draft, id).unwrap();
-            assert!(wizard_edit_allowlisted(id));
+            let definition_id = all_draft.document().pattern_settings().definition_id;
+            let reconstructed = all_draft
+                .document()
+                .reconstruct_pattern_definition_recipe(definition_id)
+                .unwrap_or_else(|error| panic!("{id} must reconstruct: {error}"));
+            let mut rebuilt = DocumentHistory::new_draft(&workspace.history);
+            let base = rebuilt.document().pattern_settings().clone();
+            let base_definition = rebuilt
+                .document()
+                .pattern_definition_bundles()
+                .iter()
+                .find(|bundle| bundle.definition.id == base.definition_id)
+                .expect("fresh private draft retains a base definition")
+                .definition
+                .clone();
+            rebuilt
+                .apply(&DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
+                    base,
+                    base_definition,
+                    recipe: reconstructed.clone(),
+                })
+                .unwrap_or_else(|error| {
+                    panic!("{id} reconstructed recipe rematerializes: {error}")
+                });
+            let rebuilt_definition = rebuilt.document().pattern_settings().definition_id;
+            assert_eq!(
+                rebuilt
+                    .document()
+                    .reconstruct_pattern_definition_recipe(rebuilt_definition)
+                    .unwrap_or_else(|error| panic!(
+                        "{id} rebuilt definition reconstructs: {error}"
+                    )),
+                reconstructed,
+                "{id} preserves ID-free recipe authority across fresh allocation"
+            );
             assert!(
                 !inline_inspector_values(all_draft.document(), InspectorTarget::DocumentAll)
                     .is_empty(),
@@ -14138,6 +22662,2409 @@ mod tests {
         assert_eq!(workspace.document(), &before);
     }
 
+    /// Proves every current record receives the same fixed card flow from domain projections.
+    ///
+    /// # Panics
+    ///
+    /// Panics when any built-in or a metadata-renamed personal-style record lacks a route for an
+    /// active descriptor or output, or when catalog presentation changes the capability route.
+    #[test]
+    fn stage21b_c1_adaptive_routes_cover_builtin_and_personal_style_recipes() {
+        let workspace = direct_png_workspace();
+        let registry = PresetRegistry::bundled();
+        let named_channel = authoritative_channel_ids(workspace.document())[0];
+        for entry in registry.entries() {
+            let mut all_draft = DocumentHistory::new_draft(&workspace.history);
+            registry
+                .apply_to_document_base(&mut all_draft, &entry.metadata.id)
+                .expect("every built-in materializes in an ALL private draft");
+            let (projection, _, route) =
+                wizard_route_for_document(all_draft.document(), InspectorTarget::DocumentAll)
+                    .expect("every built-in reconstructs into an ALL route");
+            assert_eq!(route.last(), Some(&WizardRoutePage::Review));
+            for descriptor in &projection.active_controls {
+                assert!(
+                    route.contains(&fixed_wizard_page_for_descriptor(
+                        descriptor,
+                        &projection.family
+                    )),
+                    "{} maps {:?} to one fixed card",
+                    entry.metadata.id,
+                    descriptor.field
+                );
+            }
+            for _output in &projection.outputs {
+                assert!(
+                    route.contains(&WizardRoutePage::Rendering),
+                    "{} exposes its ordered output on Rendering",
+                    entry.metadata.id
+                );
+            }
+
+            let mut named_draft = DocumentHistory::new_draft(&workspace.history);
+            registry
+                .apply_to_selected(&mut named_draft, named_channel, &entry.metadata.id)
+                .expect("every built-in materializes in a named private draft");
+            assert!(
+                !wizard_route_for_document(
+                    named_draft.document(),
+                    InspectorTarget::Channel(named_channel),
+                )
+                .expect("every named built-in reconstructs into a route")
+                .2
+                .is_empty()
+            );
+        }
+
+        let mut personal = registry
+            .find("curve-motif-rows")
+            .expect("Curve Motif record exists")
+            .clone();
+        personal.metadata.id = "user-c1-route-with-renamed-metadata".into();
+        personal.metadata.name = "Renamed personal route witness".into();
+        personal.metadata.category = "Different display group".into();
+        personal.metadata.thumbnail = None;
+        let personal_registry = PresetRegistry::new(1, vec![personal.clone()])
+            .expect("personal-style record remains a valid registry entry");
+        let mut personal_draft = DocumentHistory::new_draft(&workspace.history);
+        personal_registry
+            .apply_to_document_base(&mut personal_draft, &personal.metadata.id)
+            .expect("renamed personal record materializes without card metadata dispatch");
+        let (_, _, personal_route) =
+            wizard_route_for_document(personal_draft.document(), InspectorTarget::DocumentAll)
+                .expect("renamed personal record routes from its recipe");
+        let mut built_in_draft = DocumentHistory::new_draft(&workspace.history);
+        registry
+            .apply_to_document_base(&mut built_in_draft, "curve-motif-rows")
+            .expect("matching built-in recipe materializes");
+        assert_eq!(
+            personal_route,
+            wizard_route_for_document(built_in_draft.document(), InspectorTarget::DocumentAll)
+                .expect("matching built-in recipe routes")
+                .2
+        );
+    }
+
+    /// Keeps gallery-owned selection and global placement controls out of Family Settings.
+    ///
+    /// The test reads current descriptor authority from a materialized private recipe. It asserts
+    /// fixed presentation ownership only: it neither changes a catalog record nor invents a
+    /// second pattern model.
+    #[test]
+    fn stage21b_fixed_page_ownership_keeps_selection_and_pattern_size_in_artist_workflow() {
+        let workspace = direct_png_workspace();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        PresetRegistry::bundled()
+            .apply_to_document_base(&mut draft, "straight-grid-circles")
+            .expect("grid recipe materializes for page ownership");
+        let projection = draft
+            .document()
+            .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+            .expect("grid recipe projects current descriptors");
+        for field in [
+            PropertyFieldId::Density,
+            PropertyFieldId::DensityAspect,
+            PropertyFieldId::RotationDegrees,
+            PropertyFieldId::TranslationX,
+            PropertyFieldId::TranslationY,
+            PropertyFieldId::ShapeRotationDegrees,
+        ] {
+            let descriptor = draft
+                .document()
+                .property_values()
+                .into_iter()
+                .find(|value| value.descriptor.field == field)
+                .expect("current grid exposes global placement descriptor");
+            assert_eq!(
+                fixed_wizard_page_for_descriptor(&descriptor.descriptor, &projection.family),
+                WizardRoutePage::Rendering,
+                "{field:?} stays in Rendering"
+            );
+        }
+        let selection = draft
+            .document()
+            .property_values()
+            .into_iter()
+            .find(|value| value.descriptor.field == PropertyFieldId::DefinitionSelection)
+            .expect("current grid exposes gallery-owned definition selection");
+        assert_eq!(
+            fixed_wizard_page_for_descriptor(&selection.descriptor, &projection.family),
+            WizardRoutePage::PatternFamily
+        );
+        assert!(matches!(
+            projection.family,
+            PatternFamilyCapabilityProjection::Grid(_)
+        ));
+    }
+
+    /// Keeps New guide and reference labels local to the active private recipe.
+    ///
+    /// The direct workspace deliberately retains its pre-wizard pattern definition while New
+    /// allocates a fresh recipe. Artist-visible numbering must restart at Guide 1, and a mark
+    /// output's sole valid site product must describe its role rather than its allocated mechanism
+    /// position. Growing the same New recipe to locked three-guide intersections must then name
+    /// that construction truthfully on Review and retain Guide 1 through Guide 3 for typed
+    /// downstream reference choices without exposing their locked scalars as editable controls.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a New starter fails to materialize, its active controls are missing, reference
+    /// compatibility leaks non-site mechanisms, or any visible label depends on earlier document
+    /// allocations.
+    #[test]
+    fn stage21b_new_guide_and_site_labels_are_recipe_local() {
+        let workspace = direct_png_workspace();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        apply_wizard_recipe(
+            &mut draft,
+            InspectorTarget::DocumentAll,
+            PatternDefinitionRecipe::starter_for_family(PatternRecipeFamilyKind::Guides),
+        )
+        .expect("New guide starter materializes beside the captured base definition");
+
+        let active_definition_id = draft.document().pattern_settings().definition_id;
+        let one_guide_values = draft
+            .document()
+            .property_values()
+            .into_iter()
+            .filter(|value| {
+                target_definition_id(value.descriptor.target) == Some(active_definition_id)
+            })
+            .collect::<Vec<_>>();
+        let guide_labels = one_guide_values
+            .iter()
+            .filter(|value| value.descriptor.field == PropertyFieldId::GuideBaselineAngle)
+            .map(|value| wizard_descriptor_label(draft.document(), &value.descriptor))
+            .collect::<Vec<_>>();
+        assert_eq!(guide_labels, vec!["Guide 1 angle"]);
+        let site_product = one_guide_values
+            .iter()
+            .find(|value| value.descriptor.field == PropertyFieldId::OutputSiteProduct)
+            .expect("New guide marks expose their typed site-product descriptor");
+        let choices = wizard_reference_choices(draft.document(), &site_product.descriptor)
+            .expect("the active output projects compatible site products");
+        assert_eq!(choices.len(), 1);
+        assert_eq!(
+            wizard_reference_label_for_target(
+                draft.document(),
+                site_product.descriptor.target,
+                &choices[0],
+            ),
+            "Sites along guides"
+        );
+        assert!(!wizard_value_has_meaningful_choice(
+            draft.document(),
+            site_product
+        ));
+
+        let intersections = draft
+            .document()
+            .reconstruct_pattern_definition_recipe(
+                draft.document().pattern_settings().definition_id,
+            )
+            .expect("New guide recipe reconstructs")
+            .with_guide_dimension_count(3)
+            .expect("New guide recipe grows to three directions")
+            .with_site_generation_kind(PatternRecipeSiteGenerationKind::GuideIntersections)
+            .expect("three directions transition to locked intersections");
+        assert_eq!(
+            wizard_review_site_text(&intersections),
+            "Guide intersections · Guides 1–3"
+        );
+        apply_wizard_recipe(&mut draft, InspectorTarget::DocumentAll, intersections)
+            .expect("locked intersection recipe replaces the same private target");
+        let active_definition_id = draft.document().pattern_settings().definition_id;
+        let guide_labels = draft
+            .document()
+            .property_values()
+            .into_iter()
+            .filter(|value| {
+                target_definition_id(value.descriptor.target) == Some(active_definition_id)
+                    && value.descriptor.field == PropertyFieldId::GuideBaselineAngle
+            })
+            .map(|value| wizard_descriptor_label(draft.document(), &value.descriptor))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            guide_labels,
+            vec!["Guide 1 angle", "Guide 2 angle", "Guide 3 angle"]
+        );
+        let orientation = draft
+            .document()
+            .property_values()
+            .into_iter()
+            .find(|value| {
+                target_definition_id(value.descriptor.target) == Some(active_definition_id)
+                    && value.descriptor.field == PropertyFieldId::OutputOrientation
+            })
+            .expect("locked intersections retain a mark-orientation selector");
+        let transition = draft
+            .document()
+            .variant_transition_draft(
+                &orientation.descriptor,
+                PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideTangent),
+            )
+            .expect("guide-tangent orientation exposes its required guide choice");
+        let reference = transition
+            .fields()
+            .iter()
+            .find(|field| field.field == PropertyFieldId::OutputOrientationDimension)
+            .expect("guide-tangent orientation requires one guide reference");
+        assert_eq!(
+            reference
+                .reference_choices
+                .iter()
+                .map(|choice| {
+                    wizard_reference_label_for_target(draft.document(), reference.target, choice)
+                })
+                .collect::<Vec<_>>(),
+            vec!["Guide 1", "Guide 2", "Guide 3"]
+        );
+        let selected_guide = reference.reference_choices[0].clone();
+        let transition = transition
+            .with_updates(&[VariantTransitionFieldUpdate {
+                field: reference.field,
+                target: reference.target,
+                value: VariantTransitionValue::StableReference(Some(selected_guide)),
+            }])
+            .expect("Guide 1 completes the guide-tangent transition");
+        let command =
+            wizard_transition_command(draft.document(), InspectorTarget::DocumentAll, &transition)
+                .expect("completed guide-tangent transition forms one private command");
+        draft
+            .apply(&command)
+            .expect("completed guide-tangent transition applies once");
+        let applied_orientation = draft
+            .document()
+            .property_values()
+            .into_iter()
+            .find(|value| {
+                target_definition_id(value.descriptor.target) == Some(active_definition_id)
+                    && value.descriptor.field == PropertyFieldId::OutputOrientation
+            })
+            .expect("applied guide-tangent orientation remains active");
+        assert_eq!(
+            applied_orientation.value,
+            PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::MarkOrientation(
+                MarkOrientationKind::GuideTangent,
+            ))
+        );
+    }
+
+    /// Proves Rendering offers mark rotation only when the current pattern draws marks.
+    ///
+    /// Capability projection, rather than preset identity or UI metadata, decides whether the
+    /// setting is useful. Curve Motif paths therefore omit the no-op mark control while a circle
+    /// pattern keeps it on the same Rendering card.
+    ///
+    /// # Panics
+    ///
+    /// Panics when either bundled recipe fails to materialize, Curve Motif advertises a no-op mark
+    /// rotation, or a mark-producing pattern loses its editable rotation setting.
+    #[test]
+    fn stage21b_rendering_omits_shape_rotation_when_the_pattern_draws_no_marks() {
+        let workspace = direct_png_workspace();
+        let registry = PresetRegistry::bundled();
+        for (preset_id, expected) in [("curve-motif-rows", false), ("straight-grid-circles", true)]
+        {
+            let mut draft = DocumentHistory::new_draft(&workspace.history);
+            registry
+                .apply_to_document_base(&mut draft, preset_id)
+                .expect("rendering applicability fixture materializes");
+            let projection = draft
+                .document()
+                .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+                .expect("rendering applicability projects from the current recipe");
+            assert_eq!(
+                projection
+                    .active_controls
+                    .iter()
+                    .any(|descriptor| descriptor.field == PropertyFieldId::ShapeRotationDegrees),
+                expected,
+                "{preset_id} exposes mark rotation only when it draws marks"
+            );
+        }
+    }
+
+    /// Proves guide-count edits use shared replacement for ALL and a fresh selected copy by name.
+    ///
+    /// Named family authoring may also return from four-guide intersections to one Along Guides
+    /// direction while retaining its isolated definition boundary.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the reconstructed recipe cannot grow or reduce, scope selects the wrong typed
+    /// command, ALL renews its stable definition ID, or a named edit fails to isolate its channel.
+    #[test]
+    fn stage21b_guide_count_commands_preserve_captured_scope() {
+        let workspace = direct_png_workspace();
+        let registry = PresetRegistry::bundled();
+        let mut all = DocumentHistory::new_draft(&workspace.history);
+        registry
+            .apply_to_document_base(&mut all, "straight-grid-circles")
+            .expect("editable straight-grid recipe materializes");
+        let all_definition_id = all.document().pattern_settings().definition_id;
+        let all_command =
+            wizard_guide_count_command(all.document(), InspectorTarget::DocumentAll, 3)
+                .expect("ALL guide count reconstructs")
+                .expect("three differs from the current count");
+        assert!(matches!(
+            all_command,
+            DocumentCommand::ReplaceSharedPatternDefinitionRecipe { definition_id, .. }
+                if definition_id == all_definition_id
+        ));
+        all.apply(&all_command)
+            .expect("ALL guide count applies to the private draft");
+        assert_eq!(
+            all.document().pattern_settings().definition_id,
+            all_definition_id
+        );
+
+        let channel = authoritative_channel_ids(all.document())[0];
+        let named_command =
+            wizard_guide_count_command(all.document(), InspectorTarget::Channel(channel), 4)
+                .expect("named guide count reconstructs")
+                .expect("four differs from the current count");
+        assert!(matches!(
+            named_command,
+            DocumentCommand::ReplaceChannelPatternDefinitionOverrideRecipe {
+                channel_id,
+                ..
+            } if channel_id == channel
+        ));
+        all.apply(&named_command)
+            .expect("named guide count applies to the private draft");
+        assert_ne!(
+            all.document()
+                .effective_channel_pattern(channel)
+                .expect("named channel remains effective")
+                .definition_id,
+            all_definition_id,
+        );
+
+        let one_guide_command =
+            wizard_guide_count_command(all.document(), InspectorTarget::Channel(channel), 1)
+                .expect("named guide family can return to one direction")
+                .expect("one direction differs from the selected four-guide copy");
+        all.apply(&one_guide_command)
+            .expect("named count reduction atomically prunes incompatible intersections");
+        let effective = all
+            .document()
+            .effective_channel_pattern(channel)
+            .expect("named one-guide pattern remains effective");
+        let one_guide = all
+            .document()
+            .reconstruct_pattern_definition_recipe(effective.definition_id)
+            .expect("named one-guide recipe reconstructs");
+        assert_eq!(
+            one_guide.site_generation_kind(),
+            PatternRecipeSiteGenerationKind::AlongGuides
+        );
+        assert!(one_guide.with_guide_dimension_count(1).is_ok());
+    }
+
+    /// Proves straight-guide preparation stays child-local until one nested Apply squash.
+    ///
+    /// Cancel is represented by dropping the child and leaves the exact wizard parent untouched.
+    /// Apply publishes conversion and centered authored geometry as one parent Undo entry, with a
+    /// post-allocation focus token that addresses the rebuilt guide-path control.
+    #[test]
+    fn stage21b_nested_guide_preparation_cancels_exactly_and_applies_as_one_parent_entry() {
+        let workspace = direct_png_workspace();
+        let mut wizard = DocumentHistory::new_draft(&workspace.history);
+        let parent_before = wizard.document().clone();
+        let (command, use_value) =
+            wizard_editable_guide_preparation(wizard.document(), InspectorTarget::DocumentAll)
+                .expect("compact default guides prepare an authored child curve");
+        assert!(matches!(
+            command,
+            DocumentCommand::ReplaceSharedPatternDefinitionRecipe { .. }
+        ));
+        assert!(matches!(
+            nested_editor_focus_token(9, use_value).target,
+            NestedEditorFocusTarget::Guide { .. }
+        ));
+
+        {
+            let mut cancelled = DocumentHistory::new_draft(&wizard);
+            cancelled
+                .apply(&command)
+                .expect("child preparation applies privately");
+            assert_ne!(cancelled.document(), wizard.document());
+        }
+        assert_eq!(wizard.document(), &parent_before);
+        assert!(!wizard.can_undo());
+
+        let mut applied = DocumentHistory::new_draft(&wizard);
+        applied
+            .apply(&command)
+            .expect("second child preparation applies privately");
+        let structure = applied
+            .document()
+            .authored_structure(use_value.structure_id())
+            .expect("prepared typed use resolves the fresh guide resource");
+        let expected_half_width = applied.document().canvas().width * 0.5;
+        assert_eq!(
+            structure.segments(),
+            &[toniator_domain::AuthoredCurveSegment::Line {
+                start: toniator_domain::AuthoredPoint2 {
+                    x: -expected_half_width,
+                    y: 0.0,
+                },
+                end: toniator_domain::AuthoredPoint2 {
+                    x: expected_half_width,
+                    y: 0.0,
+                },
+            }]
+        );
+        squash_pattern_editor_child_draft(&mut wizard, &applied)
+            .expect("nested Apply squashes preparation once");
+        assert!(wizard.can_undo());
+        assert_ne!(wizard.document(), &parent_before);
+        wizard
+            .undo()
+            .expect("one parent Undo succeeds")
+            .expect("one parent entry exists");
+        assert_eq!(wizard.document(), &parent_before);
+        assert!(!wizard.can_undo());
+    }
+
+    /// Proves one nested conversion gives a two-guide family two editable repeated curves.
+    ///
+    /// Both dimensions remain independently authored and initially retain their density-relative
+    /// perpendicular stacks. Each repetition selector continues to advertise single, stacked, and
+    /// constant-gap variants through the domain descriptors.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the two-guide starter cannot convert, loses a dimension, shares one authored
+    /// path between dimensions, or omits either repetition variant or its active stack setting.
+    #[test]
+    fn stage21b_two_guide_conversion_exposes_editable_stack_and_constant_gap_variants() {
+        let workspace = direct_png_workspace();
+        let recipe = PatternDefinitionRecipe::starter_for_family(PatternRecipeFamilyKind::Guides)
+            .with_guide_dimension_count(2)
+            .expect("New Guides grows to two directions");
+        let mut wizard = DocumentHistory::new_draft(&workspace.history);
+        apply_wizard_recipe(&mut wizard, InspectorTarget::DocumentAll, recipe)
+            .expect("two-guide starter materializes privately");
+        let (command, _) =
+            wizard_editable_guide_preparation(wizard.document(), InspectorTarget::DocumentAll)
+                .expect("two straight guides prepare two editable paths");
+        let mut child = DocumentHistory::new_draft(&wizard);
+        child
+            .apply(&command)
+            .expect("two-guide conversion remains child-local");
+        let projection = child
+            .document()
+            .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+            .expect("converted two-guide family projects capabilities");
+        let PatternFamilyCapabilityProjection::Grid(grid) = &projection.family else {
+            panic!("converted family remains guide-backed")
+        };
+        assert_eq!(grid.guides.count, 2);
+        assert!(grid.guides.editable_curve);
+        let values =
+            wizard_active_values(child.document(), InspectorTarget::DocumentAll, &projection);
+        let repetitions = values
+            .iter()
+            .filter(|value| value.descriptor.field == PropertyFieldId::GuideRepetition)
+            .collect::<Vec<_>>();
+        assert_eq!(repetitions.len(), 2);
+        assert!(repetitions.iter().all(|value| {
+            matches!(
+                &value.value,
+                PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::GuideRepetition(
+                    toniator_domain::GuideRepetitionKind::TransformStack
+                ))
+            ) && value
+                .descriptor
+                .choices
+                .contains(&PropertyEnumChoice::GuideRepetition(
+                    toniator_domain::GuideRepetitionKind::TransformStack,
+                ))
+                && value
+                    .descriptor
+                    .choices
+                    .contains(&PropertyEnumChoice::GuideRepetition(
+                        toniator_domain::GuideRepetitionKind::NormalOffset,
+                    ))
+        }));
+        assert_eq!(
+            values
+                .iter()
+                .filter(|value| {
+                    value.descriptor.field == PropertyFieldId::GuideStackSpacingMultiplier
+                })
+                .count(),
+            2
+        );
+        let definition_id = child.document().pattern_settings().definition_id;
+        let resources = child
+            .document()
+            .authored_structure_uses()
+            .into_iter()
+            .filter_map(|use_value| match use_value {
+                AuthoredStructureUse::Guide {
+                    definition_id: use_definition_id,
+                    structure_id,
+                    ..
+                } if use_definition_id == definition_id => Some(structure_id),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(resources.len(), 2);
+    }
+
+    /// Proves main-window random seeds propagate from ALL and can diverge by named channel.
+    ///
+    /// The seed remains an active recipe descriptor rather than a frontend-only value. ALL and
+    /// named projections both expose it; ALL pushes a new value into compatible private copies,
+    /// while a later named edit changes only that channel relative to the latest ALL value.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the dispersion preset, seed descriptor, scoped command, or effective-channel
+    /// projection is missing, or when a named edit leaks into another channel.
+    #[test]
+    fn stage21b_random_seed_is_visible_and_can_diverge_per_channel() {
+        fn seed_for(document: &Document, scope: PatternCapabilityScope) -> u32 {
+            let projection = document
+                .pattern_capabilities(scope)
+                .expect("seed scope projects current capabilities");
+            let descriptor = projection
+                .active_controls
+                .iter()
+                .find(|descriptor| descriptor.field == PropertyFieldId::RandomSeed)
+                .expect("randomized pattern exposes its seed");
+            let value = document
+                .property_values()
+                .into_iter()
+                .find(|value| value.descriptor == *descriptor)
+                .expect("seed descriptor resolves its current value");
+            let PropertyCurrentValueKind::U32(seed) = value.value else {
+                panic!("random seed remains a whole-number setting")
+            };
+            seed
+        }
+
+        let workspace = direct_png_workspace();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        PresetRegistry::bundled()
+            .apply_to_document_base(&mut draft, "even-random-circles")
+            .expect("randomized preset materializes at ALL scope");
+        let channels = authoritative_channel_ids(draft.document());
+        let selected = channels[0];
+        let sibling = channels[1];
+        let inherited = seed_for(draft.document(), PatternCapabilityScope::DocumentBase);
+        assert!(
+            inline_inspector_values(draft.document(), InspectorTarget::DocumentAll)
+                .iter()
+                .any(|value| value.descriptor.field == PropertyFieldId::RandomSeed)
+        );
+        assert!(
+            inline_inspector_values(draft.document(), InspectorTarget::Channel(selected))
+                .iter()
+                .any(|value| value.descriptor.field == PropertyFieldId::RandomSeed)
+        );
+        assert_eq!(
+            seed_for(draft.document(), PatternCapabilityScope::Channel(selected)),
+            inherited
+        );
+        assert_eq!(
+            seed_for(draft.document(), PatternCapabilityScope::Channel(sibling)),
+            inherited
+        );
+        let inherited_field_order =
+            inline_inspector_values(draft.document(), InspectorTarget::Channel(selected))
+                .into_iter()
+                .map(|value| value.descriptor.field)
+                .collect::<Vec<_>>();
+
+        let selected_projection = draft
+            .document()
+            .pattern_capabilities(PatternCapabilityScope::Channel(selected))
+            .expect("selected seed projects");
+        let selected_descriptor = selected_projection
+            .active_controls
+            .iter()
+            .find(|descriptor| descriptor.field == PropertyFieldId::RandomSeed)
+            .expect("selected channel exposes seed")
+            .clone();
+        let command = command_for_inspector_input(
+            draft.document(),
+            Some(selected),
+            DefinitionEditScope::SelectedCopy,
+            &selected_descriptor,
+            InspectorInput::U32(inherited.wrapping_add(1)),
+        )
+        .expect("named seed forms one selected-copy command");
+        draft
+            .apply(&command)
+            .expect("named seed applies as one private history entry");
+        assert_eq!(
+            seed_for(draft.document(), PatternCapabilityScope::Channel(selected)),
+            inherited.wrapping_add(1)
+        );
+        assert_eq!(
+            seed_for(draft.document(), PatternCapabilityScope::Channel(sibling)),
+            inherited
+        );
+        assert_eq!(
+            seed_for(draft.document(), PatternCapabilityScope::DocumentBase),
+            inherited
+        );
+        assert_eq!(
+            inline_inspector_values(draft.document(), InspectorTarget::Channel(selected))
+                .into_iter()
+                .map(|value| value.descriptor.field)
+                .collect::<Vec<_>>(),
+            inherited_field_order,
+            "selected copy-on-edit retains authoritative main-inspector row order"
+        );
+
+        let private_definition_id = draft
+            .document()
+            .pattern_definition_for(selected)
+            .expect("selected channel has its seed copy")
+            .id;
+        let all_descriptor =
+            inline_inspector_values(draft.document(), InspectorTarget::DocumentAll)
+                .into_iter()
+                .find(|value| value.descriptor.field == PropertyFieldId::RandomSeed)
+                .expect("ALL main-window settings expose the seed")
+                .descriptor;
+        let pushed = inherited.wrapping_add(2);
+        draft
+            .set_all_pattern_seed(&all_descriptor, pushed)
+            .expect("ALL seed pushes into every compatible channel definition");
+        assert_eq!(
+            draft
+                .document()
+                .pattern_definition_for(selected)
+                .expect("selected private copy survives ALL")
+                .id,
+            private_definition_id
+        );
+        assert_eq!(
+            seed_for(draft.document(), PatternCapabilityScope::DocumentBase),
+            pushed
+        );
+        assert_eq!(
+            seed_for(draft.document(), PatternCapabilityScope::Channel(selected)),
+            pushed
+        );
+        assert_eq!(
+            seed_for(draft.document(), PatternCapabilityScope::Channel(sibling)),
+            pushed
+        );
+
+        let selected_descriptor =
+            inline_inspector_values(draft.document(), InspectorTarget::Channel(selected))
+                .into_iter()
+                .find(|value| value.descriptor.field == PropertyFieldId::RandomSeed)
+                .expect("named main-window settings retain the seed after ALL")
+                .descriptor;
+        let command = command_for_inspector_input(
+            draft.document(),
+            Some(selected),
+            DefinitionEditScope::SelectedCopy,
+            &selected_descriptor,
+            InspectorInput::U32(pushed.wrapping_add(1)),
+        )
+        .expect("named seed diverges from the latest ALL seed");
+        draft.apply(&command).expect("named divergence applies");
+        assert_eq!(
+            seed_for(draft.document(), PatternCapabilityScope::Channel(selected)),
+            pushed.wrapping_add(1)
+        );
+        assert_eq!(
+            seed_for(draft.document(), PatternCapabilityScope::Channel(sibling)),
+            pushed
+        );
+    }
+
+    /// Proves Curve Motif advertises only its valid one-guide topology to Family Settings.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the current Curve Motif preset is missing, reconstruction fails, or the recipe
+    /// accepts a second guide despite its one-guide Along Guides invariant.
+    #[test]
+    fn stage21b_curve_motif_guide_count_rejects_incompatible_growth() {
+        let workspace = direct_png_workspace();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        PresetRegistry::bundled()
+            .apply_to_document_base(&mut draft, "curve-motif-rows")
+            .expect("Curve Motif recipe materializes");
+        let projection = draft
+            .document()
+            .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+            .expect("Curve Motif capabilities project");
+        let PatternFamilyCapabilityProjection::Grid(grid) = projection.family else {
+            panic!("Curve Motif remains a guide family")
+        };
+        assert_eq!(grid.guides.editable_count_bounds, Some((1, 4)));
+        let recipe = draft
+            .document()
+            .reconstruct_pattern_definition_recipe(projection.definition_id)
+            .expect("Curve Motif reconstructs");
+        assert!(recipe.with_guide_dimension_count(1).is_ok());
+        assert!(recipe.with_guide_dimension_count(2).is_err());
+    }
+
+    /// Maps an oracle reference to the same artist-visible choice in a New-built pattern.
+    ///
+    /// The mapping uses the labels already shown by wizard controls, never allocated IDs or preset
+    /// metadata. This keeps the acceptance harness equivalent to selecting the matching dropdown
+    /// item after New has allocated fresh document identities.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the New-built pattern does not offer the target's visible compatible choice.
+    fn stage21b_map_reference_choice(
+        target_document: &Document,
+        candidate_document: &Document,
+        target: &PropertyReferenceValue,
+        choices: &[PropertyReferenceValue],
+    ) -> PropertyReferenceValue {
+        let label = wizard_reference_label(target_document, target);
+        choices
+            .iter()
+            .find(|candidate| wizard_reference_label(candidate_document, candidate) == label)
+            .cloned()
+            .unwrap_or_else(|| panic!("New does not offer the target choice {label}"))
+    }
+
+    /// Returns the current ALL-scope value at one descriptor-field ordinal.
+    ///
+    /// Recomputing after every structural command mirrors the wizard's page rebuild and avoids
+    /// retaining stale allocated descriptor targets across variant changes.
+    ///
+    /// # Panics
+    ///
+    /// Panics when capability projection fails or the expected active control is absent.
+    fn stage21b_current_value(
+        document: &Document,
+        field: PropertyFieldId,
+        ordinal: usize,
+    ) -> PropertyCurrentValue {
+        let projection = document
+            .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+            .expect("New-built pattern projects current controls");
+        wizard_active_values(document, InspectorTarget::DocumentAll, &projection)
+            .into_iter()
+            .filter(|value| value.descriptor.field == field)
+            .nth(ordinal)
+            .unwrap_or_else(|| panic!("New does not expose {field:?} control {ordinal}"))
+    }
+
+    /// Converts one target value into the input accepted by the matching New-built control.
+    ///
+    /// Scalar and enum values pass through unchanged. References are remapped through the actual
+    /// compatible choices exposed by the candidate descriptor, matching a user dropdown choice.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the candidate does not expose matching reference choices.
+    fn stage21b_input_from_target(
+        target_document: &Document,
+        candidate_document: &Document,
+        descriptor: &PropertyDescriptor,
+        value: &PropertyCurrentValueKind,
+    ) -> InspectorInput {
+        match value {
+            PropertyCurrentValueKind::FiniteF64(value) => InspectorInput::FiniteF64(*value),
+            PropertyCurrentValueKind::OptionalFiniteF64(value) => {
+                InspectorInput::OptionalFiniteF64(*value)
+            }
+            PropertyCurrentValueKind::U32(value) => InspectorInput::U32(*value),
+            PropertyCurrentValueKind::Boolean(value) => InspectorInput::Boolean(*value),
+            PropertyCurrentValueKind::EnumChoice(value) => InspectorInput::EnumChoice(*value),
+            PropertyCurrentValueKind::Reference(reference) => {
+                let choices = wizard_reference_choices(candidate_document, descriptor)
+                    .expect("candidate reference choices remain available");
+                InspectorInput::Reference(stage21b_map_reference_choice(
+                    target_document,
+                    candidate_document,
+                    reference,
+                    &choices,
+                ))
+            }
+            PropertyCurrentValueKind::ReferenceCollection(references) => {
+                let choices = wizard_reference_choices(candidate_document, descriptor)
+                    .expect("candidate collection choices remain available");
+                InspectorInput::ReferenceCollection(
+                    references
+                        .iter()
+                        .map(|reference| {
+                            stage21b_map_reference_choice(
+                                target_document,
+                                candidate_document,
+                                reference,
+                                &choices,
+                            )
+                        })
+                        .collect(),
+                )
+            }
+        }
+    }
+
+    /// Reports exact equality between one active value and a prepared wizard input.
+    ///
+    /// This extends the production scalar no-op check to references and ordered collections so the
+    /// acceptance harness never submits an artificial no-op command.
+    fn stage21b_value_matches_input(
+        value: &PropertyCurrentValueKind,
+        input: &InspectorInput,
+    ) -> bool {
+        match (value, input) {
+            (PropertyCurrentValueKind::FiniteF64(left), InspectorInput::FiniteF64(right)) => {
+                left == right
+            }
+            (
+                PropertyCurrentValueKind::OptionalFiniteF64(left),
+                InspectorInput::OptionalFiniteF64(right),
+            ) => left == right,
+            (PropertyCurrentValueKind::U32(left), InspectorInput::U32(right)) => left == right,
+            (PropertyCurrentValueKind::Boolean(left), InspectorInput::Boolean(right)) => {
+                left == right
+            }
+            (PropertyCurrentValueKind::EnumChoice(left), InspectorInput::EnumChoice(right)) => {
+                left == right
+            }
+            (PropertyCurrentValueKind::Reference(left), InspectorInput::Reference(right)) => {
+                left == right
+            }
+            (
+                PropertyCurrentValueKind::ReferenceCollection(left),
+                InspectorInput::ReferenceCollection(right),
+            ) => left == right,
+            _ => false,
+        }
+    }
+
+    /// Completes one payload-bearing wizard choice with the target's required references.
+    ///
+    /// Numeric and enum payload defaults are valid intermediate user choices and are subsequently
+    /// set through their ordinary visible controls. A missing required reference is selected from
+    /// the target's corresponding active control before the choice is applied atomically.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a required target reference is absent or cannot be selected in the candidate.
+    fn stage21b_complete_transition(
+        target_document: &Document,
+        target_values: &[PropertyCurrentValue],
+        selector_ordinal: usize,
+        candidate_document: &Document,
+        transition: &VariantTransitionDraft,
+    ) -> VariantTransitionDraft {
+        let updates = transition
+            .fields()
+            .iter()
+            .filter_map(|field| match &field.value {
+                VariantTransitionValue::StableReference(None) => {
+                    let target = target_values
+                        .iter()
+                        .filter(|value| value.descriptor.field == field.field)
+                        .nth(selector_ordinal)
+                        .or_else(|| {
+                            target_values
+                                .iter()
+                                .find(|value| value.descriptor.field == field.field)
+                        })
+                        .unwrap_or_else(|| panic!("target is missing required {:?}", field.field));
+                    let PropertyCurrentValueKind::Reference(reference) = &target.value else {
+                        panic!("required {:?} is not a reference", field.field)
+                    };
+                    Some(VariantTransitionFieldUpdate {
+                        field: field.field,
+                        target: field.target,
+                        value: VariantTransitionValue::StableReference(Some(
+                            stage21b_map_reference_choice(
+                                target_document,
+                                candidate_document,
+                                reference,
+                                &field.reference_choices,
+                            ),
+                        )),
+                    })
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        transition
+            .with_updates(&updates)
+            .expect("required transition choices validate")
+    }
+
+    /// Copies exact target Guide, Shape, and Motif payloads through nested-editor commands.
+    ///
+    /// Structures are paired by current kind and artist-visible ordinal. Replacements retain the
+    /// New-built document's IDs and uses, just as applying a nested editor does.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the target and candidate structures differ in kind/count or replacement fails.
+    fn stage21b_apply_nested_curve_payloads(
+        candidate: &mut DocumentHistory,
+        target_document: &Document,
+    ) {
+        let candidate_structures = candidate.document().authored_structures().to_vec();
+        for structure in candidate_structures {
+            let ordinal = candidate
+                .document()
+                .authored_structures()
+                .iter()
+                .filter(|value| value.kind() == structure.kind())
+                .position(|value| value.id() == structure.id())
+                .expect("candidate structure retains its ordinal");
+            let target = target_document
+                .authored_structures()
+                .iter()
+                .filter(|value| value.kind() == structure.kind())
+                .nth(ordinal)
+                .unwrap_or_else(|| panic!("target lacks {:?} curve {ordinal}", structure.kind()));
+            if structure.kind() != target.kind() || structure.segments() != target.segments() {
+                candidate
+                    .apply(&DocumentCommand::ReplaceAuthoredStructure {
+                        base_structure: structure,
+                        replacement: AuthoredStructureDraft::new(
+                            target.kind(),
+                            target.segments().to_vec(),
+                        )
+                        .expect("target curve payload remains valid"),
+                    })
+                    .expect("nested editor payload applies through one typed command");
+            }
+        }
+    }
+
+    /// Applies every target setting through the same command builders used by visible wizard controls.
+    ///
+    /// Compound choices finalize atomically, site-use dependencies use the dedicated filtered-output
+    /// command, and every ordinary scalar, optional, enum, reference, or collection uses the normal
+    /// inspector command boundary at document scope.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a target setting is not reachable or a wizard-backed command rejects it.
+    fn stage21b_apply_target_settings(candidate: &mut DocumentHistory, target_document: &Document) {
+        stage21b_apply_nested_curve_payloads(candidate, target_document);
+        let target_projection = target_document
+            .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+            .expect("target projects controls");
+        let target_values = wizard_active_values(
+            target_document,
+            InspectorTarget::DocumentAll,
+            &target_projection,
+        );
+        let mut ordinals = BTreeMap::<PropertyFieldId, usize>::new();
+        for target in &target_values {
+            let ordinal = *ordinals.entry(target.descriptor.field).or_default();
+            *ordinals.entry(target.descriptor.field).or_default() += 1;
+            if matches!(
+                target.descriptor.field,
+                PropertyFieldId::DefinitionSelection
+                    | PropertyFieldId::OutputSiteUseFilterReference
+            ) {
+                continue;
+            }
+            let current =
+                stage21b_current_value(candidate.document(), target.descriptor.field, ordinal);
+            if target.descriptor.field == PropertyFieldId::OutputSiteUseFilterKind {
+                let PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SiteUseFilter(kind)) =
+                    &target.value
+                else {
+                    panic!("target site-use control has a site-use choice")
+                };
+                let filter = match *kind {
+                    SiteUseFilterKind::All => SiteUseFilter::All,
+                    SiteUseFilterKind::SitesUsedBy | SiteUseFilterKind::SitesUnusedBy => {
+                        let target_reference = target_values
+                            .iter()
+                            .find(|value| {
+                                value.descriptor.field
+                                    == PropertyFieldId::OutputSiteUseFilterReference
+                                    && value.descriptor.target == target.descriptor.target
+                            })
+                            .expect("dependent target exposes its reference");
+                        let PropertyCurrentValueKind::Reference(target_reference) =
+                            &target_reference.value
+                        else {
+                            panic!("target site-use dependency is a pattern output")
+                        };
+                        let choices = candidate
+                            .document()
+                            .site_use_filter_targets(&current.descriptor)
+                            .expect("candidate advertises compatible filter targets");
+                        let PropertyReferenceValue::OutputLayer(id) = stage21b_map_reference_choice(
+                            target_document,
+                            candidate.document(),
+                            target_reference,
+                            &choices,
+                        ) else {
+                            panic!("site-use reference maps to a pattern output")
+                        };
+                        match *kind {
+                            SiteUseFilterKind::SitesUsedBy => SiteUseFilter::SitesUsedBy {
+                                output_layer_id: id,
+                            },
+                            SiteUseFilterKind::SitesUnusedBy => SiteUseFilter::SitesUnusedBy {
+                                output_layer_id: id,
+                            },
+                            SiteUseFilterKind::All => unreachable!("All handled above"),
+                        }
+                    }
+                };
+                let command = wizard_site_use_filter_command(
+                    candidate.document(),
+                    InspectorTarget::DocumentAll,
+                    &current.descriptor,
+                    filter,
+                )
+                .expect("site-use control forms its grouped command");
+                if candidate
+                    .document()
+                    .apply_command(&command)
+                    .is_ok_and(|(next, _)| next != candidate.document().clone())
+                {
+                    candidate
+                        .apply(&command)
+                        .expect("site-use rule applies through wizard history");
+                }
+                continue;
+            }
+            let input = stage21b_input_from_target(
+                target_document,
+                candidate.document(),
+                &current.descriptor,
+                &target.value,
+            );
+            if stage21b_value_matches_input(&current.value, &input) {
+                continue;
+            }
+            let command = if let InspectorInput::EnumChoice(choice) = input.clone()
+                && let Ok(transition) = candidate
+                    .document()
+                    .variant_transition_draft(&current.descriptor, choice)
+            {
+                let transition = stage21b_complete_transition(
+                    target_document,
+                    &target_values,
+                    ordinal,
+                    candidate.document(),
+                    &transition,
+                );
+                wizard_transition_command(
+                    candidate.document(),
+                    InspectorTarget::DocumentAll,
+                    &transition,
+                )
+                .expect("compound wizard choice forms one command")
+            } else {
+                command_for_inspector_input(
+                    candidate.document(),
+                    None,
+                    DefinitionEditScope::DocumentBase,
+                    &current.descriptor,
+                    input,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "ordinary {:?} wizard control forms one command: {error}",
+                        target.descriptor.field
+                    )
+                })
+            };
+            candidate.apply(&command).unwrap_or_else(|error| {
+                panic!("{:?} applies from New: {error}", target.descriptor.field)
+            });
+        }
+    }
+
+    /// Removes non-artist recipe data before complete wizard-setting comparison.
+    ///
+    /// New intentionally begins with a neutral working name, whereas a preset keeps its catalog
+    /// name. Deprecated random work ceilings are not active commands and no longer affect normal
+    /// evaluation. Every geometric, resource, filter, output, and response value is retained.
+    fn stage21b_normalize_non_artist_recipe_data(structure: &mut PatternStructureRecipe) {
+        match structure {
+            PatternStructureRecipe::AuthoredResources { definition, .. }
+            | PatternStructureRecipe::ConnectionPaths { definition, .. }
+            | PatternStructureRecipe::MazeWalls { definition, .. }
+            | PatternStructureRecipe::AuthoredClosedShapeMarks { definition, .. }
+            | PatternStructureRecipe::CurveMotifPaths { definition, .. }
+            | PatternStructureRecipe::VoronoiRegions { definition }
+            | PatternStructureRecipe::GuideFaceRegions { definition, .. }
+            | PatternStructureRecipe::OrderedOutputs { definition, .. } => {
+                stage21b_normalize_non_artist_recipe_data(definition)
+            }
+            PatternStructureRecipe::StraightGrid(definition) => {
+                definition.name.clear();
+            }
+            PatternStructureRecipe::GeneralizedStraightGuides { name, .. }
+            | PatternStructureRecipe::GenericGuides { name, .. }
+            | PatternStructureRecipe::ParametricCurve { name, .. } => name.clear(),
+            PatternStructureRecipe::RandomSites {
+                name,
+                maximum_attempts,
+                maximum_neighbor_checks,
+                ..
+            } => {
+                name.clear();
+                *maximum_attempts = 0;
+                *maximum_neighbor_checks = 0;
+            }
+        }
+    }
+
+    /// Proves New can reconstruct every setting and nested payload of all 17 built-ins.
+    ///
+    /// The test starts only from the four domain-owned New starters, reconstructs each catalog
+    /// target solely as an acceptance oracle, and applies the same guide-count, site-generation,
+    /// output-replacement, insertion, and removal transitions exposed by the wizard. Preset IDs
+    /// never select behavior or materialize the New candidate.
+    ///
+    /// # Panics
+    ///
+    /// Panics when any built-in requires a structural path that New cannot reach through wizard
+    /// controls or when the reached painter order differs from its reconstructed target.
+    #[test]
+    fn stage21b_new_workflow_recreates_every_builtin_recipe() {
+        let workspace = direct_png_workspace();
+        let registry = PresetRegistry::bundled();
+        assert_eq!(registry.entries().len(), 17);
+        for entry in registry.entries() {
+            let mut target_draft = DocumentHistory::new_draft(&workspace.history);
+            registry
+                .apply_to_document_base(&mut target_draft, &entry.metadata.id)
+                .expect("built-in target materializes for its acceptance oracle");
+            let (target_projection, target_recipe, _) =
+                wizard_route_for_document(target_draft.document(), InspectorTarget::DocumentAll)
+                    .expect("built-in target reconstructs");
+            let target_site = target_recipe.site_generation_kind();
+            let target_outputs = target_recipe
+                .output_kinds()
+                .expect("built-in output topology decomposes");
+            let mut candidate =
+                PatternDefinitionRecipe::starter_for_family(target_recipe.family_kind());
+            if target_site == PatternRecipeSiteGenerationKind::AlongGuides {
+                candidate = candidate
+                    .with_site_generation_kind(target_site)
+                    .unwrap_or_else(|error| {
+                        panic!("{} reaches Along Guides: {error}", entry.metadata.id)
+                    });
+            }
+            if let PatternFamilyCapabilityProjection::Grid(grid) = &target_projection.family
+                && grid.guides.editable_count_bounds.is_some()
+            {
+                candidate = candidate
+                    .with_guide_dimension_count(grid.guides.count)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{} reaches {} guide dimensions: {error}",
+                            entry.metadata.id, grid.guides.count
+                        )
+                    });
+            }
+            if candidate.site_generation_kind() != target_site {
+                candidate = candidate
+                    .with_site_generation_kind(target_site)
+                    .unwrap_or_else(|error| {
+                        panic!("{} reaches {target_site:?}: {error}", entry.metadata.id)
+                    });
+            }
+            while candidate
+                .output_kinds()
+                .expect("candidate output topology decomposes")
+                .len()
+                > target_outputs.len()
+            {
+                let last = candidate
+                    .output_kinds()
+                    .expect("candidate output topology decomposes")
+                    .len()
+                    - 1;
+                candidate = candidate
+                    .without_output(last)
+                    .expect("surplus New output removes");
+            }
+            for (index, kind) in target_outputs.iter().copied().enumerate() {
+                let current_len = candidate
+                    .output_kinds()
+                    .expect("candidate output topology decomposes")
+                    .len();
+                candidate = if index < current_len {
+                    candidate.with_output_kind(index, kind)
+                } else {
+                    candidate.with_appended_output_kind(kind)
+                }
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{} reaches output {} {kind:?}: {error}",
+                        entry.metadata.id,
+                        index + 1
+                    )
+                });
+            }
+            assert_eq!(candidate.family_kind(), target_recipe.family_kind());
+            assert_eq!(candidate.site_generation_kind(), target_site);
+            assert_eq!(
+                candidate
+                    .output_kinds()
+                    .expect("reached output topology projects"),
+                target_outputs,
+                "{} is structurally constructible from New",
+                entry.metadata.id,
+            );
+
+            let mut new_draft = DocumentHistory::new_draft(&workspace.history);
+            apply_wizard_recipe(&mut new_draft, InspectorTarget::DocumentAll, candidate)
+                .unwrap_or_else(|error| {
+                    panic!("{} New topology materializes: {error}", entry.metadata.id)
+                });
+            let new_projection = new_draft
+                .document()
+                .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+                .expect("New topology projects active settings");
+            let new_values = wizard_active_values(
+                new_draft.document(),
+                InspectorTarget::DocumentAll,
+                &new_projection,
+            );
+            let target_values = wizard_active_values(
+                target_draft.document(),
+                InspectorTarget::DocumentAll,
+                &target_projection,
+            );
+            let mut reachable_counts = BTreeMap::<PropertyFieldId, usize>::new();
+            for value in &new_values {
+                *reachable_counts.entry(value.descriptor.field).or_default() += 1;
+            }
+            for (new_index, value) in new_values.iter().enumerate() {
+                let PropertyCurrentValueKind::EnumChoice(current) = value.value else {
+                    continue;
+                };
+                let ordinal = new_values[..new_index]
+                    .iter()
+                    .filter(|candidate| candidate.descriptor.field == value.descriptor.field)
+                    .count();
+                let Some(target) = target_values
+                    .iter()
+                    .filter(|candidate| candidate.descriptor.field == value.descriptor.field)
+                    .nth(ordinal)
+                else {
+                    continue;
+                };
+                let PropertyCurrentValueKind::EnumChoice(target_choice) = target.value else {
+                    continue;
+                };
+                if target_choice == current {
+                    continue;
+                }
+                if let Ok(transition) = new_draft
+                    .document()
+                    .variant_transition_draft(&value.descriptor, target_choice)
+                {
+                    for field in transition.fields() {
+                        *reachable_counts.entry(field.field).or_default() += 1;
+                    }
+                }
+            }
+            if target_values.iter().any(|value| {
+                value.descriptor.field == PropertyFieldId::OutputSiteUseFilterReference
+            }) {
+                reachable_counts
+                    .entry(PropertyFieldId::OutputSiteUseFilterReference)
+                    .and_modify(|count| *count += 1)
+                    .or_insert(1);
+            }
+            let mut target_counts = BTreeMap::<PropertyFieldId, usize>::new();
+            for value in &target_values {
+                if value.descriptor.field != PropertyFieldId::DefinitionSelection {
+                    *target_counts.entry(value.descriptor.field).or_default() += 1;
+                }
+            }
+            for (field, required) in target_counts {
+                assert!(
+                    reachable_counts.get(&field).copied().unwrap_or(0) >= required,
+                    "{} cannot expose all {required} target {field:?} settings from New",
+                    entry.metadata.id,
+                );
+            }
+            stage21b_apply_target_settings(&mut new_draft, target_draft.document());
+            let mut recreated = new_draft
+                .document()
+                .reconstruct_pattern_definition_recipe(
+                    new_draft.document().pattern_settings().definition_id,
+                )
+                .expect("New-built pattern reconstructs after every wizard setting");
+            let mut oracle = target_recipe.clone();
+            stage21b_normalize_non_artist_recipe_data(&mut recreated.structure);
+            stage21b_normalize_non_artist_recipe_data(&mut oracle.structure);
+            assert_eq!(
+                recreated, oracle,
+                "{} is completely reproducible from New wizard controls",
+                entry.metadata.id,
+            );
+        }
+    }
+
+    /// Proves the consolidated Connections choice selects a site-link method for Dispersion.
+    ///
+    /// # Panics
+    ///
+    /// Panics when construction preference returns the inapplicable structural-path method or
+    /// fails to retain the Dispersion family while creating a valid connection output.
+    #[test]
+    fn stage21b_dispersion_connections_choose_a_link_network_method() {
+        let recipe =
+            PatternDefinitionRecipe::starter_for_family(PatternRecipeFamilyKind::Dispersion);
+        let connected = recipe
+            .with_construction_kind(0, PatternRecipeConstructionKind::Connections)
+            .expect("Dispersion exposes site-backed Connections");
+        assert_eq!(
+            connected.construction_kinds().expect("output decomposes"),
+            vec![PatternRecipeConstructionKind::Connections]
+        );
+        assert_eq!(
+            connected
+                .connection_method_kind(0)
+                .expect("method projects"),
+            Some(PatternRecipeConnectionMethodKind::LinkNetwork)
+        );
+        assert_eq!(connected.family_kind(), PatternRecipeFamilyKind::Dispersion);
+    }
+
+    /// Proves a New connection-plus-marks construction can target the first painted output.
+    ///
+    /// The site-use picker must use the same visible painter-order ordinal as the output cards;
+    /// stable allocation order never becomes artist-facing identity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the appended marks output lacks its compatible connection output, the selector
+    /// is hidden as meaningless, or the reference is labeled with a different visible ordinal.
+    #[test]
+    fn stage21b_new_residual_marks_reference_the_first_visible_output() {
+        let recipe = PatternDefinitionRecipe::starter_for_family(PatternRecipeFamilyKind::Guides)
+            .with_construction_kind(0, PatternRecipeConstructionKind::Connections)
+            .expect("New Guides exposes Connections")
+            .with_connection_method_kind(0, PatternRecipeConnectionMethodKind::LinkNetwork)
+            .expect("New Guides exposes site-backed links")
+            .with_appended_construction_kind(PatternRecipeConstructionKind::Marks)
+            .expect("New Guides appends residual marks");
+        let workspace = direct_png_workspace();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        apply_wizard_recipe(&mut draft, InspectorTarget::DocumentAll, recipe)
+            .expect("two-output New recipe materializes");
+        let definition_id = draft.document().pattern_settings().definition_id;
+        let definition = draft
+            .document()
+            .pattern_definition_bundles()
+            .iter()
+            .find(|bundle| bundle.definition.id == definition_id)
+            .map(|bundle| &bundle.definition)
+            .expect("New definition remains active");
+        let marks_output_id = definition.output_layers[1].id();
+        let projection = draft
+            .document()
+            .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+            .expect("two-output New recipe projects capabilities");
+        let selector =
+            wizard_active_values(draft.document(), InspectorTarget::DocumentAll, &projection)
+                .into_iter()
+                .find(|value| {
+                    value.descriptor.field == PropertyFieldId::OutputSiteUseFilterKind
+                        && value.descriptor.target
+                            == PropertyTarget::OutputLayer(definition_id, marks_output_id)
+                })
+                .expect("marks output exposes its site-use selector");
+        assert!(wizard_value_has_meaningful_choice(
+            draft.document(),
+            &selector,
+        ));
+        let targets = draft
+            .document()
+            .site_use_filter_targets(&selector.descriptor)
+            .expect("marks selector exposes compatible outputs");
+        assert_eq!(
+            targets,
+            vec![PropertyReferenceValue::OutputLayer(
+                definition.output_layers[0].id(),
+            )]
+        );
+        assert_eq!(
+            wizard_reference_label_for_target(
+                draft.document(),
+                selector.descriptor.target,
+                &targets[0],
+            ),
+            "Pattern output 1"
+        );
+        assert_eq!(
+            wizard_descriptor_label(draft.document(), &selector.descriptor),
+            "Output 2 — Use which sites?"
+        );
+    }
+
+    /// Proves enabling sites on a New parametric curve atomically produces editable mark spacing.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the transition retains an inapplicable raw-path output, loses the parametric
+    /// family, or fails to publish the along-curve interval descriptor used on the Sites card.
+    #[test]
+    fn stage21b_parametric_sites_replace_the_raw_curve_with_marks() {
+        let recipe =
+            PatternDefinitionRecipe::starter_for_family(PatternRecipeFamilyKind::Parametric);
+        let marked = recipe
+            .with_site_generation_kind(PatternRecipeSiteGenerationKind::AlongParametricCurve)
+            .expect("curve-only Parametric enables sites atomically");
+        assert_eq!(marked.family_kind(), PatternRecipeFamilyKind::Parametric);
+        assert_eq!(
+            marked.site_generation_kind(),
+            PatternRecipeSiteGenerationKind::AlongParametricCurve
+        );
+        assert_eq!(
+            marked.construction_kinds().expect("output decomposes"),
+            vec![PatternRecipeConstructionKind::Marks]
+        );
+
+        let workspace = direct_png_workspace();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        apply_wizard_recipe(&mut draft, InspectorTarget::DocumentAll, marked)
+            .expect("parametric marks materialize");
+        assert!(
+            draft.document().property_values().iter().any(|value| {
+                value.descriptor.field == PropertyFieldId::AlongParametricInterval
+            })
+        );
+    }
+
+    /// Keeps the Pattern size slider's ordinary range intuitive without clipping valid stored values.
+    ///
+    /// This pure presentation check proves values left of one request finer density and values right
+    /// of one request coarser density through the single authoritative conversion helper.
+    #[test]
+    fn pattern_size_slider_preserves_inverse_density_authority_and_current_values() {
+        let document = Document::new_default_document(DEFAULT_CANVAS, SourceReference::Unassigned)
+            .expect("default document validates");
+        let default_density = DensityMetric2D::default_for_canvas(document.canvas())
+            .expect("default density resolves")
+            .density;
+        assert_eq!(pattern_size_slider_bounds(1.0), (0.125, 8.0));
+        assert_eq!(pattern_size_slider_bounds(12.0), (0.125, 12.0));
+        assert_eq!(pattern_size_slider_bounds(0.0625), (0.0625, 8.0));
+        assert_eq!(
+            authority_numeric_value(&document, PropertyFieldId::Density, 0.5),
+            Ok(default_density * 2.0)
+        );
+        assert_eq!(
+            authority_numeric_value(&document, PropertyFieldId::Density, 2.0),
+            Ok(default_density / 2.0)
+        );
+        assert_eq!(
+            inspector_field_detail(
+                &document
+                    .property_values()
+                    .into_iter()
+                    .find(|value| value.descriptor.field == PropertyFieldId::Density)
+                    .expect("density descriptor remains active")
+                    .descriptor
+            ),
+            "Controls the size of repeated marks and spaces. Smaller values make a finer, denser pattern; larger values make a larger, coarser pattern."
+        );
+    }
+
+    /// Round-trips every bundled current-v4 record at the legal app integration boundary.
+    ///
+    /// # Panics
+    ///
+    /// Panics when any of the seventeen registry-owned records loses its ID-free authored-resource
+    /// graph, output order, response, orientation, or filter graph at the strict IO save/load
+    /// boundary. The app is intentionally the test owner because it already depends on both
+    /// `toniator-patterns` and `toniator-io`; neither lower-layer crate gains an inverse edge.
+    #[test]
+    fn stage21b_all_bundled_presets_round_trip_through_current_v4_without_allocated_ids() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/validation/stage-21b3/preset-v4-roundtrip");
+        fs::create_dir_all(&directory).expect("derived preset validation directory creates");
+        let registry = PresetRegistry::bundled();
+        assert_eq!(registry.entries().len(), 17);
+        for entry in registry.entries() {
+            let path = directory.join(format!("{}-current-v4.preset.json", entry.metadata.id));
+            save_preset(&path, entry).expect("every built-in saves through current v4");
+            assert_eq!(
+                load_preset(&path).expect("every built-in reloads through current v4"),
+                *entry
+            );
+            let text = fs::read_to_string(path).expect("every derived preset remains readable");
+            assert!(
+                !text.contains("structure_id"),
+                "{} retains no allocated authored resource identity",
+                entry.metadata.id
+            );
+        }
+    }
+
+    /// Proves the Curve Motif editor and route copy derive solely from typed capability/output facts.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the known Curve Motif recipe loses its fixed Site Generation, Rendering, or Review
+    /// route order, when any local geometry mode maps to the wrong resource topology, or when the
+    /// accessibility inventory stops naming the two terminal-direction actions truthfully.
+    #[test]
+    fn stage21b_c4_curve_motif_route_copy_and_editor_control_inventory_are_capability_derived() {
+        let workspace = direct_png_workspace();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        PresetRegistry::bundled()
+            .apply_to_document_base(&mut draft, "curve-motif-rows")
+            .expect("Curve Motif fixture materializes in a private wizard draft");
+        let (projection, _, route) =
+            wizard_route_for_document(draft.document(), InspectorTarget::DocumentAll)
+                .expect("Curve Motif recipe reconstructs into an adaptive route");
+        assert!(projection.outputs.iter().any(|output| matches!(
+            output.structural,
+            PatternOutputCapabilityProjection::CurveMotifPaths(_)
+        )));
+        let position = |page| {
+            route
+                .iter()
+                .position(|candidate| *candidate == page)
+                .unwrap_or_else(|| panic!("capability route {route:?} excludes {page:?}"))
+        };
+        assert!(position(WizardRoutePage::SiteGeneration) < position(WizardRoutePage::Rendering));
+        assert_eq!(route.last(), Some(&WizardRoutePage::Review));
+        assert!(CURVE_MOTIF_WORKFLOW_COPY.contains("connected centerline"));
+        assert!(CURVE_MOTIF_WORKFLOW_COPY.contains("row direction and spacing"));
+        assert!(CURVE_MOTIF_WORKFLOW_COPY.contains("how far apart motifs repeat"));
+        assert!(CURVE_MOTIF_WORKFLOW_COPY.contains("pure white"));
+        assert!(CURVE_MOTIF_WORKFLOW_COPY.contains("disappear"));
+        assert_eq!(
+            PatternEditorPurpose::Guide.editor_mode(),
+            stage20f_editor::AuthoredPathEditorMode::Guide
+        );
+        assert_eq!(
+            PatternEditorPurpose::Shape.editor_mode(),
+            stage20f_editor::AuthoredPathEditorMode::Shape
+        );
+        assert_eq!(
+            PatternEditorPurpose::Motif.editor_mode(),
+            stage20f_editor::AuthoredPathEditorMode::Motif
+        );
+        assert_eq!(MOTIF_SMOOTH_DIRECTION_LABEL, "Smooth direction");
+        assert!(MOTIF_SMOOTH_DIRECTION_DESCRIPTION.contains("same direction"));
+        assert!(MOTIF_SMOOTH_DIRECTION_DESCRIPTION.contains("does not reshape"));
+        assert_eq!(MOTIF_CORNER_DIRECTION_LABEL, "Corner");
+        assert!(MOTIF_CORNER_DIRECTION_DESCRIPTION.contains("different directions"));
+        assert!(MOTIF_CORNER_DIRECTION_DESCRIPTION.contains("does not reshape"));
+    }
+
+    /// Preserves route predecessors and private history while keeping Review reconstruction strict.
+    ///
+    /// # Panics
+    ///
+    /// Panics when route recomputation loses a stable predecessor, Undo/Redo moves main history, or
+    /// a changed private recipe cannot pass Review reconstruction.
+    #[test]
+    fn stage21b_c1_route_recompute_private_undo_redo_and_review_are_exact() {
+        assert_eq!(
+            recompute_wizard_route(
+                &[
+                    WizardRoutePage::PatternFamily,
+                    WizardRoutePage::FamilySettings,
+                    WizardRoutePage::SiteGeneration,
+                    WizardRoutePage::Rendering,
+                    WizardRoutePage::Review,
+                ],
+                2,
+                vec![
+                    WizardRoutePage::PatternFamily,
+                    WizardRoutePage::FamilySettings,
+                    WizardRoutePage::SiteGeneration,
+                    WizardRoutePage::Review,
+                ],
+            ),
+            (
+                vec![
+                    WizardRoutePage::PatternFamily,
+                    WizardRoutePage::FamilySettings,
+                    WizardRoutePage::SiteGeneration,
+                    WizardRoutePage::Review,
+                ],
+                2,
+            )
+        );
+        let workspace = direct_png_workspace();
+        let before_main = workspace.document().clone();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        PresetRegistry::bundled()
+            .apply_to_document_base(&mut draft, "straight-grid-circles")
+            .expect("private route fixture materializes");
+        let after_materialize = draft.document().clone();
+        let (projection, _, route) =
+            wizard_route_for_document(draft.document(), InspectorTarget::DocumentAll)
+                .expect("private fixture reconstructs into a route");
+        assert_eq!(
+            route,
+            vec![
+                WizardRoutePage::PatternFamily,
+                WizardRoutePage::FamilySettings,
+                WizardRoutePage::SiteGeneration,
+                WizardRoutePage::Rendering,
+                WizardRoutePage::Review,
+            ]
+        );
+        let density =
+            wizard_active_values(draft.document(), InspectorTarget::DocumentAll, &projection)
+                .into_iter()
+                .find(|value| value.descriptor.field == PropertyFieldId::Density)
+                .expect("grid route exposes active density authority");
+        let PropertyCurrentValueKind::FiniteF64(current) = density.value else {
+            panic!("density remains a finite descriptor")
+        };
+        let command = command_for_inspector_input(
+            draft.document(),
+            None,
+            DefinitionEditScope::SelectedCopy,
+            &density.descriptor,
+            InspectorInput::FiniteF64(current + 1.0),
+        )
+        .expect("one wizard scalar forms one typed private command");
+        draft.apply(&command).expect("private scalar applies");
+        let after_edit = draft.document().clone();
+        assert!(
+            validate_wizard_review_recipe(
+                draft.document(),
+                &before_main,
+                InspectorTarget::DocumentAll,
+            )
+            .is_ok()
+        );
+        draft.undo().expect("private Undo succeeds");
+        assert_eq!(draft.document(), &after_materialize);
+        draft.redo().expect("private Redo succeeds");
+        assert_eq!(draft.document(), &after_edit);
+        let coverage =
+            wizard_active_values(draft.document(), InspectorTarget::DocumentAll, &projection)
+                .into_iter()
+                .find(|value| value.descriptor.field == PropertyFieldId::CoverageGuardSteps)
+                .expect("ALL route exposes document-base coverage authority");
+        let PropertyCurrentValueKind::U32(current) = coverage.value else {
+            panic!("coverage guard steps remain a whole-number descriptor")
+        };
+        let command = command_for_inspector_input(
+            draft.document(),
+            None,
+            DefinitionEditScope::DocumentBase,
+            &coverage.descriptor,
+            InspectorInput::U32(current.saturating_add(1)),
+        )
+        .expect("ALL structural input targets its private document-base definition");
+        assert!(matches!(
+            command,
+            DocumentCommand::EditSharedPatternDefinition { .. }
+        ));
+        draft
+            .apply(&command)
+            .expect("ALL structural private command applies without a selected channel");
+        assert_eq!(workspace.document(), &before_main);
+        assert!(!workspace.history.can_undo());
+        assert!(validate_wizard_review_recipe(
+            &before_main,
+            &before_main,
+            InspectorTarget::DocumentAll,
+        )
+        .is_err());
+    }
+
+    /// Proves completed wizard scalar edits retain the active card for natural Tab traversal.
+    ///
+    /// # Panics
+    ///
+    /// Panics when any numeric scalar starts rebuilding the card on commit, or when a structural
+    /// choice stops requesting capability-route recomputation.
+    #[test]
+    fn stage21b_wizard_numeric_completion_retains_card_while_choices_rebuild() {
+        assert!(!wizard_input_requires_route_rebuild(
+            &InspectorInput::FiniteF64(0.25)
+        ));
+        assert!(!wizard_input_requires_route_rebuild(&InspectorInput::U32(
+            3
+        )));
+        assert!(!wizard_input_requires_route_rebuild(
+            &InspectorInput::OptionalFiniteF64(Some(0.5))
+        ));
+        assert!(wizard_input_requires_route_rebuild(
+            &InspectorInput::Boolean(true)
+        ));
+        assert!(wizard_input_requires_route_rebuild(
+            &InspectorInput::EnumChoice(PropertyEnumChoice::RegionSampling(
+                toniator_domain::RegionSamplingStrategy::AreaAverage,
+            ))
+        ));
+    }
+
+    /// Covers every advertised enum choice through its direct, transition, or filter route.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a current built-in exposes an editable enum without a typed private command,
+    /// transition draft, or compatible site-use-filter proposal path.
+    #[test]
+    fn stage21b_every_advertised_enum_has_a_descriptor_owned_route() {
+        let workspace = direct_png_workspace();
+        let registry = PresetRegistry::bundled();
+        for entry in registry.entries() {
+            let mut draft = DocumentHistory::new_draft(&workspace.history);
+            registry
+                .apply_to_document_base(&mut draft, &entry.metadata.id)
+                .expect("built-in materializes for enum coverage");
+            let projection = draft
+                .document()
+                .pattern_capabilities(toniator_domain::PatternCapabilityScope::DocumentBase)
+                .expect("materialized built-in exposes document-base capabilities");
+            for value in
+                wizard_active_values(draft.document(), InspectorTarget::DocumentAll, &projection)
+            {
+                let PropertyCurrentValueKind::EnumChoice(current) = value.value else {
+                    continue;
+                };
+                for choice in value.descriptor.choices.iter().copied() {
+                    assert!(
+                        wizard_enum_is_editable(value.descriptor.field),
+                        "{} {:?} has an editable wizard route",
+                        entry.metadata.id,
+                        value.descriptor.field
+                    );
+                    if value.descriptor.field == PropertyFieldId::OutputSiteUseFilterKind {
+                        assert!(matches!(choice, PropertyEnumChoice::SiteUseFilter(_)));
+                        assert!(
+                            draft
+                                .document()
+                                .site_use_filter_targets(&value.descriptor)
+                                .is_ok(),
+                            "{} site-use selector advertises its compatible target route",
+                            entry.metadata.id
+                        );
+                        continue;
+                    }
+                    if choice == current {
+                        continue;
+                    }
+                    match draft
+                        .document()
+                        .variant_transition_draft(&value.descriptor, choice)
+                    {
+                        Ok(transition) => assert_eq!(transition.choice(), choice),
+                        Err(_) => {
+                            let command = command_for_inspector_input(
+                                draft.document(),
+                                None,
+                                DefinitionEditScope::DocumentBase,
+                                &value.descriptor,
+                                InspectorInput::EnumChoice(choice),
+                            );
+                            assert!(
+                                command.is_ok(),
+                                "{} {:?} has a direct C2a command route: {command:?}",
+                                entry.metadata.id,
+                                value.descriptor.field
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Proves reference controls, atomic filters, and painter moves preserve private history scope.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an active stable reference lacks domain-advertised choices, a stale or
+    /// out-of-range operation mutates a private draft, or ALL and named commands fail to retain
+    /// their distinct typed bundle boundaries.
+    #[test]
+    fn stage21b_c2bc_reference_filter_and_output_move_routes_are_private_and_atomic() {
+        let workspace = direct_png_workspace();
+        let before_main = workspace.document().clone();
+        let registry = PresetRegistry::bundled();
+
+        for entry in registry.entries() {
+            let mut draft = DocumentHistory::new_draft(&workspace.history);
+            registry
+                .apply_to_document_base(&mut draft, &entry.metadata.id)
+                .expect("built-in materializes for stable-reference coverage");
+            let projection = draft
+                .document()
+                .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+                .expect("materialized built-in exposes current capabilities");
+            for value in
+                wizard_active_values(draft.document(), InspectorTarget::DocumentAll, &projection)
+            {
+                assert!(
+                    wizard_current_value_is_editable(&value),
+                    "{} {:?} has a concrete editable route",
+                    entry.metadata.id,
+                    value.descriptor.field
+                );
+                match value.value {
+                    PropertyCurrentValueKind::Reference(current) => {
+                        let choices = if value.descriptor.field
+                            == PropertyFieldId::OutputSiteUseFilterReference
+                        {
+                            let selector = draft
+                                .document()
+                                .property_descriptors()
+                                .into_iter()
+                                .find(|descriptor| {
+                                    descriptor.field == PropertyFieldId::OutputSiteUseFilterKind
+                                        && descriptor.target == value.descriptor.target
+                                })
+                                .expect("dependent site-use reference retains its selector");
+                            draft
+                                .document()
+                                .site_use_filter_targets(&selector)
+                                .expect("site-use choices remain domain advertised")
+                        } else {
+                            wizard_reference_choices(draft.document(), &value.descriptor)
+                                .expect("singular reference choices remain domain advertised")
+                        };
+                        assert!(choices.contains(&current));
+                    }
+                    PropertyCurrentValueKind::ReferenceCollection(current) => {
+                        let choices = wizard_reference_choices(draft.document(), &value.descriptor)
+                            .expect("collection choices remain domain advertised");
+                        assert!(current.iter().all(|reference| choices.contains(reference)));
+                        assert!(
+                            current.iter().enumerate().all(|(index, reference)| {
+                                !current[index + 1..].contains(reference)
+                            }),
+                            "the editable collection begins unique"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut all_draft = DocumentHistory::new_draft(&workspace.history);
+        registry
+            .apply_to_document_base(&mut all_draft, "residual-sites-along-guide")
+            .expect("two-output filter fixture materializes");
+        let all_projection = all_draft
+            .document()
+            .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+            .expect("two-output fixture exposes current capabilities");
+        assert_eq!(all_projection.outputs.len(), 2);
+        let selector = all_draft
+            .document()
+            .property_values()
+            .into_iter()
+            .find_map(|value| match value.value {
+                PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SiteUseFilter(kind))
+                    if value.descriptor.field == PropertyFieldId::OutputSiteUseFilterKind
+                        && kind != SiteUseFilterKind::All
+                        && all_draft
+                            .document()
+                            .site_use_filter_targets(&value.descriptor)
+                            .is_ok_and(|targets| !targets.is_empty()) =>
+                {
+                    Some(value.descriptor)
+                }
+                _ => None,
+            })
+            .expect("residual output exposes a dependent filter selector with compatible outputs");
+        let target = all_draft
+            .document()
+            .site_use_filter_targets(&selector)
+            .expect("selector advertises compatible outputs")
+            .into_iter()
+            .find_map(|reference| match reference {
+                PropertyReferenceValue::OutputLayer(id) => Some(id),
+                _ => None,
+            })
+            .expect("residual filter has one compatible output target");
+        let command = wizard_site_use_filter_command(
+            all_draft.document(),
+            InspectorTarget::DocumentAll,
+            &selector,
+            SiteUseFilter::SitesUsedBy {
+                output_layer_id: target,
+            },
+        )
+        .expect("complete ALL filter forms one typed bundle command");
+        assert!(matches!(
+            command,
+            DocumentCommand::EditSharedPatternDefinitionBundle { .. }
+        ));
+        let before_filter = all_draft.document().clone();
+        let revision = all_draft.revision();
+        all_draft
+            .apply(&command)
+            .expect("compatible filter applies atomically");
+        assert_eq!(all_draft.revision().0, revision.0 + 1);
+        let after_filter = all_draft.document().clone();
+        all_draft
+            .undo()
+            .expect("filter Undo restores private draft");
+        assert_eq!(all_draft.document(), &before_filter);
+        all_draft
+            .redo()
+            .expect("filter Redo restores private filter");
+        assert_eq!(all_draft.document(), &after_filter);
+
+        let invalid_filter = wizard_site_use_filter_command(
+            all_draft.document(),
+            InspectorTarget::DocumentAll,
+            &selector,
+            SiteUseFilter::SitesUsedBy {
+                output_layer_id: PatternOutputLayerId(u64::MAX),
+            },
+        )
+        .expect("typed stale filter command remains constructible for domain validation");
+        let before_invalid_filter = all_draft.document().clone();
+        assert!(all_draft.apply(&invalid_filter).is_err());
+        assert_eq!(all_draft.document(), &before_invalid_filter);
+
+        let moved_output = all_projection.outputs[0].output_layer_id;
+        let move_command = wizard_output_move_command(
+            all_draft.document(),
+            InspectorTarget::DocumentAll,
+            moved_output,
+            1,
+        )
+        .expect("ALL painter move forms one typed bundle command");
+        let before_move = all_draft.document().clone();
+        let revision = all_draft.revision();
+        all_draft
+            .apply(&move_command)
+            .expect("in-bounds painter move applies");
+        assert_eq!(all_draft.revision().0, revision.0 + 1);
+        let after_move = all_draft.document().clone();
+        all_draft.undo().expect("painter move Undo restores order");
+        assert_eq!(all_draft.document(), &before_move);
+        all_draft.redo().expect("painter move Redo restores order");
+        assert_eq!(all_draft.document(), &after_move);
+        let out_of_range = wizard_output_move_command(
+            all_draft.document(),
+            InspectorTarget::DocumentAll,
+            moved_output,
+            2,
+        )
+        .expect("typed out-of-range move reaches domain validation");
+        let before_out_of_range = all_draft.document().clone();
+        assert!(all_draft.apply(&out_of_range).is_err());
+        assert_eq!(all_draft.document(), &before_out_of_range);
+
+        let channel = authoritative_channel_ids(workspace.document())[0];
+        let mut named_draft = DocumentHistory::new_draft(&workspace.history);
+        registry
+            .apply_to_selected(&mut named_draft, channel, "residual-sites-along-guide")
+            .expect("named two-output fixture materializes");
+        let named_selector = named_draft
+            .document()
+            .property_values()
+            .into_iter()
+            .find_map(|value| match value.value {
+                PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SiteUseFilter(kind))
+                    if value.descriptor.field == PropertyFieldId::OutputSiteUseFilterKind
+                        && kind != SiteUseFilterKind::All
+                        && named_draft
+                            .document()
+                            .site_use_filter_targets(&value.descriptor)
+                            .is_ok_and(|targets| !targets.is_empty()) =>
+                {
+                    Some(value.descriptor)
+                }
+                _ => None,
+            })
+            .expect("selected copy retains a dependent selector with compatible outputs");
+        let named_target = named_draft
+            .document()
+            .site_use_filter_targets(&named_selector)
+            .expect("selected copy retains compatible target choices")
+            .into_iter()
+            .find_map(|reference| match reference {
+                PropertyReferenceValue::OutputLayer(id) => Some(id),
+                _ => None,
+            })
+            .expect("selected copy has one compatible filter target");
+        let named_filter = wizard_site_use_filter_command(
+            named_draft.document(),
+            InspectorTarget::Channel(channel),
+            &named_selector,
+            SiteUseFilter::SitesUsedBy {
+                output_layer_id: named_target,
+            },
+        )
+        .expect("named filter forms a selected-copy bundle command");
+        assert!(matches!(
+            named_filter,
+            DocumentCommand::EditSelectedChannelPatternDefinitionBundle { .. }
+        ));
+        named_draft
+            .apply(&named_filter)
+            .expect("named filter applies through selected-copy behavior");
+        assert_eq!(workspace.document(), &before_main);
+    }
+
+    /// Proves optional phase state and a reference-bearing enum transition stay private and exact.
+    ///
+    /// # Panics
+    ///
+    /// Panics when optional finite values or a required orientation reference silently default,
+    /// fail to form one private command, or move main history during private Undo/Redo.
+    #[test]
+    fn stage21b_c2a_optional_and_compound_transition_history_are_exact() {
+        let workspace = direct_png_workspace();
+        let before_main = workspace.document().clone();
+        let registry = PresetRegistry::bundled();
+        let mut optional_draft = DocumentHistory::new_draft(&workspace.history);
+        registry
+            .apply_to_document_base(&mut optional_draft, "curve-motif-rows")
+            .expect("Curve Motif private fixture materializes");
+        let optional = optional_draft
+            .document()
+            .property_values()
+            .into_iter()
+            .find(|value| value.descriptor.field == PropertyFieldId::CurveMotifAlternateRowPhase)
+            .expect("Curve Motif exposes its optional phase");
+        assert!(matches!(
+            optional.value,
+            PropertyCurrentValueKind::OptionalFiniteF64(_)
+        ));
+        let PropertyCurrentValueKind::OptionalFiniteF64(current_phase) = optional.value else {
+            unreachable!("matched optional phase above")
+        };
+        let next_phase = match current_phase {
+            Some(value) if (value - 0.25).abs() > f64::EPSILON => 0.25,
+            _ => 0.5,
+        };
+        let command = command_for_inspector_input(
+            optional_draft.document(),
+            None,
+            DefinitionEditScope::DocumentBase,
+            &optional.descriptor,
+            InspectorInput::OptionalFiniteF64(Some(next_phase)),
+        )
+        .expect("enabled optional finite value has a typed ALL command");
+        let revision = optional_draft.revision();
+        optional_draft
+            .apply(&command)
+            .expect("optional phase applies once");
+        assert_eq!(optional_draft.revision().0, revision.0 + 1);
+        optional_draft
+            .undo()
+            .expect("optional phase private Undo succeeds");
+        optional_draft
+            .redo()
+            .expect("optional phase private Redo succeeds");
+
+        let mut all_draft = DocumentHistory::new_draft(&workspace.history);
+        registry
+            .apply_to_document_base(&mut all_draft, "straight-grid-circles")
+            .expect("mark orientation private fixture materializes");
+        let orientation = all_draft
+            .document()
+            .property_values()
+            .into_iter()
+            .find(|value| value.descriptor.field == PropertyFieldId::OutputOrientation)
+            .expect("mark output exposes orientation choice");
+        let PropertyCurrentValueKind::EnumChoice(current) = orientation.value else {
+            panic!("orientation remains an enum descriptor")
+        };
+        let guided = orientation
+            .descriptor
+            .choices
+            .iter()
+            .copied()
+            .find(|choice| {
+                *choice != current
+                    && matches!(
+                        choice,
+                        PropertyEnumChoice::MarkOrientation(
+                            MarkOrientationKind::GuideTangent | MarkOrientationKind::GuideNormal
+                        )
+                    )
+            })
+            .expect("orientation advertises a guided choice");
+        let transition = all_draft
+            .document()
+            .variant_transition_draft(&orientation.descriptor, guided)
+            .expect("guided orientation begins a domain transition");
+        assert!(
+            wizard_transition_command(
+                all_draft.document(),
+                InspectorTarget::DocumentAll,
+                &transition
+            )
+            .is_err(),
+            "required guide reference is not silently chosen"
+        );
+        let reference = transition
+            .fields()
+            .iter()
+            .find_map(|field| {
+                field
+                    .reference_choices
+                    .first()
+                    .cloned()
+                    .map(|value| (field, value))
+            })
+            .expect("fixture advertises a compatible guide dimension");
+        let transition = transition
+            .with_updates(&[VariantTransitionFieldUpdate {
+                field: reference.0.field,
+                target: reference.0.target,
+                value: VariantTransitionValue::StableReference(Some(reference.1)),
+            }])
+            .expect("chosen reference validates in the transition draft");
+        let command = wizard_transition_command(
+            all_draft.document(),
+            InspectorTarget::DocumentAll,
+            &transition,
+        )
+        .expect("complete ALL transition forms one shared command");
+        let revision = all_draft.revision();
+        all_draft
+            .apply(&command)
+            .expect("complete ALL transition applies once");
+        assert_eq!(all_draft.revision().0, revision.0 + 1);
+        all_draft.undo().expect("compound private Undo succeeds");
+        all_draft.redo().expect("compound private Redo succeeds");
+        assert_eq!(workspace.document(), &before_main);
+
+        let channel = authoritative_channel_ids(workspace.document())[0];
+        let mut named_draft = DocumentHistory::new_draft(&workspace.history);
+        registry
+            .apply_to_selected(&mut named_draft, channel, "straight-grid-circles")
+            .expect("named private fixture materializes");
+        let orientation = named_draft
+            .document()
+            .property_values()
+            .into_iter()
+            .find(|value| {
+                value.descriptor.field == PropertyFieldId::OutputOrientation
+                    && matches!(value.descriptor.target, PropertyTarget::OutputLayer(..))
+            })
+            .expect("named mark output exposes orientation choice");
+        let PropertyCurrentValueKind::EnumChoice(current) = orientation.value else {
+            panic!("named orientation remains an enum descriptor")
+        };
+        let guided = orientation
+            .descriptor
+            .choices
+            .iter()
+            .copied()
+            .find(|choice| {
+                *choice != current
+                    && matches!(
+                        choice,
+                        PropertyEnumChoice::MarkOrientation(
+                            MarkOrientationKind::GuideTangent | MarkOrientationKind::GuideNormal
+                        )
+                    )
+            })
+            .expect("named orientation advertises a guided choice");
+        let transition = named_draft
+            .document()
+            .variant_transition_draft(&orientation.descriptor, guided)
+            .expect("named guided orientation begins transition");
+        let reference = transition
+            .fields()
+            .iter()
+            .find_map(|field| {
+                field
+                    .reference_choices
+                    .first()
+                    .cloned()
+                    .map(|value| (field, value))
+            })
+            .expect("named fixture advertises a guide reference");
+        let transition = transition
+            .with_updates(&[VariantTransitionFieldUpdate {
+                field: reference.0.field,
+                target: reference.0.target,
+                value: VariantTransitionValue::StableReference(Some(reference.1)),
+            }])
+            .expect("named transition reference validates");
+        assert!(matches!(
+            wizard_transition_command(
+                named_draft.document(),
+                InspectorTarget::Channel(channel),
+                &transition,
+            )
+            .expect("complete named transition command"),
+            DocumentCommand::EditSelectedChannelPatternDefinition { .. }
+        ));
+    }
+
+    /// Proves Curve Motif's two direct controls form scoped typed commands and retain private history.
+    ///
+    /// # Panics
+    ///
+    /// Panics when either active Curve Motif direct descriptor cannot construct its authoritative
+    /// command, Mirror odd rows does not apply as exactly one ALL or named private entry, Undo
+    /// removes preset materialization instead of restoring the prior mirror value, or Redo cannot
+    /// reapply the false value without publishing the main history.
+    #[test]
+    fn stage21b_curve_motif_direct_controls_are_scoped_and_history_exact() {
+        let workspace = direct_png_workspace();
+        let before_main = workspace.document().clone();
+        let registry = PresetRegistry::bundled();
+
+        let mut all_draft = DocumentHistory::new_draft(&workspace.history);
+        registry
+            .apply_to_document_base(&mut all_draft, "curve-motif-rows")
+            .expect("Curve Motif ALL fixture materializes privately");
+        let after_all_materialize = all_draft.document().clone();
+        let all_mirror = all_draft
+            .document()
+            .property_values()
+            .into_iter()
+            .find(|value| value.descriptor.field == PropertyFieldId::CurveMotifMirrorAlternateRows)
+            .expect("Curve Motif exposes Mirror odd rows for ALL");
+        assert_eq!(all_mirror.value, PropertyCurrentValueKind::Boolean(true));
+        let all_mirror_command = command_for_inspector_input(
+            all_draft.document(),
+            None,
+            DefinitionEditScope::DocumentBase,
+            &all_mirror.descriptor,
+            InspectorInput::Boolean(false),
+        )
+        .expect("Mirror odd rows has a typed ALL command");
+        assert!(matches!(
+            &all_mirror_command,
+            DocumentCommand::EditSharedPatternDefinition {
+                edit: PatternDefinitionEdit::SetCurveMotifMirrorAlternateRows {
+                    mirror_alternate_rows: false,
+                    ..
+                },
+                ..
+            }
+        ));
+        let all_phase = all_draft
+            .document()
+            .property_values()
+            .into_iter()
+            .find(|value| value.descriptor.field == PropertyFieldId::CurveMotifAlternateRowPhase)
+            .expect("Curve Motif exposes Odd-row phase for ALL");
+        assert!(matches!(
+            command_for_inspector_input(
+                all_draft.document(),
+                None,
+                DefinitionEditScope::DocumentBase,
+                &all_phase.descriptor,
+                InspectorInput::OptionalFiniteF64(Some(0.5)),
+            ),
+            Ok(DocumentCommand::EditSharedPatternDefinition {
+                edit: PatternDefinitionEdit::SetCurveMotifAlternateRowPhase { .. },
+                ..
+            })
+        ));
+        let all_revision = all_draft.revision();
+        all_draft
+            .apply(&all_mirror_command)
+            .expect("Mirror odd rows applies once in the ALL draft");
+        assert_eq!(all_draft.revision().0, all_revision.0 + 1);
+        assert_eq!(
+            all_draft
+                .document()
+                .property_values()
+                .into_iter()
+                .find(|value| {
+                    value.descriptor.field == PropertyFieldId::CurveMotifMirrorAlternateRows
+                })
+                .expect("Mirror odd rows remains active after the ALL edit")
+                .value,
+            PropertyCurrentValueKind::Boolean(false)
+        );
+        let after_all_mirror = all_draft.document().clone();
+        all_draft
+            .undo()
+            .expect("ALL private Undo restores the materialized preset");
+        assert_eq!(all_draft.document(), &after_all_materialize);
+        all_draft
+            .redo()
+            .expect("ALL private Redo restores the mirror edit");
+        assert_eq!(all_draft.document(), &after_all_mirror);
+
+        let channel = authoritative_channel_ids(workspace.document())[0];
+        let mut named_draft = DocumentHistory::new_draft(&workspace.history);
+        registry
+            .apply_to_selected(&mut named_draft, channel, "curve-motif-rows")
+            .expect("Curve Motif named fixture materializes privately");
+        let after_named_materialize = named_draft.document().clone();
+        let named_mirror = named_draft
+            .document()
+            .property_values()
+            .into_iter()
+            .find(|value| value.descriptor.field == PropertyFieldId::CurveMotifMirrorAlternateRows)
+            .expect("Curve Motif exposes Mirror odd rows for the selected copy");
+        assert_eq!(named_mirror.value, PropertyCurrentValueKind::Boolean(true));
+        let named_mirror_command = command_for_inspector_input(
+            named_draft.document(),
+            Some(channel),
+            DefinitionEditScope::SelectedCopy,
+            &named_mirror.descriptor,
+            InspectorInput::Boolean(false),
+        )
+        .expect("Mirror odd rows has a typed selected-copy command");
+        assert!(matches!(
+            &named_mirror_command,
+            DocumentCommand::EditSelectedChannelPatternDefinition {
+                channel_id: command_channel,
+                edit: PatternDefinitionEdit::SetCurveMotifMirrorAlternateRows {
+                    mirror_alternate_rows: false,
+                    ..
+                },
+                ..
+            } if *command_channel == channel
+        ));
+        let named_phase = named_draft
+            .document()
+            .property_values()
+            .into_iter()
+            .find(|value| value.descriptor.field == PropertyFieldId::CurveMotifAlternateRowPhase)
+            .expect("Curve Motif exposes Odd-row phase for the selected copy");
+        assert!(matches!(
+            command_for_inspector_input(
+                named_draft.document(),
+                Some(channel),
+                DefinitionEditScope::SelectedCopy,
+                &named_phase.descriptor,
+                InspectorInput::OptionalFiniteF64(Some(0.5)),
+            ),
+            Ok(DocumentCommand::EditSelectedChannelPatternDefinition {
+                channel_id,
+                edit: PatternDefinitionEdit::SetCurveMotifAlternateRowPhase { .. },
+                ..
+            }) if channel_id == channel
+        ));
+        let named_revision = named_draft.revision();
+        named_draft
+            .apply(&named_mirror_command)
+            .expect("Mirror odd rows applies once in the selected-copy draft");
+        assert_eq!(named_draft.revision().0, named_revision.0 + 1);
+        let after_named_mirror = named_draft.document().clone();
+        named_draft
+            .undo()
+            .expect("named private Undo restores the materialized preset");
+        assert_eq!(named_draft.document(), &after_named_materialize);
+        named_draft
+            .redo()
+            .expect("named private Redo restores the mirror edit");
+        assert_eq!(named_draft.document(), &after_named_mirror);
+        assert_eq!(workspace.document(), &before_main);
+        assert!(!workspace.history.can_undo());
+    }
+
     /// Checks compiled wizard templates retain the static-preview slot and accessible card controls.
     ///
     /// This headless resource assertion checks semantic structure only. It does not claim human
@@ -14154,13 +25081,33 @@ mod tests {
         let controls = wizard
             .find("id=\"wizard_controls\"")
             .expect("dynamic controls slot remains explicit");
+        let controls_scroll = wizard
+            .find("id=\"wizard_controls_scroll\"")
+            .expect("fixed-card controls have a bounded scrolling viewport");
         let preview = wizard
             .find("id=\"wizard_preview\"")
             .expect("private preview remains explicit");
+        let preview_viewport = wizard
+            .find("id=\"wizard_preview_viewport\"")
+            .expect("private preview retains a fixed viewport");
+        let preview_frame = wizard
+            .find("id=\"wizard_preview_frame\"")
+            .expect("private preview retains a fixed allocation frame");
         let spinner = wizard
             .find("id=\"wizard_spinner\"")
             .expect("private preview spinner remains explicit");
-        assert!(controls < preview && preview < spinner);
+        assert!(
+            preview_viewport < preview_frame
+                && preview_frame < preview
+                && preview < spinner
+                && spinner < controls_scroll
+                && controls_scroll < controls
+        );
+        assert!(
+            wizard[preview_viewport..preview_frame]
+                .contains("<property name=\"height-request\">200"),
+            "the preview frame retains its fixed 200px allocation ahead of settings"
+        );
         let gallery_heading = wizard
             .find("id=\"wizard_gallery_heading\"")
             .expect("gallery scroll content has a heading");
@@ -14174,6 +25121,11 @@ mod tests {
             gallery_heading < gallery_instruction && gallery_instruction < cards,
             "narrow scroll content presents gallery context before card list"
         );
+        assert!(
+            wizard[cards..].contains("max-children-per-line\">3")
+                && !wizard[cards..].contains("homogeneous"),
+            "wide Presets FlowBox leaves child sizing bounded instead of stretching one full-width column"
+        );
 
         let card = gio::resources_lookup_data(
             "/com/silentbutdigital/Toniator/pattern-wizard-card.ui",
@@ -14181,6 +25133,10 @@ mod tests {
         )
         .expect("compiled Pattern Wizard card template is registered");
         let card = std::str::from_utf8(card.as_ref()).expect("card template is UTF-8");
+        assert!(
+            card.contains("width-request") && !card.contains("hexpand"),
+            "preset cards retain bounded responsive widths"
+        );
         for id in [
             "wizard_card_thumbnail",
             "wizard_card_name",
@@ -14188,19 +25144,15 @@ mod tests {
             "wizard_card_current_candidate",
             "wizard_card_description",
             "wizard_card_unavailable",
-            "wizard_card_actions",
         ] {
             assert!(
                 card.contains(id),
                 "card retains {id} for accessible projection"
             );
         }
-        let actions = card
-            .find("id=\"wizard_card_actions\"")
-            .expect("card action slot remains explicit");
         assert!(
-            card[actions..].contains("<property name=\"orientation\">1</property>"),
-            "card action column preserves usable full unique action labels at 255px gallery width"
+            !card.contains("wizard_card_actions"),
+            "preset selection keeps all actions in the common wizard footer"
         );
         assert!(
             card.contains("Current candidate"),
@@ -14208,10 +25160,10 @@ mod tests {
         );
     }
 
-    /// Builds bounded wizard proxies for both immutable still-image formats without full-source fallback.
+    /// Builds neutral wizard sources for both immutable still-image formats without live-artwork fallback.
     ///
     /// This test reads current source bundles only and verifies the helper preserves each stable
-    /// source ID while enforcing the 256-pixel longest-edge private-preview bound.
+    /// source ID while using the exact bundled 100×100 SVG bytes for every page.
     #[test]
     fn stage21b_wizard_proxy_bounds_png_and_svg_sources() {
         for input in ["raster-sample.toniator", "vector-sample.toniator"] {
@@ -14220,27 +25172,608 @@ mod tests {
                 &workspace.sources,
                 workspace.source_presentation.as_ref(),
             );
-            let WizardPreviewSource::Ready {
-                source,
-                width,
-                height,
-            } = proxy
-            else {
+            let WizardPreviewSource::Ready { source } = proxy else {
                 panic!("{input} must build a private wizard proxy")
             };
-            assert!(width.max(height) <= WIZARD_SOURCE_PROXY_LONGEST_EDGE);
+            assert_eq!(WIZARD_NEUTRAL_SOURCE_EDGE_PX, 100);
             assert_eq!(
                 source.reference_id(),
                 &workspace.source_presentation.unwrap().id
             );
+            let resource = gio::resources_lookup_data(
+                "/com/silentbutdigital/Toniator/preset-icon-source.svg",
+                gio::ResourceLookupFlags::NONE,
+            )
+            .expect("neutral wizard source resource is registered");
+            assert_eq!(source.bytes(), resource.as_ref());
+            assert_eq!(source.format(), SourceFormatHint::Svg);
         }
     }
 
-    /// Writes native RGBA private-preview artifacts for both immutable input assets on explicit request.
+    /// Proves neutral preview scope selects ALL base authority or the captured named override.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an ALL preview leaks the first visible channel's selected-copy recipe or when a
+    /// named preview stops using that channel's effective definition and capability-bounded canvas.
+    #[test]
+    fn stage21b_neutral_preview_respects_all_and_named_recipe_scope() {
+        let workspace = direct_png_workspace();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        let registry = PresetRegistry::bundled();
+        registry
+            .apply_to_document_base(&mut draft, "clustered-dispersion-random-links")
+            .expect("connection base materializes");
+        let channel = authoritative_channel_ids(draft.document())[0];
+        registry
+            .apply_to_selected(&mut draft, channel, "straight-grid-circles")
+            .expect("named mark override materializes");
+        let base_definition = draft.document().pattern_settings().definition_id;
+        let named_definition = draft
+            .document()
+            .effective_channel_pattern(channel)
+            .expect("named override resolves")
+            .definition_id;
+        assert_ne!(base_definition, named_definition);
+
+        let all = wizard_preview_document(draft.document(), InspectorTarget::DocumentAll)
+            .expect("ALL neutral projection validates");
+        assert_eq!(
+            all.effective_channel_pattern(channel)
+                .expect("ALL preview channel resolves")
+                .definition_id,
+            base_definition,
+        );
+        assert_eq!(
+            all.canvas().width.max(all.canvas().height),
+            WIZARD_PREVIEW_CANVAS_LONGEST_EDGE,
+        );
+
+        let named = wizard_preview_document(draft.document(), InspectorTarget::Channel(channel))
+            .expect("named neutral projection validates");
+        assert_eq!(
+            named
+                .effective_channel_pattern(channel)
+                .expect("named preview channel resolves")
+                .definition_id,
+            named_definition,
+        );
+        assert_eq!(
+            named.canvas().width.max(named.canvas().height),
+            f64::from(WIZARD_NEUTRAL_SOURCE_EDGE_PX),
+        );
+    }
+
+    /// Proves preview scaling preserves a valid Guide/Curve-Motif resource alias by use.
+    ///
+    /// The wizard draft retains one exact shared open path. Only the disposable smaller-canvas
+    /// projection allocates a scaled copy and retargets Guide consumers to it; the Motif consumer
+    /// keeps the original tile-local payload and stable draft resource identity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the mixed-use recipe cannot materialize, the preview does not split the two
+    /// coordinate spaces, either projected payload changes incorrectly, or the draft is mutated.
+    #[test]
+    fn stage21b_preview_splits_mixed_guide_motif_alias_without_changing_draft() {
+        let workspace = direct_png_workspace();
+        let resource = AuthoredStructureDraft::new(
+            AuthoredStructureKind::OpenPath,
+            vec![AuthoredCurveSegment::Line {
+                start: AuthoredPoint2 { x: 0.0, y: 0.0 },
+                end: AuthoredPoint2 { x: 1.0, y: 0.0 },
+            }],
+        )
+        .expect("canonical shared open path validates");
+        let recipe = PatternDefinitionRecipe {
+            structure: PatternStructureRecipe::AuthoredResources {
+                resources: vec![resource],
+                definition: Box::new(PatternStructureRecipe::CurveMotifPaths {
+                    definition: Box::new(PatternStructureRecipe::GenericGuides {
+                        name: "Shared guide motif preview".into(),
+                        coverage: CoveragePolicy {
+                            guard_steps: 1,
+                            additional_margin: 0.0,
+                        },
+                        dimensions: vec![GenericGuideDimensionDraft {
+                            baseline_angle_degrees: 0.0,
+                            phase: 0.0,
+                            prototype: GenericGuidePrototypeDraft::AuthoredOpenPathReference {
+                                resource_index: 0,
+                            },
+                            repetition: CurveRepetition::TransformStack {
+                                direction_degrees: 90.0,
+                                spacing_multiplier: 1.0,
+                            },
+                        }],
+                        product: GeneralizedSiteProductDraft::AlongGuides {
+                            dimension_indices: vec![0],
+                            interval_multiplier: 1.0,
+                            phase: 0.0,
+                        },
+                        orientation: MarkOrientationDraft::Fixed,
+                    }),
+                    resource_index: 0,
+                    style: PathStrokeStyle::default(),
+                    mirror_alternate_rows: false,
+                    alternate_row_phase: None,
+                }),
+            },
+            output_settings: vec![PatternOutputSettingsRecipe {
+                source_filter: SiteUseFilterRecipe::All,
+                response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                    minimum_thickness: 0.0,
+                    maximum_thickness: 1.0,
+                    bias: 0.0,
+                }),
+            }],
+        };
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        apply_wizard_recipe(&mut draft, InspectorTarget::DocumentAll, recipe)
+            .expect("mixed Guide/Motif recipe materializes privately");
+        let draft_before = draft.document().clone();
+        let original_uses = draft.document().authored_structure_uses();
+        let original_guide = original_uses
+            .iter()
+            .find_map(|use_value| match use_value {
+                AuthoredStructureUse::Guide { structure_id, .. } => Some(*structure_id),
+                _ => None,
+            })
+            .expect("draft exposes the shared Guide use");
+        let original_motif = original_uses
+            .iter()
+            .find_map(|use_value| match use_value {
+                AuthoredStructureUse::Motif { structure_id, .. } => Some(*structure_id),
+                _ => None,
+            })
+            .expect("draft exposes the shared Motif use");
+        assert_eq!(original_guide, original_motif);
+
+        let projection = wizard_preview_canvas_document(
+            draft.document(),
+            f64::from(WIZARD_NEUTRAL_SOURCE_EDGE_PX),
+        )
+        .expect("mixed-use preview projection validates");
+        let projected_uses = projection.authored_structure_uses();
+        let projected_guide = projected_uses
+            .iter()
+            .find_map(|use_value| match use_value {
+                AuthoredStructureUse::Guide { structure_id, .. } => Some(*structure_id),
+                _ => None,
+            })
+            .expect("projection exposes the scaled Guide use");
+        let projected_motif = projected_uses
+            .iter()
+            .find_map(|use_value| match use_value {
+                AuthoredStructureUse::Motif { structure_id, .. } => Some(*structure_id),
+                _ => None,
+            })
+            .expect("projection exposes the original Motif use");
+        assert_ne!(projected_guide, projected_motif);
+        assert_eq!(projected_motif, original_motif);
+        assert_eq!(projection.authored_structures().len(), 2);
+        assert_eq!(
+            projection
+                .authored_structure(projected_motif)
+                .expect("projected Motif resource resolves")
+                .segments(),
+            &[AuthoredCurveSegment::Line {
+                start: AuthoredPoint2 { x: 0.0, y: 0.0 },
+                end: AuthoredPoint2 { x: 1.0, y: 0.0 },
+            }]
+        );
+        assert_eq!(
+            projection
+                .authored_structure(projected_guide)
+                .expect("projected Guide resource resolves")
+                .segments(),
+            &[AuthoredCurveSegment::Line {
+                start: AuthoredPoint2 { x: 0.0, y: 0.0 },
+                end: AuthoredPoint2 {
+                    x: f64::from(WIZARD_NEUTRAL_SOURCE_EDGE_PX) / draft.document().canvas().width,
+                    y: 0.0,
+                },
+            }]
+        );
+        assert_eq!(draft.document(), &draft_before);
+    }
+
+    /// Evaluates curved one- and two-guide New recipes with both repetition constructions.
+    ///
+    /// The witness replaces the first centered guide line with an asymmetric cubic matching an
+    /// ordinary one-terminal-handle edit, then uses the same private materialization and
+    /// neutral-preview evaluator as the running wizard. It proves both artist-facing `Stacked
+    /// copies` and `Constant-gap copies` choices remain usable for one- and two-guide families,
+    /// including terminal cusp cleanup, without publishing the draft into main history.
+    ///
+    /// # Panics
+    ///
+    /// Panics when conversion loses its root resource table or guide dimensions, when either
+    /// repetition cannot materialize, or when the evaluated preview has no visible alpha.
+    #[test]
+    fn stage21b_new_curved_one_and_two_guide_repetitions_render_visible_previews() {
+        register_resources();
+        let workspace = direct_png_workspace();
+        let WizardPreviewSource::Ready { source } = prepare_wizard_preview_source(
+            &workspace.sources,
+            workspace.source_presentation.as_ref(),
+        ) else {
+            panic!("direct PNG workspace has the registered neutral wizard source")
+        };
+        let frame = workspace.document().canvas().clone();
+        for count in [1, 2] {
+            for (name, repetition) in [
+                (
+                    "stacked",
+                    CurveRepetition::TransformStack {
+                        direction_degrees: 90.0,
+                        spacing_multiplier: 1.0,
+                    },
+                ),
+                (
+                    "constant-gap",
+                    CurveRepetition::NormalOffset {
+                        spacing: 16.0,
+                        cleanup: OffsetCleanup::DissolveCrossings,
+                    },
+                ),
+            ] {
+                let mut recipe =
+                    PatternDefinitionRecipe::starter_for_family(PatternRecipeFamilyKind::Guides)
+                        .with_guide_dimension_count(count)
+                        .expect("New Guides accepts one or two directions")
+                        .with_editable_guide_paths(frame.clone())
+                        .expect("one or two straight guides convert to authored paths");
+                let PatternStructureRecipe::AuthoredResources {
+                    resources,
+                    definition,
+                } = &mut recipe.structure
+                else {
+                    panic!("editable guides retain one root authored-resource table")
+                };
+                resources[0] = AuthoredStructureDraft::new(
+                    AuthoredStructureKind::OpenPath,
+                    vec![AuthoredCurveSegment::CubicBezier {
+                        start: AuthoredPoint2 {
+                            x: frame.width * -0.5,
+                            y: 0.0,
+                        },
+                        control_1: AuthoredPoint2 {
+                            x: frame.width / -6.0,
+                            y: frame.height * -0.18,
+                        },
+                        control_2: AuthoredPoint2 {
+                            x: frame.width / 6.0,
+                            y: 0.0,
+                        },
+                        end: AuthoredPoint2 {
+                            x: frame.width * 0.5,
+                            y: 0.0,
+                        },
+                    }],
+                )
+                .expect("the visibly curved open guide remains valid");
+                let PatternStructureRecipe::OrderedOutputs { definition, .. } = definition.as_mut()
+                else {
+                    panic!("editable New guides retain explicit painter order")
+                };
+                let PatternStructureRecipe::GenericGuides { dimensions, .. } = definition.as_mut()
+                else {
+                    panic!("editable New guides retain generic guide dimensions")
+                };
+                for dimension in dimensions {
+                    dimension.repetition = repetition.clone();
+                }
+
+                let mut draft = DocumentHistory::new_draft(&workspace.history);
+                apply_wizard_recipe(&mut draft, InspectorTarget::DocumentAll, recipe)
+                    .unwrap_or_else(|error| {
+                        panic!("{count}-guide {name} curve materializes privately: {error}")
+                    });
+                let projection =
+                    wizard_preview_document(draft.document(), InspectorTarget::DocumentAll)
+                        .unwrap_or_else(|error| {
+                            panic!("{count}-guide {name} curve projects for preview: {error}")
+                        });
+                let result = evaluate_with_limits(
+                    EvaluationRequest::with_preview_target(
+                        DocumentSession::new(projection)
+                            .expect("curved guide preview remains session-valid")
+                            .document_evaluation_snapshot(),
+                        source.clone(),
+                        toniator_engine::PreviewRasterTarget::new(
+                            WIZARD_PREVIEW_TARGET_PX,
+                            WIZARD_PREVIEW_TARGET_PX,
+                        )
+                        .expect("fixed neutral preview target remains valid"),
+                    ),
+                    EvaluationLimits::default(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{count}-guide {name} curve preview evaluates: {error}")
+                });
+                assert!(
+                    result
+                        .raster()
+                        .pixels()
+                        .chunks_exact(4)
+                        .any(|pixel| pixel[3] != 0),
+                    "{count}-guide {name} curve preview has visible alpha",
+                );
+            }
+        }
+    }
+
+    /// Evaluates the literal New dispersion-to-Voronoi topology against the wizard's neutral source.
+    ///
+    /// Both the domain default Luminance component and the reviewer's observed Magenta selection
+    /// must produce visible regions. This isolates preview correctness from GTK selection and never
+    /// publishes the private recipe into main history.
+    ///
+    /// # Panics
+    ///
+    /// Panics when either valid artwork-weight component cannot materialize, evaluate, or produce
+    /// visible alpha through the same bounded neutral preview used by the running wizard.
+    #[test]
+    fn stage21b_new_source_weighted_voronoi_has_a_visible_neutral_preview() {
+        register_resources();
+        let workspace = direct_png_workspace();
+        let WizardPreviewSource::Ready { source } = prepare_wizard_preview_source(
+            &workspace.sources,
+            workspace.source_presentation.as_ref(),
+        ) else {
+            panic!("direct PNG workspace has the registered neutral wizard source")
+        };
+        for component in [
+            SourceMappingComponent::Luminance,
+            SourceMappingComponent::Magenta,
+        ] {
+            let mut recipe =
+                PatternDefinitionRecipe::starter_for_family(PatternRecipeFamilyKind::Dispersion);
+            let PatternStructureRecipe::RandomSites {
+                density_modulation, ..
+            } = &mut recipe.structure
+            else {
+                panic!("New dispersion starts from one random-site family")
+            };
+            *density_modulation = SiteDensityModulation::ArtworkWeighted {
+                mapping: SourceMapping::canonical(component),
+                strength: 1.0,
+                response: ArtworkWeightResponse::Linear,
+            };
+            recipe = recipe
+                .with_output_kind(0, PatternRecipeOutputKind::VoronoiRegions)
+                .expect("New dispersion can draw Voronoi regions");
+            let mut draft = DocumentHistory::new_draft(&workspace.history);
+            apply_wizard_recipe(&mut draft, InspectorTarget::DocumentAll, recipe)
+                .expect("New source-weighted Voronoi materializes privately");
+            let projection =
+                wizard_preview_document(draft.document(), InspectorTarget::DocumentAll)
+                    .expect("source-weighted Voronoi projects onto the neutral preview canvas");
+            let result = evaluate_with_limits(
+                EvaluationRequest::with_preview_target(
+                    DocumentSession::new(projection)
+                        .expect("neutral projection remains session-valid")
+                        .document_evaluation_snapshot(),
+                    source.clone(),
+                    toniator_engine::PreviewRasterTarget::new(
+                        WIZARD_PREVIEW_TARGET_PX,
+                        WIZARD_PREVIEW_TARGET_PX,
+                    )
+                    .expect("fixed neutral preview target remains valid"),
+                ),
+                EvaluationLimits::default(),
+            )
+            .unwrap_or_else(|error| panic!("{component:?} Voronoi preview evaluates: {error}"));
+            assert!(
+                result
+                    .raster()
+                    .pixels()
+                    .chunks_exact(4)
+                    .any(|pixel| pixel[3] != 0),
+                "{component:?} Voronoi preview has visible alpha",
+            );
+        }
+    }
+
+    /// Evaluates every output offered after the literal New three-guide intersection sequence.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the locked triangular family cannot materialize or when any advertised marks,
+    /// shapes, paths, connections, maze, Voronoi, or guide-cell output fails to render visible
+    /// alpha through the same neutral preview used by the wizard.
+    #[test]
+    fn stage21b_new_three_guide_intersection_outputs_render_visible_previews() {
+        register_resources();
+        let workspace = direct_png_workspace();
+        let WizardPreviewSource::Ready { source } = prepare_wizard_preview_source(
+            &workspace.sources,
+            workspace.source_presentation.as_ref(),
+        ) else {
+            panic!("direct PNG workspace has the registered neutral wizard source")
+        };
+        let family = PatternDefinitionRecipe::starter_for_family(PatternRecipeFamilyKind::Guides)
+            .with_guide_dimension_count(3)
+            .expect("New guide family grows to three directions")
+            .with_site_generation_kind(PatternRecipeSiteGenerationKind::GuideIntersections)
+            .expect("New three-guide family creates locked intersections");
+        assert!(family.has_locked_triangular_intersection_layout());
+        for kind in [
+            PatternRecipeOutputKind::Marks,
+            PatternRecipeOutputKind::CustomShapeMarks,
+            PatternRecipeOutputKind::StructuralPaths,
+            PatternRecipeOutputKind::Connections,
+            PatternRecipeOutputKind::Maze,
+            PatternRecipeOutputKind::VoronoiRegions,
+            PatternRecipeOutputKind::GuideFaceRegions,
+        ] {
+            let recipe = family
+                .with_output_kind(0, kind)
+                .unwrap_or_else(|error| panic!("{kind:?} remains an advertised output: {error}"));
+            let mut draft = DocumentHistory::new_draft(&workspace.history);
+            apply_wizard_recipe(&mut draft, InspectorTarget::DocumentAll, recipe)
+                .unwrap_or_else(|error| panic!("{kind:?} materializes privately: {error}"));
+            let projection =
+                wizard_preview_document(draft.document(), InspectorTarget::DocumentAll)
+                    .unwrap_or_else(|error| panic!("{kind:?} projects for preview: {error}"));
+            let result = evaluate_with_limits(
+                EvaluationRequest::with_preview_target(
+                    DocumentSession::new(projection)
+                        .expect("neutral projection remains session-valid")
+                        .document_evaluation_snapshot(),
+                    source.clone(),
+                    toniator_engine::PreviewRasterTarget::new(
+                        WIZARD_PREVIEW_TARGET_PX,
+                        WIZARD_PREVIEW_TARGET_PX,
+                    )
+                    .expect("fixed neutral preview target remains valid"),
+                ),
+                EvaluationLimits::default(),
+            )
+            .unwrap_or_else(|error| panic!("{kind:?} neutral preview evaluates: {error}"));
+            assert!(
+                result
+                    .raster()
+                    .pixels()
+                    .chunks_exact(4)
+                    .any(|pixel| pixel[3] != 0),
+                "{kind:?} neutral preview has visible alpha",
+            );
+        }
+    }
+
+    /// Exercises every catalog recipe through the same neutral, one-channel Wizard preview path.
+    ///
+    /// The smoke check deliberately iterates catalog entries instead of dispatching by preset
+    /// identity, materializes each recipe privately, applies the density-bounded neutral projection,
+    /// and prints elapsed time plus raw-alpha coverage under `--nocapture`. It has no flaky timing
+    /// threshold and does not alter a workspace, preset, personal library, or immutable asset.
+    #[test]
+    #[ignore = "runs the explicit all-17 neutral-preview performance smoke under --ignored --nocapture"]
+    fn stage21b_neutral_preview_smoke_benchmarks_every_catalog_entry() {
+        register_resources();
+        let resource = gio::resources_lookup_data(
+            "/com/silentbutdigital/Toniator/preset-icon-source.svg",
+            gio::ResourceLookupFlags::NONE,
+        )
+        .expect("neutral preview source is registered");
+        let source_id = SourceReferenceId::new("wizard-neutral-smoke")
+            .expect("fixed neutral source ID remains valid");
+        let source = ResolvedSource::new(
+            source_id.clone(),
+            Arc::<[u8]>::from(resource.as_ref()),
+            SourceFormatHint::Svg,
+        )
+        .expect("registered neutral SVG is an evaluable source");
+        let catalog = LayeredPresetCatalog::new(&PresetRegistry::bundled(), Vec::new())
+            .expect("bundled catalog remains valid");
+        let mut exercised = 0usize;
+        let mut coverage = Vec::new();
+        for entry in catalog.entries() {
+            let document = Document::new_default_document(
+                CanvasSpec {
+                    width: 100.0,
+                    height: 100.0,
+                },
+                SourceReference::Assigned(source_id.clone()),
+            )
+            .expect("neutral smoke document validates");
+            let mut draft = DocumentHistory::new(
+                DocumentSession::new(document).expect("neutral smoke session validates"),
+            );
+            catalog
+                .apply_to_document_base(&mut draft, &entry.preset.metadata.id)
+                .expect("every bundled recipe materializes in a neutral private draft");
+            let projection =
+                wizard_preview_document(draft.document(), InspectorTarget::DocumentAll)
+                    .expect("one-channel neutral projection validates");
+            let connection_backed = draft
+                .document()
+                .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+                .expect("neutral smoke recipe projects capabilities")
+                .outputs
+                .iter()
+                .any(|output| {
+                    matches!(
+                        output.structural,
+                        PatternOutputCapabilityProjection::ConnectionPaths(_)
+                    )
+                });
+            let expected_edge = if connection_backed {
+                WIZARD_PREVIEW_CANVAS_LONGEST_EDGE
+            } else {
+                f64::from(WIZARD_NEUTRAL_SOURCE_EDGE_PX)
+            };
+            assert_eq!(
+                (projection.canvas().width, projection.canvas().height),
+                (expected_edge, expected_edge),
+                "{} uses its capability-bounded neutral canvas before topology work",
+                entry.preset.metadata.id,
+            );
+            let visible = authoritative_channel_ids(&projection)[0];
+            let projected_density = projection
+                .effective_channel_pattern(visible)
+                .expect("neutral preview channel remains effective")
+                .density
+                .density;
+            eprintln!(
+                "neutral-preview {}: start density={projected_density}",
+                entry.preset.metadata.id,
+            );
+            let started = Instant::now();
+            let result = evaluate_with_limits(
+                EvaluationRequest::with_preview_target(
+                    DocumentSession::new(projection)
+                        .expect("neutral preview projection remains session-valid")
+                        .document_evaluation_snapshot(),
+                    source.clone(),
+                    toniator_engine::PreviewRasterTarget::new(
+                        WIZARD_PREVIEW_TARGET_PX,
+                        WIZARD_PREVIEW_TARGET_PX,
+                    )
+                    .expect("fixed neutral preview target remains valid"),
+                ),
+                EvaluationLimits::default(),
+            )
+            .expect("bundled recipe realizes through neutral preview evaluation");
+            let alpha_pixels = result
+                .raster()
+                .pixels()
+                .chunks_exact(4)
+                .filter(|pixel| pixel[3] != 0)
+                .count();
+            eprintln!(
+                "neutral-preview {}: {:?}, {}x{}, alpha_pixels={alpha_pixels}",
+                entry.preset.metadata.id,
+                started.elapsed(),
+                result.raster().width(),
+                result.raster().height(),
+            );
+            assert_eq!(result.raster().width(), WIZARD_PREVIEW_TARGET_PX);
+            assert_eq!(result.raster().height(), WIZARD_PREVIEW_TARGET_PX);
+            assert!(
+                alpha_pixels > 0,
+                "{} must produce visible neutral-preview output",
+                entry.preset.metadata.id,
+            );
+            coverage.push(alpha_pixels);
+            exercised += 1;
+        }
+        assert_eq!(exercised, 17, "all bundled catalog entries are exercised");
+        let minimum = *coverage.iter().min().expect("catalog coverage is nonempty");
+        let maximum = *coverage.iter().max().expect("catalog coverage is nonempty");
+        assert!(
+            maximum <= minimum * 4,
+            "neutral-preview visible geometry stays within one practical order of magnitude: {minimum}..={maximum}",
+        );
+    }
+
+    /// Writes native RGBA neutral-preview artifacts for both immutable input assets on explicit request.
     ///
     /// This ignored generator is the same Gate 21B-2 path used by the modal: it creates a direct
-    /// source-backed workspace, clones a private draft, reduces the source to the 256px proxy, and
-    /// renders the fixed 512×512 target through the ordinary evaluator. It writes only new-stage
+    /// source-backed workspace, clones a private draft, replaces live artwork with the neutral
+    /// SVG, and renders the fixed 256×256 target through the ordinary evaluator. It writes only new-stage
     /// `target/validation/stage21b-gate2` PNG outputs without flattening or compositing source alpha.
     #[test]
     #[ignore = "writes Gate 21B-2 native RGBA validation artifacts on explicit request"]
@@ -14259,18 +25792,13 @@ mod tests {
                 input.to_owned(),
             )
             .expect("immutable validation input creates current workspace");
-            let WizardPreviewSource::Ready {
-                source,
-                width,
-                height,
-            } = prepare_wizard_preview_source(
+            let WizardPreviewSource::Ready { source } = prepare_wizard_preview_source(
                 &workspace.sources,
                 workspace.source_presentation.as_ref(),
-            )
-            else {
+            ) else {
                 panic!("{input} must build a bounded private wizard proxy")
             };
-            assert!(width.max(height) <= WIZARD_SOURCE_PROXY_LONGEST_EDGE);
+            assert_eq!(WIZARD_NEUTRAL_SOURCE_EDGE_PX, 100);
             let draft = DocumentHistory::new_draft(&workspace.history);
             let target = toniator_engine::PreviewRasterTarget::new(
                 WIZARD_PREVIEW_TARGET_PX,
@@ -14300,6 +25828,208 @@ mod tests {
             )
             .expect("native RGBA private preview artifact writes");
         }
+    }
+
+    /// Writes intrinsic Gate 21B-3 private-Apply PNG, SVG, and SVG-scene raster artifacts.
+    ///
+    /// The ignored generator uses only the immutable direct-source inputs, chooses the current
+    /// Curve Motif registry record by its stable catalog ID, and performs one additional active
+    /// `CoverageAdditionalMargin` descriptor command in the private ALL draft. Recipe
+    /// reconstruction is the Review-equivalent admission witness; one successful draft squash is
+    /// the sole main-history publication. Derived files and their ID-free manifest stay under
+    /// `target/validation/stage21b-gate3` and never write either input or a personal library.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an immutable source does not decode at its prescribed intrinsic dimensions, the
+    /// current Curve Motif recipe does not materialize/reconstruct, the ordinary descriptor edit
+    /// cannot apply as one private entry, publication is not exactly one main revision, or an
+    /// exported transparent PNG/SVG/rasterized SVG scene does not retain its exact canvas bounds.
+    #[test]
+    #[ignore = "writes Gate 21B-3 intrinsic private-Apply validation artifacts on explicit request"]
+    fn stage21b_gate3_intrinsic_private_apply_validation_artifacts() {
+        let output_directory =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/validation/stage21b-gate3");
+        fs::create_dir_all(&output_directory)
+            .expect("Gate 21B-3 validation directory is creatable");
+        let registry = PresetRegistry::bundled();
+        let preset_id = "curve-motif-rows";
+        assert!(
+            registry.find(preset_id).is_some(),
+            "the current registry retains the capability-backed Curve Motif record"
+        );
+        let mut manifest_entries = Vec::new();
+
+        for (input, format, width, height) in [
+            ("raster-sample.png", SourceFormatHint::Png, 1024, 1024),
+            ("vector-sample.svg", SourceFormatHint::Svg, 900, 620),
+        ] {
+            let source_bytes = fs::read(asset(input)).expect("immutable validation input reads");
+            let source_identity = resolve_source_identity(&source_bytes, format)
+                .expect("immutable validation input decodes through the source authority");
+            assert_eq!(
+                (source_identity.width, source_identity.height),
+                (width, height)
+            );
+            let mut workspace =
+                Workspace::from_direct(Arc::from(source_bytes), format, input.to_owned())
+                    .expect("immutable validation input creates a current direct workspace");
+            let main_revision_before = workspace.history.revision().0;
+            let mut draft = DocumentHistory::new_draft(&workspace.history);
+            registry
+                .apply_to_document_base(&mut draft, preset_id)
+                .expect("current Curve Motif record materializes in the private ALL draft");
+            let descriptor_value = draft
+                .document()
+                .property_values()
+                .into_iter()
+                .find(|value| {
+                    value.descriptor.field == PropertyFieldId::CoverageAdditionalMargin
+                        && matches!(
+                            value.descriptor.target,
+                            PropertyTarget::Definition(definition_id)
+                                if definition_id == draft.document().pattern_settings().definition_id
+                        )
+                })
+                .expect("materialized Curve Motif exposes its active additional-margin descriptor");
+            let PropertyCurrentValueKind::FiniteF64(current_margin) = descriptor_value.value else {
+                panic!("Curve Motif additional margin remains a finite active descriptor")
+            };
+            let command = command_for_inspector_input(
+                draft.document(),
+                None,
+                DefinitionEditScope::DocumentBase,
+                &descriptor_value.descriptor,
+                InspectorInput::FiniteF64(current_margin + 0.125),
+            )
+            .expect("ordinary active margin command remains valid for the private ALL draft");
+            let draft_revision_before_edit = draft.revision().0;
+            draft
+                .apply(&command)
+                .expect("one ordinary private descriptor command applies");
+            assert_eq!(draft.revision().0, draft_revision_before_edit + 1);
+            let definition_id = draft.document().pattern_settings().definition_id;
+            let reconstructed = draft
+                .document()
+                .reconstruct_pattern_definition_recipe(definition_id)
+                .expect("Review-equivalent reconstruction succeeds before publication");
+            assert!(matches!(
+                reconstructed.structure,
+                PatternStructureRecipe::AuthoredResources { ref resources, .. } if !resources.is_empty()
+            ));
+            let draft_revision_after_edit = draft.revision().0;
+            let squash = workspace
+                .history
+                .squash_draft(&draft)
+                .expect("one private draft publishes as one main-history entry");
+            assert!(!squash.unchanged);
+            assert_eq!(workspace.history.revision().0, main_revision_before + 1);
+
+            let stem = input
+                .strip_suffix(".png")
+                .or_else(|| input.strip_suffix(".svg"))
+                .expect("fixed immutable input has a supported extension");
+            let png_name = format!("{stem}-curve-motif-private-apply.png");
+            let svg_name = format!("{stem}-curve-motif-private-apply.svg");
+            let svg_raster_name = format!("{stem}-curve-motif-private-apply-svg-raster.png");
+            let target = OutputRasterTarget::new(width, height)
+                .expect("intrinsic validation dimensions remain valid output targets");
+            let presentation = workspace
+                .source_presentation
+                .clone()
+                .expect("direct source-backed workspace retains presentation authority");
+            export_snapshot(
+                workspace.snapshot(),
+                presentation.clone(),
+                output_directory.join(&png_name),
+                ExportSettings {
+                    format: ExportFormat::Png,
+                    background: RasterBackground::Transparent,
+                    antialiasing: RasterAntialiasing::On,
+                    output_target: Some(target),
+                },
+            )
+            .expect("transparent native intrinsic PNG export succeeds");
+            let png = fs::read(output_directory.join(&png_name))
+                .expect("native intrinsic PNG artifact remains readable");
+            assert_eq!(png_dimensions(&png), (width, height));
+            export_snapshot(
+                workspace.snapshot(),
+                presentation.clone(),
+                output_directory.join(&svg_name),
+                ExportSettings {
+                    format: ExportFormat::Svg,
+                    background: RasterBackground::Transparent,
+                    antialiasing: RasterAntialiasing::On,
+                    output_target: None,
+                },
+            )
+            .expect("raw intrinsic SVG export succeeds");
+            let svg = fs::read_to_string(output_directory.join(&svg_name))
+                .expect("raw intrinsic SVG artifact remains UTF-8");
+            let dimensions =
+                format!("width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\"");
+            assert!(
+                svg.contains(&dimensions),
+                "raw SVG retains intrinsic canvas bounds"
+            );
+
+            let source = workspace
+                .sources
+                .get(&presentation.id)
+                .expect("direct workspace retains the active source bytes");
+            let evaluated = evaluate_with_limits(
+                EvaluationRequest::new(
+                    workspace.history.session().document_evaluation_snapshot(),
+                    ResolvedSource::new(
+                        presentation.id.clone(),
+                        Arc::<[u8]>::from(source.bytes()),
+                        presentation.format,
+                    )
+                    .expect("active direct source remains resolvable"),
+                ),
+                EvaluationLimits::default(),
+            )
+            .expect("published private-Apply document evaluates through the canonical engine");
+            let svg_scene_raster = rasterize_output(
+                evaluated.scene(),
+                RasterBackground::Transparent,
+                Some(target),
+                RasterAntialiasing::On,
+            )
+            .expect("canonical SVG scene rasterizes in process at intrinsic dimensions");
+            let svg_scene_raster = encode_png(&svg_scene_raster)
+                .expect("canonical SVG-scene raster encodes as native RGBA PNG");
+            assert_eq!(png_dimensions(&svg_scene_raster), (width, height));
+            fs::write(output_directory.join(&svg_raster_name), svg_scene_raster)
+                .expect("in-process intrinsic SVG-scene raster artifact writes");
+
+            manifest_entries.push(serde_json::json!({
+                "input": input,
+                "source_content_hash": source_identity.content_hash,
+                "source_decoded_pixel_hash": source_identity.decoded_pixel_hash,
+                "intrinsic_dimensions": { "width": width, "height": height },
+                "preset_id": preset_id,
+                "ordinary_private_descriptor": "CoverageAdditionalMargin",
+                "recipe_reconstruction_succeeded": true,
+                "draft_revision_after_edit": draft_revision_after_edit,
+                "main_revision_before": main_revision_before,
+                "main_revision_after_single_squash": workspace.history.revision().0,
+                "transparent_png": png_name,
+                "raw_svg": svg_name,
+                "in_process_svg_scene_raster": svg_raster_name,
+            }));
+        }
+        let manifest = serde_json::json!({
+            "stage": "21B-3",
+            "generator": "stage21b_gate3_intrinsic_private_apply_validation_artifacts",
+            "artifacts": manifest_entries,
+        });
+        fs::write(
+            output_directory.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).expect("validation manifest serializes"),
+        )
+        .expect("Gate 21B-3 validation manifest writes");
     }
 
     /// Preserves ALL replacement delta-reset and exact one-step Undo and Redo publication.
@@ -14399,6 +26129,48 @@ mod tests {
         assert_ne!(draft.document(), &before);
         assert_eq!(workspace.document(), &before);
         assert_eq!(workspace.history.revision().0, 0);
+    }
+
+    /// Rejects early or unreconstructable publication before a wizard draft reaches main history.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a changed private draft is admitted before Review, a stale captured target
+    /// bypasses recipe reconstruction, or either rejected path mutates the main history.
+    #[test]
+    fn stage21b_apply_requires_review_and_reconstruction_before_publication() {
+        let workspace = direct_png_workspace();
+        let before = workspace.document().clone();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        PresetRegistry::bundled()
+            .apply_to_document_base(&mut draft, "curve-motif-rows")
+            .expect("changed private draft materializes for terminal admission");
+
+        let early = wizard_apply_admission(
+            draft.document(),
+            &before,
+            InspectorTarget::DocumentAll,
+            WizardRoutePage::GuideLayout,
+            false,
+        )
+        .expect_err("Apply is unavailable before Review");
+        assert_eq!(early, "Apply is available only from Review.");
+        assert_eq!(workspace.document(), &before);
+        assert!(!workspace.history.can_undo());
+
+        let unreconstructable = wizard_apply_admission(
+            draft.document(),
+            &before,
+            InspectorTarget::Channel(ChannelId(u64::MAX)),
+            WizardRoutePage::Review,
+            false,
+        )
+        .expect_err("a stale captured target cannot reconstruct a publishable recipe");
+        assert!(
+            unreconstructable.starts_with("Couldn’t validate these pattern settings for Apply:")
+        );
+        assert_eq!(workspace.document(), &before);
+        assert!(!workspace.history.can_undo());
     }
 
     /// Rejects stale wizard epochs and preview tickets while retaining the last success and allowing Apply.

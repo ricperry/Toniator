@@ -21,7 +21,7 @@ use toniator_domain::{
     ConnectionProgram, CurveRepetition, CurveWinding, DensityMetric2D, Document, DocumentCommand,
     DocumentHistory, DocumentSessionError, EffectivePatternOutputSettings, GuideDimension,
     GuideDimensionDraft, GuideDimensionId, GuidePrototype, GuideRepetition, MarkOrientation,
-    MarkOrientationDraft, MarkPrototype, MazeProgram, OffsetCleanup, OffsetSides, ParametricCurve,
+    MarkOrientationDraft, MarkPrototype, MazeProgram, OffsetCleanup, ParametricCurve,
     PatternCapabilityFlag, PatternCapabilityScope, PatternDefinition, PatternDefinitionRecipe,
     PatternFamily, PatternGeometryResponse, PatternMechanism, PatternMechanismId,
     PatternModulation, PatternOutputLayerId, PatternOutputRealization, PatternStructureRecipe,
@@ -50,11 +50,13 @@ pub use toniator_geometry::{
     StructuralPathLocationProvenance, StructuralPathSet, StructuralPathSourceId,
     VORONOI_REGION_CONTRACT_ID, VariableWidthOutlineLimits, VariableWidthPathSample, Vector2,
     VoronoiRegionDiagnostics, VoronoiRegionLimits, VoronoiRegionRequest,
-    build_canonical_regions_cancellable, build_connection_paths_cancellable,
-    build_guide_faces_cancellable, build_maze_walls_from_sites_cancellable,
-    build_site_adjacency_cancellable, build_variable_width_outline_cancellable,
-    build_voronoi_regions_cancellable, connection_program_contract_id, offset_path_cancellable,
-    projection_range, resolve_guide_prototype, treat_region_requests_cancellable,
+    advance_planar_constant_gap_frontier_cancellable, build_canonical_regions_cancellable,
+    build_connection_paths_cancellable, build_guide_faces_cancellable,
+    build_maze_walls_from_sites_cancellable, build_site_adjacency_cancellable,
+    build_variable_width_outline_cancellable, build_voronoi_regions_cancellable,
+    connection_program_contract_id, insert_solved_crossing_nodes_cancellable,
+    offset_path_cancellable, projection_range, resolve_guide_prototype,
+    stabilize_planar_constant_gap_path, treat_region_requests_cancellable,
     treat_regions_cancellable, voronoi_region_references,
 };
 use toniator_sampling::{
@@ -107,6 +109,7 @@ fn path_recipe(structure: PatternStructureRecipe) -> PatternDefinitionRecipe {
         PatternGeometryResponse::Connected(toniator_domain::ConnectedGeometryResponse {
             minimum_thickness: 0.15,
             maximum_thickness: 0.65,
+            bias: 0.0,
         });
     recipe
 }
@@ -709,7 +712,7 @@ impl PresetRegistry {
                         "clustered-dispersion-random-links",
                         "Clustered Connections",
                         "Connections",
-                        "Clustered sites with deterministic random links.",
+                        "Clusters of marks joined by short, repeatable random connections.",
                     ),
                     recipe: path_recipe(PatternStructureRecipe::ConnectionPaths {
                         definition: Box::new(random(
@@ -726,7 +729,7 @@ impl PresetRegistry {
                                 maximum_degree: 3,
                                 maximum_distance: 48.0,
                             },
-                            minimum_degree: 1,
+                            minimum_degree: 0,
                             seed: 43,
                         },
                         style: Default::default(),
@@ -737,10 +740,12 @@ impl PresetRegistry {
                         "curve-motif-rows",
                         "Curve Motif",
                         "Guides",
-                        "One asymmetric open motif chained at Along Guides cadence.",
+                        "A custom curve repeated end to end across evenly spaced rows.",
                     ),
                     recipe: PatternDefinitionRecipe::connected(
-                        PatternStructureRecipe::CurveMotifPaths {
+                        PatternStructureRecipe::AuthoredResources {
+                            resources: vec![curve_motif_shape()],
+                            definition: Box::new(PatternStructureRecipe::CurveMotifPaths {
                             definition: Box::new(
                                 PatternStructureRecipe::GeneralizedStraightGuides {
                                     name: "Curve motif rows".into(),
@@ -760,10 +765,11 @@ impl PresetRegistry {
                                     },
                                 },
                             ),
-                            motif: curve_motif_shape(),
+                            resource_index: 0,
                             style: Default::default(),
                             mirror_alternate_rows: true,
                             alternate_row_phase: Some(0.25),
+                            }),
                         },
                     ),
                 },
@@ -772,7 +778,7 @@ impl PresetRegistry {
                         "even-random-circles",
                         "Even Dispersion Marks",
                         "Dispersion",
-                        "Even sites with deterministic circle marks.",
+                        "Evenly spaced circles in a repeatable random arrangement.",
                     ),
                     recipe: mark_recipe(random(
                         "Even random circles",
@@ -787,7 +793,7 @@ impl PresetRegistry {
                         "grid-voronoi-scale",
                         "Grid Voronoi",
                         "Regions",
-                        "Two-guide intersections with source-driven Scale fill from 0.0 through its natural boundary at 1.0.",
+                        "A rectangular grid divided into cells whose size follows the artwork tone.",
                     ),
                     recipe: voronoi_recipe(
                         grid("Grid Voronoi", &[0.0, 90.0], false),
@@ -804,7 +810,7 @@ impl PresetRegistry {
                         "one-guide-lines",
                         "One Guide Lines",
                         "Guides",
-                        "One straight guide dimension as structural paths.",
+                        "Evenly spaced straight lines in one direction.",
                     ),
                     recipe: path_recipe(PatternStructureRecipe::OrderedOutputs {
                         definition: Box::new(grid("One guide lines", &[0.0], true)),
@@ -820,7 +826,7 @@ impl PresetRegistry {
                         "residual-sites-along-guide",
                         "Connected and Residual Sites",
                         "Composites",
-                        "Nearest links followed by residual equal-arc marks.",
+                        "Nearby sites are joined first, with circles drawn at the unused sites.",
                     ),
                     recipe: composite_connection_marks(
                         grid("Residual guide sites", &[0.0], true),
@@ -838,7 +844,7 @@ impl PresetRegistry {
                         "round-spiral-line",
                         "Round Spiral Line",
                         "Parametric",
-                        "One canvas-covering clockwise round spiral path.",
+                        "One round spiral line that expands to cover the artwork.",
                     ),
                     recipe: path_recipe(PatternStructureRecipe::ParametricCurve {
                         name: "Round spiral line".into(),
@@ -860,7 +866,7 @@ impl PresetRegistry {
                         "round-spiral-marks",
                         "Round Spiral Marks",
                         "Parametric",
-                        "Canvas-covering clockwise round spiral with equal-arc circle marks.",
+                        "Circles spaced evenly along a round spiral.",
                     ),
                     recipe: mark_recipe(PatternStructureRecipe::ParametricCurve {
                         name: "Round spiral marks".into(),
@@ -885,7 +891,7 @@ impl PresetRegistry {
                         "source-weighted-dispersion-voronoi",
                         "Source-Weighted Voronoi",
                         "Regions",
-                        "Luminance weights where Voronoi sites cluster; each channel's source mapping and paint supply its color and response.",
+                        "Voronoi cells gather according to the light and dark areas of the artwork.",
                     ),
                     recipe: voronoi_recipe(
                         PatternStructureRecipe::RandomSites {
@@ -917,7 +923,7 @@ impl PresetRegistry {
                         "square-spiral-marks",
                         "Square Spiral Marks",
                         "Parametric",
-                        "Equal-arc circle marks on a square spiral.",
+                        "Circles spaced evenly along a square spiral.",
                     ),
                     recipe: mark_recipe(PatternStructureRecipe::ParametricCurve {
                         name: "Square spiral marks".into(),
@@ -942,7 +948,7 @@ impl PresetRegistry {
                         "straight-grid-circles",
                         "Straight Grid Circles",
                         "Marks",
-                        "Two-guide intersection circle marks with guide-tangent orientation.",
+                        "Circles placed where horizontal and vertical guides cross.",
                     ),
                     recipe: mark_recipe(tangent_grid("Straight grid circles", &[0.0, 90.0])),
                 },
@@ -951,7 +957,7 @@ impl PresetRegistry {
                         "three-guide-cells-scale",
                         "Three-Guide Cells",
                         "Regions",
-                        "Phase-aligned equilateral Guide Faces with positive-region Scale resizing.",
+                        "Triangular cells formed by three evenly spaced guide directions.",
                     ),
                     recipe: guide_face_recipe(
                         grid("Three guide cells", &[0.0, 60.0, 120.0], false),
@@ -969,7 +975,7 @@ impl PresetRegistry {
                         "three-guide-maze",
                         "Three-Guide Maze",
                         "Connections",
-                        "Triangular recursive-backtracker maze.",
+                        "A maze built on a triangular guide grid.",
                     ),
                     recipe: path_recipe(PatternStructureRecipe::MazeWalls {
                         definition: Box::new(grid("Three guide maze", &[0.0, 60.0, 120.0], false)),
@@ -985,15 +991,18 @@ impl PresetRegistry {
                         "triagrid-custom-shape-marks",
                         "Triagrid Diamond Marks",
                         "Marks",
-                        "Three-guide intersection diamond marks.",
+                        "Diamond marks placed where three guide directions cross.",
                     ),
-                    recipe: mark_recipe(PatternStructureRecipe::AuthoredClosedShapeMarks {
-                        definition: Box::new(grid(
-                            "Triagrid diamond marks",
-                            &[0.0, 60.0, 120.0],
-                            false,
-                        )),
-                        shape: diamond_shape(),
+                    recipe: mark_recipe(PatternStructureRecipe::AuthoredResources {
+                        resources: vec![diamond_shape()],
+                        definition: Box::new(PatternStructureRecipe::AuthoredClosedShapeMarks {
+                            definition: Box::new(grid(
+                                "Triagrid diamond marks",
+                                &[0.0, 60.0, 120.0],
+                                false,
+                            )),
+                            resource_index: 0,
+                        }),
                     }),
                 },
                 PresetRecord {
@@ -1001,7 +1010,7 @@ impl PresetRegistry {
                         "triagrid-spanning-tree",
                         "Triagrid Spanning Tree",
                         "Connections",
-                        "Three-guide randomized-Prim spanning tree.",
+                        "A branching tree of connections built on a triangular guide grid.",
                     ),
                     recipe: path_recipe(PatternStructureRecipe::ConnectionPaths {
                         definition: Box::new(grid(
@@ -1022,7 +1031,7 @@ impl PresetRegistry {
                         "two-guide-cells-uniform-offset",
                         "Two-Guide Cells",
                         "Regions",
-                        "Rectangular Guide Faces with positive-region uniform offset resizing.",
+                        "Rectangular cells formed by two perpendicular guide directions.",
                     ),
                     recipe: guide_face_recipe(
                         grid("Two guide cells", &[0.0, 90.0], false),
@@ -1040,7 +1049,7 @@ impl PresetRegistry {
                         "two-guide-maze",
                         "Two-Guide Maze",
                         "Connections",
-                        "Rectangular recursive-backtracker maze.",
+                        "A maze built on a rectangular guide grid.",
                     ),
                     recipe: path_recipe(PatternStructureRecipe::MazeWalls {
                         definition: Box::new(grid("Two guide maze", &[0.0, 90.0], false)),
@@ -1303,6 +1312,7 @@ fn composite_connection_marks(
                     toniator_domain::ConnectedGeometryResponse {
                         minimum_thickness: 0.15,
                         maximum_thickness: 0.65,
+                        bias: 0.0,
                     },
                 ),
             },
@@ -1878,6 +1888,7 @@ pub fn realize_curve_motif_canonical_strokes_cancellable(
     identity.write(alternate_row_phase.unwrap_or(-1.0).to_bits().to_le_bytes());
     identity.write(response.minimum_thickness.to_bits().to_le_bytes());
     identity.write(response.maximum_thickness.to_bits().to_le_bytes());
+    identity.write(response.bias.to_bits().to_le_bytes());
     for (row_ordinal, path) in rows.into_iter().enumerate() {
         if is_cancelled() {
             return Err(PatternPipelineError::new(
@@ -1978,6 +1989,7 @@ pub fn realize_curve_motif_canonical_strokes_cancellable(
                 })
                 .collect::<Vec<_>>(),
             style,
+            response.bias,
             1.0 / 8.0,
             VariableWidthOutlineLimits::new(
                 max_outline_segments.saturating_sub(outline_segments).max(1),
@@ -5070,26 +5082,6 @@ fn evaluate_parametric_curve_with_progress_cancellable(
     Ok(output)
 }
 
-/// Borrows already accepted offsets between the source and one same-side candidate as barriers.
-fn nearer_same_side_offset_barriers(
-    paths_by_index: &BTreeMap<i64, Vec<toniator_geometry::OffsetPathComponent>>,
-    candidate_index: i64,
-) -> Vec<&CurvePath> {
-    paths_by_index
-        .iter()
-        .filter(|(index, _)| {
-            if candidate_index > 0 {
-                **index >= 0 && **index < candidate_index
-            } else if candidate_index < 0 {
-                **index <= 0 && **index > candidate_index
-            } else {
-                false
-            }
-        })
-        .flat_map(|(_, components)| components.iter().map(|component| &component.path))
-        .collect()
-}
-
 /// Proves that surviving outer offset components span authored endpoints and the requested normal side.
 ///
 /// # Errors
@@ -5104,29 +5096,16 @@ fn normal_offset_components_bracket_domain(
     if paths.is_empty() {
         return Ok(false);
     }
-    let authored_start = PathLocation::new(0, 0.0)?;
-    let authored_end = PathLocation::new(source.segments().len() - 1, 1.0)?;
     let tolerance = PathOffsetLimits::default().tolerance;
-    if paths.first().map(|component| component.source_start) != Some(authored_start)
-        || paths.last().map(|component| component.source_end) != Some(authored_end)
-        || paths.iter().any(|component| {
-            source_location_order(component.source_start, component.source_end)
-                != std::cmp::Ordering::Less
-                && component.source_start != component.source_end
-        })
-        || paths.windows(2).any(|pair| {
-            pair[0].component_ordinal >= pair[1].component_ordinal
-                || source_location_order(pair[0].source_start, pair[1].source_start)
-                    != std::cmp::Ordering::Less
-                || source_location_order(pair[0].source_end, pair[1].source_start)
-                    == std::cmp::Ordering::Greater
-        })
-    {
-        return Ok(false);
-    }
+    let mut inspected_normal = false;
     for segment_index in 0..source.segments().len() {
         for parameter in [0.0, 0.5, 1.0] {
-            let normal = source.unit_normal_at(PathLocation::new(segment_index, parameter)?)?;
+            let normal = match source.unit_normal_at(PathLocation::new(segment_index, parameter)?) {
+                Ok(normal) => normal,
+                Err(error) if error.path() == "curve.path.tangent.stationary" => continue,
+                Err(error) => return Err(error.into()),
+            };
+            inspected_normal = true;
             let (domain_minimum, domain_maximum) = domain
                 .corners()
                 .into_iter()
@@ -5156,14 +5135,605 @@ fn normal_offset_components_bracket_domain(
             }
         }
     }
-    Ok(true)
+    Ok(inspected_normal)
 }
 
-/// Orders exact authored path locations without projecting them into a lossy global parameter.
-fn source_location_order(left: PathLocation, right: PathLocation) -> std::cmp::Ordering {
-    left.segment_index()
-        .cmp(&right.segment_index())
-        .then_with(|| left.parameter().total_cmp(&right.parameter()))
+/// Reports whether every open Constant-gap endpoint inside the generation domain is a shared node.
+///
+/// Exact crossing authority copies one solved coordinate into every incident segment, so bitwise
+/// coordinate identity is required instead of a renderer-scale proximity test. Boundary endpoints
+/// belong to final clipping and are intentionally excluded. Signed zero is canonicalized because
+/// it denotes the same exact Cartesian coordinate.
+fn constant_gap_interior_endpoints_are_paired(
+    paths: &[StructuralPathInstance],
+    domain: Bounds,
+) -> bool {
+    let coordinate_bits = |value: f64| if value == 0.0 { 0 } else { value.to_bits() };
+    let point_key = |point: Point2| (coordinate_bits(point.x), coordinate_bits(point.y));
+    let mut node_counts = BTreeMap::<(u64, u64), usize>::new();
+    for segment in paths.iter().flat_map(|path| path.path.segments()) {
+        for point in [segment.start(), segment.end()] {
+            *node_counts.entry(point_key(point)).or_default() += 1;
+        }
+    }
+    paths
+        .iter()
+        .flat_map(|path| [path.path.start(), path.path.end()])
+        .filter(|endpoint| {
+            endpoint.x > domain.min.x
+                && endpoint.x < domain.max.x
+                && endpoint.y > domain.min.y
+                && endpoint.y < domain.max.y
+        })
+        .all(|endpoint| node_counts.get(&point_key(endpoint)).copied().unwrap_or(0) >= 2)
+}
+
+/// Returns one curve's conservative projection range on an exact finite unit axis.
+///
+/// The path is rotated so the requested axis becomes the local x-axis, then canonical analytic
+/// curve bounds own the extrema calculation. This avoids projecting an axis-aligned bounds box,
+/// whose empty corners can under-count required bilateral Constant-gap ranks.
+///
+/// # Errors
+///
+/// Returns finite-transform, curve-bounds, or numeric-overflow diagnostics without publishing a
+/// partial range.
+fn curve_projection_range(
+    path: &CurvePath,
+    axis: Vector2,
+) -> Result<(f64, f64), PatternPipelineError> {
+    let axis_length = axis.x.hypot(axis.y);
+    if !axis_length.is_finite() || (axis_length - 1.0).abs() > 1.0e-9 {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.proof",
+            "normal-offset projection axis must remain finite and normalized",
+        ));
+    }
+    let transform = AffineTransform2D::rotate_about_then_translate(
+        Point2::new(0.0, 0.0),
+        -axis.y.atan2(axis.x).to_degrees(),
+        Vector2::new(0.0, 0.0),
+    )
+    .ok_or(PatternPipelineError::new(
+        "coverage.curved_guides.proof",
+        "normal-offset projection transform could not be represented",
+    ))?;
+    let bounds = path.transformed(transform)?.bounds()?;
+    Ok((bounds.min.x, bounds.max.x))
+}
+
+/// Resolves the authored frame's stable transverse axis from its fixed left/right endpoints.
+///
+/// Guide-editor endpoint authority makes the terminal chord the repetition-frame baseline even
+/// when the interior curve reverses. Its left-hand perpendicular therefore remains stable across
+/// rotations and topology events.
+///
+/// # Errors
+///
+/// Returns a stable coverage diagnostic when the terminal chord is non-finite or collapsed.
+fn authored_guide_transverse_axis(path: &CurvePath) -> Result<Vector2, PatternPipelineError> {
+    let delta = Vector2::new(path.end().x - path.start().x, path.end().y - path.start().y);
+    let length = delta.x.hypot(delta.y);
+    if !length.is_finite() || length <= 1.0e-12 {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.normal_offset",
+            "authored Constant-gap guide requires distinct left and right endpoints",
+        ));
+    }
+    Ok(Vector2::new(-delta.y / length, delta.x / length))
+}
+
+/// Computes bilateral authored Constant-gap ranks in the stable guide-authoring frame.
+///
+/// The calculation uses exact curve projection extrema rather than changing interior segment
+/// normals. Interior normals may reverse at cusps; treating those reversals as family axes can
+/// falsely claim one side is covered after a single rank. The caller's guard is applied after the
+/// two signed rank bounds are rounded outward. A symmetric canvas-center-to-corner rank floor plus
+/// two clipping ranks prevents an early projected-edge proof from leaving a diagonal canvas wedge
+/// uncovered.
+///
+/// # Errors
+///
+/// Returns stable spacing, endpoint, transform, bounds, or integer-overflow diagnostics.
+fn authored_normal_offset_rank_bounds(
+    source: &CurvePath,
+    domain: Bounds,
+    canvas_center_to_corner: f64,
+    spacing: f64,
+    guard: i64,
+) -> Result<(i64, i64), PatternPipelineError> {
+    if !spacing.is_finite()
+        || spacing <= 0.0
+        || !canvas_center_to_corner.is_finite()
+        || canvas_center_to_corner < 0.0
+    {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.normal_offset",
+            "normal-offset spacing and canvas extent must remain finite and positive",
+        ));
+    }
+    let axis = authored_guide_transverse_axis(source)?;
+    let (source_minimum, source_maximum) = curve_projection_range(source, axis)?;
+    let (domain_minimum, domain_maximum) = domain
+        .corners()
+        .into_iter()
+        .map(|point| point.dot(axis))
+        .fold(
+            (f64::INFINITY, f64::NEG_INFINITY),
+            |(minimum, maximum), projection| (minimum.min(projection), maximum.max(projection)),
+        );
+    let first_raw = ((domain_minimum - source_minimum) / spacing).floor();
+    let last_raw = ((domain_maximum - source_maximum) / spacing).ceil();
+    if !first_raw.is_finite()
+        || !last_raw.is_finite()
+        || first_raw < i64::MIN as f64
+        || last_raw > i64::MAX as f64
+    {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.numeric_overflow",
+            "normal-offset rank arithmetic overflowed",
+        ));
+    }
+    let projected_first = (first_raw as i64)
+        .checked_sub(guard)
+        .ok_or(PatternPipelineError::new(
+            "coverage.curved_guides.numeric_overflow",
+            "normal-offset rank arithmetic overflowed",
+        ))?
+        .min(0);
+    let projected_last = (last_raw as i64)
+        .checked_add(guard)
+        .ok_or(PatternPipelineError::new(
+            "coverage.curved_guides.numeric_overflow",
+            "normal-offset rank arithmetic overflowed",
+        ))?
+        .max(0);
+    const DIAGONAL_CLIPPING_RANKS: i64 = 2;
+    let diagonal_raw = (canvas_center_to_corner / spacing).ceil();
+    if !diagonal_raw.is_finite() || diagonal_raw > i64::MAX as f64 {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.numeric_overflow",
+            "normal-offset diagonal rank arithmetic overflowed",
+        ));
+    }
+    let diagonal_rank = (diagonal_raw as i64)
+        .checked_add(DIAGONAL_CLIPPING_RANKS)
+        .ok_or(PatternPipelineError::new(
+            "coverage.curved_guides.numeric_overflow",
+            "normal-offset diagonal rank arithmetic overflowed",
+        ))?;
+    let negative_diagonal_rank = diagonal_rank
+        .checked_neg()
+        .ok_or(PatternPipelineError::new(
+            "coverage.curved_guides.numeric_overflow",
+            "normal-offset diagonal rank arithmetic overflowed",
+        ))?;
+    Ok((
+        projected_first.min(negative_diagonal_rank),
+        projected_last.max(diagonal_rank),
+    ))
+}
+
+/// Proves one authored frontier reaches the requested transverse edge of the generation domain.
+///
+/// This uses the same fixed endpoint-owned transverse axis as authored rank planning, so local
+/// tangent reversals cannot make the negative side appear covered by a positive lobe.
+///
+/// # Errors
+///
+/// Returns endpoint, transform, or curve-bounds diagnostics without accepting partial coverage.
+fn authored_normal_offset_components_bracket_domain(
+    paths: &[toniator_geometry::OffsetPathComponent],
+    source: &CurvePath,
+    domain: Bounds,
+    signed_side: f64,
+) -> Result<bool, PatternPipelineError> {
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    let axis = authored_guide_transverse_axis(source)?;
+    let (domain_minimum, domain_maximum) = domain
+        .corners()
+        .into_iter()
+        .map(|point| point.dot(axis))
+        .fold(
+            (f64::INFINITY, f64::NEG_INFINITY),
+            |(minimum, maximum), projection| (minimum.min(projection), maximum.max(projection)),
+        );
+    let frontier = authored_normal_offset_frontier_projection(paths, source, signed_side)?
+        .expect("nonempty authored offset components have a frontier");
+    let tolerance = PathOffsetLimits::default().tolerance;
+    Ok(if signed_side > 0.0 {
+        frontier + tolerance >= domain_maximum
+    } else {
+        frontier - tolerance <= domain_minimum
+    })
+}
+
+/// Returns the farthest retained component projection on one signed authored-guide side.
+///
+/// The endpoint-owned transverse axis remains stable across ranks. This makes a cusp-induced
+/// frontier reversal observable without allowing another lobe to substitute for progress on the
+/// requested side.
+///
+/// # Errors
+///
+/// Returns endpoint, transform, or curve-bounds diagnostics without accepting a non-finite
+/// component projection.
+fn authored_normal_offset_frontier_projection(
+    paths: &[toniator_geometry::OffsetPathComponent],
+    source: &CurvePath,
+    signed_side: f64,
+) -> Result<Option<f64>, PatternPipelineError> {
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let axis = authored_guide_transverse_axis(source)?;
+    let mut path_minimum = f64::INFINITY;
+    let mut path_maximum = f64::NEG_INFINITY;
+    for component in paths {
+        let (minimum, maximum) = curve_projection_range(&component.path, axis)?;
+        path_minimum = path_minimum.min(minimum);
+        path_maximum = path_maximum.max(maximum);
+    }
+    Ok(Some(if signed_side > 0.0 {
+        path_maximum
+    } else {
+        path_minimum
+    }))
+}
+
+/// Advances one authored Constant-gap side by exactly one preset spacing rank.
+///
+/// Open exterior components from the preceding rank seed the next rank. Closed reversal loops
+/// created while solving a self-crossing are construction-only topology: Dissolve crossings keeps
+/// their exact shared intersection on the exterior continuation, but does not publish or advance
+/// the enclosed loop. Each child still runs the geometry-owned segment offset, exact crossing
+/// solve, and relink pipeline before receiving a deterministic component ordinal.
+///
+/// # Errors
+///
+/// Returns cancellation, geometry, component-limit, or integer-conversion diagnostics without
+/// exposing a partially advanced rank.
+fn advance_constant_gap_frontier(
+    previous: &[toniator_geometry::OffsetPathComponent],
+    signed_spacing: f64,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<toniator_geometry::OffsetPathComponent>, PatternPipelineError> {
+    let limits = PathOffsetLimits::default();
+    let mut next = Vec::new();
+    for component in previous {
+        if component.path.closure() != PathClosure::Open {
+            continue;
+        }
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let result = advance_planar_constant_gap_frontier_cancellable(
+            &component.path,
+            &component.planar_switch_nodes,
+            signed_spacing,
+            limits,
+            is_cancelled,
+        )?;
+        if let PathOffsetResult::Paths(children) = result {
+            next.extend(
+                children
+                    .into_iter()
+                    .filter(|child| child.path.closure() == PathClosure::Open),
+            );
+        }
+        if next.len() > limits.maximum_components {
+            return Err(PatternPipelineError::new(
+                "coverage.curved_guides.instance_limit",
+                "constant-gap frontier exceeds the configured component limit",
+            ));
+        }
+    }
+    for (ordinal, component) in next.iter_mut().enumerate() {
+        component.component_ordinal = u32::try_from(ordinal).map_err(|_| {
+            PatternPipelineError::new(
+                "coverage.curved_guides.instance_limit",
+                "constant-gap component ordinal exceeds its identity range",
+            )
+        })?;
+    }
+    Ok(next)
+}
+
+/// Bounds the farthest offset index that can still intersect the generation domain.
+///
+/// Authored curve points stay inside `source`, while tangential endpoint extensions stay inside
+/// `domain`. The union of those bounds therefore contains every construction-source point. Any
+/// normal-offset point inside `domain` must be no farther from that source point than the maximum
+/// corner-to-corner distance used here. The fitting tolerance is included before conversion to a
+/// repetition index.
+///
+/// # Errors
+///
+/// Returns a stable coverage diagnostic when spacing is not positive or the finite geometric bound
+/// cannot be represented as an `i64` repetition index.
+fn normal_offset_absolute_index_limit(
+    source: Bounds,
+    domain: Bounds,
+    spacing: f64,
+) -> Result<i64, PatternPipelineError> {
+    if !spacing.is_finite() || spacing <= 0.0 {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.normal_offset",
+            "normal-offset spacing must remain finite and positive",
+        ));
+    }
+    let source_envelope = Bounds::new(
+        Point2::new(
+            source.min.x.min(domain.min.x),
+            source.min.y.min(domain.min.y),
+        ),
+        Point2::new(
+            source.max.x.max(domain.max.x),
+            source.max.y.max(domain.max.y),
+        ),
+    )
+    .ok_or(PatternPipelineError::new(
+        "coverage.curved_guides.numeric_overflow",
+        "normal-offset coverage arithmetic overflowed",
+    ))?;
+    let domain_corners = domain.corners();
+    let maximum_distance = source_envelope
+        .corners()
+        .into_iter()
+        .flat_map(|source_point| {
+            domain_corners.into_iter().map(move |domain_point| {
+                (domain_point.x - source_point.x).hypot(domain_point.y - source_point.y)
+            })
+        })
+        .fold(0.0_f64, f64::max);
+    let raw = ((maximum_distance + PathOffsetLimits::default().tolerance) / spacing).ceil();
+    if !raw.is_finite() || raw < 0.0 || raw > i64::MAX as f64 {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.numeric_overflow",
+            "normal-offset coverage arithmetic overflowed",
+        ));
+    }
+    Ok(raw as i64)
+}
+
+/// Uniformly scales one centered authored guide through the local generation span.
+///
+/// Guide-editor endpoints are fixed on opposite sides of a centered authoring frame. Rotation can
+/// require a longer finite guide than that frame supplies, so this applies one shape-preserving
+/// scale before any Single, Stacked, or Constant-gap repetition. Repetition pitch remains separate
+/// domain intent and is never derived from the scaled path. Final canvas clipping remains a
+/// downstream consumer operation.
+///
+/// # Errors
+///
+/// Returns stable finite-geometry or coverage diagnostics when the authored terminal span cannot
+/// bracket the centered generation domain or its scale cannot be represented.
+fn scale_authored_guide_to_generation_span(
+    path: &CurvePath,
+    domain: Bounds,
+) -> Result<CurvePath, PatternPipelineError> {
+    let terminal_delta = Vector2::new(path.end().x - path.start().x, path.end().y - path.start().y);
+    let terminal_length = terminal_delta.x.hypot(terminal_delta.y);
+    if !terminal_length.is_finite() || terminal_length <= 1.0e-12 {
+        return Ok(path.clone());
+    }
+    let tangent = terminal_delta.scale(terminal_length.recip());
+    let terminal_minimum = path.start().dot(tangent).min(path.end().dot(tangent));
+    let terminal_maximum = path.start().dot(tangent).max(path.end().dot(tangent));
+    let (domain_minimum, domain_maximum) = domain
+        .corners()
+        .into_iter()
+        .map(|point| point.dot(tangent))
+        .fold(
+            (f64::INFINITY, f64::NEG_INFINITY),
+            |(minimum, maximum), projection| (minimum.min(projection), maximum.max(projection)),
+        );
+    if !terminal_minimum.is_finite()
+        || !terminal_maximum.is_finite()
+        || !domain_minimum.is_finite()
+        || !domain_maximum.is_finite()
+    {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.proof",
+            "authored guide terminals must bracket the centered generation span",
+        ));
+    }
+    if terminal_minimum >= 0.0 || terminal_maximum <= 0.0 {
+        return Ok(path.clone());
+    }
+    let scale = 1.0_f64
+        .max((domain_minimum / terminal_minimum).max(1.0))
+        .max((domain_maximum / terminal_maximum).max(1.0));
+    let transform = AffineTransform2D::scale_then_rotate_about_then_translate(
+        Point2::new(0.0, 0.0),
+        scale,
+        scale,
+        0.0,
+        Vector2::new(0.0, 0.0),
+    )
+    .ok_or(PatternPipelineError::new(
+        "coverage.curved_guides.proof",
+        "curved-guide coverage scale must remain finite and positive",
+    ))?;
+    path.transformed(transform).map_err(Into::into)
+}
+
+/// Translates one authored segment for a tiled guide while forcing exact path continuity.
+///
+/// The first anchor supplied by the caller is the previous derived segment's exact endpoint; all
+/// remaining construction points receive the same finite tile translation. This avoids a
+/// floating-point seam without smoothing, reshaping, or changing line/cubic construction kind.
+///
+/// # Errors
+///
+/// Returns canonical finite-coordinate diagnostics when the translated construction overflows.
+fn translated_tiled_segment(
+    segment: CurveSegment,
+    start: Point2,
+    translation: Vector2,
+) -> Result<CurveSegment, PatternPipelineError> {
+    let translate = |point: Point2| {
+        let translated = Point2::new(point.x + translation.x, point.y + translation.y);
+        translated
+            .is_finite()
+            .then_some(translated)
+            .ok_or(PatternPipelineError::new(
+                "coverage.curved_guides.numeric_overflow",
+                "curved-guide tiling arithmetic overflowed",
+            ))
+    };
+    match segment {
+        CurveSegment::Line(line) => Ok(CurveSegment::Line(LineSegment::new(
+            start,
+            translate(line.end())?,
+        )?)),
+        CurveSegment::CubicBezier(cubic) => Ok(CurveSegment::CubicBezier(CubicBezierSegment::new(
+            start,
+            translate(cubic.control_1())?,
+            translate(cubic.control_2())?,
+            translate(cubic.end())?,
+        )?)),
+    }
+}
+
+/// Tiles one authored open guide end-to-end beyond every planned normal-offset endpoint.
+///
+/// Constant-gap copies remain independent guide instances. The authored curve is repeated only
+/// along its start-to-end vector. Repeated cubic seams retain the next tile's handle length while
+/// aligning its outgoing direction with the preceding tile's incoming tangent, preventing a finite
+/// tile boundary from becoming a false Constant-gap cusp. Adjacent offsets are never wrapped into a
+/// fingerprint-style serpentine path. The caller has already applied the one-time uniform coverage
+/// scale, so tiling cannot change repetition pitch.
+///
+/// # Errors
+///
+/// Returns stable finite-coverage, segment-limit, or canonical path diagnostics before exposing a
+/// partial tiled centerline.
+fn tile_authored_guide_end_to_end(
+    path: &CurvePath,
+    domain: Bounds,
+    longitudinal_margin: f64,
+) -> Result<CurvePath, PatternPipelineError> {
+    let terminal_delta = Vector2::new(path.end().x - path.start().x, path.end().y - path.start().y);
+    let terminal_span = terminal_delta.x.hypot(terminal_delta.y);
+    if !terminal_span.is_finite()
+        || terminal_span <= 1.0e-12
+        || !longitudinal_margin.is_finite()
+        || longitudinal_margin < 0.0
+    {
+        return Ok(path.clone());
+    }
+    let tangent = terminal_delta.scale(terminal_span.recip());
+    let start_projection = path.start().dot(tangent);
+    let end_projection = path.end().dot(tangent);
+    let (domain_minimum, domain_maximum) = domain
+        .corners()
+        .into_iter()
+        .map(|point| point.dot(tangent))
+        .fold(
+            (f64::INFINITY, f64::NEG_INFINITY),
+            |(minimum, maximum), projection| (minimum.min(projection), maximum.max(projection)),
+        );
+    let first_raw =
+        ((domain_minimum - longitudinal_margin - start_projection) / terminal_span).floor();
+    let last_raw = ((domain_maximum + longitudinal_margin - end_projection) / terminal_span).ceil();
+    if !first_raw.is_finite()
+        || !last_raw.is_finite()
+        || first_raw < i64::MIN as f64
+        || last_raw > i64::MAX as f64
+    {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.numeric_overflow",
+            "curved-guide tiling arithmetic overflowed",
+        ));
+    }
+    let first = (first_raw as i64).min(0);
+    let last = (last_raw as i64).max(0);
+    let tile_count = last
+        .checked_sub(first)
+        .and_then(|count| count.checked_add(1))
+        .ok_or(PatternPipelineError::new(
+            "coverage.curved_guides.numeric_overflow",
+            "curved-guide tiling arithmetic overflowed",
+        ))?;
+    let segment_count = usize::try_from(tile_count)
+        .ok()
+        .and_then(|count| count.checked_mul(path.segments().len()))
+        .filter(|count| *count <= 4_096)
+        .ok_or(PatternPipelineError::new(
+            "coverage.curved_guides.instance_limit",
+            "tiled curved-guide segment count exceeds the configured path limit",
+        ))?;
+    let mut segments = Vec::<CurveSegment>::with_capacity(segment_count);
+    for tile_index in first..=last {
+        let amount = tile_index as f64;
+        let translation = terminal_delta.scale(amount);
+        for (segment_index, segment) in path.segments().iter().enumerate() {
+            let start = segments.last().map_or_else(
+                || {
+                    let point = segment.start();
+                    Point2::new(point.x + translation.x, point.y + translation.y)
+                },
+                CurveSegment::end,
+            );
+            let mut tiled = translated_tiled_segment(*segment, start, translation)?;
+            if segment_index == 0
+                && let (Some(previous), CurveSegment::CubicBezier(cubic)) =
+                    (segments.last().copied(), tiled)
+            {
+                let incoming = previous.limiting_unit_tangent_at(1.0)?;
+                let handle_length = (cubic.control_1().x - cubic.start().x)
+                    .hypot(cubic.control_1().y - cubic.start().y);
+                let control_1 = Point2::new(
+                    cubic.start().x + incoming.x * handle_length,
+                    cubic.start().y + incoming.y * handle_length,
+                );
+                tiled = CurveSegment::CubicBezier(CubicBezierSegment::new(
+                    cubic.start(),
+                    control_1,
+                    cubic.control_2(),
+                    cubic.end(),
+                )?);
+            }
+            segments.push(tiled);
+        }
+    }
+    CurvePath::new(segments, PathClosure::Open).map_err(Into::into)
+}
+
+/// Resolves the artist-facing uniform Pattern size from canonical density authority.
+///
+/// Density aspect is deliberately excluded: the geometric mean recovers the persisted scalar
+/// density, while the source-size-normalized default provides the same size-one reference used by
+/// the main-window control. Callers apply this scale to authored absolute curve distances; ordinary
+/// density-derived spacing continues to consume the resolved directional metric directly.
+///
+/// # Errors
+///
+/// Returns the domain's finite-positive density diagnostics when the resolved layout cannot be
+/// represented, or a stable guide-spacing diagnostic when their ratio is invalid.
+fn resolved_pattern_size_scale(
+    canvas: &CanvasSpec,
+    density: &ResolvedDensityMetric2D,
+) -> Result<f64, PatternPipelineError> {
+    let current = DensityMetric2D::from_resolved(canvas, density)
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?
+        .density;
+    let default = DensityMetric2D::default_for_canvas(canvas)
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?
+        .density;
+    let scale = default / current;
+    (scale.is_finite() && scale > 0.0)
+        .then_some(scale)
+        .ok_or(PatternPipelineError::new(
+            "pattern.family.guide_spacing",
+            "pattern size must resolve to a finite positive curve scale",
+        ))
 }
 
 /// Evaluates resolved finite guide paths using the authoritative local-grid placement policy.
@@ -5186,7 +5756,8 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
     struct NormalOffsetCoveragePlan {
         first_required: i64,
         last_required: i64,
-        sides: OffsetSides,
+        first_probe_limit: i64,
+        last_probe_limit: i64,
     }
 
     let generic = family
@@ -5219,6 +5790,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
         .along_interval_multiplier
         .map(|value| value * maximum_directional_spacing)
         .unwrap_or(0.0);
+    let pattern_size_scale = resolved_pattern_size_scale(&request.canvas, &request.density)?;
     let mut maximum_spacing = along_bound;
     for dimension in &generic.dimensions {
         if let GuideRepetition::TransformStack {
@@ -5233,7 +5805,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
             maximum_spacing = maximum_spacing.max(spacing);
         }
         if let GuideRepetition::NormalOffset { spacing, .. } = dimension.repetition {
-            maximum_spacing = maximum_spacing.max(spacing);
+            maximum_spacing = maximum_spacing.max(spacing * pattern_size_scale);
         }
     }
     let margin =
@@ -5271,6 +5843,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
     let mut guides = Vec::new();
     let mut guide_nominal_bases = BTreeMap::new();
     let mut grouped = Vec::<Vec<StructuralPathInstance>>::new();
+    let mut requires_solved_crossing_nodes = false;
     let dimension_total = generic.dimensions.len().max(1);
     for (dimension_index, (dimension, (source_structure_id, prototype))) in generic
         .dimensions
@@ -5293,7 +5866,12 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
             "coverage.curved_guides.proof",
             "curved-guide coverage could not prove a complete generation envelope",
         ))?;
-        let base = prototype.transformed(baseline)?;
+        let unscaled_base = prototype.transformed(baseline)?;
+        let base = if matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { .. }) {
+            scale_authored_guide_to_generation_span(&unscaled_base, local_domain)?
+        } else {
+            unscaled_base
+        };
         let (unit, spacing, indices, normal_offset_coverage) = match dimension.repetition {
             GuideRepetition::Single => {
                 let angle = dimension.baseline_angle_degrees.to_radians();
@@ -5361,7 +5939,10 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 }
                 (unit, spacing, (first..=last).collect(), None)
             }
-            GuideRepetition::NormalOffset { spacing, sides, .. } => {
+            GuideRepetition::NormalOffset { spacing, .. } => {
+                let spacing = spacing * pattern_size_scale;
+                // Constant-gap construction is always bilateral. Visible left/right weighting is
+                // output response bias and must not delete guide topology or family sites.
                 let path_bounds = base.bounds()?;
                 if path_bounds.min == path_bounds.max {
                     return Err(PatternPipelineError::new(
@@ -5425,11 +6006,53 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                             "coverage.curved_guides.numeric_overflow",
                             "normal-offset coverage arithmetic overflowed",
                         ))?;
-                let (first, last) = match sides {
-                    OffsetSides::Left => (0, last.max(0)),
-                    OffsetSides::Right => (first.min(0), 0),
-                    OffsetSides::Both => (first.min(0), last.max(0)),
-                };
+                let first = first.min(0);
+                let last = last.max(0);
+                let (first, last) =
+                    if matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { .. }) {
+                        authored_normal_offset_rank_bounds(
+                            &base,
+                            local_domain,
+                            0.5 * request.canvas.width.hypot(request.canvas.height),
+                            spacing,
+                            i64::from(request.guard_steps),
+                        )?
+                    } else {
+                        (first, last)
+                    };
+                let (first_probe_limit, last_probe_limit) =
+                    if matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { .. }) {
+                        let fallback_ranks = i64::from(request.guard_steps).max(2) + 1;
+                        let symmetric_extent = first
+                            .saturating_abs()
+                            .max(last.saturating_abs())
+                            .checked_add(fallback_ranks)
+                            .ok_or(PatternPipelineError::new(
+                                "coverage.curved_guides.numeric_overflow",
+                                "normal-offset coverage arithmetic overflowed",
+                            ))?;
+                        (
+                            symmetric_extent
+                                .checked_neg()
+                                .ok_or(PatternPipelineError::new(
+                                    "coverage.curved_guides.numeric_overflow",
+                                    "normal-offset coverage arithmetic overflowed",
+                                ))?,
+                            symmetric_extent,
+                        )
+                    } else {
+                        let absolute_index_limit =
+                            normal_offset_absolute_index_limit(path_bounds, local_domain, spacing)?;
+                        (
+                            first.min(absolute_index_limit.checked_neg().ok_or(
+                                PatternPipelineError::new(
+                                    "coverage.curved_guides.numeric_overflow",
+                                    "normal-offset coverage arithmetic overflowed",
+                                ),
+                            )?),
+                            last.max(absolute_index_limit),
+                        )
+                    };
                 let count = last
                     .checked_sub(first)
                     .and_then(|value| value.checked_add(1));
@@ -5446,10 +6069,34 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                     Some(NormalOffsetCoveragePlan {
                         first_required: first,
                         last_required: last,
-                        sides,
+                        first_probe_limit,
+                        last_probe_limit,
                     }),
                 )
             }
+        };
+        let uses_tiled_authored_normal_offset = normal_offset_coverage.is_some()
+            && matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { .. });
+        // Iterated authored Constant-gap ranks already solve and relink their crossings before the
+        // next frontier is constructed. Re-running an all-rank arrangement here would discard that
+        // bounded rank ownership and charge every retained closed event component against one
+        // quadratic cleanup budget. Direct one-shot offset families still require the collection
+        // arrangement below.
+        requires_solved_crossing_nodes |=
+            normal_offset_coverage.is_some() && !uses_tiled_authored_normal_offset;
+        let evaluation_base = if uses_tiled_authored_normal_offset {
+            let coverage = normal_offset_coverage.expect("tiled normal offset owns coverage");
+            let maximum_offset_rank = coverage
+                .first_probe_limit
+                .saturating_abs()
+                .max(coverage.last_probe_limit.saturating_abs());
+            let maximum_offset_travel = maximum_offset_rank as f64 * spacing;
+            let longitudinal_margin = (local_domain.max.x - local_domain.min.x)
+                .hypot(local_domain.max.y - local_domain.min.y)
+                + maximum_offset_travel;
+            tile_authored_guide_end_to_end(&base, local_domain, longitudinal_margin)?
+        } else {
+            base.clone()
         };
         let evaluate_index = |index: i64,
                               crossing_barriers: &[&CurvePath]|
@@ -5466,14 +6113,18 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
             match dimension.repetition {
                 GuideRepetition::NormalOffset { cleanup, .. } => {
                     let cleanup = match cleanup {
-                        OffsetCleanup::DissolveCrossings => PathOffsetCleanup::DissolveCrossings,
+                        OffsetCleanup::DissolveCrossings => PathOffsetCleanup::PlanarConstantGap,
                     };
                     match offset_path_cancellable(
                         PathOffsetRequest {
-                            path: &base,
+                            path: &evaluation_base,
                             signed_distance: index as f64 * spacing,
-                            endpoint_policy: PathOffsetEndpointPolicy::TangentialExtension {
-                                bounds: local_domain,
+                            endpoint_policy: if uses_tiled_authored_normal_offset {
+                                PathOffsetEndpointPolicy::Preserve
+                            } else {
+                                PathOffsetEndpointPolicy::TangentialExtension {
+                                    bounds: local_domain,
+                                }
                             },
                             cleanup,
                             crossing_barriers,
@@ -5496,19 +6147,22 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                         "coverage.curved_guides.proof",
                         "curved-guide coverage could not prove a complete generation envelope",
                     ))?;
+                    let path = evaluation_base.transformed(local)?;
                     Ok(vec![toniator_geometry::OffsetPathComponent {
                         component_ordinal: 0,
                         source_start: PathLocation::new(0, 0.0)?,
-                        source_end: PathLocation::new(base.segments().len() - 1, 1.0)?,
-                        path: base.transformed(local)?,
+                        source_end: PathLocation::new(evaluation_base.segments().len() - 1, 1.0)?,
+                        path,
+                        planar_switch_nodes: Vec::new(),
                     }])
                 }
             }
         };
         let mut attempts = 0_usize;
-        let mut paths_by_index = BTreeMap::new();
+        let mut paths_by_index =
+            BTreeMap::<i64, Vec<toniator_geometry::OffsetPathComponent>>::new();
         let mut evaluation_indices = indices;
-        if normal_offset_coverage.is_some() {
+        if normal_offset_coverage.is_some() && !uses_tiled_authored_normal_offset {
             evaluation_indices.sort_by(|left, right| {
                 left.unsigned_abs()
                     .cmp(&right.unsigned_abs())
@@ -5516,24 +6170,151 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
             });
         }
         let planned_attempts = evaluation_indices.len().max(1);
-        for index in evaluation_indices {
-            attempts += 1;
-            let barriers = if normal_offset_coverage.is_some() {
-                nearer_same_side_offset_barriers(&paths_by_index, index)
-            } else {
-                Vec::new()
-            };
-            let paths = evaluate_index(index, &barriers)?;
-            paths_by_index.insert(index, paths);
+        let report_attempt = |completed| {
             let dimension_start = 400 * dimension_index / dimension_total;
             let dimension_end = 400 * (dimension_index + 1) / dimension_total;
             report_family_progress_portion(
                 report_progress,
                 dimension_start,
                 dimension_end - dimension_start,
-                attempts,
+                completed,
                 planned_attempts,
             );
+        };
+        if uses_tiled_authored_normal_offset {
+            let coverage = normal_offset_coverage.expect("tiled normal offset owns coverage");
+            let frontier_tolerance = PathOffsetLimits::default().tolerance;
+            let frontier_retracted =
+                |previous: Option<f64>, advanced: Option<f64>, signed_side: f64| match (
+                    previous, advanced,
+                ) {
+                    (Some(_), None) => true,
+                    (Some(previous), Some(advanced)) if signed_side > 0.0 => {
+                        advanced <= previous + frontier_tolerance
+                    }
+                    (Some(previous), Some(advanced)) => advanced >= previous - frontier_tolerance,
+                    _ => false,
+                };
+            paths_by_index.insert(
+                0,
+                vec![toniator_geometry::OffsetPathComponent {
+                    component_ordinal: 0,
+                    source_start: PathLocation::new(0, 0.0)?,
+                    source_end: PathLocation::new(evaluation_base.segments().len() - 1, 1.0)?,
+                    path: evaluation_base.clone(),
+                    planar_switch_nodes: Vec::new(),
+                }],
+            );
+            attempts = 1;
+            report_attempt(attempts);
+            let mut positive_bracketed = coverage.last_required <= 0;
+            let mut index = 1_i64;
+            while !positive_bracketed && index <= coverage.last_probe_limit {
+                let previous =
+                    paths_by_index
+                        .get(&(index - 1))
+                        .ok_or(PatternPipelineError::new(
+                            "coverage.curved_guides.normal_offset",
+                            "constant-gap frontier lost its preceding positive rank",
+                        ))?;
+                let previous_frontier =
+                    authored_normal_offset_frontier_projection(previous, &evaluation_base, 1.0)?;
+                let mut paths = advance_constant_gap_frontier(previous, spacing, is_cancelled)?;
+                let advanced_frontier =
+                    authored_normal_offset_frontier_projection(&paths, &evaluation_base, 1.0)?;
+                if frontier_retracted(previous_frontier, advanced_frontier, 1.0) {
+                    // A cusp can turn the relinked exterior back toward the source. Restart this
+                    // rank from the original tiled runway at its absolute distance so coverage
+                    // continues on the same signed side without scaling or re-spacing the stack.
+                    paths = evaluate_index(index, &[])?
+                        .into_iter()
+                        .filter(|component| component.path.closure() == PathClosure::Open)
+                        .collect();
+                }
+                let reaches_edge = !paths.is_empty()
+                    && authored_normal_offset_components_bracket_domain(
+                        &paths,
+                        &evaluation_base,
+                        local_domain,
+                        1.0,
+                    )?;
+                positive_bracketed = index >= coverage.last_required && reaches_edge;
+                paths_by_index.insert(index, paths);
+                attempts += 1;
+                report_attempt(attempts);
+                index = index.checked_add(1).ok_or(PatternPipelineError::new(
+                    "coverage.curved_guides.numeric_overflow",
+                    "normal-offset rank arithmetic overflowed",
+                ))?;
+            }
+            if !positive_bracketed {
+                return Err(PatternPipelineError::new(
+                    "coverage.curved_guides.normal_offset",
+                    "constant-gap positive frontier did not bracket the generation domain",
+                ));
+            }
+            let mut negative_bracketed = coverage.first_required >= 0;
+            let mut index = -1_i64;
+            while !negative_bracketed && index >= coverage.first_probe_limit {
+                let previous =
+                    paths_by_index
+                        .get(&(index + 1))
+                        .ok_or(PatternPipelineError::new(
+                            "coverage.curved_guides.normal_offset",
+                            "constant-gap frontier lost its preceding negative rank",
+                        ))?;
+                let previous_frontier =
+                    authored_normal_offset_frontier_projection(previous, &evaluation_base, -1.0)?;
+                let mut paths = advance_constant_gap_frontier(previous, -spacing, is_cancelled)?;
+                let advanced_frontier =
+                    authored_normal_offset_frontier_projection(&paths, &evaluation_base, -1.0)?;
+                if frontier_retracted(previous_frontier, advanced_frontier, -1.0) {
+                    // See the positive-side reset above. Absolute source distance restores the
+                    // signed frontier after a cusp instead of advancing a folded-back remnant.
+                    paths = evaluate_index(index, &[])?
+                        .into_iter()
+                        .filter(|component| component.path.closure() == PathClosure::Open)
+                        .collect();
+                }
+                let reaches_edge = !paths.is_empty()
+                    && authored_normal_offset_components_bracket_domain(
+                        &paths,
+                        &evaluation_base,
+                        local_domain,
+                        -1.0,
+                    )?;
+                negative_bracketed = index <= coverage.first_required && reaches_edge;
+                paths_by_index.insert(index, paths);
+                attempts += 1;
+                report_attempt(attempts);
+                index = index.checked_sub(1).ok_or(PatternPipelineError::new(
+                    "coverage.curved_guides.numeric_overflow",
+                    "normal-offset rank arithmetic overflowed",
+                ))?;
+            }
+            if !negative_bracketed {
+                return Err(PatternPipelineError::new(
+                    "coverage.curved_guides.normal_offset",
+                    "constant-gap negative frontier did not bracket the generation domain",
+                ));
+            }
+        } else {
+            for index in evaluation_indices {
+                attempts += 1;
+                let paths = if index == 0 && normal_offset_coverage.is_some() {
+                    vec![toniator_geometry::OffsetPathComponent {
+                        component_ordinal: 0,
+                        source_start: PathLocation::new(0, 0.0)?,
+                        source_end: PathLocation::new(evaluation_base.segments().len() - 1, 1.0)?,
+                        path: evaluation_base.clone(),
+                        planar_switch_nodes: Vec::new(),
+                    }]
+                } else {
+                    evaluate_index(index, &[])?
+                };
+                paths_by_index.insert(index, paths);
+                report_attempt(attempts);
+            }
         }
         if let Some(coverage) = normal_offset_coverage {
             if paths_by_index.get(&0).is_none_or(Vec::is_empty) {
@@ -5542,19 +6323,18 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                     "normal-offset source guide collapsed before coverage could be proved",
                 ));
             }
-            if matches!(coverage.sides, OffsetSides::Left | OffsetSides::Both)
-                && coverage.last_required > 0
-            {
+            if !uses_tiled_authored_normal_offset && coverage.last_required > 0 {
                 let mut probe = coverage.last_required;
                 while paths_by_index
                     .get(&probe)
                     .is_some_and(|paths| !paths.is_empty())
                     && !normal_offset_components_bracket_domain(
                         paths_by_index.get(&probe).map_or(&[], Vec::as_slice),
-                        &base,
+                        &evaluation_base,
                         local_domain,
                         1.0,
                     )?
+                    && probe < coverage.last_probe_limit
                 {
                     if attempts >= request.max_family_candidates {
                         return Err(PatternPipelineError::new(
@@ -5567,24 +6347,22 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                         "normal-offset coverage arithmetic overflowed",
                     ))?;
                     attempts += 1;
-                    let barriers = nearer_same_side_offset_barriers(&paths_by_index, probe);
-                    let paths = evaluate_index(probe, &barriers)?;
+                    let paths = evaluate_index(probe, &[])?;
                     paths_by_index.insert(probe, paths);
                 }
             }
-            if matches!(coverage.sides, OffsetSides::Right | OffsetSides::Both)
-                && coverage.first_required < 0
-            {
+            if !uses_tiled_authored_normal_offset && coverage.first_required < 0 {
                 let mut probe = coverage.first_required;
                 while paths_by_index
                     .get(&probe)
                     .is_some_and(|paths| !paths.is_empty())
                     && !normal_offset_components_bracket_domain(
                         paths_by_index.get(&probe).map_or(&[], Vec::as_slice),
-                        &base,
+                        &evaluation_base,
                         local_domain,
                         -1.0,
                     )?
+                    && probe > coverage.first_probe_limit
                 {
                     if attempts >= request.max_family_candidates {
                         return Err(PatternPipelineError::new(
@@ -5597,13 +6375,13 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                         "normal-offset coverage arithmetic overflowed",
                     ))?;
                     attempts += 1;
-                    let barriers = nearer_same_side_offset_barriers(&paths_by_index, probe);
-                    let paths = evaluate_index(probe, &barriers)?;
+                    let paths = evaluate_index(probe, &[])?;
                     paths_by_index.insert(probe, paths);
                 }
             }
         }
         let mut this_dimension = Vec::new();
+        let published_dimension_start = guides.len();
         for (index, paths) in paths_by_index {
             let basis = if spacing > 0.0 {
                 spacing
@@ -5613,6 +6391,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                         .max(request.canvas.height / request.density.across_y),
                 )
             };
+            let mut published_component_ordinal = 0_u32;
             for component in paths {
                 let instance = StructuralPathInstance {
                     id: match generic.structural_source {
@@ -5632,17 +6411,59 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 };
                 guide_nominal_bases.insert(instance.id, basis);
                 this_dimension.push(instance.clone());
-                guides.push(instance);
-                if guides.len() > request.max_family_candidates {
-                    return Err(PatternPipelineError::new(
-                        "coverage.curved_guides.instance_limit",
-                        "curved-guide instance count exceeds the configured family limit",
-                    ));
+                for fragment in instance.path.clip_to_bounds(document_domain)? {
+                    let fragment = if uses_tiled_authored_normal_offset {
+                        stabilize_planar_constant_gap_path(&fragment, PathOffsetLimits::default())?
+                    } else {
+                        fragment
+                    };
+                    let mut published = instance.clone();
+                    published.id.component_ordinal = published_component_ordinal;
+                    published.path = fragment;
+                    guide_nominal_bases.insert(published.id, basis);
+                    guides.push(published);
+                    published_component_ordinal = published_component_ordinal
+                        .checked_add(1)
+                        .ok_or(PatternPipelineError::new(
+                            "coverage.curved_guides.instance_limit",
+                            "curved-guide component count exceeds the configured family limit",
+                        ))?;
+                    if guides.len() > request.max_family_candidates {
+                        return Err(PatternPipelineError::new(
+                            "coverage.curved_guides.instance_limit",
+                            "curved-guide instance count exceeds the configured family limit",
+                        ));
+                    }
                 }
             }
         }
+        if uses_tiled_authored_normal_offset
+            && !constant_gap_interior_endpoints_are_paired(
+                &guides[published_dimension_start..],
+                document_domain,
+            )
+        {
+            return Err(PatternPipelineError::new(
+                "coverage.curved_guides.normal_offset",
+                "constant-gap cleanup left an unpaired endpoint inside the generation domain",
+            ));
+        }
         grouped.push(this_dimension);
         report_progress(400 * (dimension_index + 1) / dimension_total, 1_000);
+    }
+    if requires_solved_crossing_nodes {
+        let source_paths = guides
+            .iter()
+            .map(|instance| instance.path.clone())
+            .collect::<Vec<_>>();
+        let planarized = insert_solved_crossing_nodes_cancellable(
+            &source_paths,
+            PathOffsetLimits::default(),
+            is_cancelled,
+        )?;
+        for (instance, path) in guides.iter_mut().zip(planarized) {
+            instance.path = path;
+        }
     }
     let fingerprint = generic_curve_fingerprint(family, request, generic);
     let path_set = StructuralPathSet::new(
@@ -5931,7 +6752,7 @@ fn curve_intersection_sites(
                         }
                         let first_tangent = first
                             .path
-                            .unit_tangent_at(contact.first_location())
+                            .limiting_unit_tangent_at(contact.first_location())
                             .map_err(|_| {
                                 PatternPipelineError::new(
                                     "pattern.family.curved_guides.tangent",
@@ -5940,7 +6761,7 @@ fn curve_intersection_sites(
                             })?;
                         let second_tangent = second
                             .path
-                            .unit_tangent_at(contact.second_location())
+                            .limiting_unit_tangent_at(contact.second_location())
                             .map_err(|_| {
                                 PatternPipelineError::new(
                                     "pattern.family.curved_guides.tangent",
@@ -6081,7 +6902,7 @@ fn curve_along_sites(
             let measure = guide.path.measure_arc_length()?;
             let total = measure.total_length();
             let start = measure.location_at_length(0.0)?;
-            let start_tangent = guide.path.unit_tangent_at(start).map_err(|_| {
+            let start_tangent = guide.path.limiting_unit_tangent_at(start).map_err(|_| {
                 PatternPipelineError::new(
                     "pattern.family.curved_guides.tangent",
                     "curved along-guide sampling requires a nonstationary tangent",
@@ -6126,7 +6947,7 @@ fn curve_along_sites(
                     report_progress(completed_samples.min(predicted_sites), predicted_sites);
                 }
                 let location = measure.location_at_length(local_position)?;
-                let tangent = guide.path.unit_tangent_at(location).map_err(|_| {
+                let tangent = guide.path.limiting_unit_tangent_at(location).map_err(|_| {
                     PatternPipelineError::new(
                         "pattern.family.curved_guides.tangent",
                         "curved along-guide sampling requires a nonstationary tangent",
@@ -6406,6 +7227,7 @@ pub fn maximum_nominal_cell_diameter(
     canvas: &CanvasSpec,
     density: &ResolvedDensityMetric2D,
 ) -> Result<f64, PatternPipelineError> {
+    let pattern_size_scale = resolved_pattern_size_scale(canvas, density)?;
     if let Some(parametric) = &family.parametric_curve {
         let radial_spacing = match &parametric.curve {
             ParametricCurve::Spiral(spiral) => spiral.radial_spacing,
@@ -6420,7 +7242,7 @@ pub fn maximum_nominal_cell_diameter(
                 directional_spacing(canvas, density, Vector2::new(angle.cos(), angle.sin()))?
                     * spacing_multiplier
             }
-            GuideRepetition::NormalOffset { spacing, .. } => spacing,
+            GuideRepetition::NormalOffset { spacing, .. } => spacing * pattern_size_scale,
         };
         let bound = parametric
             .site_interval
@@ -6473,7 +7295,9 @@ pub fn maximum_nominal_cell_diameter(
                     directional_spacing(canvas, density, Vector2::new(angle.cos(), angle.sin()))
                         .map(|spacing| maximum.max(spacing * spacing_multiplier))
                 }
-                GuideRepetition::NormalOffset { spacing, .. } => Ok(maximum.max(spacing)),
+                GuideRepetition::NormalOffset { spacing, .. } => {
+                    Ok(maximum.max(spacing * pattern_size_scale))
+                }
             })
     };
     let maximum = match family.product {
@@ -6525,9 +7349,12 @@ pub fn maximum_emitted_guide_spacing(
     canvas: &CanvasSpec,
     density: &ResolvedDensityMetric2D,
 ) -> Result<f64, PatternPipelineError> {
+    let pattern_size_scale = resolved_pattern_size_scale(canvas, density)?;
     if let Some(parametric) = &family.parametric_curve {
         let spacing = match (&parametric.curve, &parametric.repetition) {
-            (ParametricCurve::Spiral(_), GuideRepetition::NormalOffset { spacing, .. }) => *spacing,
+            (ParametricCurve::Spiral(_), GuideRepetition::NormalOffset { spacing, .. }) => {
+                *spacing * pattern_size_scale
+            }
             (
                 ParametricCurve::Spiral(_),
                 GuideRepetition::TransformStack {
@@ -6567,7 +7394,7 @@ pub fn maximum_emitted_guide_spacing(
                     directional_spacing(canvas, density, Vector2::new(angle.cos(), angle.sin()))?
                         * spacing_multiplier
                 }
-                GuideRepetition::NormalOffset { spacing, .. } => spacing,
+                GuideRepetition::NormalOffset { spacing, .. } => spacing * pattern_size_scale,
             };
             maximum = maximum.max(spacing);
         }
@@ -6685,18 +7512,9 @@ fn generic_curve_fingerprint(
                 bytes.extend(direction_degrees.to_bits().to_le_bytes());
                 bytes.extend(spacing_multiplier.to_bits().to_le_bytes());
             }
-            GuideRepetition::NormalOffset {
-                spacing,
-                sides,
-                cleanup,
-            } => {
+            GuideRepetition::NormalOffset { spacing, cleanup } => {
                 bytes.push(3);
                 bytes.extend(spacing.to_bits().to_le_bytes());
-                bytes.push(match sides {
-                    OffsetSides::Left => 1,
-                    OffsetSides::Right => 2,
-                    OffsetSides::Both => 3,
-                });
                 bytes.push(match cleanup {
                     OffsetCleanup::DissolveCrossings => 1,
                 });
@@ -7326,23 +8144,32 @@ fn evaluate_random_sites_with_progress_cancellable(
             }
             continue;
         }
-        let density_weight = match (&random.density_modulation, weighted_source) {
-            (SiteDensityModulation::Uniform, _) => 1.0,
-            (
-                SiteDensityModulation::ArtworkWeighted {
-                    mapping,
-                    strength,
-                    response,
-                },
-                Some(field),
-            ) => {
-                let sampled = field
-                    .sample_density_weight(point, &request.canvas, *mapping)
-                    .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
-                let shaped = artwork_weight_response(sampled, response);
-                (1.0 - strength) + strength * shaped
+        let density_weight = if !canvas.contains(point) {
+            // Guard sites are coverage topology, not visible source-weighted placement. Sampling
+            // a clamped zero-valued canvas edge here can otherwise remove the entire exterior
+            // hull and leave an ordinary Voronoi output unbounded inside the canvas.
+            1.0
+        } else {
+            match (&random.density_modulation, weighted_source) {
+                (SiteDensityModulation::Uniform, _) => 1.0,
+                (
+                    SiteDensityModulation::ArtworkWeighted {
+                        mapping,
+                        strength,
+                        response,
+                    },
+                    Some(field),
+                ) => {
+                    let sampled = field
+                        .sample_density_weight(point, &request.canvas, *mapping)
+                        .map_err(|error| {
+                            PatternPipelineError::new(error.path(), error.message())
+                        })?;
+                    let shaped = artwork_weight_response(sampled, response);
+                    (1.0 - strength) + strength * shaped
+                }
+                _ => unreachable!("weighted source requirement is checked above"),
             }
-            _ => unreachable!("weighted source requirement is checked above"),
         };
         if prng.unit() > density_weight {
             rejected_by_density += 1;
@@ -9756,6 +10583,7 @@ pub struct CanonicalMarkRealization {
 pub struct StrokeResponse {
     pub minimum_thickness: f64,
     pub maximum_thickness: f64,
+    pub bias: f64,
 }
 
 /// Immutable ordered canonical strokes produced from one guide-path output layer.
@@ -9908,6 +10736,7 @@ pub fn realize_typed_canonical_strokes_cancellable(
                 })
                 .collect::<Vec<_>>(),
             output.guide_paths().expect("validated guide output").1,
+            response.bias,
             1.0 / 8.0,
             VariableWidthOutlineLimits::new(
                 max_outline_segments.saturating_sub(outline_segments).max(1),
@@ -9970,6 +10799,7 @@ pub fn realize_typed_canonical_strokes_cancellable(
     bytes.extend(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.as_bytes());
     bytes.extend(response.minimum_thickness.to_bits().to_le_bytes());
     bytes.extend(response.maximum_thickness.to_bits().to_le_bytes());
+    bytes.extend(response.bias.to_bits().to_le_bytes());
     for stroke in &strokes {
         match &stroke.source_id {
             toniator_geometry::CanonicalStrokeSourceId::Structural(id) => {
@@ -10051,6 +10881,7 @@ pub fn realize_typed_canonical_stroke_output_cancellable(
         StrokeResponse {
             minimum_thickness: response.minimum_thickness,
             maximum_thickness: response.maximum_thickness,
+            bias: response.bias,
         },
         1.0,
         max_profile_samples,
@@ -10181,6 +11012,7 @@ where
     identity.write(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.bytes());
     identity.write(response.minimum_thickness.to_bits().to_le_bytes());
     identity.write(response.maximum_thickness.to_bits().to_le_bytes());
+    identity.write(response.bias.to_bits().to_le_bytes());
     let mut profile_samples = 0_usize;
     let mut outline_segments = 0_usize;
     for (connection_id, path, nominal_basis) in connections {
@@ -10269,6 +11101,7 @@ where
             &path,
             &outline_input,
             style,
+            response.bias,
             1.0 / 8.0,
             VariableWidthOutlineLimits::new(
                 max_outline_segments.saturating_sub(outline_segments).max(1),
@@ -10461,6 +11294,7 @@ where
     identity.write(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.bytes());
     identity.write(response.minimum_thickness.to_bits().to_le_bytes());
     identity.write(response.maximum_thickness.to_bits().to_le_bytes());
+    identity.write(response.bias.to_bits().to_le_bytes());
     let mut profile_samples = 0_usize;
     let mut outline_segments = 0_usize;
     for (wall_id, path, nominal_basis) in walls {
@@ -10546,6 +11380,7 @@ where
             &path,
             &outline_input,
             style,
+            response.bias,
             1.0 / 8.0,
             VariableWidthOutlineLimits::new(
                 max_outline_segments.saturating_sub(outline_segments).max(1),
@@ -10691,6 +11526,7 @@ pub fn realize_typed_maze_canonical_stroke_output_cancellable(
         StrokeResponse {
             minimum_thickness: response.minimum_thickness,
             maximum_thickness: response.maximum_thickness,
+            bias: response.bias,
         },
         style,
         max_profile_samples,
@@ -10782,6 +11618,7 @@ pub fn realize_typed_connection_canonical_stroke_output_cancellable(
         StrokeResponse {
             minimum_thickness: response.minimum_thickness,
             maximum_thickness: response.maximum_thickness,
+            bias: response.bias,
         },
         style,
         max_profile_samples,
@@ -12734,6 +13571,7 @@ mod realization_tests {
             StrokeResponse {
                 minimum_thickness: 0.1,
                 maximum_thickness: 0.6,
+                bias: 0.0,
             },
             toniator_domain::PathStrokeStyle::default(),
             MAX_STROKE_PROFILE_SAMPLES,
@@ -12760,6 +13598,7 @@ mod realization_tests {
             StrokeResponse {
                 minimum_thickness: 0.0,
                 maximum_thickness: 0.6,
+                bias: 0.0,
             },
             toniator_domain::PathStrokeStyle::default(),
             MAX_STROKE_PROFILE_SAMPLES,
@@ -12786,6 +13625,7 @@ mod realization_tests {
             StrokeResponse {
                 minimum_thickness: 0.0,
                 maximum_thickness: 0.6,
+                bias: 0.0,
             },
             toniator_domain::PathStrokeStyle::default(),
             MAX_STROKE_PROFILE_SAMPLES,
@@ -13806,6 +14646,153 @@ fn fingerprint(request: &GridInspectRequest, spacing_x: f64, spacing_y: f64) -> 
 mod coverage_tests {
     use super::*;
 
+    /// Proves authored Constant-gap planning retains the canvas half-diagonal plus two ranks.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a smaller projected transverse bound can shorten either mandatory bilateral
+    /// rank range for the reported 900-by-620 canvas witness.
+    #[test]
+    fn authored_normal_offset_rank_plan_has_diagonal_plus_two_floor() {
+        let source = CurvePath::line(Point2::new(-450.0, 0.0), Point2::new(450.0, 0.0))
+            .expect("fixed authored source validates");
+        let domain = Bounds::new(Point2::new(-465.0, -330.0), Point2::new(465.0, 330.0))
+            .expect("fixed centered domain validates");
+        let center_to_corner = 0.5 * 900.0_f64.hypot(620.0);
+        let (first, last) =
+            authored_normal_offset_rank_bounds(&source, domain, center_to_corner, 16.128, 1)
+                .expect("finite authored Constant-gap range resolves");
+        assert_eq!((first, last), (-36, 36));
+    }
+
+    /// Proves normal-offset coverage probing has a geometry-owned finite distance sentinel.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the bound omits the domain diagonal, fails to include an authored source that
+    /// begins outside the domain, or no longer rounds outward to a complete repetition index.
+    #[test]
+    fn normal_offset_absolute_limit_contains_authored_and_extension_sources() {
+        let domain = Bounds::new(Point2::new(0.0, 0.0), Point2::new(10.0, 10.0)).unwrap();
+        let inside = Bounds::new(Point2::new(2.0, 4.0), Point2::new(8.0, 6.0)).unwrap();
+        assert_eq!(
+            normal_offset_absolute_index_limit(inside, domain, 2.0).unwrap(),
+            8,
+            "the endpoint-extension domain contributes its complete diagonal"
+        );
+        let outside = Bounds::new(Point2::new(-20.0, 4.0), Point2::new(-10.0, 6.0)).unwrap();
+        assert_eq!(
+            normal_offset_absolute_index_limit(outside, domain, 2.0).unwrap(),
+            16,
+            "authored geometry outside the generation domain expands the proof envelope"
+        );
+    }
+
+    /// Proves chained cubic runway owns exact nodes and tangent-continuous derived seams.
+    ///
+    /// # Panics
+    ///
+    /// Panics when end-to-end guide tiling changes the next handle length, leaves a floating-point
+    /// node gap, or introduces a seam tangent discontinuity before Constant-gap repetition.
+    #[test]
+    fn authored_cubic_runway_chains_with_exact_g1_seams() {
+        let cubic = CubicBezierSegment::new(
+            Point2::new(-10.0, 0.0),
+            Point2::new(-6.0, -5.0),
+            Point2::new(4.0, 7.0),
+            Point2::new(10.0, 0.0),
+        )
+        .expect("finite authored cubic");
+        let source = CurvePath::new(vec![CurveSegment::CubicBezier(cubic)], PathClosure::Open)
+            .expect("one-cubic authored guide");
+        let domain = Bounds::new(Point2::new(-45.0, -20.0), Point2::new(45.0, 20.0))
+            .expect("finite runway domain");
+        let tiled = tile_authored_guide_end_to_end(&source, domain, 10.0)
+            .expect("authored runway tiles within its bound");
+        assert!(tiled.segments().len() > 2);
+        let authored_handle_length =
+            (cubic.control_1().x - cubic.start().x).hypot(cubic.control_1().y - cubic.start().y);
+        for seam in tiled.segments().windows(2) {
+            assert_eq!(seam[0].end(), seam[1].start());
+            let incoming = seam[0]
+                .limiting_unit_tangent_at(1.0)
+                .expect("incoming tiled tangent is finite");
+            let outgoing = seam[1]
+                .limiting_unit_tangent_at(0.0)
+                .expect("outgoing tiled tangent is finite");
+            assert!((incoming.dot(outgoing) - 1.0).abs() <= 1.0e-12);
+            let CurveSegment::CubicBezier(next) = seam[1] else {
+                panic!("cubic source produces cubic runway tiles");
+            };
+            let next_handle_length =
+                (next.control_1().x - next.start().x).hypot(next.control_1().y - next.start().y);
+            assert!((next_handle_length - authored_handle_length).abs() <= 1.0e-12);
+        }
+    }
+
+    /// Proves one-time longitudinal scaling cannot change Stacked directional pitch.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the authored guide does not scale to the generation span, directional density
+    /// does not resolve the expected pitch, or any next-rank construction point receives a
+    /// displacement other than that single preset-owned pitch vector.
+    #[test]
+    fn authored_curve_scales_once_without_scaling_stack_pitch() {
+        let cubic = CubicBezierSegment::new(
+            Point2::new(-60.0, 0.0),
+            Point2::new(-20.0, -24.0),
+            Point2::new(20.0, 16.0),
+            Point2::new(60.0, 0.0),
+        )
+        .expect("finite authored stack curve");
+        let source = CurvePath::new(vec![CurveSegment::CubicBezier(cubic)], PathClosure::Open)
+            .expect("one-cubic authored stack guide");
+        let domain = Bounds::new(Point2::new(-160.0, -60.0), Point2::new(160.0, 60.0))
+            .expect("finite centered generation domain");
+        let scaled =
+            scale_authored_guide_to_generation_span(&source, domain).expect("guide scales once");
+        assert!(
+            (scaled.end().x - scaled.start().x).hypot(scaled.end().y - scaled.start().y) > 120.0
+        );
+        let canvas = CanvasSpec {
+            width: 320.0,
+            height: 120.0,
+        };
+        let density = ResolvedDensityMetric2D {
+            across_x: 40.0,
+            across_y: 15.0,
+        };
+        let unit = Vector2::new(0.0, 1.0);
+        let pitch = directional_spacing(&canvas, &density, unit)
+            .expect("directional stack spacing resolves");
+        assert!((pitch - 8.0).abs() <= 1.0e-12);
+        let transform = AffineTransform2D::rotate_about_then_translate(
+            Point2::new(0.0, 0.0),
+            0.0,
+            unit.scale(pitch),
+        )
+        .expect("finite stack translation");
+        let next = scaled
+            .transformed(transform)
+            .expect("next stack rank translates");
+        let CurveSegment::CubicBezier(current) = scaled.segments()[0] else {
+            panic!("scaled cubic retains its construction kind");
+        };
+        let CurveSegment::CubicBezier(next) = next.segments()[0] else {
+            panic!("translated cubic retains its construction kind");
+        };
+        for (current, next) in [
+            (current.start(), next.start()),
+            (current.control_1(), next.control_1()),
+            (current.control_2(), next.control_2()),
+            (current.end(), next.end()),
+        ] {
+            assert!((next.x - current.x).abs() <= 1.0e-12);
+            assert!((next.y - current.y - pitch).abs() <= 1.0e-12);
+        }
+    }
+
     /// Proves outer normal-offset coverage requires authored endpoint span and geometric side bracketing.
     #[test]
     fn normal_offset_outer_components_must_bracket_the_generation_domain() {
@@ -13817,6 +14804,7 @@ mod coverage_tests {
                 source_start: PathLocation::new(0, start).unwrap(),
                 source_end: PathLocation::new(0, end).unwrap(),
                 path: CurvePath::line(Point2::new(first_x, y), Point2::new(last_x, y)).unwrap(),
+                planar_switch_nodes: Vec::new(),
             };
         assert!(
             !normal_offset_components_bracket_domain(

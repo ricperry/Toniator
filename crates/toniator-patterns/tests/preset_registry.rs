@@ -25,8 +25,12 @@ fn history() -> DocumentHistory {
     DocumentHistory::new(DocumentSession::new(document).unwrap())
 }
 
-/// Reconstructs every bundled entry deterministically and proves metadata IDs
-/// remain stable, sorted, and independent from document-owned allocation.
+/// Reconstructs and rematerializes every bundled entry with recipe-local resource graphs.
+///
+/// # Panics
+///
+/// Panics when a built-in metadata ID, root authored-resource table, or allocation-insensitive
+/// reconstruction changes while materializing either the registered or reconstructed recipe.
 #[test]
 fn bundled_registry_is_stable_and_reconstructs_every_entry() {
     let registry = PresetRegistry::bundled();
@@ -63,11 +67,48 @@ fn bundled_registry_is_stable_and_reconstructs_every_entry() {
             "two-guide-maze",
         ]
     );
-    for id in ids {
+    for entry in registry.entries() {
+        let id = &entry.metadata.id;
         assert!(registry.reconstruct(id).is_some());
+        let mut first = history();
         registry
-            .apply_to_selected(&mut history(), ChannelId(1), id)
+            .apply_to_selected(&mut first, ChannelId(1), id)
             .expect("every bundled recipe materializes through the ordinary history boundary");
+        let reconstructed = first
+            .document()
+            .reconstruct_pattern_definition_recipe(
+                first
+                    .document()
+                    .pattern_definition_for(ChannelId(1))
+                    .expect("selected channel retains its materialized definition")
+                    .id,
+            )
+            .expect("every built-in materialized definition reconstructs");
+        let reconstructed_registry = PresetRegistry::new(
+            1,
+            vec![PresetRecord {
+                metadata: entry.metadata.clone(),
+                recipe: reconstructed.clone(),
+            }],
+        )
+        .expect("every reconstructed built-in remains a valid registry entry");
+        let mut second = history();
+        reconstructed_registry
+            .apply_to_selected(&mut second, ChannelId(1), id)
+            .expect("every reconstructed built-in rematerializes normally");
+        assert_eq!(
+            second
+                .document()
+                .reconstruct_pattern_definition_recipe(
+                    second
+                        .document()
+                        .pattern_definition_for(ChannelId(1))
+                        .expect("selected channel retains its rematerialized definition")
+                        .id,
+                )
+                .expect("every rematerialized built-in reconstructs"),
+            reconstructed
+        );
     }
 }
 
@@ -147,13 +188,20 @@ fn curve_motif_card_uses_the_accepted_row_cadence_and_phase_recipe() {
     let record = registry
         .find("curve-motif-rows")
         .expect("seventeenth Curve Motif card exists");
+    let PatternStructureRecipe::AuthoredResources {
+        resources,
+        definition: root_definition,
+    } = &record.recipe.structure
+    else {
+        panic!("Curve Motif card retains its root authored-resource table")
+    };
     let PatternStructureRecipe::CurveMotifPaths {
         definition,
-        motif,
+        resource_index,
         mirror_alternate_rows,
         alternate_row_phase,
         ..
-    } = &record.recipe.structure
+    } = root_definition.as_ref()
     else {
         panic!("Curve Motif card retains its ordinary Curve Motif recipe")
     };
@@ -183,7 +231,7 @@ fn curve_motif_card_uses_the_accepted_row_cadence_and_phase_recipe() {
         orientation,
         MarkOrientationDraft::GuideTangent { dimension_index: 0 }
     ));
-    assert_eq!(motif.segments().len(), 3);
+    assert_eq!(resources[*resource_index].segments().len(), 3);
     assert!(*mirror_alternate_rows);
     assert_eq!(*alternate_row_phase, Some(0.25));
 }
@@ -544,8 +592,9 @@ fn shape_preset_materialization_is_atomic_and_uses_an_ordinary_typed_reference()
                 description: "Atomic shape materialization fixture.".into(),
                 thumbnail: None,
             },
-            recipe: PatternDefinitionRecipe::marks(
-                PatternStructureRecipe::AuthoredClosedShapeMarks {
+            recipe: PatternDefinitionRecipe::marks(PatternStructureRecipe::AuthoredResources {
+                resources: vec![shape],
+                definition: Box::new(PatternStructureRecipe::AuthoredClosedShapeMarks {
                     definition: Box::new(PatternStructureRecipe::StraightGrid(
                         PatternDefinitionDraft {
                             name: "Triangle grid".into(),
@@ -555,9 +604,9 @@ fn shape_preset_materialization_is_atomic_and_uses_an_ordinary_typed_reference()
                             },
                         },
                     )),
-                    shape,
-                },
-            ),
+                    resource_index: 0,
+                }),
+            }),
         }],
     )
     .expect("the shape registry entry is valid");

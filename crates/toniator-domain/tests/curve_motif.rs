@@ -1,13 +1,17 @@
 use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructureDraft, AuthoredStructureKind,
-    CanvasSpec, CoveragePolicy, Document, DocumentCommand, DocumentHistory, DocumentSession,
-    GeneralizedSiteProductDraft, GuideDimensionDraft, MarkOrientationDraft, PathStrokeStyle,
-    PatternDefinitionDraft, PatternDefinitionEdit, PatternDefinitionRecipe,
+    AuthoredStructureUse, CanvasSpec, CoveragePolicy, Document, DocumentCommand, DocumentHistory,
+    DocumentSession, GeneralizedSiteProductDraft, GuideDimensionDraft, MarkOrientationDraft,
+    PathStrokeStyle, PatternDefinitionDraft, PatternDefinitionEdit, PatternDefinitionRecipe,
     PatternGeometryResponse, PatternOutputRealization, PatternStructureRecipe,
     PropertyCurrentValueKind, PropertyFieldId, PropertyFieldValue, PropertyTarget,
 };
 
 /// Builds the single-guide Along Guides recipe required by the Curve Motif authority.
+///
+/// # Panics
+///
+/// Panics when the fixed authored open-path fixture stops satisfying domain validation.
 fn curve_motif_recipe(phase: Option<f64>) -> PatternDefinitionRecipe {
     let motif = AuthoredStructureDraft::new(
         AuthoredStructureKind::OpenPath,
@@ -23,29 +27,32 @@ fn curve_motif_recipe(phase: Option<f64>) -> PatternDefinitionRecipe {
         ],
     )
     .expect("asymmetric open motif validates");
-    PatternDefinitionRecipe::connected(PatternStructureRecipe::CurveMotifPaths {
-        definition: Box::new(PatternStructureRecipe::GeneralizedStraightGuides {
-            name: "Curve Motif test".into(),
-            coverage: CoveragePolicy {
-                guard_steps: 1,
-                additional_margin: 0.0,
-            },
-            dimensions: vec![GuideDimensionDraft {
-                baseline_angle_degrees: 0.0,
-                phase: 0.0,
-                spacing_multiplier: 1.0,
-            }],
-            product: GeneralizedSiteProductDraft::AlongGuides {
-                dimension_indices: vec![0],
-                interval_multiplier: 1.0,
-                phase: 0.0,
-            },
-            orientation: MarkOrientationDraft::GuideTangent { dimension_index: 0 },
+    PatternDefinitionRecipe::connected(PatternStructureRecipe::AuthoredResources {
+        resources: vec![motif],
+        definition: Box::new(PatternStructureRecipe::CurveMotifPaths {
+            definition: Box::new(PatternStructureRecipe::GeneralizedStraightGuides {
+                name: "Curve Motif test".into(),
+                coverage: CoveragePolicy {
+                    guard_steps: 1,
+                    additional_margin: 0.0,
+                },
+                dimensions: vec![GuideDimensionDraft {
+                    baseline_angle_degrees: 0.0,
+                    phase: 0.0,
+                    spacing_multiplier: 1.0,
+                }],
+                product: GeneralizedSiteProductDraft::AlongGuides {
+                    dimension_indices: vec![0],
+                    interval_multiplier: 1.0,
+                    phase: 0.0,
+                },
+                orientation: MarkOrientationDraft::GuideTangent { dimension_index: 0 },
+            }),
+            resource_index: 0,
+            style: PathStrokeStyle::default(),
+            mirror_alternate_rows: true,
+            alternate_row_phase: phase,
         }),
-        motif,
-        style: PathStrokeStyle::default(),
-        mirror_alternate_rows: true,
-        alternate_row_phase: phase,
     })
 }
 
@@ -63,6 +70,11 @@ fn history() -> DocumentHistory {
 }
 
 /// Materializes a motif resource, exposes connected controls, and restores exact history state.
+///
+/// # Panics
+///
+/// Panics when the valid root-table recipe stops materializing, exposing its authoritative
+/// descriptors, or restoring its one grouped history entry exactly.
 #[test]
 fn curve_motif_recipe_materializes_resource_descriptors_and_exact_history() {
     let mut history = history();
@@ -189,6 +201,10 @@ fn curve_motif_recipe_materializes_resource_descriptors_and_exact_history() {
 }
 
 /// Rejects a non-open phase fraction before recipe materialization can publish a resource.
+///
+/// # Panics
+///
+/// Panics when the invalid phase publishes a history entry or loses its recipe-level diagnostic.
 #[test]
 fn curve_motif_recipe_rejects_invalid_alternate_phase() {
     let mut history = history();
@@ -218,6 +234,10 @@ fn curve_motif_recipe_rejects_invalid_alternate_phase() {
 }
 
 /// Rejects malformed Curve Motif paths, two-guide families, and nonfinite layout before history can publish intent.
+///
+/// # Panics
+///
+/// Panics when a malformed root-table payload or invalid family topology reaches history.
 #[test]
 fn curve_motif_recipe_rejects_invalid_path_and_family_shapes() {
     assert!(AuthoredStructureDraft::new(AuthoredStructureKind::OpenPath, Vec::new()).is_err());
@@ -262,22 +282,34 @@ fn curve_motif_recipe_rejects_invalid_path_and_family_shapes() {
             .is_err()
     };
     let mut closed_recipe = curve_motif_recipe(None);
-    let PatternStructureRecipe::CurveMotifPaths { motif, .. } = &mut closed_recipe.structure else {
-        panic!("fixture remains Curve Motif")
+    let PatternStructureRecipe::AuthoredResources {
+        resources,
+        definition,
+    } = &mut closed_recipe.structure
+    else {
+        panic!("fixture retains its root resource table")
     };
-    *motif = closed;
+    assert!(matches!(
+        definition.as_ref(),
+        PatternStructureRecipe::CurveMotifPaths { .. }
+    ));
+    resources[0] = closed;
     assert!(reject(closed_recipe));
     let mut coincident_recipe = curve_motif_recipe(None);
-    let PatternStructureRecipe::CurveMotifPaths { motif, .. } = &mut coincident_recipe.structure
+    let PatternStructureRecipe::AuthoredResources { resources, .. } =
+        &mut coincident_recipe.structure
     else {
-        panic!("fixture remains Curve Motif")
+        panic!("fixture retains its root resource table")
     };
-    *motif = coincident;
+    resources[0] = coincident;
     assert!(reject(coincident_recipe));
     let mut two_guide_recipe = curve_motif_recipe(None);
-    let PatternStructureRecipe::CurveMotifPaths { definition, .. } =
+    let PatternStructureRecipe::AuthoredResources { definition, .. } =
         &mut two_guide_recipe.structure
     else {
+        panic!("fixture retains its root resource table")
+    };
+    let PatternStructureRecipe::CurveMotifPaths { definition, .. } = definition.as_mut() else {
         panic!("fixture remains Curve Motif")
     };
     let PatternStructureRecipe::GeneralizedStraightGuides {
@@ -300,9 +332,12 @@ fn curve_motif_recipe_rejects_invalid_path_and_family_shapes() {
     };
     assert!(reject(two_guide_recipe));
     let mut nonfinite_recipe = curve_motif_recipe(None);
-    let PatternStructureRecipe::CurveMotifPaths { definition, .. } =
+    let PatternStructureRecipe::AuthoredResources { definition, .. } =
         &mut nonfinite_recipe.structure
     else {
+        panic!("fixture retains its root resource table")
+    };
+    let PatternStructureRecipe::CurveMotifPaths { definition, .. } = definition.as_mut() else {
         panic!("fixture remains Curve Motif")
     };
     let PatternStructureRecipe::GeneralizedStraightGuides { dimensions, .. } = definition.as_mut()
@@ -312,9 +347,12 @@ fn curve_motif_recipe_rejects_invalid_path_and_family_shapes() {
     dimensions[0].phase = f64::NAN;
     assert!(reject(nonfinite_recipe));
     let mut wrong_family_recipe = curve_motif_recipe(None);
-    let PatternStructureRecipe::CurveMotifPaths { definition, .. } =
+    let PatternStructureRecipe::AuthoredResources { definition, .. } =
         &mut wrong_family_recipe.structure
     else {
+        panic!("fixture retains its root resource table")
+    };
+    let PatternStructureRecipe::CurveMotifPaths { definition, .. } = definition.as_mut() else {
         panic!("fixture remains Curve Motif")
     };
     **definition = PatternStructureRecipe::StraightGrid(PatternDefinitionDraft {
@@ -453,4 +491,145 @@ fn curve_motif_descriptor_commands_are_exact_and_history_backed() {
         .expect("phase command redoes")
         .expect("phase redo exists");
     assert_eq!(history.document(), &after_phase);
+}
+
+/// Keeps Curve Motif resources in the same typed shared-resource routes as guides and marks.
+///
+/// The witness proves the use projection, selected-copy retarget, and nested
+/// undo boundary without treating an output name or a resource ordinal as an
+/// authority.
+#[test]
+fn curve_motif_resource_use_duplicates_and_retargets_as_one_history_entry() {
+    let mut history = history();
+    let base = history.document().pattern_settings().clone();
+    let base_definition = history
+        .document()
+        .pattern_definition_bundles()
+        .iter()
+        .find(|bundle| bundle.definition.id == base.definition_id)
+        .expect("base definition exists")
+        .definition
+        .clone();
+    history
+        .apply(&DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
+            base,
+            base_definition,
+            recipe: curve_motif_recipe(None),
+        })
+        .expect("Curve Motif recipe materializes");
+    let before = history.document().clone();
+    let use_value = history
+        .document()
+        .authored_structure_uses()
+        .into_iter()
+        .find(|use_value| matches!(use_value, AuthoredStructureUse::Motif { .. }))
+        .expect("Curve Motif exposes one typed authored-resource use");
+    let result = history
+        .duplicate_and_retarget_authored_structure(use_value)
+        .expect("Curve Motif selected-copy retarget applies");
+    let created = result
+        .created_authored_structure_id
+        .expect("selected-copy retarget allocates one fresh motif");
+    assert_ne!(created, use_value.structure_id());
+    assert!(history.document().authored_structure(created).is_some());
+    let after = history.document().clone();
+    history
+        .undo()
+        .expect("retarget undoes")
+        .expect("one undo exists");
+    assert_eq!(history.document(), &before);
+    history
+        .redo()
+        .expect("retarget redoes")
+        .expect("one redo exists");
+    assert_eq!(history.document(), &after);
+}
+
+/// Keeps document-base Curve Motif copy-on-edit inside one shared-definition history entry.
+///
+/// # Panics
+///
+/// Panics when the grouped operation creates a named-channel override, changes the old shared
+/// resource, misses a linked channel, loses the replacement payload, or fails exact undo/redo.
+#[test]
+fn curve_motif_document_base_copy_retargets_the_shared_definition_atomically() {
+    let mut history = history();
+    let base = history.document().pattern_settings().clone();
+    let base_definition = history
+        .document()
+        .pattern_definition_bundles()
+        .iter()
+        .find(|bundle| bundle.definition.id == base.definition_id)
+        .expect("base definition exists")
+        .definition
+        .clone();
+    history
+        .apply(&DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
+            base,
+            base_definition,
+            recipe: curve_motif_recipe(None),
+        })
+        .expect("Curve Motif recipe materializes");
+    let definition_id = history.document().pattern_settings().definition_id;
+    let before = history.document().clone();
+    let use_value = history
+        .document()
+        .authored_structure_uses()
+        .into_iter()
+        .find(|use_value| matches!(use_value, AuthoredStructureUse::Motif { .. }))
+        .expect("Curve Motif exposes a typed use");
+    let original_id = use_value.structure_id();
+    let replacement = AuthoredStructureDraft::new(
+        AuthoredStructureKind::OpenPath,
+        vec![AuthoredCurveSegment::CubicBezier {
+            start: AuthoredPoint2 { x: 0.0, y: 0.0 },
+            control_1: AuthoredPoint2 { x: 0.2, y: 0.3 },
+            control_2: AuthoredPoint2 { x: 0.8, y: -0.3 },
+            end: AuthoredPoint2 { x: 1.0, y: 0.0 },
+        }],
+    )
+    .expect("replacement motif validates");
+    let result = history
+        .duplicate_retarget_shared_definition_and_replace_authored_structure(
+            use_value,
+            replacement.clone(),
+        )
+        .expect("document-base copy-and-retarget applies");
+    let created = result
+        .created_authored_structure_id
+        .expect("grouped shared retarget allocates one resource");
+    assert_ne!(created, original_id);
+    assert_eq!(
+        result.affected_channels,
+        history.document().linked_channels(definition_id)
+    );
+    assert_eq!(
+        history
+            .document()
+            .authored_structure(created)
+            .expect("fresh motif remains document-owned")
+            .segments(),
+        replacement.segments()
+    );
+    assert!(
+        history
+            .document()
+            .authored_structure_uses()
+            .into_iter()
+            .filter(|use_value| matches!(use_value, AuthoredStructureUse::Motif { .. }))
+            .all(|use_value| use_value.structure_id() == created),
+        "every channel linked to the document base follows the retargeted output use"
+    );
+    assert!(history.document().authored_structure(original_id).is_some());
+    let after = history.document().clone();
+    history
+        .undo()
+        .expect("shared retarget undoes")
+        .expect("one undo exists");
+    assert_eq!(history.document(), &before);
+    history
+        .redo()
+        .expect("shared retarget redoes")
+        .expect("one redo exists");
+    assert_eq!(history.document(), &after);
 }

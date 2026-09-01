@@ -3,6 +3,7 @@ using Gtk 4.0;
 template $ToniatorPatternWizardCard : Gtk.Box {
   orientation: vertical;
   spacing: 6;
+  width-request: 220;
   styles [ "toniator-wizard-card" ]
 
   Gtk.Image wizard_card_thumbnail {
@@ -12,11 +13,15 @@ template $ToniatorPatternWizardCard : Gtk.Box {
 
   Gtk.Label wizard_card_name {
     xalign: 0;
+    wrap: true;
+    max-width-chars: 28;
     styles [ "heading" ]
   }
 
   Gtk.Label wizard_card_category {
     xalign: 0;
+    wrap: true;
+    max-width-chars: 28;
     styles [ "dim-label" ]
   }
 
@@ -30,6 +35,7 @@ template $ToniatorPatternWizardCard : Gtk.Box {
   Gtk.Label wizard_card_description {
     xalign: 0;
     wrap: true;
+    max-width-chars: 28;
     styles [ "dim-label" ]
   }
 
@@ -37,12 +43,8 @@ template $ToniatorPatternWizardCard : Gtk.Box {
     visible: false;
     xalign: 0;
     wrap: true;
+    max-width-chars: 28;
     styles [ "dim-label" ]
   }
 
-  Gtk.Box wizard_card_actions {
-    orientation: vertical;
-    spacing: 8;
-    hexpand: true;
-  }
 }

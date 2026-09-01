@@ -698,6 +698,7 @@ fn apply_mutation(
                                         } else {
                                             endpoint
                                         },
+                                        bias: response.bias,
                                     },
                                 ),
                             ),

@@ -3,7 +3,7 @@ use toniator_domain::{
     AuthoredStructureId, AuthoredStructureKind, CanvasSpec, CoveragePolicy, Document,
     DocumentCommand, DocumentHistory, DocumentId, DocumentSession, GeneralizedSiteProduct,
     GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition, InvalidationLevel,
-    MarkOrientation, OffsetCleanup, OffsetSides, PatternDefinition, PatternDefinitionBundle,
+    MarkOrientation, OffsetCleanup, PatternDefinition, PatternDefinitionBundle,
     PatternDefinitionEdit, PatternDefinitionId, PatternMechanism, PatternMechanismId,
     PatternOutputLayerId, PropertyCurrentValueKind, PropertyEnumChoice, PropertyFieldId,
     SourceReference,
@@ -167,7 +167,6 @@ fn normal_offset_repetition_requires_zero_phase() {
             },
             repetition: GuideRepetition::NormalOffset {
                 spacing: 24.0,
-                sides: OffsetSides::Both,
                 cleanup: OffsetCleanup::DissolveCrossings,
             },
         }],
@@ -500,7 +499,6 @@ fn normal_offset_payload_descriptors_and_typed_edits_are_history_safe() {
             dimension_id: GuideDimensionId(1),
             repetition: GuideRepetition::NormalOffset {
                 spacing: 24.0,
-                sides: OffsetSides::Both,
                 cleanup: OffsetCleanup::DissolveCrossings,
             },
         },
@@ -527,10 +525,6 @@ fn normal_offset_payload_descriptors_and_typed_edits_are_history_safe() {
         &PropertyCurrentValueKind::FiniteF64(24.0)
     );
     assert_eq!(
-        value(PropertyFieldId::GuideOffsetSides),
-        &PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::OffsetSides(OffsetSides::Both))
-    );
-    assert_eq!(
         value(PropertyFieldId::GuideOffsetCleanup),
         &PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::OffsetCleanup(
             OffsetCleanup::DissolveCrossings
@@ -549,14 +543,6 @@ fn normal_offset_payload_descriptors_and_typed_edits_are_history_safe() {
         },
     );
     assert_eq!(result.invalidation, Some(InvalidationLevel::Family));
-    apply(
-        &mut history,
-        PatternDefinitionEdit::SetGuideOffsetSides {
-            mechanism_id: PatternMechanismId(1),
-            dimension_id: GuideDimensionId(1),
-            sides: OffsetSides::Left,
-        },
-    );
     let revision = history.revision();
     let before = history.document().clone();
     assert!(
@@ -576,25 +562,8 @@ fn normal_offset_payload_descriptors_and_typed_edits_are_history_safe() {
     assert_eq!(history.document(), &before);
     assert_eq!(history.revision(), revision);
 
-    let current_base = history.document().pattern_definition_bundles()[0]
-        .definition
-        .clone();
-    assert!(
-        history
-            .apply(&DocumentCommand::EditSharedPatternDefinition {
-                definition_id: PatternDefinitionId(1),
-                base_definition: current_base,
-                edit: PatternDefinitionEdit::SetGuideOffsetSides {
-                    mechanism_id: PatternMechanismId(1),
-                    dimension_id: GuideDimensionId(1),
-                    sides: OffsetSides::Left,
-                },
-            })
-            .is_err(),
-        "equal authored payload is a semantic no-op"
-    );
-    history.undo().expect("offset side edit is undoable");
-    history.redo().expect("offset side edit is redoable");
+    history.undo().expect("offset spacing edit is undoable");
+    history.redo().expect("offset spacing edit is redoable");
     let PatternMechanism::GuideDimensions { dimensions, .. } =
         &history.document().pattern_definition_bundles()[0]
             .definition
@@ -606,7 +575,6 @@ fn normal_offset_payload_descriptors_and_typed_edits_are_history_safe() {
         dimensions[0].repetition,
         GuideRepetition::NormalOffset {
             spacing: 36.0,
-            sides: OffsetSides::Left,
             cleanup: OffsetCleanup::DissolveCrossings
         }
     ));

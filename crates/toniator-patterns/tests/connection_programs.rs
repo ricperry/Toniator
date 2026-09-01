@@ -1254,6 +1254,7 @@ fn connection_strokes_use_normalized_thickness_times_minimum_trail_basis() {
         StrokeResponse {
             minimum_thickness: 2.0,
             maximum_thickness: 2.0,
+            bias: 0.0,
         },
         100_000,
         100_000,
@@ -1282,6 +1283,7 @@ fn connection_realization_identity_tracks_program_contract_and_seed() {
     let response = StrokeResponse {
         minimum_thickness: 1.0,
         maximum_thickness: 1.0,
+        bias: 0.0,
     };
     let identities = [&nearest, &random, &tree]
         .iter()
@@ -1318,6 +1320,7 @@ fn connection_realizer_limits_and_cancellation_return_stable_errors() {
     let response = StrokeResponse {
         minimum_thickness: 1.0,
         maximum_thickness: 1.0,
+        bias: 0.0,
     };
     assert_eq!(
         realize(&evaluated, response, 1, 100_000, &|| false)
@@ -1362,6 +1365,7 @@ fn maze_realizer_limits_and_cancellation_are_atomic() {
                 StrokeResponse {
                     minimum_thickness: 1.0,
                     maximum_thickness: 1.0,
+                    bias: 0.0,
                 },
                 PathStrokeStyle::default(),
                 max_profile_samples,
@@ -1395,6 +1399,7 @@ fn consuming_stroke_realizers_preserve_existing_canonical_output() {
     let response = StrokeResponse {
         minimum_thickness: 0.25,
         maximum_thickness: 0.75,
+        bias: 0.0,
     };
     let evaluated = connections(&grid(), &program(0)).expect("connection paths evaluate");
     let borrowed_connection = realize(&evaluated, response, usize::MAX, usize::MAX, &|| false)

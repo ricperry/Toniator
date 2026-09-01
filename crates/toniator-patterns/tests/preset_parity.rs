@@ -1,10 +1,12 @@
 use toniator_domain::{
     CanvasSpec, ChannelId, Document, DocumentCommand, DocumentHistory, DocumentSession,
-    PatternCapabilityScope, PatternStructureRecipe, PropertyFieldId, SiteDensityModulation,
-    SourceReference,
+    PatternCapabilityScope, PatternFamilyCapabilityProjection, PatternStructureRecipe,
+    PropertyFieldId, SiteDensityModulation, SourceReference,
 };
+use toniator_geometry::SiteScope;
 use toniator_patterns::{
-    GridInspectRequest, PresetRegistry, evaluate_typed_family, resolve_pattern_pipeline,
+    GridInspectRequest, PresetRegistry, evaluate_document_typed_family_cancellable,
+    evaluate_typed_family, resolve_pattern_pipeline,
 };
 
 /// Creates a fresh default document whose output is compared against a preset
@@ -59,8 +61,12 @@ fn recipe_uses_artwork_weighted_density(recipe: &PatternStructureRecipe) -> bool
         | PatternStructureRecipe::OrderedOutputs { definition, .. } => {
             recipe_uses_artwork_weighted_density(definition)
         }
+        PatternStructureRecipe::AuthoredResources { definition, .. } => {
+            recipe_uses_artwork_weighted_density(definition)
+        }
         PatternStructureRecipe::StraightGrid(_)
         | PatternStructureRecipe::GeneralizedStraightGuides { .. }
+        | PatternStructureRecipe::GenericGuides { .. }
         | PatternStructureRecipe::ParametricCurve { .. } => false,
     }
 }
@@ -146,6 +152,82 @@ fn bundled_rotation_capability_matches_rotated_family_evaluation() {
                 entry.metadata.id, error
             )
         });
+    }
+}
+
+/// Rotates every capability-advertised guide preset through a coverage matrix without name dispatch.
+///
+/// # Panics
+///
+/// Panics when a guide-backed built-in cannot accept a supported rotation, fails its document-owned
+/// family evaluation, or leaves any quarter-canvas tile without a canvas-scoped construction site.
+#[test]
+fn every_guide_backed_preset_covers_the_canvas_across_rotations() {
+    let registry = PresetRegistry::bundled();
+    for entry in registry.entries() {
+        let mut history = history();
+        registry
+            .apply_to_selected(&mut history, ChannelId(1), &entry.metadata.id)
+            .expect("bundled recipe applies to the selected channel");
+        let projection = history
+            .document()
+            .pattern_capabilities(PatternCapabilityScope::Channel(ChannelId(1)))
+            .expect("bundled recipe projects selected-channel controls");
+        if !matches!(
+            projection.family,
+            PatternFamilyCapabilityProjection::Grid(_)
+        ) {
+            continue;
+        }
+        for rotation_degrees in [0.0, 17.0, 37.0, 73.0, 121.0] {
+            let command = history
+                .document()
+                .set_channel_pattern_rotation_for_effective(ChannelId(1), rotation_degrees)
+                .expect("guide-backed preset accepts rotation");
+            history
+                .apply(&command)
+                .expect("guide-backed rotation applies");
+            let document = history.document();
+            let definition = document
+                .pattern_definition_for(ChannelId(1))
+                .expect("selected guide definition remains available");
+            let output = evaluate_document_typed_family_cancellable(
+                document,
+                definition,
+                &request(document),
+                &|| false,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{} evaluates at {rotation_degrees} degrees: {error}",
+                    entry.metadata.id
+                )
+            });
+            let canvas_sites = output
+                .site_set()
+                .sites()
+                .iter()
+                .filter(|site| site.scope == SiteScope::Canvas)
+                .collect::<Vec<_>>();
+            for tile_y in 0..4 {
+                for tile_x in 0..4 {
+                    let minimum_x = document.canvas().width * f64::from(tile_x) / 4.0;
+                    let maximum_x = document.canvas().width * f64::from(tile_x + 1) / 4.0;
+                    let minimum_y = document.canvas().height * f64::from(tile_y) / 4.0;
+                    let maximum_y = document.canvas().height * f64::from(tile_y + 1) / 4.0;
+                    assert!(
+                        canvas_sites.iter().any(|site| {
+                            site.position.x >= minimum_x
+                                && site.position.x <= maximum_x
+                                && site.position.y >= minimum_y
+                                && site.position.y <= maximum_y
+                        }),
+                        "{} leaves tile ({tile_x}, {tile_y}) empty at {rotation_degrees} degrees",
+                        entry.metadata.id
+                    );
+                }
+            }
+        }
     }
 }
 

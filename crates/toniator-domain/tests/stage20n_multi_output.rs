@@ -118,6 +118,7 @@ fn output_setting_kind_mismatch_is_rejected_atomically() {
             response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.0,
                 maximum_thickness: 1.0,
+                bias: 0.0,
             }),
         }],
     };

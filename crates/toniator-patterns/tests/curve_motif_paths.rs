@@ -279,6 +279,7 @@ fn curve_motif_cubic_path_maps_controls_and_adjacent_endpoints_exactly() {
         StrokeResponse {
             minimum_thickness: 0.2,
             maximum_thickness: 0.2,
+            bias: 0.0,
         },
         1024,
         4096,
@@ -337,6 +338,7 @@ fn curve_motif_canonical_strokes_sample_source_thickness_without_row_length_scal
         StrokeResponse {
             minimum_thickness: 0.0,
             maximum_thickness: 1.0,
+            bias: 0.0,
         },
         1024,
         4096,
@@ -392,6 +394,7 @@ fn curve_motif_sharp_source_zero_refines_the_profile_without_breaking_centerline
         StrokeResponse {
             minimum_thickness: 0.0,
             maximum_thickness: 1.0,
+            bias: 0.0,
         },
         4096,
         16_384,
@@ -458,6 +461,7 @@ fn curve_motif_canonical_strokes_report_ordered_live_row_work() {
         StrokeResponse {
             minimum_thickness: 0.2,
             maximum_thickness: 0.8,
+            bias: 0.0,
         },
         1024,
         4096,
@@ -520,6 +524,7 @@ fn curve_motif_canonical_strokes_report_profile_and_outline_limits() {
             StrokeResponse {
                 minimum_thickness: 0.2,
                 maximum_thickness: 0.8,
+                bias: 0.0,
             },
             max_profile_samples,
             max_outline_segments,

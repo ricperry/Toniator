@@ -82,10 +82,17 @@ pub fn build_variable_width_outline_cancellable(
     path: &CurvePath,
     samples: &[VariableWidthPathSample],
     _style: toniator_domain::PathStrokeStyle,
+    bias: f64,
     tolerance: f64,
     limits: VariableWidthOutlineLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CanonicalFilledOutline, CurveError> {
+    if !bias.is_finite() || !(-1.0..=1.0).contains(&bias) {
+        return Err(CurveError::new(
+            "curve.outline.bias",
+            "curve response bias must be finite and within -1.0..=1.0",
+        ));
+    }
     if !tolerance.is_finite() || tolerance <= 0.0 {
         return Err(CurveError::new(
             "curve.outline.tolerance",
@@ -158,6 +165,7 @@ pub fn build_variable_width_outline_cancellable(
             contours.push(single_sample_disc(
                 path,
                 run[0],
+                bias,
                 &mut remaining_segments,
                 is_cancelled,
             )?);
@@ -165,6 +173,7 @@ pub fn build_variable_width_outline_cancellable(
             contours.extend(build_positive_run(
                 path,
                 &run,
+                bias,
                 path.closure() == PathClosure::Closed && start == 0 && end == samples.len(),
                 &mut remaining_segments,
                 is_cancelled,
@@ -230,13 +239,15 @@ fn validate_samples(
 fn single_sample_disc(
     path: &CurvePath,
     sample: VariableWidthPathSample,
+    bias: f64,
     remaining_segments: &mut usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CanonicalOutlineContour, CurveError> {
-    let center = path.point_at(sample.location)?;
-    let tangent = path.unit_tangent_at(sample.location)?;
+    let centerline = path.point_at(sample.location)?;
+    let tangent = path.limiting_unit_tangent_at(sample.location)?;
     let normal = tangent.perpendicular();
     let radius = sample.width * 0.5;
+    let center = add(centerline, normal.scale(-bias * radius));
     let left = add(center, normal.scale(radius));
     let right = add(center, normal.scale(-radius));
     let mut segments = Vec::with_capacity(4);
@@ -288,13 +299,14 @@ fn single_sample_disc(
 fn build_positive_run(
     path: &CurvePath,
     samples: &[VariableWidthPathSample],
+    bias: f64,
     closed: bool,
     remaining_segments: &mut usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<CanonicalOutlineContour>, CurveError> {
     let vertices = samples
         .iter()
-        .map(|sample| outline_vertex(path, *sample))
+        .map(|sample| outline_vertex(path, *sample, bias))
         .collect::<Result<Vec<_>, _>>()?;
     if closed {
         let left = build_closed_rail(&vertices, true, remaining_segments, is_cancelled)?;
@@ -465,19 +477,21 @@ fn sample_measure(location: PathLocation) -> f64 {
     location.segment_index() as f64 + location.parameter()
 }
 
-/// Resolves one centerline sample into paired rails using the exact path tangent.
+/// Resolves one centerline sample into paired rails using its exact edge tangent or cusp limit.
 ///
 /// # Errors
 ///
-/// Propagates exact path location/tangent failures instead of inventing a fallback normal.
+/// Propagates exact path location/tangent failures instead of inventing an interior fallback normal.
 fn outline_vertex(
     path: &CurvePath,
     sample: VariableWidthPathSample,
+    bias: f64,
 ) -> Result<OutlineVertex, CurveError> {
-    let center = path.point_at(sample.location)?;
-    let tangent = path.unit_tangent_at(sample.location)?;
+    let centerline = path.point_at(sample.location)?;
+    let tangent = path.limiting_unit_tangent_at(sample.location)?;
     let normal = tangent.perpendicular();
     let half_width = sample.width * 0.5;
+    let center = add(centerline, normal.scale(-bias * half_width));
     Ok(OutlineVertex {
         center,
         left: add(center, normal.scale(half_width)),

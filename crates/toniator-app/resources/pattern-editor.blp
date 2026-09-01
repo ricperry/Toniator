@@ -54,7 +54,7 @@ template $ToniatorPatternEditorShell : Gtk.Box {
       spacing: 12;
 
       Gtk.Label draft_introduction {
-        label: "Changes stay in this private draft. Cancel discards them and leaves your document unchanged.";
+        label: "Try curve changes here. Cancel returns to the Pattern Wizard without keeping them.";
         xalign: 0;
         wrap: true;
         styles [ "dim-label" ]
@@ -102,8 +102,8 @@ template $ToniatorPatternEditorShell : Gtk.Box {
           spacing: 8;
           hexpand: true;
 
-          Gtk.Label {
-            label: "Construction canvas";
+          Gtk.Label construction_canvas_heading {
+            label: "Curve preview";
             xalign: 0;
             styles [ "heading" ]
           }
@@ -142,6 +142,31 @@ template $ToniatorPatternEditorShell : Gtk.Box {
               width-chars: 10;
               input-purpose: number;
               tooltip-text: "Selected anchor Y coordinate";
+            }
+          }
+
+          Gtk.Label selected_point_label {
+            label: "Selected point: none";
+            xalign: 0;
+            wrap: true;
+            styles [ "dim-label" ]
+          }
+
+          Gtk.Box motif_terminal_handle_row {
+            orientation: horizontal;
+            spacing: 6;
+            visible: false;
+
+            Gtk.Button edit_left_terminal_handle {
+              label: "Left end handle";
+              sensitive: false;
+              tooltip-text: "Select the left end handle. If the end is a straight line, add a curve handle first.";
+            }
+
+            Gtk.Button edit_right_terminal_handle {
+              label: "Right end handle";
+              sensitive: false;
+              tooltip-text: "Select the right end handle. If the end is a straight line, add a curve handle first.";
             }
           }
 
@@ -189,6 +214,30 @@ template $ToniatorPatternEditorShell : Gtk.Box {
               }
             }
           }
+
+          Gtk.Box motif_direction_row {
+            orientation: horizontal;
+            spacing: 6;
+            visible: false;
+
+            Gtk.Label {
+              label: "End-handle direction";
+              xalign: 0;
+            }
+
+            Gtk.ToggleButton smooth_direction {
+              label: "Smooth direction";
+              sensitive: false;
+              tooltip-text: "Link terminal handle directions for subsequent Curve Motif handle edits.";
+            }
+
+            Gtk.ToggleButton corner_direction {
+              label: "Corner";
+              group: smooth_direction;
+              sensitive: false;
+              tooltip-text: "Keep terminal handle directions independent for subsequent Curve Motif handle edits.";
+            }
+          }
         }
       }
 
@@ -200,7 +249,7 @@ template $ToniatorPatternEditorShell : Gtk.Box {
 
       Gtk.Expander advanced {
         label: "Advanced";
-        tooltip-text: "Optional modulation, exclusion, coverage, and safety controls for this private draft.";
+        tooltip-text: "Optional source response, spacing, edge coverage, and performance controls for this curve.";
 
         Gtk.Box advanced_rows {
           orientation: vertical;

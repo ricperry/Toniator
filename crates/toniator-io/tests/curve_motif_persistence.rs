@@ -83,7 +83,7 @@ fn rewrite_document_schema(path: &Path, schema: u32) {
     });
 }
 
-/// Builds the embedded asymmetric open-path record required by preset-v4 Curve Motifs.
+/// Builds the root-table asymmetric open-path record required by preset-v4 Curve Motifs.
 fn record() -> PresetRecord {
     let motif = AuthoredStructureDraft::new(
         AuthoredStructureKind::OpenPath,
@@ -107,29 +107,32 @@ fn record() -> PresetRecord {
             description: "Embedded open-path motif persistence witness.".into(),
             thumbnail: None,
         },
-        recipe: PatternDefinitionRecipe::connected(PatternStructureRecipe::CurveMotifPaths {
-            definition: Box::new(PatternStructureRecipe::GeneralizedStraightGuides {
-                name: "Curve Motif persistence family".into(),
-                coverage: CoveragePolicy {
-                    guard_steps: 1,
-                    additional_margin: 0.0,
-                },
-                dimensions: vec![GuideDimensionDraft {
-                    baseline_angle_degrees: 0.0,
-                    phase: 0.0,
-                    spacing_multiplier: 1.0,
-                }],
-                product: GeneralizedSiteProductDraft::AlongGuides {
-                    dimension_indices: vec![0],
-                    interval_multiplier: 1.0,
-                    phase: 0.0,
-                },
-                orientation: MarkOrientationDraft::GuideTangent { dimension_index: 0 },
+        recipe: PatternDefinitionRecipe::connected(PatternStructureRecipe::AuthoredResources {
+            resources: vec![motif],
+            definition: Box::new(PatternStructureRecipe::CurveMotifPaths {
+                definition: Box::new(PatternStructureRecipe::GeneralizedStraightGuides {
+                    name: "Curve Motif persistence family".into(),
+                    coverage: CoveragePolicy {
+                        guard_steps: 1,
+                        additional_margin: 0.0,
+                    },
+                    dimensions: vec![GuideDimensionDraft {
+                        baseline_angle_degrees: 0.0,
+                        phase: 0.0,
+                        spacing_multiplier: 1.0,
+                    }],
+                    product: GeneralizedSiteProductDraft::AlongGuides {
+                        dimension_indices: vec![0],
+                        interval_multiplier: 1.0,
+                        phase: 0.0,
+                    },
+                    orientation: MarkOrientationDraft::GuideTangent { dimension_index: 0 },
+                }),
+                resource_index: 0,
+                style: PathStrokeStyle::default(),
+                mirror_alternate_rows: true,
+                alternate_row_phase: Some(0.25),
             }),
-            motif,
-            style: PathStrokeStyle::default(),
-            mirror_alternate_rows: true,
-            alternate_row_phase: Some(0.25),
         }),
     }
 }
@@ -175,7 +178,7 @@ fn save_current_curve_motif_document(path: &Path) -> Document {
     history.document().clone()
 }
 
-/// Round-trips one embedded Curve Motif under v4 and rejects the obsolete v3 discriminator.
+/// Round-trips one root-table Curve Motif under v4 and rejects the obsolete v3 discriminator.
 #[test]
 fn curve_motif_preset_v4_round_trips_embedded_geometry_and_rejects_v3() {
     let _lock = PERSISTENCE_FIXTURE_LOCK
@@ -189,7 +192,7 @@ fn curve_motif_preset_v4_round_trips_embedded_geometry_and_rejects_v3() {
         "\"preset_format_version\": {PRESET_FORMAT_VERSION}"
     )));
     assert!(text.contains("\"kind\": \"curve_motif_paths\""));
-    assert!(text.contains("\"segments\""));
+    assert!(text.contains("\"authored_resources\""));
     assert_eq!(load_preset(&path).expect("current preset loads"), expected);
     fs::write(
         &path,
@@ -262,7 +265,7 @@ fn curve_motif_document_v7_rejects_missing_reference_and_closed_resource() {
     assert_eq!(wrong_kind.path(), "document.json");
 }
 
-/// Rejects malformed current-v4 Curve Motif phase, family, and embedded open-path geometry.
+/// Rejects malformed current-v4 Curve Motif phase, family, and root-table open-path geometry.
 #[test]
 fn curve_motif_preset_v4_rejects_malformed_phase_family_and_geometry() {
     let _lock = PERSISTENCE_FIXTURE_LOCK
@@ -286,23 +289,27 @@ fn curve_motif_preset_v4_rejects_malformed_phase_family_and_geometry() {
         );
     };
     reject(&|json| {
-        json["recipe"]["structure"]["alternate_row_phase"] = serde_json::Value::from(0.0);
+        json["recipe"]["structure"]["definition"]["alternate_row_phase"] =
+            serde_json::Value::from(0.0);
     });
     reject(&|json| {
-        json["recipe"]["structure"]["alternate_row_phase"] = serde_json::Value::from(1.0);
+        json["recipe"]["structure"]["definition"]["alternate_row_phase"] =
+            serde_json::Value::from(1.0);
     });
     reject(&|json| {
-        json["recipe"]["structure"]["alternate_row_phase"] = serde_json::Value::from("NaN");
+        json["recipe"]["structure"]["definition"]["alternate_row_phase"] =
+            serde_json::Value::from("NaN");
     });
     reject(&|json| {
-        json["recipe"]["structure"]["definition"]["dimensions"] = serde_json::json!([
+        json["recipe"]["structure"]["definition"]["definition"]["dimensions"] = serde_json::json!([
             { "baseline_angle_degrees": 0.0, "phase": 0.0, "spacing_multiplier": 1.0 },
             { "baseline_angle_degrees": 90.0, "phase": 0.0, "spacing_multiplier": 1.0 }
         ]);
-        json["recipe"]["structure"]["definition"]["product"]["dimension_indices"] =
+        json["recipe"]["structure"]["definition"]["definition"]["product"]["dimension_indices"] =
             serde_json::json!([0, 1]);
     });
     reject(&|json| {
-        json["recipe"]["structure"]["segments"][1]["start"]["x"] = serde_json::Value::from(0.41);
+        json["recipe"]["structure"]["resources"][0]["segments"][1]["start"]["x"] =
+            serde_json::Value::from(0.41);
     });
 }

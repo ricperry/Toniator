@@ -140,10 +140,23 @@ pub(crate) fn path_intersections(
             "path intersection pair limit exceeded",
         ));
     }
+    let first_bounds = first
+        .segments()
+        .iter()
+        .map(CurveSegment::bounds)
+        .collect::<Result<Vec<_>, _>>()?;
+    let second_bounds = second
+        .segments()
+        .iter()
+        .map(CurveSegment::bounds)
+        .collect::<Result<Vec<_>, _>>()?;
     let mut output = Vec::new();
     let mut budget = IntersectionBudget::new(MAX_WORK_ITEMS);
     for (first_index, first_segment) in first.segments().iter().copied().enumerate() {
         for (second_index, second_segment) in second.segments().iter().copied().enumerate() {
+            if !bounds_overlap(first_bounds[first_index], second_bounds[second_index])? {
+                continue;
+            }
             for intersection in
                 segment_intersections_with_budget(first_segment, second_segment, &mut budget)?
             {

@@ -20,6 +20,7 @@ fn outline(
             })
             .collect::<Vec<_>>(),
         PathStrokeStyle::default(),
+        0.0,
         1.0 / 8.0,
         VariableWidthOutlineLimits::new(128).expect("limit"),
         &|| false,
@@ -112,6 +113,7 @@ fn reusable_outline_preserves_zero_runs_closed_winding_and_limits() {
             width: 2.0,
         }],
         PathStrokeStyle::default(),
+        0.0,
         1.0 / 8.0,
         VariableWidthOutlineLimits::new(1).expect("limit"),
         &|| false,
@@ -165,12 +167,53 @@ fn reusable_outline_rejects_unordered_or_nonfinite_samples() {
             },
         ],
         PathStrokeStyle::default(),
+        0.0,
         1.0 / 8.0,
         VariableWidthOutlineLimits::new(16).expect("limit"),
         &|| false,
     )
     .expect_err("invalid samples reject");
     assert_eq!(error.path(), "curve.outline.width");
+}
+
+/// Proves response bias shifts a stroke continuously to one authored side without changing width.
+#[test]
+fn reusable_outline_applies_continuous_authored_direction_bias() {
+    let path = CurvePath::line(Point2::new(0.0, 0.0), Point2::new(8.0, 0.0)).expect("line");
+    let build = |bias| {
+        build_variable_width_outline_cancellable(
+            &path,
+            &[
+                VariableWidthPathSample {
+                    location: PathLocation::new(0, 0.0).expect("location"),
+                    width: 2.0,
+                },
+                VariableWidthPathSample {
+                    location: PathLocation::new(0, 1.0).expect("location"),
+                    width: 2.0,
+                },
+            ],
+            PathStrokeStyle::default(),
+            bias,
+            1.0 / 8.0,
+            VariableWidthOutlineLimits::new(128).expect("limit"),
+            &|| false,
+        )
+        .expect("biased outline")
+        .bounds
+        .expect("positive outline bounds")
+    };
+    let left = build(-1.0);
+    let centered = build(0.0);
+    let intermediate = build(0.5);
+    let right = build(1.0);
+    assert!((left.max.y - left.min.y - 2.0).abs() < 1.0e-9);
+    assert!((centered.max.y - centered.min.y - 2.0).abs() < 1.0e-9);
+    assert!((right.max.y - right.min.y - 2.0).abs() < 1.0e-9);
+    assert!((left.min.y - 0.0).abs() < 1.0e-9);
+    assert!((centered.min.y + 1.0).abs() < 1.0e-9);
+    assert!((intermediate.min.y + 1.5).abs() < 1.0e-9);
+    assert!((right.max.y - 0.0).abs() < 1.0e-9);
 }
 
 /// Proves simplification uses authored path location rather than the count of adaptive samples.

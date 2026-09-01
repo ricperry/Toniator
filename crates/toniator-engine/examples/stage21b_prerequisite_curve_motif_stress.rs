@@ -379,6 +379,7 @@ fn apply_response_endpoint(
                 } else {
                     endpoint
                 },
+                bias: response.bias,
             };
             let command = history
                 .document()

@@ -76,6 +76,7 @@ fn stroke_document(
             response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.05,
                 maximum_thickness: 0.8,
+                bias: -0.4,
             }),
         }],
         definition,

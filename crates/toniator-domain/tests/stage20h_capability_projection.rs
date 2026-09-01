@@ -175,6 +175,7 @@ fn base_and_inherited_channel_project_the_same_legacy_structure() {
             },
             guides: GuideCapabilities {
                 count: 2,
+                editable_count_bounds: None,
                 spacing: false,
                 phase: false,
                 editable_curve: false,

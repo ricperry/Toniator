@@ -23,8 +23,9 @@ use toniator_domain::{
     ChannelPatternInstance, ChannelPatternLayoutDelta, ChannelSourceMapping, ChannelState,
     ChannelTopology, ColorValue, ConnectedGeometryResponse, ConnectedGeometryResponseDelta,
     CoveragePolicy, CurveWinding, DensityMetric2D, DensityMetricDelta2D, Document, DocumentId,
-    DocumentPatternSettings, GeneralizedSiteProductDraft, GuideDimension, GuideDimensionDraft,
-    GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel, HalftoneChannelRole,
+    DocumentPatternSettings, GeneralizedSiteProductDraft, GenericGuideDimensionDraft,
+    GenericGuidePrototypeDraft, GuideDimension, GuideDimensionDraft, GuideDimensionId,
+    GuidePrototype, GuideRepetition, HalftoneChannelModel, HalftoneChannelRole,
     MarkGeometryResponse, MarkGeometryResponseDelta, MarkOrientation, MarkOrientationDraft,
     MarkPrototype, MazeProgram, ModeledChannelState, ParametricCurve, ParametricCurveSiteDraft,
     PathStrokeStyle, PatternDefinition, PatternDefinitionBundle, PatternDefinitionDraft,
@@ -1028,6 +1029,13 @@ enum PresetStructureRecipeDto {
         product: GeneralizedSiteProductDraftDto,
         orientation: MarkOrientationDraftDto,
     },
+    GenericGuides {
+        name: String,
+        coverage: CoverageDtoV6,
+        dimensions: Vec<GenericGuideDimensionDraftDtoV4>,
+        product: GeneralizedSiteProductDraftDto,
+        orientation: MarkOrientationDraftDto,
+    },
     RandomSites {
         name: String,
         coverage: CoverageDtoV6,
@@ -1058,11 +1066,11 @@ enum PresetStructureRecipeDto {
     },
     AuthoredClosedShapeMarks {
         definition: Box<PresetStructureRecipeDto>,
-        segments: Vec<AuthoredCurveSegmentDtoV6>,
+        resource_index: usize,
     },
     CurveMotifPaths {
         definition: Box<PresetStructureRecipeDto>,
-        segments: Vec<AuthoredCurveSegmentDtoV6>,
+        resource_index: usize,
         style: PathStrokeStyle,
         mirror_alternate_rows: bool,
         alternate_row_phase: Option<f64>,
@@ -1077,6 +1085,10 @@ enum PresetStructureRecipeDto {
     OrderedOutputs {
         definition: Box<PresetStructureRecipeDto>,
         outputs: Vec<PatternOutputRealizationRecipeDtoV3>,
+    },
+    AuthoredResources {
+        resources: Vec<AuthoredStructureDraftDtoV4>,
+        definition: Box<PresetStructureRecipeDto>,
     },
 }
 
@@ -1100,8 +1112,18 @@ struct ParametricCurveSiteRecipeDtoV3 {
 #[serde(deny_unknown_fields)]
 enum PatternOutputRealizationRecipeDtoV3 {
     Marks,
+    AuthoredClosedShapeMarks {
+        resource_index: usize,
+        orientation: MarkOrientationDraftDto,
+    },
     StructuralPaths {
         style: PathStrokeStyle,
+    },
+    CurveMotifPaths {
+        resource_index: usize,
+        style: PathStrokeStyle,
+        mirror_alternate_rows: bool,
+        alternate_row_phase: Option<f64>,
     },
     ConnectionPaths {
         program: ConnectionProgramDtoV6,
@@ -1122,6 +1144,37 @@ struct GuideDimensionDraftDto {
     baseline_angle_degrees: f64,
     phase: f64,
     spacing_multiplier: f64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GenericGuideDimensionDraftDtoV4 {
+    baseline_angle_degrees: f64,
+    phase: f64,
+    prototype: GenericGuidePrototypeDraftDtoV4,
+    repetition: GuideRepetitionDtoV6,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
+enum GenericGuidePrototypeDraftDtoV4 {
+    AuthoredOpenPathReference {
+        resource_index: usize,
+    },
+    CircularArc {
+        center: AuthoredPointDtoV6,
+        radius: f64,
+        start_angle_degrees: f64,
+        sweep_angle_degrees: f64,
+    },
+}
+
+/// Current preset-v4 ID-free authored resource retained by the root recipe table.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthoredStructureDraftDtoV4 {
+    kind: AuthoredStructureKindDtoV6,
+    segments: Vec<AuthoredCurveSegmentDtoV6>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1468,7 +1521,11 @@ enum CurveWindingDtoV6 {
     CounterClockwise,
 }
 
-/// Persisted current-v7 signed-side intent for normal-offset guide repetition.
+/// Retains the current-v7 field shape after normal-offset construction became bilateral.
+///
+/// Writers emit `Both`; readers accept the two superseded spellings but project every value into
+/// the same canonical bilateral domain construction. This keeps document-v7 unchanged without
+/// preserving a misleading editable side authority.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum OffsetSidesDtoV6 {
@@ -1504,6 +1561,72 @@ impl GuideDimensionDtoV6 {
             phase: self.phase,
             prototype: self.prototype.into_domain(),
             repetition: self.repetition.into_domain(),
+        }
+    }
+}
+
+impl GenericGuideDimensionDraftDtoV4 {
+    /// Converts one ID-free generic guide without allocating document resource IDs.
+    fn from_domain(value: &GenericGuideDimensionDraft) -> Self {
+        Self {
+            baseline_angle_degrees: value.baseline_angle_degrees,
+            phase: value.phase,
+            prototype: GenericGuidePrototypeDraftDtoV4::from_domain(&value.prototype),
+            repetition: GuideRepetitionDtoV6::from_domain(&value.repetition),
+        }
+    }
+
+    /// Restores one ID-free generic guide without allocating document-owned resources.
+    fn into_domain(self) -> Result<GenericGuideDimensionDraft, PresetIoError> {
+        Ok(GenericGuideDimensionDraft {
+            baseline_angle_degrees: self.baseline_angle_degrees,
+            phase: self.phase,
+            prototype: self.prototype.into_domain()?,
+            repetition: self.repetition.into_domain(),
+        })
+    }
+}
+
+impl GenericGuidePrototypeDraftDtoV4 {
+    /// Converts one recipe-local generic guide prototype without retaining stable document IDs.
+    fn from_domain(value: &GenericGuidePrototypeDraft) -> Self {
+        match value {
+            GenericGuidePrototypeDraft::AuthoredOpenPathReference { resource_index } => {
+                Self::AuthoredOpenPathReference {
+                    resource_index: *resource_index,
+                }
+            }
+            GenericGuidePrototypeDraft::CircularArc {
+                center,
+                radius,
+                start_angle_degrees,
+                sweep_angle_degrees,
+            } => Self::CircularArc {
+                center: AuthoredPointDtoV6::from_domain(*center),
+                radius: *radius,
+                start_angle_degrees: *start_angle_degrees,
+                sweep_angle_degrees: *sweep_angle_degrees,
+            },
+        }
+    }
+
+    /// Restores one recipe-local generic guide prototype without document-owned references.
+    fn into_domain(self) -> Result<GenericGuidePrototypeDraft, PresetIoError> {
+        match self {
+            Self::AuthoredOpenPathReference { resource_index } => {
+                Ok(GenericGuidePrototypeDraft::AuthoredOpenPathReference { resource_index })
+            }
+            Self::CircularArc {
+                center,
+                radius,
+                start_angle_degrees,
+                sweep_angle_degrees,
+            } => Ok(GenericGuidePrototypeDraft::CircularArc {
+                center: center.into_domain(),
+                radius,
+                start_angle_degrees,
+                sweep_angle_degrees,
+            }),
         }
     }
 }
@@ -1562,17 +1685,9 @@ impl GuideRepetitionDtoV6 {
                 direction_degrees: *direction_degrees,
                 spacing_multiplier: *spacing_multiplier,
             },
-            GuideRepetition::NormalOffset {
-                spacing,
-                sides,
-                cleanup,
-            } => Self::NormalOffset {
+            GuideRepetition::NormalOffset { spacing, cleanup } => Self::NormalOffset {
                 spacing: *spacing,
-                sides: match sides {
-                    toniator_domain::OffsetSides::Left => OffsetSidesDtoV6::Left,
-                    toniator_domain::OffsetSides::Right => OffsetSidesDtoV6::Right,
-                    toniator_domain::OffsetSides::Both => OffsetSidesDtoV6::Both,
-                },
+                sides: OffsetSidesDtoV6::Both,
                 cleanup: match cleanup {
                     toniator_domain::OffsetCleanup::DissolveCrossings => {
                         OffsetCleanupDtoV6::DissolveCrossings
@@ -1595,15 +1710,10 @@ impl GuideRepetitionDtoV6 {
             },
             Self::NormalOffset {
                 spacing,
-                sides,
+                sides: _,
                 cleanup,
             } => GuideRepetition::NormalOffset {
                 spacing,
-                sides: match sides {
-                    OffsetSidesDtoV6::Left => toniator_domain::OffsetSides::Left,
-                    OffsetSidesDtoV6::Right => toniator_domain::OffsetSides::Right,
-                    OffsetSidesDtoV6::Both => toniator_domain::OffsetSides::Both,
-                },
                 cleanup: match cleanup {
                     OffsetCleanupDtoV6::DissolveCrossings => {
                         toniator_domain::OffsetCleanup::DissolveCrossings
@@ -1881,6 +1991,22 @@ impl PresetStructureRecipeDto {
                 product: GeneralizedSiteProductDraftDto::from_domain(product),
                 orientation: MarkOrientationDraftDto::from_domain(orientation),
             },
+            PatternStructureRecipe::GenericGuides {
+                name,
+                coverage: definition_coverage,
+                dimensions,
+                product,
+                orientation,
+            } => Self::GenericGuides {
+                name: name.clone(),
+                coverage: coverage(definition_coverage),
+                dimensions: dimensions
+                    .iter()
+                    .map(GenericGuideDimensionDraftDtoV4::from_domain)
+                    .collect(),
+                product: GeneralizedSiteProductDraftDto::from_domain(product),
+                orientation: MarkOrientationDraftDto::from_domain(orientation),
+            },
             PatternStructureRecipe::RandomSites {
                 name,
                 coverage: definition_coverage,
@@ -1939,29 +2065,22 @@ impl PresetStructureRecipeDto {
                 program: MazeProgramDtoV6::from_domain(program),
                 style: *style,
             },
-            PatternStructureRecipe::AuthoredClosedShapeMarks { definition, shape } => {
-                Self::AuthoredClosedShapeMarks {
-                    definition: Box::new(Self::from_domain(definition)),
-                    segments: shape
-                        .segments()
-                        .iter()
-                        .map(AuthoredCurveSegmentDtoV6::from_domain)
-                        .collect(),
-                }
-            }
+            PatternStructureRecipe::AuthoredClosedShapeMarks {
+                definition,
+                resource_index,
+            } => Self::AuthoredClosedShapeMarks {
+                definition: Box::new(Self::from_domain(definition)),
+                resource_index: *resource_index,
+            },
             PatternStructureRecipe::CurveMotifPaths {
                 definition,
-                motif,
+                resource_index,
                 style,
                 mirror_alternate_rows,
                 alternate_row_phase,
             } => Self::CurveMotifPaths {
                 definition: Box::new(Self::from_domain(definition)),
-                segments: motif
-                    .segments()
-                    .iter()
-                    .map(AuthoredCurveSegmentDtoV6::from_domain)
-                    .collect(),
+                resource_index: *resource_index,
                 style: *style,
                 mirror_alternate_rows: *mirror_alternate_rows,
                 alternate_row_phase: *alternate_row_phase,
@@ -1985,6 +2104,16 @@ impl PresetStructureRecipeDto {
                     .iter()
                     .map(PatternOutputRealizationRecipeDtoV3::from_domain)
                     .collect(),
+            },
+            PatternStructureRecipe::AuthoredResources {
+                resources,
+                definition,
+            } => Self::AuthoredResources {
+                resources: resources
+                    .iter()
+                    .map(AuthoredStructureDraftDtoV4::from_domain)
+                    .collect(),
+                definition: Box::new(Self::from_domain(definition)),
             },
         }
     }
@@ -2023,6 +2152,22 @@ impl PresetStructureRecipeDto {
                         spacing_multiplier: dimension.spacing_multiplier,
                     })
                     .collect(),
+                product: product.into_domain(),
+                orientation: orientation.into_domain(),
+            }),
+            Self::GenericGuides {
+                name,
+                coverage: stored_coverage,
+                dimensions,
+                product,
+                orientation,
+            } => Ok(PatternStructureRecipe::GenericGuides {
+                name,
+                coverage: coverage_from(stored_coverage),
+                dimensions: dimensions
+                    .into_iter()
+                    .map(GenericGuideDimensionDraftDtoV4::into_domain)
+                    .collect::<Result<Vec<_>, _>>()?,
                 product: product.into_domain(),
                 orientation: orientation.into_domain(),
             }),
@@ -2086,48 +2231,24 @@ impl PresetStructureRecipeDto {
             }),
             Self::AuthoredClosedShapeMarks {
                 definition,
-                segments,
-            } => {
-                let shape = AuthoredStructureDraft::new(
-                    AuthoredStructureKind::ClosedShape,
-                    segments
-                        .into_iter()
-                        .map(AuthoredCurveSegmentDtoV6::into_domain)
-                        .collect(),
-                )
-                .map_err(|error| PresetIoError {
-                    context: error.to_string(),
-                })?;
-                Ok(PatternStructureRecipe::AuthoredClosedShapeMarks {
-                    definition: Box::new(definition.into_domain()?),
-                    shape,
-                })
-            }
+                resource_index,
+            } => Ok(PatternStructureRecipe::AuthoredClosedShapeMarks {
+                definition: Box::new(definition.into_domain()?),
+                resource_index,
+            }),
             Self::CurveMotifPaths {
                 definition,
-                segments,
+                resource_index,
                 style,
                 mirror_alternate_rows,
                 alternate_row_phase,
-            } => {
-                let motif = AuthoredStructureDraft::new(
-                    AuthoredStructureKind::OpenPath,
-                    segments
-                        .into_iter()
-                        .map(AuthoredCurveSegmentDtoV6::into_domain)
-                        .collect(),
-                )
-                .map_err(|error| PresetIoError {
-                    context: error.to_string(),
-                })?;
-                Ok(PatternStructureRecipe::CurveMotifPaths {
-                    definition: Box::new(definition.into_domain()?),
-                    motif,
-                    style,
-                    mirror_alternate_rows,
-                    alternate_row_phase,
-                })
-            }
+            } => Ok(PatternStructureRecipe::CurveMotifPaths {
+                definition: Box::new(definition.into_domain()?),
+                resource_index,
+                style,
+                mirror_alternate_rows,
+                alternate_row_phase,
+            }),
             Self::VoronoiRegions { definition } => Ok(PatternStructureRecipe::VoronoiRegions {
                 definition: Box::new(definition.into_domain()?),
             }),
@@ -2146,7 +2267,17 @@ impl PresetStructureRecipeDto {
                 outputs: outputs
                     .into_iter()
                     .map(PatternOutputRealizationRecipeDtoV3::into_domain)
-                    .collect(),
+                    .collect::<Result<_, _>>()?,
+            }),
+            Self::AuthoredResources {
+                resources,
+                definition,
+            } => Ok(PatternStructureRecipe::AuthoredResources {
+                resources: resources
+                    .into_iter()
+                    .map(AuthoredStructureDraftDtoV4::into_domain)
+                    .collect::<Result<_, _>>()?,
+                definition: Box::new(definition.into_domain()?),
             }),
         }
     }
@@ -2157,9 +2288,27 @@ impl PatternOutputRealizationRecipeDtoV3 {
     fn from_domain(value: &PatternOutputRealizationRecipe) -> Self {
         match value {
             PatternOutputRealizationRecipe::Marks => Self::Marks,
+            PatternOutputRealizationRecipe::AuthoredClosedShapeMarks {
+                resource_index,
+                orientation,
+            } => Self::AuthoredClosedShapeMarks {
+                resource_index: *resource_index,
+                orientation: MarkOrientationDraftDto::from_domain(orientation),
+            },
             PatternOutputRealizationRecipe::StructuralPaths { style } => {
                 Self::StructuralPaths { style: *style }
             }
+            PatternOutputRealizationRecipe::CurveMotifPaths {
+                resource_index,
+                style,
+                mirror_alternate_rows,
+                alternate_row_phase,
+            } => Self::CurveMotifPaths {
+                resource_index: *resource_index,
+                style: *style,
+                mirror_alternate_rows: *mirror_alternate_rows,
+                alternate_row_phase: *alternate_row_phase,
+            },
             PatternOutputRealizationRecipe::ConnectionPaths { program, style } => {
                 Self::ConnectionPaths {
                     program: ConnectionProgramDtoV6::from_domain(program),
@@ -2180,12 +2329,34 @@ impl PatternOutputRealizationRecipeDtoV3 {
     }
 
     /// Restores one ID-free output recipe without accepting derived output state.
-    fn into_domain(self) -> PatternOutputRealizationRecipe {
-        match self {
+    ///
+    /// # Errors
+    ///
+    /// Returns the recipe-local output conversion diagnostic for malformed v4 payloads.
+    fn into_domain(self) -> Result<PatternOutputRealizationRecipe, PresetIoError> {
+        Ok(match self {
             Self::Marks => PatternOutputRealizationRecipe::Marks,
+            Self::AuthoredClosedShapeMarks {
+                resource_index,
+                orientation,
+            } => PatternOutputRealizationRecipe::AuthoredClosedShapeMarks {
+                resource_index,
+                orientation: orientation.into_domain(),
+            },
             Self::StructuralPaths { style } => {
                 PatternOutputRealizationRecipe::StructuralPaths { style }
             }
+            Self::CurveMotifPaths {
+                resource_index,
+                style,
+                mirror_alternate_rows,
+                alternate_row_phase,
+            } => PatternOutputRealizationRecipe::CurveMotifPaths {
+                resource_index,
+                style,
+                mirror_alternate_rows,
+                alternate_row_phase,
+            },
             Self::ConnectionPaths { program, style } => {
                 PatternOutputRealizationRecipe::ConnectionPaths {
                     program: program.into_domain(),
@@ -2200,7 +2371,7 @@ impl PatternOutputRealizationRecipeDtoV3 {
             Self::GuideFaceRegions { dimension_indices } => {
                 PatternOutputRealizationRecipe::GuideFaceRegions { dimension_indices }
             }
-        }
+        })
     }
 }
 
@@ -2533,6 +2704,8 @@ struct MarkResponseDeltaDto {
 struct ConnectedResponseDto {
     minimum_thickness: f64,
     maximum_thickness: f64,
+    #[serde(default)]
+    bias: f64,
 }
 #[derive(Serialize, Deserialize)]
 struct ConnectedResponseDeltaDto {
@@ -2540,6 +2713,8 @@ struct ConnectedResponseDeltaDto {
     minimum_thickness_delta: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     maximum_thickness_delta: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bias_delta: Option<f64>,
 }
 #[derive(Serialize, Deserialize)]
 struct DensityDto {
@@ -2814,6 +2989,38 @@ impl AuthoredStructureDtoV6 {
                 .map(AuthoredCurveSegmentDtoV6::into_domain)
                 .collect(),
         )
+    }
+}
+
+impl AuthoredStructureDraftDtoV4 {
+    /// Projects one recipe-local authored resource without assigning a document-stable ID.
+    fn from_domain(value: &AuthoredStructureDraft) -> Self {
+        Self {
+            kind: AuthoredStructureKindDtoV6::from_domain(value.kind()),
+            segments: value
+                .segments()
+                .iter()
+                .map(AuthoredCurveSegmentDtoV6::from_domain)
+                .collect(),
+        }
+    }
+
+    /// Rebuilds one recipe-local authored resource before root-table validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable domain topology diagnostic when the typed payload is invalid.
+    fn into_domain(self) -> Result<AuthoredStructureDraft, PresetIoError> {
+        AuthoredStructureDraft::new(
+            self.kind.into_domain(),
+            self.segments
+                .into_iter()
+                .map(AuthoredCurveSegmentDtoV6::into_domain)
+                .collect(),
+        )
+        .map_err(|error| PresetIoError {
+            context: error.to_string(),
+        })
     }
 }
 
@@ -3916,6 +4123,7 @@ impl ConnectedResponseDto {
         Self {
             minimum_thickness: value.minimum_thickness,
             maximum_thickness: value.maximum_thickness,
+            bias: value.bias,
         }
     }
     /// Rebuilds the connected response for domain-owned validation.
@@ -3923,6 +4131,7 @@ impl ConnectedResponseDto {
         ConnectedGeometryResponse {
             minimum_thickness: self.minimum_thickness,
             maximum_thickness: self.maximum_thickness,
+            bias: self.bias,
         }
     }
 }
@@ -3933,6 +4142,7 @@ impl ConnectedResponseDeltaDto {
         Self {
             minimum_thickness_delta: value.minimum_thickness_delta,
             maximum_thickness_delta: value.maximum_thickness_delta,
+            bias_delta: value.bias_delta,
         }
     }
     /// Rebuilds optional additive stroke response intent.
@@ -3940,6 +4150,7 @@ impl ConnectedResponseDeltaDto {
         ConnectedGeometryResponseDelta {
             minimum_thickness_delta: self.minimum_thickness_delta,
             maximum_thickness_delta: self.maximum_thickness_delta,
+            bias_delta: self.bias_delta,
         }
     }
 }
@@ -4251,6 +4462,7 @@ mod stage20r_tests {
                         response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                             minimum_thickness: 0.05,
                             maximum_thickness: 0.2,
+                            bias: 0.0,
                         }),
                     },
                 ],

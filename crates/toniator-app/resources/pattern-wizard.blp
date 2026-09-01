@@ -28,7 +28,7 @@ template $ToniatorPatternWizardShell : Gtk.Box {
     hexpand: true;
     vexpand: true;
 
-    Gtk.ScrolledWindow {
+    Gtk.ScrolledWindow wizard_gallery_panel {
       hscrollbar-policy: never;
       vscrollbar-policy: automatic;
       hexpand: true;
@@ -42,52 +42,81 @@ template $ToniatorPatternWizardShell : Gtk.Box {
         valign: start;
 
         Gtk.Label wizard_gallery_heading {
-          label: "Gallery";
+          label: "Presets";
           xalign: 0;
           styles [ "heading" ]
         }
 
         Gtk.Label wizard_gallery_instruction {
-          label: "Choose Use as is to materialize a card in the private draft, or Edit when this gate exposes a capability-driven page.";
+          label: "Select Current Pattern or a preset. Apply uses the selected design immediately; Edit opens every setting with the preset values filled in; New starts with a pattern family.";
           xalign: 0;
           wrap: true;
           styles [ "dim-label" ]
         }
 
-        Gtk.Box wizard_cards {
-          orientation: vertical;
-          spacing: 10;
+        Gtk.FlowBox wizard_cards {
+          selection-mode: none;
+          row-spacing: 10;
+          column-spacing: 10;
+          max-children-per-line: 3;
+          min-children-per-line: 1;
+          hexpand: true;
           valign: start;
         }
       }
     }
 
-    Gtk.Box wizard_page {
+    Gtk.Box wizard_page_panel {
       orientation: vertical;
       spacing: 10;
       hexpand: true;
       vexpand: true;
       width-request: 300;
 
-      Gtk.Box wizard_controls {
-        orientation: vertical;
-        spacing: 10;
-        valign: start;
+      Gtk.ScrolledWindow wizard_preview_viewport {
+        height-request: 200;
+        min-content-height: 200;
+        max-content-height: 200;
+        hscrollbar-policy: never;
+        vscrollbar-policy: never;
+        propagate-natural-height: false;
+        hexpand: true;
+        vexpand: false;
+
+        Gtk.Overlay wizard_preview_frame {
+          hexpand: true;
+          vexpand: false;
+
+          Gtk.Picture wizard_preview {
+            content-fit: contain;
+            can-shrink: true;
+            hexpand: true;
+            vexpand: false;
+            styles [ "toniator-wizard-preview" ]
+          }
+
+          [overlay]
+          Gtk.Spinner wizard_spinner {
+            visible: false;
+            halign: center;
+            valign: center;
+            tooltip-text: "Preview updating";
+          }
+        }
       }
 
-      Gtk.Picture wizard_preview {
-        content-fit: contain;
-        can-shrink: true;
+      Gtk.ScrolledWindow wizard_controls_scroll {
+        hscrollbar-policy: never;
+        vscrollbar-policy: automatic;
         hexpand: true;
         vexpand: true;
-        height-request: 260;
-        styles [ "toniator-wizard-preview" ]
-      }
+        min-content-height: 220;
 
-      Gtk.Spinner wizard_spinner {
-        visible: false;
-        halign: center;
-        tooltip-text: "Preview updating";
+        Gtk.Box wizard_controls {
+          orientation: vertical;
+          spacing: 10;
+          valign: start;
+        }
       }
     }
   }

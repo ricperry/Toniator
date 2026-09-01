@@ -5276,6 +5276,7 @@ fn evaluate_document_channel(
                     toniator_patterns::StrokeResponse {
                         minimum_thickness: response.minimum_thickness,
                         maximum_thickness: response.maximum_thickness,
+                        bias: response.bias,
                     },
                     style,
                     max_stroke_profile_samples,
@@ -5355,6 +5356,7 @@ fn evaluate_document_channel(
                     toniator_patterns::StrokeResponse {
                         minimum_thickness: response.minimum_thickness,
                         maximum_thickness: response.maximum_thickness,
+                        bias: response.bias,
                     },
                     style,
                     max_stroke_profile_samples,
@@ -5423,6 +5425,7 @@ fn evaluate_document_channel(
             toniator_patterns::StrokeResponse {
                 minimum_thickness: response.minimum_thickness,
                 maximum_thickness: response.maximum_thickness,
+                bias: response.bias,
             },
             max_stroke_profile_samples,
             max_stroke_outline_segments,
@@ -6456,7 +6459,7 @@ pub(crate) mod test_support {
         DocumentHistory, DocumentId, DocumentPatternSettings, DocumentSession,
         GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
         HalftoneChannelModel, MarkGeometryResponse, MarkOrientation, MarkPrototype, OffsetCleanup,
-        OffsetSides, ParametricCurve, PathStrokeStyle, PatternDefinition, PatternDefinitionBundle,
+        ParametricCurve, PathStrokeStyle, PatternDefinition, PatternDefinitionBundle,
         PatternDefinitionEdit, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
         PatternOutputLayer, PatternOutputLayerId, PatternOutputSettings, RandomSiteCharacter,
         RegionGeometryResponse, RegionSourceIntent, ResolvedDensityMetric2D, SiteDensityModulation,
@@ -6508,6 +6511,7 @@ pub(crate) mod test_support {
                         PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                             minimum_thickness: 0.0,
                             maximum_thickness: 1.0,
+                            bias: 0.0,
                         })
                     }
                     PatternOutputRealization::Regions { .. } => {
@@ -6775,6 +6779,7 @@ pub(crate) mod test_support {
             PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.01,
                 maximum_thickness: 0.02,
+                bias: 0.0,
             }),
         );
         DocumentSession::new(
@@ -6883,6 +6888,7 @@ pub(crate) mod test_support {
             PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.1,
                 maximum_thickness: 0.25,
+                bias: 0.0,
             }),
         );
         DocumentSession::new(
@@ -7672,6 +7678,7 @@ pub(crate) mod test_support {
                         PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                             minimum_thickness: 0.08,
                             maximum_thickness: 0.18,
+                            bias: 0.0,
                         })
                     }
                     PatternOutputRealization::MarkPrototype { .. } => {
@@ -7799,7 +7806,6 @@ pub(crate) mod test_support {
                 },
                 repetition: GuideRepetition::NormalOffset {
                     spacing: 12.0,
-                    sides: OffsetSides::Both,
                     cleanup: OffsetCleanup::DissolveCrossings,
                 },
             }],
@@ -7838,6 +7844,7 @@ pub(crate) mod test_support {
             PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.01,
                 maximum_thickness: 0.02,
+                bias: 0.0,
             }),
         );
         DocumentSession::new(
@@ -7889,7 +7896,6 @@ pub(crate) mod test_support {
                     },
                     repetition: GuideRepetition::NormalOffset {
                         spacing: canvas.width * 0.3125,
-                        sides: OffsetSides::Both,
                         cleanup: OffsetCleanup::DissolveCrossings,
                     },
                 },
@@ -7902,7 +7908,6 @@ pub(crate) mod test_support {
                     },
                     repetition: GuideRepetition::NormalOffset {
                         spacing: canvas.height * 0.5,
-                        sides: OffsetSides::Both,
                         cleanup: OffsetCleanup::DissolveCrossings,
                     },
                 },
@@ -10126,6 +10131,7 @@ pub(crate) mod test_support {
                 PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                     minimum_thickness: 0.015,
                     maximum_thickness: 0.025,
+                    bias: 0.0,
                 }),
             )
             .unwrap();
@@ -10785,6 +10791,7 @@ pub(crate) mod test_support {
                 PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                     minimum_thickness: 0.012,
                     maximum_thickness: 0.024,
+                    bias: 0.0,
                 }),
             )
             .unwrap();
@@ -10841,10 +10848,10 @@ pub(crate) mod test_support {
             .apply(&DocumentCommand::EditSharedPatternDefinition {
                 definition_id: PatternDefinitionId(90),
                 base_definition,
-                edit: PatternDefinitionEdit::SetGuideOffsetSides {
+                edit: PatternDefinitionEdit::SetGuideOffsetSpacing {
                     mechanism_id: PatternMechanismId(92),
                     dimension_id: GuideDimensionId(95),
-                    sides: OffsetSides::Left,
+                    spacing: 13.0,
                 },
             })
             .unwrap();
@@ -11120,6 +11127,7 @@ pub(crate) mod test_support {
                         PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                             minimum_thickness: 0.1,
                             maximum_thickness: 0.25,
+                            bias: 0.0,
                         })
                     }
                     _ => unreachable!("fixture contains marks and connections only"),

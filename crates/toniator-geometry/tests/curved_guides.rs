@@ -1,7 +1,8 @@
 use toniator_domain::{AuthoredPoint2, GuideDimensionId, PatternMechanismId};
 use toniator_geometry::{
-    CurvePath, IntersectionKind, PathClosure, Point2, StructuralPathInstance,
-    StructuralPathInstanceId, StructuralPathSet, construct_circular_arc,
+    CubicBezierSegment, CurvePath, CurveSegment, IntersectionKind, PathClosure, PathOffsetLimits,
+    Point2, StructuralPathInstance, StructuralPathInstanceId, StructuralPathSet,
+    construct_circular_arc, insert_solved_crossing_nodes_cancellable,
 };
 
 /// Proves authored and fixed procedural prototypes expose deterministic ordered open curve paths.
@@ -120,4 +121,62 @@ fn curved_along_guide_coverage_uses_exact_anisotropic_interval_upper_bound() {
         (measured.total_length() - std::f64::consts::FRAC_PI_2 * 10.0).abs() < 0.01,
         "the measured curved interval must remain close to the finite quarter-arc authority"
     );
+}
+
+/// Proves transverse centerlines retain every branch and share one exact solved vector node.
+///
+/// # Panics
+///
+/// Panics when planarization deletes a branch, fails to subdivide both paths, moves a terminal,
+/// or gives the two crossing paths different coordinates for their shared node.
+#[test]
+fn solved_crossing_planarization_preserves_branches_and_shared_nodes() {
+    let first = CurvePath::line(Point2::new(0.0, 0.0), Point2::new(10.0, 10.0)).unwrap();
+    let second = CurvePath::line(Point2::new(0.0, 10.0), Point2::new(10.0, 0.0)).unwrap();
+    let planarized = insert_solved_crossing_nodes_cancellable(
+        &[first.clone(), second.clone()],
+        PathOffsetLimits::default(),
+        &|| false,
+    )
+    .expect("one exact crossing planarizes");
+    assert_eq!(planarized.len(), 2);
+    assert_eq!(planarized[0].segments().len(), 2);
+    assert_eq!(planarized[1].segments().len(), 2);
+    assert_eq!(planarized[0].start(), first.start());
+    assert_eq!(planarized[0].end(), first.end());
+    assert_eq!(planarized[1].start(), second.start());
+    assert_eq!(planarized[1].end(), second.end());
+    let shared = Point2::new(5.0, 5.0);
+    assert_eq!(planarized[0].segments()[0].end(), shared);
+    assert_eq!(planarized[0].segments()[1].start(), shared);
+    assert_eq!(planarized[1].segments()[0].end(), shared);
+    assert_eq!(planarized[1].segments()[1].start(), shared);
+}
+
+/// Proves a stored cusp node exposes its one-sided edge direction without weakening ordinary tangents.
+///
+/// # Panics
+///
+/// Panics when a stationary terminal handle is accepted by the ordinary tangent API or the
+/// limiting API fails to recover the cubic's first moving control direction.
+#[test]
+fn stationary_cubic_endpoint_has_an_explicit_one_sided_tangent_limit() {
+    let segment = CurveSegment::CubicBezier(
+        CubicBezierSegment::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(0.0, 0.0),
+            Point2::new(3.0, 0.0),
+            Point2::new(4.0, 1.0),
+        )
+        .expect("finite stationary-endpoint cubic"),
+    );
+    assert_eq!(
+        segment.unit_tangent_at(0.0).unwrap_err().path(),
+        "curve.path.tangent.stationary"
+    );
+    let limiting = segment
+        .limiting_unit_tangent_at(0.0)
+        .expect("one-sided endpoint tangent exists");
+    assert!((limiting.x - 1.0).abs() <= 1.0e-12);
+    assert!(limiting.y.abs() <= 1.0e-12);
 }

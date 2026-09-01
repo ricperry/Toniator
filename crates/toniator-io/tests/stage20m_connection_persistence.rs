@@ -147,6 +147,7 @@ fn connection_document_for(
             response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.1,
                 maximum_thickness: 0.25,
+                bias: 0.0,
             }),
         }],
         definition,
@@ -285,6 +286,7 @@ fn dispersion_document_for(source_id: SourceReferenceId, width: f64, height: f64
             response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.1,
                 maximum_thickness: 0.25,
+                bias: 0.0,
             }),
         }],
         definition,

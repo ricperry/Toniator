@@ -63,8 +63,9 @@ pub use path_offsets::{
     MAX_PATH_OFFSET_CLEANUP_PAIRS, MAX_PATH_OFFSET_COMPONENTS, MAX_PATH_OFFSET_CUSP_ISOLATION_WORK,
     MAX_PATH_OFFSET_SEGMENTS, MAX_PATH_OFFSET_SUBDIVISION_DEPTH, OffsetPathComponent,
     PATH_OFFSET_ALGORITHM_CONTRACT_ID, PathOffsetCleanup, PathOffsetEndpointPolicy,
-    PathOffsetLimits, PathOffsetRequest, PathOffsetResult, PathOffsetWork, offset_path_cancellable,
-    offset_path_with_work_cancellable,
+    PathOffsetLimits, PathOffsetRequest, PathOffsetResult, PathOffsetWork,
+    advance_planar_constant_gap_frontier_cancellable, insert_solved_crossing_nodes_cancellable,
+    offset_path_cancellable, offset_path_with_work_cancellable, stabilize_planar_constant_gap_path,
 };
 pub use region_treatment::{
     REGION_TREATMENT_CONTRACT_ID, RegionReference, RegionTreatment, RegionTreatmentError,

@@ -18,10 +18,6 @@ pub(crate) enum UiIntent {
     Lifecycle(LifecycleAction),
     /// Selects a stable channel identity rather than a GTK list index.
     SelectChannel(ChannelId),
-    /// Opens the isolated private Grid Pattern Editor for the selected channel.
-    OpenGridPatternEditor,
-    /// Opens the isolated private Mark Editor for the selected channel.
-    OpenMarkEditor,
     /// Discards the private Pattern Editor only through its confirmation route.
     DiscardPatternEditor,
 }

@@ -137,6 +137,7 @@ fn document(
         PatternGeometryResponse::Connected(ConnectedGeometryResponse {
             minimum_thickness: 0.04,
             maximum_thickness: 0.28,
+            bias: 0.0,
         })
     };
     Document::with_source_topology_and_authored_structures(

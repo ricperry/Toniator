@@ -169,6 +169,20 @@ impl CurvePath {
             .unit_tangent_at(location.parameter())
     }
 
+    /// Evaluates a tangent or one-sided stationary-endpoint limit on the addressed segment.
+    ///
+    /// The path never averages adjacent edge directions; the stored segment and location retain
+    /// authority over which incoming or outgoing limit is selected.
+    ///
+    /// # Errors
+    ///
+    /// Returns location, finite-arithmetic, or stationary-tangent diagnostics from the addressed
+    /// segment when no endpoint limit exists.
+    pub fn limiting_unit_tangent_at(&self, location: PathLocation) -> Result<Vector2, CurveError> {
+        self.segment_for(location)?
+            .limiting_unit_tangent_at(location.parameter())
+    }
+
     /// Evaluates the left-hand normal on exactly its stored segment, never averaging joins.
     ///
     /// # Errors

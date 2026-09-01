@@ -150,6 +150,86 @@ impl CurveSegment {
         normalize(derivative, self.control_polygon_length()?)
     }
 
+    /// Returns the analytic tangent or a one-sided limit at a stationary cubic endpoint.
+    ///
+    /// Exact subdivision can place a cubic cusp at a stored vector node. This method preserves the
+    /// ordinary tangent contract for moving parameters, derives the first numerically resolvable
+    /// endpoint direction when the evaluated point coincides with that node, and continues to
+    /// reject a true interior stationary point.
+    ///
+    /// # Errors
+    ///
+    /// Returns parameter, finite-arithmetic, or `curve.path.tangent.stationary` diagnostics when no
+    /// one-sided endpoint direction exists.
+    pub fn limiting_unit_tangent_at(&self, parameter_value: f64) -> Result<Vector2, CurveError> {
+        let t = parameter(parameter_value)?;
+        match self.unit_tangent_at(t) {
+            Ok(tangent) => return Ok(tangent),
+            Err(error) if error.path() == "curve.path.tangent.stationary" => {}
+            Err(error) => return Err(error),
+        }
+        let local_scale = self.control_polygon_length()?;
+        let derivative = self.derivative_at(t)?;
+        let derivative_length = derivative.x.hypot(derivative.y);
+        if derivative_length.is_finite()
+            && derivative_length > local_scale * 1.0e-12
+            && derivative_length > 0.0
+        {
+            return Ok(Vector2::new(
+                derivative.x / derivative_length,
+                derivative.y / derivative_length,
+            ));
+        }
+        let Self::CubicBezier(cubic) = self else {
+            return Err(CurveError::new(
+                "curve.path.tangent.stationary",
+                "curve segment derivative is stationary at this parameter",
+            ));
+        };
+        let point = self.point_at(t)?;
+        let endpoint_tolerance =
+            ABSOLUTE_TOLERANCE + super::RELATIVE_TOLERANCE * local_scale.max(1.0);
+        let near_start = distance(point, cubic.start())? <= endpoint_tolerance;
+        let near_end = distance(point, cubic.end())? <= endpoint_tolerance;
+        let candidates = if t == 0.0 || near_start {
+            [
+                vector(cubic.start(), cubic.control_1())?,
+                vector(cubic.start(), cubic.control_2())?,
+                vector(cubic.start(), cubic.end())?,
+            ]
+        } else if t == 1.0 || near_end {
+            [
+                vector(cubic.control_2(), cubic.end())?,
+                vector(cubic.control_1(), cubic.end())?,
+                vector(cubic.start(), cubic.end())?,
+            ]
+        } else {
+            return Err(CurveError::new(
+                "curve.path.tangent.stationary",
+                "curve segment derivative is stationary at this parameter",
+            ));
+        };
+        let mut longest = None::<(Vector2, f64)>;
+        for candidate in candidates {
+            let length = candidate.x.hypot(candidate.y);
+            if length.is_finite()
+                && longest.is_none_or(|(_, longest_length)| length > longest_length)
+            {
+                longest = Some((candidate, length));
+            }
+            if length.is_finite() && length > endpoint_tolerance {
+                return Ok(Vector2::new(candidate.x / length, candidate.y / length));
+            }
+        }
+        if let Some((candidate, length)) = longest.filter(|(_, length)| *length > 0.0) {
+            return Ok(Vector2::new(candidate.x / length, candidate.y / length));
+        }
+        Err(CurveError::new(
+            "curve.path.tangent.stationary",
+            "curve segment derivative is stationary at this parameter",
+        ))
+    }
+
     /// Returns the left-hand unit normal derived from the segment-local tangent.
     ///
     /// # Errors
