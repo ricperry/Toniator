@@ -6,6 +6,8 @@ use toniator_engine::{EvaluationCompletion, EvaluationProgress};
 /// Carries worker results without granting workers GTK or document authority.
 #[allow(clippy::large_enum_variant)] // Save events deliberately own one authoritative document snapshot.
 pub(crate) enum AppEvent {
+    /// Completes a captured document-Preset read, destination check, or immutable save.
+    DocumentPreset(crate::document_presets::Completion),
     /// Finishes one generation-scoped open request.
     Load {
         generation: u64,

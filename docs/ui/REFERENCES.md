@@ -8,7 +8,8 @@ Product vocabulary follows the user's
 Patterns are structural recipes applicable to All or a named channel; Presets
 are reusable document-level configurations that may contain different Patterns
 and settings per channel. The gallery/wizard and current personal library hold
-Patterns. A `.toniator` file is the actual project, not either reusable resource.
+Patterns. A `.toniator` file is the actual project; Load preset... can extract its
+reusable configuration while keeping the destination artwork.
 Use Pattern Recipe, Pattern Gallery, Current Pattern, Change..., and Edit channel.
 Gate 21B-4 personal management remains personal Patterns; this clarification
 does not expand it to document-level Presets.
@@ -18,10 +19,14 @@ Gate 21B-4. As a supplement to the mockup, place **Load preset...** and
 button, preserving its primary New action. These entries serve reusable
 document/per-channel configurations, including different Patterns per channel.
 They are separate from the Pattern Gallery and do not establish a permanent
-Preset manager panel. The preferred storage direction is the `.toniator`
-document structure without source data or source-specific references, pending
-an explicit source-free format contract. Detailed save/load semantics remain Gate 21B-5 planning
-work; the entries are planned, not implemented.
+Preset manager panel. Gate 21B-5 is user-accepted on 2026-09-05:
+Save writes a source-free `.toniator-preset` sharing project configuration
+serialization; Load accepts that file or an intact `.toniator` project.
+Both formats apply the complete model/channel configuration, retain destination
+artwork/canvas, and support one-step Undo. All displays **Base pattern** to
+distinguish inherited defaults from heterogeneous channel Patterns.
+The [implementation record](../STAGE_21B_GATE5_IMPLEMENTATION.md) accounts for
+native menu/dialog accessibility, applicability, keyboard and visual evidence.
 Preserve existing internal `preset_format_version`, preset-v4, `presets/`,
 registry/CLI/Rust names and versions. They are internal naming artifacts where
 they store structural Patterns, not evidence of a document-Preset implementation.

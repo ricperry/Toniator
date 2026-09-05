@@ -754,21 +754,21 @@ impl Default for EvaluationLimits {
 mod stage20e2_limit_tests {
     use super::*;
 
-    /// Fixes monotonic family/output milestone weights independently of worker timing.
+    /// Balances evaluation and raster work while preserving interleaved family/output monotonicity.
     #[test]
     fn document_progress_assigns_fixed_family_and_output_contributions() {
-        assert_eq!(document_work_progress(0, 3, 0, 6), 200);
-        assert_eq!(document_work_progress(1, 3, 0, 6), 283);
-        assert_eq!(document_work_progress(3, 3, 3, 6), 675);
-        assert_eq!(document_work_progress(3, 3, 6, 6), 900);
-        assert_eq!(document_family_work_progress(0, 2, 0, 2, 0, 100), 200);
-        assert_eq!(document_family_work_progress(0, 2, 0, 2, 50, 100), 262);
-        assert_eq!(document_family_work_progress(1, 2, 1, 2, 50, 100), 612);
-        assert_eq!(document_output_work_progress(2, 2, 0, 2, 0, 100), 450);
-        assert_eq!(document_output_work_progress(2, 2, 0, 2, 50, 100), 562);
-        assert_eq!(document_output_work_progress(2, 2, 1, 2, 50, 100), 787);
-        assert_eq!(raster_work_progress(0, 100), 950);
-        assert_eq!(raster_work_progress(50, 100), 970);
+        assert_eq!(document_work_progress(0, 3, 0, 6), 100);
+        assert_eq!(document_work_progress(1, 3, 0, 6), 150);
+        assert_eq!(document_work_progress(3, 3, 3, 6), 350);
+        assert_eq!(document_work_progress(3, 3, 6, 6), 450);
+        assert_eq!(document_family_work_progress(0, 2, 0, 2, 0, 100), 100);
+        assert_eq!(document_family_work_progress(0, 2, 0, 2, 50, 100), 137);
+        assert_eq!(document_family_work_progress(1, 2, 1, 2, 50, 100), 312);
+        assert_eq!(document_output_work_progress(2, 2, 0, 2, 0, 100), 250);
+        assert_eq!(document_output_work_progress(2, 2, 0, 2, 50, 100), 300);
+        assert_eq!(document_output_work_progress(2, 2, 1, 2, 50, 100), 400);
+        assert_eq!(raster_work_progress(0, 100), 500);
+        assert_eq!(raster_work_progress(50, 100), 745);
         assert_eq!(raster_work_progress(100, 100), 990);
     }
 
@@ -3297,16 +3297,23 @@ fn evaluate_cached_document_with_test_observer(
     )
 }
 
+/// Observational shares reserve half of Overall for rasterization and final publication.
+const PREPARED_PROGRESS: u128 = 100;
+const FAMILY_PROGRESS_SHARE: u128 = 150;
+const OUTPUT_PROGRESS_SHARE: u128 = 200;
+const DOCUMENT_WORK_COMPLETE: u16 = 450;
+const RASTER_PROGRESS_START: u16 = 500;
+
 /// Computes the fixed-weight coordinator progress for completed family/output units.
 ///
-/// Source preparation owns the first 200 per-mille, channel family generation
-/// owns 250, and ordered output realization owns 450. Zero totals are treated
+/// Source preparation owns the first 100 per-mille, channel family generation
+/// owns 150, and ordered output realization owns 200. Zero totals are treated
 /// as already complete so malformed work cannot divide by zero; document
 /// preflight remains responsible for rejecting invalid topology.
 ///
 /// # Panics
 ///
-/// Cannot panic: the fixed weights sum to at most 900, which fits in `u16`.
+/// Cannot panic: the fixed weights sum to at most 450, which fits in `u16`.
 fn document_work_progress(
     completed_families: usize,
     total_families: usize,
@@ -3320,10 +3327,11 @@ fn document_work_progress(
             weight * completed.min(total) as u128 / total as u128
         }
     };
-    let value = 200_u128
-        + weighted(completed_families, total_families, 250)
-        + weighted(completed_outputs, total_outputs, 450);
-    u16::try_from(value.min(900)).expect("document progress is at most 900 per-mille")
+    let value = PREPARED_PROGRESS
+        + weighted(completed_families, total_families, FAMILY_PROGRESS_SHARE)
+        + weighted(completed_outputs, total_outputs, OUTPUT_PROGRESS_SHARE);
+    u16::try_from(value.min(u128::from(DOCUMENT_WORK_COMPLETE)))
+        .expect("document progress is at most 450 per-mille")
 }
 
 /// Resolves unit progress inside the current family into its fixed document share.
@@ -3335,7 +3343,7 @@ fn document_work_progress(
 /// # Panics
 ///
 /// Cannot panic: the fixed preparation, family, and output weights sum to at
-/// most 900 per-mille.
+/// most 450 per-mille.
 fn document_family_work_progress(
     completed_families: usize,
     total_families: usize,
@@ -3345,12 +3353,12 @@ fn document_family_work_progress(
     total_units: usize,
 ) -> u16 {
     let output = if total_outputs == 0 {
-        450_u128
+        OUTPUT_PROGRESS_SHARE
     } else {
-        450_u128 * completed_outputs.min(total_outputs) as u128 / total_outputs as u128
+        OUTPUT_PROGRESS_SHARE * completed_outputs.min(total_outputs) as u128 / total_outputs as u128
     };
     let family = if total_families == 0 {
-        250_u128
+        FAMILY_PROGRESS_SHARE
     } else {
         let local_total = total_units.max(1) as u128;
         let local_completed = completed_units.min(total_units) as u128;
@@ -3358,10 +3366,11 @@ fn document_family_work_progress(
             .saturating_mul(local_total)
             .saturating_add(local_completed);
         let denominator = (total_families as u128).saturating_mul(local_total);
-        250_u128 * numerator.min(denominator) / denominator
+        FAMILY_PROGRESS_SHARE * numerator.min(denominator) / denominator
     };
-    let value = 200_u128 + family + output;
-    u16::try_from(value.min(900)).expect("document progress is at most 900 per-mille")
+    let value = PREPARED_PROGRESS + family + output;
+    u16::try_from(value.min(u128::from(DOCUMENT_WORK_COMPLETE)))
+        .expect("document progress is at most 450 per-mille")
 }
 
 /// Resolves site-worker progress inside the current output into its fixed document share.
@@ -3374,7 +3383,7 @@ fn document_family_work_progress(
 /// # Panics
 ///
 /// Cannot panic: the fixed preparation, family, and output weights sum to at
-/// most 900 per-mille.
+/// most 450 per-mille.
 fn document_output_work_progress(
     completed_families: usize,
     total_families: usize,
@@ -3384,12 +3393,13 @@ fn document_output_work_progress(
     total_units: usize,
 ) -> u16 {
     let family = if total_families == 0 {
-        250_u128
+        FAMILY_PROGRESS_SHARE
     } else {
-        250_u128 * completed_families.min(total_families) as u128 / total_families as u128
+        FAMILY_PROGRESS_SHARE * completed_families.min(total_families) as u128
+            / total_families as u128
     };
     let output = if total_outputs == 0 {
-        450_u128
+        OUTPUT_PROGRESS_SHARE
     } else {
         let local_total = total_units.max(1) as u128;
         let local_completed = completed_units.min(total_units) as u128;
@@ -3397,10 +3407,11 @@ fn document_output_work_progress(
             .saturating_mul(local_total)
             .saturating_add(local_completed);
         let denominator = (total_outputs as u128).saturating_mul(local_total);
-        450_u128 * numerator.min(denominator) / denominator
+        OUTPUT_PROGRESS_SHARE * numerator.min(denominator) / denominator
     };
-    let value = 200_u128 + family + output;
-    u16::try_from(value.min(900)).expect("document progress is at most 900 per-mille")
+    let value = PREPARED_PROGRESS + family + output;
+    u16::try_from(value.min(u128::from(DOCUMENT_WORK_COMPLETE)))
+        .expect("document progress is at most 450 per-mille")
 }
 
 /// Resolves completed family groups plus current-family work into local stage progress.
@@ -3461,16 +3472,16 @@ fn unit_stage_progress(completed_units: usize, total_units: usize) -> u16 {
     u16::try_from(value).expect("local unit progress is at most 1,000 per-mille")
 }
 
-/// Maps completed raster primitives and parallel phases into the fixed four-percent share.
+/// Maps completed raster primitives and parallel phases into the fixed 49-percent share.
 ///
 /// Empty work begins at the raster-stage boundary and completion is finalized
 /// by the coordinator's following publication stage.
 fn raster_work_progress(completed_units: usize, total_units: usize) -> u16 {
     if total_units == 0 {
-        return 950;
+        return RASTER_PROGRESS_START;
     }
     let completed = completed_units.min(total_units) as u128;
-    let value = 950_u128 + 40_u128 * completed / total_units as u128;
+    let value = u128::from(RASTER_PROGRESS_START) + 490_u128 * completed / total_units as u128;
     u16::try_from(value.min(990)).expect("raster progress is at most 990 per-mille")
 }
 
@@ -3488,7 +3499,7 @@ fn evaluate_cached_document_impl(
     mut performance: Option<&mut EvaluationPerformanceBuilder>,
     #[cfg(test)] decode_observer: Option<&AtomicUsize>,
 ) -> Result<CachedDocumentEvaluation, EvaluationRunError> {
-    cancellation.report_progress(EvaluationProgressStage::Preparing, 10, 0);
+    cancellation.report_progress(EvaluationProgressStage::Preparing, 0, 0);
     let preflight_started = Instant::now();
     if cancellation.is_cancelled() {
         return Err(EvaluationRunError::Cancelled);
@@ -3589,8 +3600,8 @@ fn evaluate_cached_document_impl(
             }],
         );
     }
-    cancellation.report_progress(EvaluationProgressStage::Preparing, 100, 1_000);
-    cancellation.report_progress(EvaluationProgressStage::DecodingSource, 100, 0);
+    cancellation.report_progress(EvaluationProgressStage::Preparing, 50, 1_000);
+    cancellation.report_progress(EvaluationProgressStage::DecodingSource, 50, 0);
     let source_key = SourceCacheKey {
         reference_id: request.source.reference_id().as_str().to_owned(),
         bytes: Arc::clone(&request.source.bytes),
@@ -3637,8 +3648,8 @@ fn evaluate_cached_document_impl(
             }],
         );
     }
-    cancellation.report_progress(EvaluationProgressStage::DecodingSource, 200, 1_000);
-    cancellation.report_progress(EvaluationProgressStage::GeneratingGeometry, 200, 0);
+    cancellation.report_progress(EvaluationProgressStage::DecodingSource, 100, 1_000);
+    cancellation.report_progress(EvaluationProgressStage::GeneratingGeometry, 100, 0);
     let mut summaries = Vec::with_capacity(topology.channels().len());
     let mut layers = Vec::with_capacity(topology.channels().len());
     let mut families = Vec::with_capacity(topology.channels().len());
@@ -3874,8 +3885,6 @@ fn evaluate_cached_document_impl(
                 output_stage_progress(completed_output_units, output_units, 0, 1),
             );
             let collect_performance = performance.is_some();
-            let output_progress_units = AtomicUsize::new(0);
-            let output_total_units = filtered_family.site_set().len().max(1);
             let report_output_progress = |completed: usize, total: usize| {
                 cancellation.report_progress(
                     EvaluationProgressStage::RealizingOutputs,
@@ -3897,10 +3906,8 @@ fn evaluate_cached_document_impl(
             {
                 Some((_, realization)) => (Arc::clone(realization), CacheDisposition::Hit, None),
                 None => {
-                    let (realization, region_performance) = match evaluate_stage(
-                        EvaluationStage::Realization,
-                        cancellation,
-                        || {
+                    let (realization, region_performance) =
+                        match evaluate_stage(EvaluationStage::Realization, cancellation, || {
                             evaluate_document_output(
                                 document,
                                 definition,
@@ -3923,38 +3930,17 @@ fn evaluate_cached_document_impl(
                                 limits.region_sampling_limits(),
                                 limits.region_treatment_limits(),
                                 collect_performance,
-                                &|| {
-                                    if cancellation.is_cancelled() {
-                                        return true;
-                                    }
-                                    if output_capability.regions().is_none()
-                                        && !matches!(
-                                            &output_capability.payload,
-                                            toniator_patterns::OutputCapabilityPayload::CurveMotifPaths { .. }
-                                        )
-                                        && let Ok(previous) = output_progress_units.fetch_update(
-                                            Ordering::Relaxed,
-                                            Ordering::Relaxed,
-                                            |value| {
-                                                (value < output_total_units).then_some(value + 1)
-                                            },
-                                        )
-                                    {
-                                        report_output_progress(previous + 1, output_total_units);
-                                    }
-                                    false
-                                },
+                                &|| cancellation.is_cancelled(),
                                 &report_output_progress,
                             )
-                        },
-                    ) {
-                        Err(EvaluationRunError::Evaluation(error))
-                            if error.path() == "evaluation.cancelled" =>
-                        {
-                            return Err(EvaluationRunError::Cancelled);
-                        }
-                        result => result?,
-                    };
+                        }) {
+                            Err(EvaluationRunError::Evaluation(error))
+                                if error.path() == "evaluation.cancelled" =>
+                            {
+                                return Err(EvaluationRunError::Cancelled);
+                            }
+                            result => result?,
+                        };
                     (
                         Arc::new(realization),
                         CacheDisposition::Miss,
@@ -4130,7 +4116,11 @@ fn evaluate_cached_document_impl(
             )
         }),
     );
-    cancellation.report_progress(EvaluationProgressStage::ComposingScene, 900, 0);
+    cancellation.report_progress(
+        EvaluationProgressStage::ComposingScene,
+        DOCUMENT_WORK_COMPLETE,
+        0,
+    );
     let scene_started = Instant::now();
     let built_scene = evaluate_stage(EvaluationStage::Scene, cancellation, || {
         RenderScene::new_modeled(
@@ -4174,8 +4164,16 @@ fn evaluate_cached_document_impl(
             limits.max_flattened_raster_edges()
         ),
     };
-    cancellation.report_progress(EvaluationProgressStage::ComposingScene, 950, 1_000);
-    cancellation.report_progress(EvaluationProgressStage::RasterizingPreview, 950, 0);
+    cancellation.report_progress(
+        EvaluationProgressStage::ComposingScene,
+        RASTER_PROGRESS_START,
+        1_000,
+    );
+    cancellation.report_progress(
+        EvaluationProgressStage::RasterizingPreview,
+        RASTER_PROGRESS_START,
+        0,
+    );
     let raster_started = Instant::now();
     let (raster, raster_disposition) = match &accepted.raster {
         Some((key, value)) if *key == raster_key => (Arc::clone(value), CacheDisposition::Hit),
@@ -5625,9 +5623,9 @@ fn voronoi_region_site_usage(
 
 /// Derives positive mark membership from completed geometry before renderer clipping.
 ///
-/// Generalized marks retain family IDs directly. The circular compatibility realizers retain the
-/// same exact center bits and family order, so this boundary recovers only positive-radius emitted
-/// sites without inventing a second family or using canvas visibility.
+/// Generalized marks retain family IDs directly. Circular realizers retain exact center bits;
+/// an index recovers only positive-radius emitted sites in O((sites + marks) log sites), retaining
+/// the first family site at duplicate coordinates and never using canvas visibility.
 ///
 /// # Errors
 ///
@@ -5639,14 +5637,18 @@ fn mark_site_usage(
     let mut members = BTreeSet::new();
     match realization.geometry().as_ref() {
         GeometryOutput::CircularMarks(marks) => {
+            let mut sites_by_center = BTreeMap::new();
+            for site in family.site_set().iter() {
+                sites_by_center
+                    .entry((site.position.x.to_bits(), site.position.y.to_bits()))
+                    .or_insert(site.id);
+            }
             for mark in marks {
                 if mark.radius > 0.0
-                    && let Some(site) = family.site_set().iter().find(|site| {
-                        site.position.x.to_bits() == mark.center.x.to_bits()
-                            && site.position.y.to_bits() == mark.center.y.to_bits()
-                    })
+                    && let Some(site_id) =
+                        sites_by_center.get(&(mark.center.x.to_bits(), mark.center.y.to_bits()))
                 {
-                    members.insert(site.id);
+                    members.insert(*site_id);
                 }
             }
         }
@@ -9314,6 +9316,60 @@ pub(crate) mod test_support {
         }
     }
 
+    /// Preserves exact positive-radius membership and deduplication through indexed circular lookup.
+    /// Authoritative generated sites supply provenance; zero-radius and foreign centers add no usage.
+    #[test]
+    fn circular_mark_usage_preserves_positive_site_membership() {
+        let session = modeled_document_session();
+        let evaluated = evaluate_cached_document(
+            document_request(&session, valid_document_bytes()),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .expect("document evaluates");
+        let family = &evaluated.transaction.families[0].1;
+        let sites = family.site_set().sites();
+        assert!(sites.len() >= 2);
+        let GeometryOutput::CircularMarks(emitted) = evaluated.transaction.realizations[0]
+            .1
+            .realization
+            .geometry()
+            .as_ref()
+        else {
+            panic!("witness emits circular marks");
+        };
+        let template = &emitted[0];
+        let marks = vec![
+            CanonicalCircleMark {
+                center: sites[0].position,
+                radius: 1.0,
+                ..template.clone()
+            },
+            CanonicalCircleMark {
+                center: sites[0].position,
+                radius: 2.0,
+                ..template.clone()
+            },
+            CanonicalCircleMark {
+                center: sites[1].position,
+                radius: 0.0,
+                ..template.clone()
+            },
+            CanonicalCircleMark {
+                center: Point2::new(f64::MAX, f64::MAX),
+                radius: 1.0,
+                ..template.clone()
+            },
+        ];
+        let realization = DocumentRealization::Mapped {
+            geometry: Arc::new(GeometryOutput::CircularMarks(marks)),
+            fingerprint: "usage-witness".to_owned(),
+        };
+        let usage = mark_site_usage(family, &realization).expect("usage retains family provenance");
+        assert_eq!(usage.members(), &[sites[0].id]);
+    }
+
     /// Proves worker progress is ticketed, monotonic, staged, and complete before publication.
     #[test]
     fn document_scheduler_reports_monotonic_stage_progress() {
@@ -9340,6 +9396,22 @@ pub(crate) mod test_support {
         }
 
         assert_eq!(completion.ticket(), ticket);
+        assert_eq!(
+            progress
+                .iter()
+                .find(|update| update.stage() == EvaluationProgressStage::GeneratingGeometry)
+                .expect("family stage starts")
+                .fraction(),
+            0.1
+        );
+        assert_eq!(
+            progress
+                .iter()
+                .find(|update| update.stage() == EvaluationProgressStage::RasterizingPreview)
+                .expect("raster stage starts")
+                .fraction(),
+            0.5
+        );
         assert!(progress.len() >= 7, "coarse stages remain observable");
         assert!(
             progress

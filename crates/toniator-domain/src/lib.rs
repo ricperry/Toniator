@@ -4680,6 +4680,96 @@ enum ChannelConfiguration {
     },
 }
 
+/// An immutable snapshot of the reusable authored document configuration.
+///
+/// This authority deliberately excludes document identity, canvas dimensions,
+/// source identity, revisions, history, evaluator state, and frontend state.
+/// Binding always supplies those project-specific values from a destination
+/// document and validates the complete resulting document before returning it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocumentConfiguration {
+    pattern_definition_bundles: Vec<PatternDefinitionBundle>,
+    channel_configuration: ChannelConfiguration,
+    authored_structures: Vec<AuthoredStructure>,
+    pattern_settings: DocumentPatternSettings,
+}
+
+impl DocumentConfiguration {
+    /// Captures the four reusable authored authorities from one validated document.
+    ///
+    /// The snapshot preserves exact IDs, sharing relationships, channel order,
+    /// inheritance versus explicit channel intent, and source-interpretation
+    /// settings while excluding the source reference itself.
+    pub fn capture(document: &Document) -> Self {
+        Self {
+            pattern_definition_bundles: document.pattern_definition_bundles.clone(),
+            channel_configuration: document.channel_configuration.clone(),
+            authored_structures: document.authored_structures.clone(),
+            pattern_settings: document.pattern_settings.clone(),
+        }
+    }
+
+    /// Binds this reusable configuration to one destination's immutable project authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns the existing complete-document validation diagnostic when the
+    /// captured configuration is invalid for the destination canvas or source.
+    /// No document, history, or revision is mutated.
+    pub fn bind(&self, destination: &Document) -> Result<Document, ValidationError> {
+        let candidate = Document {
+            id: destination.id,
+            canvas: destination.canvas.clone(),
+            source: destination.source.clone(),
+            pattern_definition_bundles: self.pattern_definition_bundles.clone(),
+            channel_configuration: self.channel_configuration.clone(),
+            authored_structures: self.authored_structures.clone(),
+            pattern_settings: self.pattern_settings.clone(),
+        };
+        candidate.validate()?;
+        Ok(candidate)
+    }
+
+    /// Returns the exact captured definition bundles in authored order.
+    pub fn pattern_definition_bundles(&self) -> &[PatternDefinitionBundle] {
+        &self.pattern_definition_bundles
+    }
+
+    /// Returns the exact captured document-wide Pattern settings.
+    pub fn pattern_settings(&self) -> &DocumentPatternSettings {
+        &self.pattern_settings
+    }
+
+    /// Returns legacy channel state when this configuration uses legacy channel authority.
+    pub fn channels(&self) -> Option<&[ChannelState]> {
+        match &self.channel_configuration {
+            ChannelConfiguration::Legacy(channels) => Some(channels),
+            ChannelConfiguration::Topology { .. } => None,
+        }
+    }
+
+    /// Returns the modeled color authority when this configuration uses a channel topology.
+    pub fn channel_model(&self) -> Option<HalftoneChannelModel> {
+        match &self.channel_configuration {
+            ChannelConfiguration::Legacy(_) => None,
+            ChannelConfiguration::Topology { model, .. } => Some(*model),
+        }
+    }
+
+    /// Returns the exact captured modeled topology and its ordered channels.
+    pub fn channel_topology(&self) -> Option<&ChannelTopology> {
+        match &self.channel_configuration {
+            ChannelConfiguration::Legacy(_) => None,
+            ChannelConfiguration::Topology { topology, .. } => Some(topology),
+        }
+    }
+
+    /// Returns the complete captured document-owned authored resource store.
+    pub fn authored_structures(&self) -> &[AuthoredStructure] {
+        &self.authored_structures
+    }
+}
+
 impl Document {
     /// Builds the accepted default document directly, without a
     /// command transition.  Frontends use this for new and direct-source
@@ -26093,6 +26183,54 @@ impl DocumentHistory {
         self.redo.clear();
         Ok(result)
     }
+
+    /// Applies one reusable authored configuration to an exact document root as one history step.
+    ///
+    /// The destination document supplies identity, canvas, and source authority.
+    /// Equal configuration is an atomic no-op that preserves revision and both
+    /// history stacks; a changed validated configuration advances one revision,
+    /// records one undo entry, and clears redo.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stale-root diagnostic when either `base` or `revision` no
+    /// longer matches this history, a complete-document validation diagnostic
+    /// before publication, or revision exhaustion without changing authority.
+    pub fn apply_document_configuration(
+        &mut self,
+        base: &Document,
+        revision: Revision,
+        configuration: &DocumentConfiguration,
+    ) -> Result<DraftSquashResult, DocumentSessionError> {
+        if self.document() != base || self.revision() != revision {
+            return Err(DocumentSessionError::Validation(ValidationError::new(
+                "document.configuration",
+                "document configuration root is stale against the current history",
+            )));
+        }
+        let candidate = configuration.bind(base)?;
+        if &candidate == base {
+            return Ok(DraftSquashResult {
+                unchanged: true,
+                affected_channels: Vec::new(),
+                invalidation: None,
+            });
+        }
+        let result = squash_result(base, &candidate);
+        let before = self.session.snapshot();
+        self.session.restore_history_snapshot(candidate.clone())?;
+        self.undo.push(HistoryEntry {
+            before,
+            after: candidate,
+            result: CommandResult {
+                affected_channels: result.affected_channels.clone(),
+                invalidation: result.invalidation,
+                created_authored_structure_id: None,
+            },
+        });
+        self.redo.clear();
+        Ok(result)
+    }
 }
 
 /// Summarizes the net draft document difference without replaying draft command history.
@@ -26111,8 +26249,7 @@ fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
         .iter()
         .chain(after.pattern_definition_bundles.iter())
         .filter_map(|definition| {
-            (before.definition(definition.id) != after.definition(definition.id))
-                .then_some(definition.id)
+            (before.bundle(definition.id) != after.bundle(definition.id)).then_some(definition.id)
         })
         .collect::<HashSet<_>>();
     let source_changed = before.source != after.source;
@@ -26133,27 +26270,14 @@ fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
     for channel_id in &after_channel_ids {
         let before_effective = before.effective_channel_pattern(*channel_id).ok();
         let after_effective = after.effective_channel_pattern(*channel_id).ok();
-        if before_effective != after_effective {
+        if let Some(pattern_level) = channel_pattern_change_invalidation(
+            before,
+            after,
+            before_effective.as_ref(),
+            after_effective.as_ref(),
+        ) {
             changed_channels.insert(*channel_id);
-            let family = before_effective
-                .as_ref()
-                .zip(after_effective.as_ref())
-                .is_none_or(|(old, new)| {
-                    old.definition_id != new.definition_id
-                        || old.density != new.density
-                        || old.pattern_rotation_degrees != new.pattern_rotation_degrees
-                        || old.translation_x != new.translation_x
-                        || old.translation_y != new.translation_y
-                });
-            level = strongest_invalidation(
-                level,
-                if family {
-                    InvalidationLevel::Family
-                } else {
-                    InvalidationLevel::Realization
-                },
-            );
-            continue;
+            level = strongest_invalidation(level, pattern_level);
         }
         match (
             before.modeled_channel(*channel_id),
@@ -26206,9 +26330,6 @@ fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
             },
         );
     }
-    if !changed_definitions.is_empty() {
-        level = strongest_invalidation(level, InvalidationLevel::Family);
-    }
     let affected_channels = after
         .channel_ids()
         .into_iter()
@@ -26230,6 +26351,163 @@ fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
         affected_channels,
         invalidation: level,
     }
+}
+
+/// Classifies one channel's net Pattern change from effective and structural authority.
+///
+/// Layout and family inputs invalidate family construction; artwork-weighted
+/// source interpretation invalidates decoded source fields; region algorithm
+/// or sampling changes invalidate family geometry; response, output, filter,
+/// and shape changes invalidate realization; painter-only reordering invalidates
+/// presentation. Name-only and inherited-versus-explicit changes that resolve
+/// identically require no evaluation work.
+fn channel_pattern_change_invalidation(
+    before: &Document,
+    after: &Document,
+    before_effective: Option<&EffectiveChannelPatternInstance>,
+    after_effective: Option<&EffectiveChannelPatternInstance>,
+) -> Option<InvalidationLevel> {
+    let (Some(old), Some(new)) = (before_effective, after_effective) else {
+        return (before_effective != after_effective).then_some(InvalidationLevel::Family);
+    };
+    let old_bundle = before.bundle(old.definition_id)?;
+    let new_bundle = after.bundle(new.definition_id)?;
+    if definition_artwork_mapping_changed(&old_bundle.definition, &new_bundle.definition) {
+        return Some(InvalidationLevel::Source);
+    }
+    if old.definition_id != new.definition_id
+        || old.density != new.density
+        || old.pattern_rotation_degrees != new.pattern_rotation_degrees
+        || old.translation_x != new.translation_x
+        || old.translation_y != new.translation_y
+    {
+        return Some(InvalidationLevel::Family);
+    }
+    if old_bundle.definition.family != new_bundle.definition.family
+        || old_bundle.definition.mechanisms != new_bundle.definition.mechanisms
+        || old_bundle.definition.modulation != new_bundle.definition.modulation
+        || old_bundle.definition.coverage != new_bundle.definition.coverage
+    {
+        return Some(InvalidationLevel::Family);
+    }
+    if region_algorithm_or_sampling_changed(&old.output_settings, &new.output_settings) {
+        return Some(InvalidationLevel::Family);
+    }
+    let output_level = output_definition_change_invalidation(
+        &old_bundle.definition.output_layers,
+        &new_bundle.definition.output_layers,
+    );
+    let response_level =
+        output_settings_change_invalidation(&old.output_settings, &new.output_settings);
+    let shape_level = (old.shape_rotation_degrees != new.shape_rotation_degrees)
+        .then_some(InvalidationLevel::Realization);
+    [output_level, response_level, shape_level]
+        .into_iter()
+        .flatten()
+        .fold(None, strongest_invalidation)
+}
+
+/// Detects changes only to nested artwork-weighted source interpretation.
+fn definition_artwork_mapping_changed(
+    before: &PatternDefinition,
+    after: &PatternDefinition,
+) -> bool {
+    before.mechanisms.iter().any(|old| {
+        let PatternMechanism::SiteDensityModulation {
+            id,
+            modulation: old_modulation,
+            ..
+        } = old
+        else {
+            return false;
+        };
+        after.mechanisms.iter().any(|new| {
+            let PatternMechanism::SiteDensityModulation {
+                id: new_id,
+                modulation: new_modulation,
+                ..
+            } = new
+            else {
+                return false;
+            };
+            new_id == id
+                && artwork_weight_mapping(old_modulation) != artwork_weight_mapping(new_modulation)
+        })
+    })
+}
+
+/// Returns only the source interpretation nested in an artwork-weighted site mechanism.
+fn artwork_weight_mapping(modulation: &SiteDensityModulation) -> Option<SourceMapping> {
+    match modulation {
+        SiteDensityModulation::Uniform => None,
+        SiteDensityModulation::ArtworkWeighted { mapping, .. } => Some(*mapping),
+    }
+}
+
+/// Classifies structural output changes while distinguishing painter order from realization input.
+fn output_definition_change_invalidation(
+    before: &[PatternOutputLayer],
+    after: &[PatternOutputLayer],
+) -> Option<InvalidationLevel> {
+    if before == after {
+        return None;
+    }
+    let same_outputs = before.len() == after.len()
+        && before.iter().all(|old| {
+            after
+                .iter()
+                .find(|new| new.id == old.id)
+                .is_some_and(|new| new == old)
+        });
+    Some(if same_outputs {
+        InvalidationLevel::Presentation
+    } else {
+        InvalidationLevel::Realization
+    })
+}
+
+/// Classifies effective response changes while preserving painter-only ordering semantics.
+fn output_settings_change_invalidation(
+    before: &[EffectivePatternOutputSettings],
+    after: &[EffectivePatternOutputSettings],
+) -> Option<InvalidationLevel> {
+    if before == after {
+        return None;
+    }
+    let same_settings = before.len() == after.len()
+        && before.iter().all(|old| {
+            after
+                .iter()
+                .find(|new| new.output_layer_id == old.output_layer_id)
+                .is_some_and(|new| new == old)
+        });
+    Some(if same_settings {
+        InvalidationLevel::Presentation
+    } else {
+        InvalidationLevel::Realization
+    })
+}
+
+/// Detects region choices that alter family construction or source integration.
+fn region_algorithm_or_sampling_changed(
+    before: &[EffectivePatternOutputSettings],
+    after: &[EffectivePatternOutputSettings],
+) -> bool {
+    before.iter().any(|old| {
+        let Some(new) = after
+            .iter()
+            .find(|new| new.output_layer_id == old.output_layer_id)
+        else {
+            return false;
+        };
+        matches!(
+            (&old.response, &new.response),
+            (
+                PatternGeometryResponse::Regions(old),
+                PatternGeometryResponse::Regions(new)
+            ) if old.algorithm != new.algorithm || old.sampling != new.sampling
+        )
+    })
 }
 
 /// Returns whether one effective channel owns any changed authored resource.

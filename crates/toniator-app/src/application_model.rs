@@ -17,6 +17,8 @@ use crate::{PreviewModel, Workspace, preview_coordinator::PreviewCoordinator};
 /// selected artist channel and scheduler identity. GTK may borrow it only long
 /// enough to project immutable view models or dispatch existing typed commands.
 pub(crate) struct ApplicationModel {
+    /// Tracks exclusive document-Preset operations without owning GTK or duplicate document state.
+    pub(crate) document_presets: crate::document_presets::OperationState,
     /// Evaluates immutable snapshots and never receives GTK widgets.
     pub(crate) scheduler: Arc<EvaluationScheduler>,
     /// Holds the sole main document/history/savepoint authority when open.
@@ -27,6 +29,8 @@ pub(crate) struct ApplicationModel {
     pub(crate) pending_save: bool,
     /// Marks an immutable export snapshot awaiting an event completion.
     pub(crate) pending_export: bool,
+    /// Retains lifecycle exclusion while a native or external portal file chooser owns a decision.
+    pub(crate) pending_file_chooser: bool,
     /// Rejects stale lifecycle completions after a newer request begins.
     pub(crate) generation: u64,
     /// Distinguishes independent workspaces with the same document revision.
@@ -48,6 +52,7 @@ impl ApplicationModel {
     /// constructed; without it the desktop application cannot render previews.
     pub(crate) fn new() -> Self {
         Self {
+            document_presets: crate::document_presets::OperationState::default(),
             scheduler: Arc::new(
                 EvaluationScheduler::new().expect("failed to start evaluation scheduler"),
             ),
@@ -55,6 +60,7 @@ impl ApplicationModel {
             pending_load: false,
             pending_save: false,
             pending_export: false,
+            pending_file_chooser: false,
             generation: 0,
             workspace_generation: 0,
             preview_coordinator: PreviewCoordinator::default(),

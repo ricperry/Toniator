@@ -9,6 +9,7 @@ mod application_model;
 mod automation;
 mod components;
 mod controller;
+mod document_presets;
 mod main_view_state;
 mod personal_pattern_management;
 mod preview_coordinator;
@@ -579,10 +580,12 @@ impl Page {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Captures one lifecycle request, including an immutable externally supplied file path.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LifecycleAction {
     New,
     Open,
+    OpenFile(PathBuf),
     Close,
     WindowClose,
 }
@@ -647,7 +650,7 @@ enum UnsavedDecision {
     Save,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum LifecycleDisposition {
     Execute(LifecycleAction),
     Prompt(LifecycleAction),
@@ -655,6 +658,7 @@ enum LifecycleDisposition {
     Noop,
 }
 
+/// Routes a captured request through the unsaved-content decision without changing history.
 fn begin_lifecycle(dirty: bool, action: LifecycleAction) -> LifecycleDisposition {
     if dirty {
         LifecycleDisposition::Prompt(action)
@@ -663,6 +667,7 @@ fn begin_lifecycle(dirty: bool, action: LifecycleAction) -> LifecycleDisposition
     }
 }
 
+/// Retains the exact requested action through Discard or Save and drops it on Cancel.
 fn resolve_unsaved_decision(
     action: LifecycleAction,
     decision: UnsavedDecision,
@@ -843,6 +848,8 @@ fn wizard_preview_surface_after<T: Copy>(
 
 #[derive(Clone)]
 struct Actions {
+    load_document_preset: gio::SimpleAction,
+    save_document_preset: gio::SimpleAction,
     new: gio::SimpleAction,
     open: gio::SimpleAction,
     save: gio::SimpleAction,
@@ -3380,6 +3387,7 @@ impl PatternEditorDraft {
 }
 
 struct AppState {
+    document_preset_progress: Option<gtk::Window>,
     application_model: application_model::ApplicationModel,
     syncing_model: bool,
     window_close: WindowCloseController,
@@ -3473,8 +3481,8 @@ impl std::ops::DerefMut for AppState {
 ///
 /// This entrypoint owns process arguments and application activation only. Document, history,
 /// evaluation, and persistence authority begin in the single main-window coordinator;
-/// subsequent activations present the existing window without replacing its document.
-/// invalid command-line input exits before GTK startup.
+/// File activations use the existing guarded lifecycle route in the primary process;
+/// ordinary activations present the existing window. Invalid arguments exit before GTK startup.
 fn main() {
     register_resources();
     let initial_path = match parse_args(env::args_os().skip(1).collect()) {
@@ -3484,15 +3492,91 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let app = gtk::Application::builder().application_id(APP_ID).build();
+    let app = gtk::Application::builder()
+        .application_id(APP_ID)
+        .flags(gio::ApplicationFlags::HANDLES_OPEN)
+        .build();
+    let controller = Rc::new(RefCell::new(std::rc::Weak::new()));
+    let activation_controller = Rc::clone(&controller);
     app.connect_activate(move |app| {
+        let state = activation_workspace(app, &activation_controller);
         if let Some(window) = app.active_window() {
             window.present();
         } else {
-            build_window(app, initial_path.clone());
+            state.borrow().window.present();
         }
     });
-    app.run_with_args(&["toniator-app"]);
+    app.connect_open(move |app, files, _| {
+        let state = activation_workspace(app, &controller);
+        request_forwarded_file(&state, files);
+    });
+    app.run_with_args(&activation_arguments(initial_path));
+}
+
+/// Encodes the caller's native path as an absolute file URI before GApplication forwarding.
+/// This retains the launching process's working directory and non-UTF-8 filename bytes.
+fn activation_arguments(path: Option<PathBuf>) -> Vec<String> {
+    let mut arguments = vec!["toniator-app".to_owned()];
+    if let Some(path) = path {
+        arguments.push(gio::File::for_path(path).uri().to_string());
+    }
+    arguments
+}
+
+/// Returns the single live main-window controller, creating its empty startup surface if needed.
+/// The application signal holds only a weak controller reference to avoid owning a widget cycle.
+fn activation_workspace(
+    app: &gtk::Application,
+    controller: &RefCell<std::rc::Weak<RefCell<AppState>>>,
+) -> Rc<RefCell<AppState>> {
+    if let Some(state) = controller.borrow().upgrade() {
+        return state;
+    }
+    let state = build_window(app);
+    *controller.borrow_mut() = Rc::downgrade(&state);
+    state
+}
+
+/// Accepts one local file per activation without silently choosing among multiple requested files.
+///
+/// # Errors
+/// Returns actionable guidance for a batch or a nonlocal URI; neither starts document loading.
+fn forwarded_file_path(files: &[gio::File]) -> Result<PathBuf, String> {
+    let [file] = files else {
+        return Err("Open one artwork or document file at a time.".to_owned());
+    };
+    file.path()
+        .ok_or_else(|| "Open a local artwork or document file.".to_owned())
+}
+
+/// Presents a forwarded request and routes it through the same dirty guard and loader as Open.
+/// Existing modal authoring, file decisions and workers retain ownership; a competing request
+/// reports retry guidance without replacing the document or the operation already in progress.
+fn request_forwarded_file(state: &Rc<RefCell<AppState>>, files: &[gio::File]) {
+    let window = state.borrow().window.clone();
+    let modal = gtk::Window::list_toplevels()
+        .into_iter()
+        .find_map(|widget| {
+            widget
+                .downcast::<gtk::Window>()
+                .ok()
+                .filter(|window| window.is_visible() && window.is_modal())
+        });
+    if lifecycle_is_busy(&state.borrow()) || modal.is_some() {
+        if let Some(modal) = modal {
+            modal.present();
+        }
+        show_error(
+            &mut state.borrow_mut(),
+            "Finish the current dialog or file operation, then open the file again.".to_owned(),
+        );
+        return;
+    }
+    window.present();
+    match forwarded_file_path(files) {
+        Ok(path) => request_lifecycle(state, LifecycleAction::OpenFile(path)),
+        Err(error) => show_error(&mut state.borrow_mut(), error),
+    }
 }
 
 /// Registers the checked-in GResource bundle before any composite widget is built.
@@ -3646,7 +3730,7 @@ fn parse_args(arguments: Vec<std::ffi::OsString>) -> Result<Option<PathBuf>, Str
 /// authoritative headless workspace/history boundary. This function owns
 /// widget lifetime and notification wiring, but never directly mutates a
 /// document outside the existing command paths.
-fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
+fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     let theme_bridge = main_view_state::inherit_system_color_scheme();
     install_css();
     let window = gtk::ApplicationWindow::builder()
@@ -3669,7 +3753,12 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
     let new_menu = gio::Menu::new();
     new_menu.append(Some("New document"), Some("app.new"));
     new_menu.append(Some("Open artwork or document…"), Some("app.open"));
+    let preset_menu = gio::Menu::new();
+    preset_menu.append(Some("Load preset..."), Some("app.load-document-preset"));
+    preset_menu.append(Some("Save preset"), Some("app.save-document-preset"));
+    new_menu.append_section(None, &preset_menu);
     shell.new_button().set_menu_model(Some(&new_menu));
+    document_presets::label_new_menu(&shell.new_button());
     let selector = shell.model_selector();
     selector.set_model(Some(&gtk::StringList::new(
         &PreviewModel::ALL.map(PreviewModel::label),
@@ -3753,6 +3842,8 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
     });
 
     let actions = Actions {
+        load_document_preset: gio::SimpleAction::new("load-document-preset", None),
+        save_document_preset: gio::SimpleAction::new("save-document-preset", None),
         new: gio::SimpleAction::new("new", None),
         open: gio::SimpleAction::new("open", None),
         save: gio::SimpleAction::new("save", None),
@@ -3765,6 +3856,8 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
         help: gio::SimpleAction::new("help", None),
     };
     for action in [
+        &actions.load_document_preset,
+        &actions.save_document_preset,
         &actions.new,
         &actions.open,
         &actions.save,
@@ -3808,6 +3901,7 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
         ),
     };
     let state = Rc::new(RefCell::new(AppState {
+        document_preset_progress: None,
         application_model: application_model::ApplicationModel::new(),
         syncing_model: false,
         window_close: WindowCloseController::default(),
@@ -3937,9 +4031,7 @@ fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
     sync_ui(&mut state.borrow_mut());
     rebuild_inspector(&state);
     window.present();
-    if let Some(path) = initial_path {
-        start_load(&state, path);
-    }
+    state
 }
 
 /// Connects startup history clearing; only metadata is changed and filesystem targets stay intact.
@@ -4027,6 +4119,22 @@ fn remember_recent_file(state: &Rc<RefCell<AppState>>, path: &Path) {
 /// Connects menu/shortcut actions to existing document commands and guarded lifecycle decisions.
 /// Exit calls the window's close request so it shares exactly the compositor-X save/cancel path.
 fn connect_actions(state: &Rc<RefCell<AppState>>) {
+    {
+        let handle = Rc::clone(state);
+        state
+            .borrow()
+            .actions
+            .load_document_preset
+            .connect_activate(move |_, _| document_presets::choose_load(&handle));
+    }
+    {
+        let handle = Rc::clone(state);
+        state
+            .borrow()
+            .actions
+            .save_document_preset
+            .connect_activate(move |_, _| document_presets::choose_save(&handle));
+    }
     let window = state.borrow().window.downgrade();
     state.borrow().actions.exit.connect_activate(move |_, _| {
         if let Some(window) = window.upgrade() {
@@ -4040,7 +4148,7 @@ fn connect_actions(state: &Rc<RefCell<AppState>>) {
     ] {
         let state = Rc::clone(state);
         action.connect_activate(move |_, _| {
-            dispatch_ui_intent(&state, UiIntent::Lifecycle(lifecycle))
+            dispatch_ui_intent(&state, UiIntent::Lifecycle(lifecycle.clone()))
         });
     }
     {
@@ -4087,6 +4195,9 @@ fn show_main_help(parent: &gtk::ApplicationWindow) {
 
 /// Dispatches a typed header intent through the authoritative history boundary.
 fn dispatch_ui_intent(state: &Rc<RefCell<AppState>>, intent: UiIntent) {
+    if main_document_edits_blocked(&state.borrow()) {
+        return;
+    }
     if let Some(redo) = history_redo(&intent) {
         apply_history_navigation(state, redo);
         return;
@@ -4161,13 +4272,8 @@ fn apply_history_navigation(state: &Rc<RefCell<AppState>>, redo: bool) {
     };
     match result {
         Ok(Some(_)) => {
-            let mut app_state = state.borrow_mut();
-            set_preview_pending(&mut app_state);
-            set_inspector_status(&mut app_state, "Rendering preview…");
-            sync_ui(&mut app_state);
-            drop(app_state);
-            rebuild_inspector(state);
-            schedule_main_preview_submission(state);
+            document_presets::refresh_configuration(state);
+            set_inspector_status(&mut state.borrow_mut(), "Rendering preview…");
         }
         Ok(None) => {}
         Err(error) => show_error(&mut state.borrow_mut(), error.to_string()),
@@ -5916,7 +6022,11 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
         return;
     };
     catalog.set_visible(true);
-    active_pattern.set_label(&format!("Current pattern: {active_pattern_text}"));
+    let pattern_label = match target {
+        InspectorTarget::DocumentAll => "Base pattern",
+        InspectorTarget::Channel(_) => "Current pattern",
+    };
+    active_pattern.set_label(&format!("{pattern_label}: {active_pattern_text}"));
     status.set_label(status_message.as_deref().unwrap_or(match target {
         InspectorTarget::DocumentAll => {
             "ALL edits the document base while preserving channel overrides."
@@ -6306,6 +6416,9 @@ fn append_pattern_gallery_launch(
 /// Repeated activation presents the same modal instead of creating a second draft. The captured
 /// candidate remains non-mutating until a card action changes only the cloned draft history.
 fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button) {
+    if state.borrow().document_presets.busy() {
+        return;
+    }
     if let Some(window) = state
         .borrow()
         .pattern_wizard
@@ -7513,6 +7626,7 @@ fn open_pattern_library_manager(state: &Rc<RefCell<AppState>>, _wizard_epoch: Op
     let state_for_close = Rc::clone(state);
     window.connect_close_request(move |_| {
         state_for_close.borrow_mut().pattern_library_surface = None;
+        sync_ui(&mut state_for_close.borrow_mut());
         glib::Propagation::Proceed
     });
     rebuild_pattern_library_surface(state);
@@ -13372,7 +13486,7 @@ fn handle_wizard_preview_progress(
         return;
     };
     surface.status.set_label(&format!(
-        "Updating pattern preview: {} · {:.0}%",
+        "Updating pattern preview: {} · {:.1}%",
         preview_progress_stage_label(progress.stage()).trim_end_matches('…'),
         progress.fraction().clamp(0.0, 1.0) * 100.0
     ));
@@ -13697,7 +13811,9 @@ fn request_wizard_discard(state: &Rc<RefCell<AppState>>, epoch: u64) {
     dialog.present();
 }
 
-/// Detaches a captured wizard, stops its worker bridge, closes its window, and restores edit focus.
+/// Detaches a captured wizard, stops its worker bridge, destroys its window, and restores edit focus.
+/// Terminal destruction bypasses a reentrant close-request veto; menu applicability refreshes only
+/// after private authoring ownership is released, including Apply, Cancel and titlebar close.
 fn close_pattern_wizard(state: &Rc<RefCell<AppState>>, epoch: u64) {
     let surface = {
         let mut app_state = state.borrow_mut();
@@ -13714,7 +13830,8 @@ fn close_pattern_wizard(state: &Rc<RefCell<AppState>>, epoch: u64) {
         if let Some(parent_window) = invoking_edit.root().and_downcast::<gtk::Window>() {
             gtk::prelude::GtkWindowExt::set_focus(&parent_window, Some(&invoking_edit));
         }
-        surface.window.close();
+        surface.window.destroy();
+        sync_ui(&mut state.borrow_mut());
         restore_focus_after_modal_close(invoking_edit.clone());
         // A dirty-close confirmation tears down one modal after the wizard itself closes. Repeat
         // the exact-control restoration after that second Wayland activation has settled.
@@ -14106,6 +14223,9 @@ fn configure_private_dialog_keyboard(window: &gtk::Window, default: &gtk::Button
 
 /// Opens the Blueprint-owned private Advanced Settings history and canonical preview.
 fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
+    if state.borrow().document_presets.busy() {
+        return;
+    }
     if let Some(window) = state
         .borrow()
         .advanced_settings
@@ -14295,6 +14415,7 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
         if let Some(surface) = surface {
             surface.preview_bridge_stop.store(true, Ordering::Release);
         }
+        sync_ui(&mut state_for_close.borrow_mut());
         glib::Propagation::Proceed
     });
     window.present();
@@ -16529,6 +16650,7 @@ fn close_pattern_editor_after_terminal(
             gtk::prelude::GtkWindowExt::set_focus(&parent_window, Some(invoking_control));
         }
         surface.window.close();
+        sync_ui(&mut state.borrow_mut());
         if let Some(invoking_control) = restoring_control {
             restore_focus_after_modal_close(invoking_control.clone());
             if terminal == NestedEditorTerminal::ConfirmedClose {
@@ -19055,6 +19177,9 @@ fn apply_inspector_command(
 ) -> bool {
     let state_handle = Rc::clone(state);
     let mut app_state = state.borrow_mut();
+    if main_document_edits_blocked(&app_state) {
+        return false;
+    }
     let Some(workspace) = app_state.workspace.as_mut() else {
         return false;
     };
@@ -19101,6 +19226,9 @@ fn apply_all_pattern_seed(
 ) -> bool {
     let state_handle = Rc::clone(state);
     let mut app_state = state.borrow_mut();
+    if main_document_edits_blocked(&app_state) {
+        return false;
+    }
     let Some(workspace) = app_state.workspace.as_mut() else {
         return false;
     };
@@ -20422,7 +20550,7 @@ fn choose_unsaved_resolution(state: &Rc<RefCell<AppState>>, action: LifecycleAct
         state.borrow_mut().lifecycle_prompt = false;
         sync_ui(&mut state.borrow_mut());
         match resolve_unsaved_decision(
-            action,
+            action.clone(),
             match response {
                 Ok(1) => UnsavedDecision::Discard,
                 Ok(2) => UnsavedDecision::Save,
@@ -20453,6 +20581,7 @@ fn execute_lifecycle(state: &Rc<RefCell<AppState>>, action: LifecycleAction) {
             Err(error) => show_error(&mut state.borrow_mut(), error),
         },
         LifecycleAction::Open => choose_open(state),
+        LifecycleAction::OpenFile(path) => start_load(state, path),
         LifecycleAction::Close => {
             clear_workspace(state);
             rebuild_recent_files(state);
@@ -20493,12 +20622,26 @@ fn cancel_window_close_after(state: &mut AppState, after: Option<LifecycleAction
 }
 
 /// Blocks competing lifecycle requests during file I/O, a save decision, or deferred quit.
+/// Portal chooser ownership is explicit even when no GTK modal window exists in this process.
 fn lifecycle_is_busy(state: &AppState) -> bool {
-    state.pending_load
+    state.document_presets.busy()
+        || state.pending_file_chooser
+        || state.pending_load
         || state.pending_save
         || state.pending_export
         || state.lifecycle_prompt
         || state.window_close.deferred
+}
+
+/// Blocks authored edits while a replacement load or modal lifecycle decision owns the workspace.
+/// Save/export workers retain their existing immutable-snapshot editing policy. This guard also
+/// protects queued callbacks after widgets become insensitive, before a loaded candidate replaces A.
+fn main_document_edits_blocked(state: &AppState) -> bool {
+    state.pending_load
+        || state.pending_file_chooser
+        || state.lifecycle_prompt
+        || state.window_close.deferred
+        || state.document_presets.blocks_edits()
 }
 
 fn request_window_close(
@@ -20513,7 +20656,11 @@ fn request_window_close(
 }
 
 /// Opens the native portal dialog with the combined supported-source filter selected by default.
+/// Native and external portal choosers retain lifecycle ownership until their callback resolves.
 fn choose_open(state: &Rc<RefCell<AppState>>) {
+    if state.borrow().document_presets.busy() {
+        return;
+    }
     let dialog = gtk::FileDialog::new();
     dialog.set_title("Open document or artwork");
     let filters = open_filters();
@@ -20524,9 +20671,13 @@ fn choose_open(state: &Rc<RefCell<AppState>>) {
     {
         dialog.set_default_filter(Some(&filter));
     }
+    state.borrow_mut().pending_file_chooser = true;
+    sync_ui(&mut state.borrow_mut());
     let state = Rc::clone(state);
     let window = state.borrow().window.clone();
     dialog.open(Some(&window), None::<&gio::Cancellable>, move |result| {
+        state.borrow_mut().pending_file_chooser = false;
+        sync_ui(&mut state.borrow_mut());
         if let Ok(file) = result
             && let Some(path) = file.path()
         {
@@ -20600,7 +20751,12 @@ fn image_open_filter(name: &str, mime_type: &str, patterns: &[&str]) -> gtk::Fil
     filter
 }
 
+/// Opens project Save As only when a document-Preset operation does not own file interaction.
+/// A cancelled chooser preserves workspace state and any captured quit decision.
 fn choose_save_as(state: &Rc<RefCell<AppState>>, after: Option<LifecycleAction>) {
+    if state.borrow().document_presets.busy() {
+        return;
+    }
     if !state
         .borrow()
         .workspace
@@ -20626,9 +20782,13 @@ fn choose_save_as(state: &Rc<RefCell<AppState>>, after: Option<LifecycleAction>)
             .expect("checked workspace"),
     );
     dialog.set_initial_name(Some(&initial_name));
+    state.borrow_mut().pending_file_chooser = true;
+    sync_ui(&mut state.borrow_mut());
     let state = Rc::clone(state);
     let window = state.borrow().window.clone();
     dialog.save(Some(&window), None::<&gio::Cancellable>, move |result| {
+        state.borrow_mut().pending_file_chooser = false;
+        sync_ui(&mut state.borrow_mut());
         if let Ok(file) = result
             && let Some(path) = file.path()
         {
@@ -20648,7 +20808,12 @@ fn save_filters() -> gio::ListStore {
     filters
 }
 
+/// Opens the existing export chooser only when document-Preset file interaction is idle.
+/// Cancelling or rejecting the chooser leaves document/history and output files untouched.
 fn choose_export(state: &Rc<RefCell<AppState>>) {
+    if state.borrow().document_presets.busy() {
+        return;
+    }
     if !state
         .borrow()
         .workspace
@@ -20673,9 +20838,13 @@ fn choose_export(state: &Rc<RefCell<AppState>>) {
         ExportFormat::Png,
     );
     dialog.set_initial_name(Some(&initial_name));
+    state.borrow_mut().pending_file_chooser = true;
+    sync_ui(&mut state.borrow_mut());
     let state = Rc::clone(state);
     let window = state.borrow().window.clone();
     dialog.save(Some(&window), None::<&gio::Cancellable>, move |result| {
+        state.borrow_mut().pending_file_chooser = false;
+        sync_ui(&mut state.borrow_mut());
         let Ok(file) = result else { return };
         let Some(path) = file.path() else { return };
         let format = match export_format_for_path(&path) {
@@ -20938,7 +21107,12 @@ fn format_hint_for_path(path: &Path) -> Result<SourceFormatHint, String> {
     }
 }
 
+/// Dispatches project saving without overlapping document-Preset file operations.
+/// Existing savepoint and deferred lifecycle authority remain in their normal completion path.
 fn start_save(state: &Rc<RefCell<AppState>>, after: Option<LifecycleAction>) {
+    if state.borrow().document_presets.busy() {
+        return;
+    }
     let route = { save_route(state.borrow().workspace.as_ref()) };
     match route {
         SaveRoute::Unavailable => {
@@ -21073,6 +21247,7 @@ fn export_snapshot(
 /// pending quit request. Stale results never replace the workspace or populate Recent Files.
 fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
     match event {
+        AppEvent::DocumentPreset(completion) => document_presets::complete(state, completion),
         AppEvent::Load {
             generation,
             path,
@@ -21124,7 +21299,7 @@ fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
                     emit_automation_state(&mut app_state, "save_completed", None);
                 }
                 Err(error) => {
-                    cancel_window_close_after(&mut app_state, after);
+                    cancel_window_close_after(&mut app_state, after.clone());
                     show_error(
                         &mut app_state,
                         format!("Couldn’t save this document: {error}"),
@@ -21217,16 +21392,16 @@ fn handle_preview_progress(
     app_state.preview_progress.set_visible(true);
     app_state
         .preview_overall_progress_label
-        .set_label(&format!("Overall preview · {:.0}%", fraction * 100.0));
+        .set_label(&format!("Overall preview · {:.1}%", fraction * 100.0));
     app_state.preview_progress_label.set_label(&format!(
-        "{} · {:.0}%",
+        "{} · {:.1}%",
         stage.trim_end_matches('…'),
         stage_fraction * 100.0
     ));
     app_state.preview_progress_bar.set_fraction(fraction);
     app_state
         .preview_progress_bar
-        .set_text(Some(&format!("Overall {:.0}%", fraction * 100.0)));
+        .set_text(Some(&format!("Overall {:.1}%", fraction * 100.0)));
     app_state
         .preview_progress_bar
         .update_property(&[gtk::accessible::Property::Label("Overall preview progress")]);
@@ -21235,7 +21410,7 @@ fn handle_preview_progress(
         .set_fraction(stage_fraction);
     app_state
         .preview_stage_progress_bar
-        .set_text(Some(&format!("Stage {:.0}%", stage_fraction * 100.0)));
+        .set_text(Some(&format!("Stage {:.1}%", stage_fraction * 100.0)));
     app_state
         .preview_stage_progress_bar
         .update_property(&[gtk::accessible::Property::Label(&format!(
@@ -21391,7 +21566,7 @@ fn handle_advanced_preview_progress(
     let stage = preview_progress_stage_label(progress.stage());
     let fraction = progress.fraction().clamp(0.0, 1.0);
     surface.status.set_label(&format!(
-        "Settings preview: {} · {:.0}%",
+        "Settings preview: {} · {:.1}%",
         stage.trim_end_matches('…'),
         fraction * 100.0
     ));
@@ -21624,6 +21799,9 @@ fn clear_workspace(state: &Rc<RefCell<AppState>>) {
 /// schedules its canonical preview after GTK notifications unwind.
 fn change_model(state: &Rc<RefCell<AppState>>, model: PreviewModel) {
     let mut app_state = state.borrow_mut();
+    if main_document_edits_blocked(&app_state) {
+        return;
+    }
     if !should_apply_model_change(
         app_state.syncing_model,
         app_state.model,
@@ -21984,7 +22162,7 @@ fn dismiss_main_message(state: &Rc<RefCell<AppState>>) {
 fn sync_ui(state: &mut AppState) {
     let policy = ui_policy(
         state.workspace.as_ref(),
-        state.pending_load || state.lifecycle_prompt || state.window_close.deferred,
+        main_document_edits_blocked(state),
         state.pending_save,
         state.pending_export,
     );
@@ -22057,6 +22235,7 @@ fn sync_ui(state: &mut AppState) {
         preview_vm.accepted_ticket.is_some(),
     )));
     apply_main_view_presentation(state);
+    document_presets::sync_controls(state);
 }
 
 #[cfg(test)]
@@ -23873,46 +24052,78 @@ mod tests {
         );
     }
 
+    /// Preserves caller-relative and native filename bytes across URI forwarding and rejects batches.
+    #[test]
+    fn forwarded_file_activation_preserves_native_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        assert_eq!(activation_arguments(None), ["toniator-app"]);
+        for path in [
+            PathBuf::from("artwork with spaces #1.svg"),
+            PathBuf::from(std::ffi::OsString::from_vec(b"native-\xff.png".to_vec())),
+        ] {
+            let arguments = activation_arguments(Some(path.clone()));
+            let file = gio::File::for_uri(&arguments[1]);
+            assert_eq!(
+                forwarded_file_path(&[file]).unwrap(),
+                env::current_dir().unwrap().join(path)
+            );
+        }
+        assert!(forwarded_file_path(&[]).is_err());
+        assert!(
+            forwarded_file_path(&[gio::File::for_uri("https://example.invalid/a.png")]).is_err()
+        );
+        assert!(
+            forwarded_file_path(&[gio::File::for_path("a.png"), gio::File::for_path("b.svg")])
+                .is_err()
+        );
+    }
+
+    /// Retains the captured file or close request through every unsaved decision and stale savepoint.
     #[test]
     fn unsaved_decisions_and_save_follow_up_preserve_lifecycle_intent() {
-        let action = LifecycleAction::Close;
-        assert_eq!(
-            begin_lifecycle(true, action),
-            LifecycleDisposition::Prompt(action)
-        );
-        assert_eq!(
-            resolve_unsaved_decision(action, UnsavedDecision::Cancel),
-            LifecycleDisposition::Noop
-        );
-        assert_eq!(
-            resolve_unsaved_decision(action, UnsavedDecision::Discard),
-            LifecycleDisposition::Execute(action)
-        );
-        assert_eq!(
-            resolve_unsaved_decision(action, UnsavedDecision::Save),
-            LifecycleDisposition::SaveThen(action)
-        );
-        // Successful Save continues only when the saved snapshot is still the
-        // current content. Save As cancellation and Save failure keep the
-        // current dirty content and therefore do not execute the action.
-        assert_eq!(
-            begin_lifecycle(false, action),
-            LifecycleDisposition::Execute(action)
-        );
-        assert_eq!(
-            begin_lifecycle(true, action),
-            LifecycleDisposition::Prompt(action)
-        );
-        let mut workspace = load_workspace(&asset("raster-sample.png")).unwrap();
-        let saving_snapshot = workspace.snapshot();
-        replace_model_topology(&mut workspace.history, PreviewModel::Cmyk).unwrap();
-        workspace.accept_saved_snapshot(PathBuf::from("saved.toniator"), saving_snapshot);
-        assert!(workspace.is_dirty());
-        assert_eq!(
-            begin_lifecycle(workspace.is_dirty(), action),
-            LifecycleDisposition::Prompt(action),
-            "completion must return through the unsaved-work boundary"
-        );
+        for action in [
+            LifecycleAction::Close,
+            LifecycleAction::OpenFile(PathBuf::from("requested.svg")),
+        ] {
+            assert_eq!(
+                begin_lifecycle(true, action.clone()),
+                LifecycleDisposition::Prompt(action.clone())
+            );
+            assert_eq!(
+                resolve_unsaved_decision(action.clone(), UnsavedDecision::Cancel),
+                LifecycleDisposition::Noop
+            );
+            assert_eq!(
+                resolve_unsaved_decision(action.clone(), UnsavedDecision::Discard),
+                LifecycleDisposition::Execute(action.clone())
+            );
+            assert_eq!(
+                resolve_unsaved_decision(action.clone(), UnsavedDecision::Save),
+                LifecycleDisposition::SaveThen(action.clone())
+            );
+            // Successful Save continues only when the saved snapshot is still the
+            // current content. Save As cancellation and Save failure keep the
+            // current dirty content and therefore do not execute the action.
+            assert_eq!(
+                begin_lifecycle(false, action.clone()),
+                LifecycleDisposition::Execute(action.clone())
+            );
+            assert_eq!(
+                begin_lifecycle(true, action.clone()),
+                LifecycleDisposition::Prompt(action.clone())
+            );
+            let mut workspace = load_workspace(&asset("raster-sample.png")).unwrap();
+            let saving_snapshot = workspace.snapshot();
+            replace_model_topology(&mut workspace.history, PreviewModel::Cmyk).unwrap();
+            workspace.accept_saved_snapshot(PathBuf::from("saved.toniator"), saving_snapshot);
+            assert!(workspace.is_dirty());
+            assert_eq!(
+                begin_lifecycle(workspace.is_dirty(), action.clone()),
+                LifecycleDisposition::Prompt(action),
+                "completion must return through the unsaved-work boundary"
+            );
+        }
     }
 
     #[test]

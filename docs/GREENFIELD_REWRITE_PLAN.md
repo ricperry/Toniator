@@ -2242,7 +2242,7 @@ presets, reusable shape storage, and wizard design work remain paused in Stage
 
 ### Stage 21B — Pattern Wizard, Personal Pattern Library, and Document Presets
 
-Stage 21B is **In progress** as five separately reviewed and accepted gates.
+Stage 21B is **Accepted awaiting checkpoint**; all five gates are user-accepted.
 Gate 21B-1 is complete and user-accepted at implementation checkpoint
 `f77998c`; Gate 21B-2 is complete and user-accepted at implementation
 checkpoint `63fd9fb` on 2026-08-28, with its accepted CMYK/SourceColorAlpha
@@ -2255,10 +2255,10 @@ reliable reproducer and does not block Gate 21B-3. Gate 21B-3 is complete at
 with the startup/Recent Files/Close/Exit follow-up at implementation checkpoint
 `4ed29d4f5e3733ab487ae433139b302c27a80c44`; its
 implementation/evidence record is `docs/STAGE_21B_GATE4_IMPLEMENTATION.md`.
-Gate 21B-5 was added by
-user instruction on 2026-09-04 for document-level Presets; it is planned,
-not begun, and requires detailed planning and separate authorization after
-Gate 21B-4 acceptance and checkpointing. The decision-complete contract for
+Gate 21B-5 was added by user instruction on 2026-09-04 for document-level
+Presets, authorized and user-accepted on 2026-09-05. It is **Accepted awaiting checkpoint**;
+see [`STAGE_21B_GATE5_IMPLEMENTATION.md`](STAGE_21B_GATE5_IMPLEMENTATION.md).
+The user authorized local acceptance checkpointing. The decision-complete contract for
 Gates 21B-1 through 21B-4 and the Gate 21B-5 planning brief are in
 [`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md).
 
@@ -2293,14 +2293,15 @@ verification for that work. Gate 21B-5 adds distinct reusable document-level
 Presets containing document/per-channel settings and potentially different
 Patterns on different channels. Its entry points are **Load preset...** and
 **Save preset** under the main-window **New** drop-down, preserving the
-primary New action. Exact capture, storage, load, and history semantics must
-be settled before implementation. The preferred Preset format reuses the
-`.toniator` document structure without source bytes or source-specific
-references, sharing its serialization authority. Current project I/O requires
-an embedded source; the source-free variant and its identification/versioning
-must be explicitly defined in Gate 21B-5. Current internal Pattern format names and
-versions are unchanged. Stage 21B completes only after all five gates are
-accepted.
+primary New action. The source-free `.toniator-preset` envelope has kind
+`document_preset`, format version 1, and shared document configuration schema 7.
+Load also accepts intact current `.toniator` projects through their ordinary
+integrity reader. Both replace reusable configuration in one undoable transition,
+retaining destination source, canvas, identity, location and savepoint. Save
+captures configuration without artwork or source references and does not save
+the project. Current internal Pattern format names and
+versions are unchanged. All five gates are accepted; later implementation remains
+separately gated.
 
 Gate 21B-2 verification passed its focused app/engine tests, formatting,
 strict Clippy, architecture, and diff checks, plus independent UX and

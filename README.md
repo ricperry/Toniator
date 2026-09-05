@@ -85,6 +85,11 @@ Download `SHA256SUMS` alongside the packages to verify their integrity with
 
 Personal Patterns can be saved, updated, copied, renamed, and moved to recoverable
 trash. Saving a Pattern to your library is separate from applying it to artwork.
+In the development build, **New → Save preset** saves the whole design configuration
+as a source-free `.toniator-preset`. **Load preset...** accepts that format or an
+intact `.toniator` project, applies all channel settings, and keeps your current
+artwork and canvas. Loading is one undoable change; saving a Preset does not save
+the project. Open artwork before loading a Preset.
 Undo and Redo operate on document edits. **Close** returns to startup; **Exit**
 quits. Both prompt when a document has unsaved changes. The app follows the
 system light/dark preference where supported.
@@ -156,12 +161,15 @@ GitHub tags, release notes, and uploading the packages.
 
 Toniator is a pre-release native rewrite. Project formats can change between
 development versions; obsolete formats are rejected rather than automatically
-migrated. Document-level **Presets** are planned separately from the current
-personal **Pattern** library.
+migrated. Document-level **Presets** are implemented and user-accepted in the
+development build, separately from the personal **Pattern** library. See the
+[Gate 21B-5 record](docs/STAGE_21B_GATE5_IMPLEMENTATION.md) for the format and checks.
 
 Known limitations include slow previews at very fine Pattern sizes, first-use
-personal thumbnail latency, an intermittent reported RGB-to-CMYK crash, and
-second-launch file forwarding. Details and follow-up work are in [ISSUES.md](ISSUES.md).
+personal thumbnail latency, and an intermittent reported RGB-to-CMYK crash.
+Second-launch forwarding, stale Preset actions, wizard dismissal and progress
+reporting are fixed; dense circular-mark previews also avoid a quadratic lookup.
+Details and follow-up work are in [ISSUES.md](ISSUES.md).
 Package workflow checks use an isolated Wayland compositor; they do not claim
 exhaustive GNOME/Mutter or native file-portal acceptance.
 

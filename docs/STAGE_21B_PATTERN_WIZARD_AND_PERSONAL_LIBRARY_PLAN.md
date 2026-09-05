@@ -2,8 +2,8 @@
 
 Status: **approved decision-complete plan for Gates 21B-1 through 21B-4;
 Gates 21B-1 through 21B-4 complete and accepted;
-Gate 21B-5 added to the roadmap, detailed planning pending**
-(updated 2026-09-04).
+Gate 21B-5 accepted awaiting checkpoint; all five gates accepted**
+(updated 2026-09-05).
 This plan is
 subordinate to the protected project specifications, especially the Addendum,
 and does not by itself authorize later gates or publication.
@@ -231,7 +231,15 @@ root without moving or deleting the old one.
 
 ### Gate 21B-5 — Document-level Presets
 
-**Planned; not begun; detailed planning pending.** Added by user instruction
+**Accepted awaiting checkpoint; user acceptance and checkpoint authorization 2026-09-05.** The
+implementation/evidence record is
+[`STAGE_21B_GATE5_IMPLEMENTATION.md`](STAGE_21B_GATE5_IMPLEMENTATION.md).
+The detailed contract is
+[`STAGE_21B_GATE5_PLANNING_DRAFT.md`](STAGE_21B_GATE5_PLANNING_DRAFT.md), with
+the user's explicit requirement that Load preset... accept both source-free
+`.toniator-preset` files and valid `.toniator` projects. Source, canvas and
+project identity remain those of the destination. The following original brief
+is retained as the planning provenance. Added by user instruction
 on 2026-09-04. Begin only after Gate 21B-4 is accepted and checkpointed and
 the user separately authorizes this gate. Gate 21B-4's final verification
 closes the Pattern Wizard and personal Pattern management work; Stage 21B
@@ -360,7 +368,7 @@ sampling, new topology mechanisms, renderer-specific branches, compatibility
 adapters, and any unapproved icon or asset adoption. GTK/Blueprint work,
 personal management UI, and reusable closed-shape storage are not retroactively
 part of Gate 21B-1.
-Gate 21B-5's document-Preset save/load is a separate planned capability; the
+Gate 21B-5's document-Preset save/load is a separately implemented capability; the
 Pattern import/export exclusion does not prohibit it. Additional Preset
 management features beyond save/load require separate scope agreement.
 
@@ -370,9 +378,9 @@ Each gate uses one writer, focused verification, independent review, and a
 parent-owned acceptance transition. Update `ProgressTracker.md` only to the
 verified status: Gate 21B-1 is Complete at `f77998c`; Gate 21B-2 is Complete
 at `63fd9fb`; Gate 21B-3 is Complete at `68ef02e` and user-accepted on
-2026-09-01; Gate 21B-4 is Complete and user-accepted on 2026-09-04; Gate 21B-5 remains
-Planned/not begun with detailed planning pending; Stage 21B overall remains
-In progress until all five gates are accepted.
+2026-09-01; Gate 21B-4 is Complete and user-accepted on 2026-09-04; Gate 21B-5 is
+Accepted awaiting checkpoint on 2026-09-05. All five gates are accepted; Stage 21B
+is Accepted awaiting checkpoint.
 
 Do not commit, push, publish, or begin the next gate without its explicit
 authorization. At closeout, inspect the exact milestone diff, preserve

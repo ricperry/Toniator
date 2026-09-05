@@ -22,10 +22,10 @@ use toniator_domain::{
     ChannelAppearance, ChannelGeometryResponseDelta, ChannelId, ChannelPaint,
     ChannelPatternInstance, ChannelPatternLayoutDelta, ChannelSourceMapping, ChannelState,
     ChannelTopology, ColorValue, ConnectedGeometryResponse, ConnectedGeometryResponseDelta,
-    CoveragePolicy, CurveWinding, DensityMetric2D, DensityMetricDelta2D, Document, DocumentId,
-    DocumentPatternSettings, GeneralizedSiteProductDraft, GenericGuideDimensionDraft,
-    GenericGuidePrototypeDraft, GuideDimension, GuideDimensionDraft, GuideDimensionId,
-    GuidePrototype, GuideRepetition, HalftoneChannelModel, HalftoneChannelRole,
+    CoveragePolicy, CurveWinding, DensityMetric2D, DensityMetricDelta2D, Document,
+    DocumentConfiguration, DocumentId, DocumentPatternSettings, GeneralizedSiteProductDraft,
+    GenericGuideDimensionDraft, GenericGuidePrototypeDraft, GuideDimension, GuideDimensionDraft,
+    GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel, HalftoneChannelRole,
     MarkGeometryResponse, MarkGeometryResponseDelta, MarkOrientation, MarkOrientationDraft,
     MarkPrototype, MazeProgram, ModeledChannelState, ParametricCurve, ParametricCurveSiteDraft,
     PathStrokeStyle, PatternDefinition, PatternDefinitionBundle, PatternDefinitionDraft,
@@ -41,13 +41,21 @@ use toniator_domain::{
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
+/// Source-free document Preset archives and guarded publication.
+mod document_presets;
 /// Current-only XDG personal preset and authored-resource library authority.
 pub mod personal_library;
+pub use document_presets::{
+    DocumentPresetError, DocumentPresetSaveOutcome, DocumentPresetWriteGuard,
+    capture_document_preset_destination, load_document_preset, save_document_preset,
+};
 /// Recent source/project metadata for frontend startup navigation.
 pub mod recent;
 
 pub const CONTAINER_VERSION: u32 = 1;
 pub const DOCUMENT_SCHEMA_VERSION: u32 = 7;
+/// Current source-free document Preset archive envelope version.
+pub const DOCUMENT_PRESET_FORMAT_VERSION: u32 = 1;
 /// Standalone pure-schema preset JSON format version. It is deliberately
 /// independent from the `.toniator` container and document schema versions.
 pub const PRESET_FORMAT_VERSION: u32 = 4;
@@ -541,19 +549,39 @@ fn declared_zip_entry_count(file: &mut File, length: u64) -> Result<usize, LoadE
 /// Returns a stable filesystem, archive, topology, limit, JSON, integrity, or domain error without
 /// publishing a partial document or source bundle.
 pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
-    let metadata = fs::metadata(path).map_err(|error| LoadError::Filesystem {
+    let file = File::open(path).map_err(|error| LoadError::Filesystem {
         path: path.to_owned(),
         context: error.to_string(),
     })?;
+    load_opened(path, file)
+}
+
+/// Loads one current project from an already opened file handle.
+///
+/// This internal seam lets archive-kind dispatch retain the exact no-follow
+/// file identity it inspected instead of reopening a potentially replaced
+/// path. Ordinary `load` delegates here after its existing path open.
+///
+/// # Errors
+///
+/// Returns the same bounded archive, topology, version, integrity, source, and
+/// domain diagnostics as `load` without publishing partial state.
+fn load_opened(path: &Path, mut file: File) -> Result<LoadedDocument, LoadError> {
+    let metadata = file.metadata().map_err(|error| LoadError::Filesystem {
+        path: path.to_owned(),
+        context: error.to_string(),
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(LoadError::Filesystem {
+            path: path.to_owned(),
+            context: "project input must be a regular file".into(),
+        });
+    }
     if metadata.len() > MAX_ARCHIVE_BYTES {
         return Err(LoadError::Limits {
             context: "archive exceeds the 256 MiB v1 limit".into(),
         });
     }
-    let mut file = File::open(path).map_err(|error| LoadError::Filesystem {
-        path: path.to_owned(),
-        context: error.to_string(),
-    })?;
     let declared_entry_count = declared_zip_entry_count(&mut file, metadata.len())?;
     let mut archive = ZipArchive::new(file).map_err(|error| LoadError::Archive {
         context: error.to_string(),
@@ -1097,6 +1125,7 @@ enum PresetStructureRecipeDto {
 /// Current preset-v4 tagged recipe-only spiral materialization intent.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum SpiralCoveragePolicyDtoV3 {
     Fixed,
     CoverCanvas,
@@ -1253,6 +1282,13 @@ struct DocumentDtoV6 {
     id: u64,
     canvas: CanvasDto,
     source_reference_id: String,
+    #[serde(flatten)]
+    configuration: DocumentConfigurationDtoV7,
+}
+
+/// The shared current-v7 authored-configuration shape used by projects and document Presets.
+#[derive(Serialize, Deserialize)]
+struct DocumentConfigurationDtoV7 {
     pattern_definition_bundles: Vec<PatternDefinitionBundleDtoV6>,
     pattern_settings: DocumentPatternSettingsDto,
     channel_configuration: ChannelConfigurationDto,
@@ -1262,6 +1298,7 @@ struct DocumentDtoV6 {
 
 /// Current-v7 persistence representation of one document-owned authored structure.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuthoredStructureDtoV6 {
     id: u64,
     kind: AuthoredStructureKindDtoV6,
@@ -1271,6 +1308,7 @@ struct AuthoredStructureDtoV6 {
 /// Current-v7 persistence representation of declared authored-structure topology.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum AuthoredStructureKindDtoV6 {
     OpenPath,
     ClosedShape,
@@ -1279,6 +1317,7 @@ enum AuthoredStructureKindDtoV6 {
 /// Current-v7 persistence representation of one explicit authored construction segment.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum AuthoredCurveSegmentDtoV6 {
     Line {
         start: AuthoredPointDtoV6,
@@ -1294,16 +1333,19 @@ enum AuthoredCurveSegmentDtoV6 {
 
 /// Current-v7 persistence representation of one authored finite coordinate pair.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuthoredPointDtoV6 {
     x: f64,
     y: f64,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CanvasDto {
     width: f64,
     height: f64,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PatternDefinitionDtoV6 {
     id: u64,
     name: String,
@@ -1316,6 +1358,7 @@ struct PatternDefinitionDtoV6 {
 
 /// Current-v7 atomic structural definition and ordered response authority.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PatternDefinitionBundleDtoV6 {
     definition: PatternDefinitionDtoV6,
     output_settings: Vec<PatternOutputSettingsDtoV6>,
@@ -1323,12 +1366,14 @@ struct PatternDefinitionBundleDtoV6 {
 
 /// Current-v7 persisted base response keyed to one structural output layer.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PatternOutputSettingsDtoV6 {
     output_layer_id: u64,
     response: PatternGeometryResponseDto,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum PatternFamilyDtoV6 {
     GuideIntersections {
         guide_mechanism_id: u64,
@@ -1347,6 +1392,7 @@ enum PatternFamilyDtoV6 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum PatternMechanismDtoV6 {
     StraightGuides {
         id: u64,
@@ -1417,6 +1463,7 @@ const fn default_random_site_neighbor_checks() -> u32 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum RandomSiteCharacterDtoV6 {
     RawUniform,
     Even {
@@ -1430,6 +1477,7 @@ enum RandomSiteCharacterDtoV6 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum SiteDensityModulationDtoV6 {
     Uniform,
     ArtworkWeighted {
@@ -1440,18 +1488,21 @@ enum SiteDensityModulationDtoV6 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum ArtworkWeightResponseDtoV6 {
     Linear,
     Smoothstep,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum SiteExclusionPolicyDtoV6 {
     None,
     MinimumCenterDistance { minimum: f64 },
     VisibleMarkMargin { margin: f64 },
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StraightGuideDimensionDtoV6 {
     id: u64,
     baseline_angle_degrees: f64,
@@ -1459,6 +1510,7 @@ struct StraightGuideDimensionDtoV6 {
     spacing_multiplier: f64,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GuideDimensionDtoV6 {
     id: u64,
     baseline_angle_degrees: f64,
@@ -1468,6 +1520,7 @@ struct GuideDimensionDtoV6 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum GuidePrototypeDtoV6 {
     AuthoredOpenPath {
         structure_id: u64,
@@ -1481,6 +1534,7 @@ enum GuidePrototypeDtoV6 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum GuideRepetitionDtoV6 {
     Single,
     TransformStack {
@@ -1497,6 +1551,7 @@ enum GuideRepetitionDtoV6 {
 /// Current-v7 analytic intent for the bounded parametric source vocabulary.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum ParametricCurveDtoV6 {
     Spiral {
         shape: SpiralShapeDtoV6,
@@ -1510,6 +1565,7 @@ enum ParametricCurveDtoV6 {
 /// Current-v7 round/square discriminant for one spiral source.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum SpiralShapeDtoV6 {
     Round,
     Square,
@@ -1518,6 +1574,7 @@ enum SpiralShapeDtoV6 {
 /// Current-v7 winding discriminant for one spiral source.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum CurveWindingDtoV6 {
     Clockwise,
     CounterClockwise,
@@ -1530,6 +1587,7 @@ enum CurveWindingDtoV6 {
 /// preserving a misleading editable side authority.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum OffsetSidesDtoV6 {
     Left,
     Right,
@@ -1539,6 +1597,7 @@ enum OffsetSidesDtoV6 {
 /// Persisted current-v7 cleanup discriminant for normal-offset guide repetition.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum OffsetCleanupDtoV6 {
     DissolveCrossings,
 }
@@ -1726,6 +1785,7 @@ impl GuideRepetitionDtoV6 {
     }
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PatternOutputLayerDtoV6 {
     id: u64,
     source_filter: SiteUseFilterDtoV6,
@@ -1734,6 +1794,7 @@ struct PatternOutputLayerDtoV6 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum SiteUseFilterDtoV6 {
     All,
     SitesUsedBy { output_layer_id: u64 },
@@ -1742,6 +1803,7 @@ enum SiteUseFilterDtoV6 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum PatternOutputRealizationDtoV6 {
     CircularMarks {
         site_mechanism_id: u64,
@@ -1783,6 +1845,7 @@ enum PatternOutputRealizationDtoV6 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum RegionSourceIntentDtoV6 {
     VoronoiSites {
         site_mechanism_id: u64,
@@ -1795,6 +1858,7 @@ enum RegionSourceIntentDtoV6 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum ConnectionProgramDtoV6 {
     NearestLinks {
         adjacency: ConnectionAdjacencyIntentDtoV6,
@@ -1812,6 +1876,7 @@ enum ConnectionProgramDtoV6 {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConnectionAdjacencyIntentDtoV6 {
     maximum_degree: u32,
     maximum_distance: f64,
@@ -1819,11 +1884,13 @@ struct ConnectionAdjacencyIntentDtoV6 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum GridMazeAlgorithmDtoV6 {
     RecursiveBacktracker,
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MazeProgramDtoV6 {
     algorithm: GridMazeAlgorithmDtoV6,
     seed: u32,
@@ -1831,25 +1898,30 @@ struct MazeProgramDtoV6 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum GridSpanningTreeAlgorithmDtoV6 {
     RandomizedPrim,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum MarkPrototypeDtoV6 {
     Circle,
     AuthoredClosedShape { structure_id: u64 },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum MarkOrientationDtoV6 {
     Fixed,
     GuideTangent { dimension_id: u64 },
     GuideNormal { dimension_id: u64 },
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PatternModulationDtoV6 {}
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CoverageDtoV6 {
     guard_steps: u32,
     additional_margin: f64,
@@ -2452,6 +2524,7 @@ impl MarkOrientationDraftDto {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum ChannelConfigurationDto {
     Legacy {
         channels: Vec<LegacyChannelDto>,
@@ -2462,6 +2535,7 @@ enum ChannelConfigurationDto {
     },
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LegacyChannelDto {
     id: u64,
     pattern_instance: ChannelPatternInstanceDto,
@@ -2469,6 +2543,7 @@ struct LegacyChannelDto {
     source_mapping: LegacySourceMappingDto,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ModeledChannelDto {
     role: HalftoneChannelRoleDto,
     id: u64,
@@ -2479,6 +2554,7 @@ struct ModeledChannelDto {
     opacity: f64,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DocumentPatternSettingsDto {
     definition_id: u64,
     density: DensityDto,
@@ -2486,6 +2562,7 @@ struct DocumentPatternSettingsDto {
     shape_rotation_degrees: f64,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ChannelPatternInstanceDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     definition_override: Option<u64>,
@@ -2524,6 +2601,7 @@ struct RegionResponseDtoV6 {
 /// Current-v7 positive-geometry region resize selector.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum RegionResizeAlgorithmDtoV6 {
     Scale,
     UniformOffset,
@@ -2532,6 +2610,7 @@ enum RegionResizeAlgorithmDtoV6 {
 /// Current v7 sampling selector; absence is intentionally rejected by serde.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum RegionSamplingStrategyDtoV6 {
     ReferencePoint,
     AreaAverage,
@@ -2682,6 +2761,7 @@ impl RegionResponseDeltaDtoV6 {
     }
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LayoutDeltaDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     density: Option<DensityDeltaDto>,
@@ -2691,11 +2771,13 @@ struct LayoutDeltaDto {
     translation_y: f64,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DensityDeltaDto {
     density_delta: f64,
     aspect_delta: f64,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MarkResponseDeltaDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     minimum_fill_delta: Option<f64>,
@@ -2703,6 +2785,7 @@ struct MarkResponseDeltaDto {
     maximum_fill_delta: Option<f64>,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConnectedResponseDto {
     minimum_thickness: f64,
     maximum_thickness: f64,
@@ -2710,6 +2793,7 @@ struct ConnectedResponseDto {
     bias: f64,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConnectedResponseDeltaDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     minimum_thickness_delta: Option<f64>,
@@ -2719,27 +2803,32 @@ struct ConnectedResponseDeltaDto {
     bias_delta: Option<f64>,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DensityDto {
     density: f64,
     aspect: f64,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AppearanceDto {
     visible: bool,
     color: ColorDto,
     opacity: f64,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MarkResponseDto {
     minimum_fill: f64,
     maximum_fill: f64,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LegacySourceMappingDto {
     component: SourceComponentDto,
     placement: SourcePlacementDto,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SourceMappingDto {
     component: SourceMappingComponentDto,
     placement: SourcePlacementDto,
@@ -2748,6 +2837,7 @@ struct SourceMappingDto {
     bias: f64,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ColorDto {
     red: f64,
     green: f64,
@@ -2756,6 +2846,7 @@ struct ColorDto {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum PaintDto {
     Solid { color: ColorDto },
     SampledSource,
@@ -2763,6 +2854,7 @@ enum PaintDto {
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum EmbeddedSourceFormatDto {
     Png,
     Svg,
@@ -2860,10 +2952,57 @@ impl DocumentDtoV6 {
                 });
             }
         };
+        Ok(Self {
+            id: document.id().0,
+            canvas: CanvasDto {
+                width: document.canvas().width,
+                height: document.canvas().height,
+            },
+            source_reference_id,
+            configuration: DocumentConfigurationDtoV7::from_domain(document)?,
+        })
+    }
+    /// Rebuilds and validates the complete authoritative document before a loaded archive commits.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable domain validation diagnostics for authored IDs, coordinates, topology, bounds,
+    /// or existing document state; no partially rebuilt document escapes this boundary.
+    fn into_domain(self) -> Result<Document, ValidationError> {
+        let source = SourceReference::Assigned(dto_source_id(&self.source_reference_id)?);
+        self.configuration.into_document(
+            DocumentId(self.id),
+            CanvasSpec {
+                width: self.canvas.width,
+                height: self.canvas.height,
+            },
+            source,
+        )
+    }
+}
+
+impl DocumentConfigurationDtoV7 {
+    /// Projects the exact reusable authored configuration using current-v7 field authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a domain persistence diagnostic when the document exposes an
+    /// incoherent legacy/modeled channel representation.
+    fn from_domain(document: &Document) -> Result<Self, SaveError> {
+        Self::from_configuration(&DocumentConfiguration::capture(document))
+    }
+
+    /// Projects a source-free domain configuration into the shared current-v7 field shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns a domain persistence diagnostic when configuration channel
+    /// authority is neither a coherent legacy list nor a modeled topology.
+    fn from_configuration(configuration: &DocumentConfiguration) -> Result<Self, SaveError> {
         let channel_configuration = match (
-            document.channels(),
-            document.channel_model(),
-            document.channel_topology(),
+            configuration.channels(),
+            configuration.channel_model(),
+            configuration.channel_topology(),
         ) {
             (Some(channels), None, None) => ChannelConfigurationDto::Legacy {
                 channels: channels.iter().map(LegacyChannelDto::from_domain).collect(),
@@ -2883,34 +3022,35 @@ impl DocumentDtoV6 {
             }
         };
         Ok(Self {
-            id: document.id().0,
-            canvas: CanvasDto {
-                width: document.canvas().width,
-                height: document.canvas().height,
-            },
-            source_reference_id,
-            pattern_definition_bundles: document
+            pattern_definition_bundles: configuration
                 .pattern_definition_bundles()
                 .iter()
                 .map(PatternDefinitionBundleDtoV6::from_domain)
                 .collect(),
-            pattern_settings: DocumentPatternSettingsDto::from_domain(document.pattern_settings()),
+            pattern_settings: DocumentPatternSettingsDto::from_domain(
+                configuration.pattern_settings(),
+            ),
             channel_configuration,
-            authored_structures: document
+            authored_structures: configuration
                 .authored_structures()
                 .iter()
                 .map(AuthoredStructureDtoV6::from_domain)
                 .collect(),
         })
     }
-    /// Rebuilds and validates the complete authoritative document before a loaded archive commits.
+
+    /// Rebuilds one shared configuration against explicit project-specific authority.
     ///
     /// # Errors
     ///
-    /// Returns stable domain validation diagnostics for authored IDs, coordinates, topology, bounds,
-    /// or existing document state; no partially rebuilt document escapes this boundary.
-    fn into_domain(self) -> Result<Document, ValidationError> {
-        let source = SourceReference::Assigned(dto_source_id(&self.source_reference_id)?);
+    /// Returns current domain diagnostics for malformed authored resources,
+    /// definitions, channel topology, mappings, or destination-dependent values.
+    fn into_document(
+        self,
+        id: DocumentId,
+        canvas: CanvasSpec,
+        source: SourceReference,
+    ) -> Result<Document, ValidationError> {
         let definitions = self
             .pattern_definition_bundles
             .into_iter()
@@ -2924,11 +3064,8 @@ impl DocumentDtoV6 {
         match self.channel_configuration {
             ChannelConfigurationDto::Legacy { channels } => {
                 Document::with_source_and_authored_structures(
-                    DocumentId(self.id),
-                    CanvasSpec {
-                        width: self.canvas.width,
-                        height: self.canvas.height,
-                    },
+                    id,
+                    canvas,
                     source,
                     definitions,
                     self.pattern_settings.into_domain(),
@@ -2941,11 +3078,8 @@ impl DocumentDtoV6 {
             }
             ChannelConfigurationDto::Topology { model, channels } => {
                 Document::with_source_topology_and_authored_structures(
-                    DocumentId(self.id),
-                    CanvasSpec {
-                        width: self.canvas.width,
-                        height: self.canvas.height,
-                    },
+                    id,
+                    canvas,
                     source,
                     definitions,
                     self.pattern_settings.into_domain(),
@@ -2960,6 +3094,24 @@ impl DocumentDtoV6 {
                 )
             }
         }
+    }
+
+    /// Rebuilds and captures one reusable configuration against a destination's validation context.
+    ///
+    /// # Errors
+    ///
+    /// Returns current complete-document validation diagnostics without
+    /// publishing any document or filesystem state.
+    fn into_domain_configuration(
+        self,
+        destination: &Document,
+    ) -> Result<DocumentConfiguration, ValidationError> {
+        let document = self.into_document(
+            destination.id(),
+            destination.canvas().clone(),
+            destination.source().clone(),
+        )?;
+        Ok(DocumentConfiguration::capture(&document))
     }
 }
 
