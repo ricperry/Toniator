@@ -9,6 +9,7 @@ pub(crate) enum AppEvent {
     /// Finishes one generation-scoped open request.
     Load {
         generation: u64,
+        path: std::path::PathBuf,
         result: Box<Result<Workspace, String>>,
     },
     /// Finishes one immutable save snapshot.

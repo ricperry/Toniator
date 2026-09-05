@@ -109,6 +109,13 @@ scripts/ui-action Pattern --application Toniator --actions
 ```
 
 AT-SPI actions and values are authoritative only for the exposed widget state.
+In a device-free private seat, disconnecting a one-shot WayVNC client can clear
+keyboard focus. A transient AT-SPI focus event does not prove focus survives
+that disconnect. If dropdown selection fails despite correct semantic targets,
+retain one loopback VNC connection across focus, popup opening, and the complete
+Home/Down/Enter sequence; inspect the actual selected text afterward. The same
+retained connection is needed when capturing a pointer-hover tooltip. This is
+a harness input-lifetime issue, not grounds for coordinate-based widget clicks.
 They do not prove that a typed command committed, persistence changed, a cache
 invalidated, or the canvas rerendered. Verify those boundaries separately.
 
@@ -129,3 +136,10 @@ Wayland trace data and Rust/GLib diagnostics.
 Sway is a real Wayland compositor but not Mutter. Reproduce GNOME Shell,
 Mutter, portal, global-shortcut, or compositor-policy defects in GNOME after
 the isolated run narrows the problem.
+
+For native GTK file-chooser workflow tests, the private app wrapper may set
+`GDK_DEBUG=no-portals` when the installed GTK supports it. Verify that the
+chooser appears in the private compositor before proceeding. This test-only
+fallback exercises the native chooser and application callbacks; it does not
+validate the host GNOME portal. If a chooser escapes to the user's desktop,
+stop that run immediately.

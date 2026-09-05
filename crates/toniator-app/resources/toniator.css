@@ -7,6 +7,42 @@
 .toniator-viewer-cmyk { background: #ffffff; }
 .toniator-viewer-source-color-alpha { background: #808080; }
 
+.toniator-viewport-toolbar {
+  border-top: 1px solid @borders;
+  background: @theme_bg_color;
+}
+
+.toniator-inspector {
+  background: @theme_bg_color;
+}
+
+.toniator-inspector-group {
+  padding: 10px;
+  border: 1px solid @borders;
+  border-radius: 8px;
+  background: alpha(@theme_fg_color, 0.035);
+}
+
+.toniator-channel-segments button {
+  min-width: 38px;
+  padding-left: 7px;
+  padding-right: 7px;
+}
+
+.toniator-channel-segments button:checked {
+  background: @theme_selected_bg_color;
+  color: @theme_selected_fg_color;
+}
+
+.toniator-channel-red { border-bottom: 3px solid #e01b24; }
+.toniator-channel-green { border-bottom: 3px solid #33d17a; }
+.toniator-channel-blue { border-bottom: 3px solid #3584e4; }
+.toniator-channel-cyan { border-bottom: 3px solid #00b7c7; }
+.toniator-channel-magenta { border-bottom: 3px solid #c061cb; }
+.toniator-channel-yellow { border-bottom: 3px solid #f6d32d; }
+.toniator-channel-black { border-bottom: 3px solid @theme_fg_color; }
+.toniator-channel-source { border-bottom: 3px solid #ff7800; }
+
 /* The draft preview never consumes the controls' scroll allocation. */
 .toniator-draft-preview {
   min-height: 120px;
@@ -37,3 +73,14 @@
   color: #3584e4;
   font-weight: 700;
 }
+
+.toniator-startup { background: @theme_bg_color; }
+.toniator-startup-card {
+  padding: 22px;
+  border: 1px solid @borders;
+  border-radius: 12px;
+  background: alpha(@theme_fg_color, 0.035);
+}
+.toniator-startup-description { font-size: 1.08em; }
+.toniator-startup-primary { padding: 16px 12px; font-size: 1.15em; }
+.toniator-recent-file { padding: 12px 10px; border-radius: 6px; }

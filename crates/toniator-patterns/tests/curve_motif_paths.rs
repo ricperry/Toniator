@@ -1,8 +1,10 @@
 use std::sync::Mutex;
 
 use toniator_domain::{
-    CanvasSpec, PathStrokeStyle, PatternMechanismId, SourceMapping, SourceMappingComponent,
+    CanvasSpec, GuideDimensionId, PathStrokeStyle, PatternMechanismId, SourceMapping,
+    SourceMappingComponent,
 };
+use toniator_geometry::{StructuralPathInstanceId, StructuralPathLocationProvenance};
 use toniator_patterns::{
     CubicBezierSegment, CurvePath, CurveSegment, FamilySite, FamilySiteId, FamilySiteProvenance,
     FamilySiteSet, GuideInstanceId, NominalCellBasis, PathClosure, Point2, SiteScope,
@@ -139,6 +141,160 @@ fn curve_motif_rows_chain_and_compose_mirror_phase_deterministically() {
     assert_eq!(phased[0].start().x, 2.5);
     assert_eq!(first[0].start().x, 2.5);
     assert_eq!(first[0].segments()[0].end().y, -2.5);
+}
+
+/// Re-expresses the straight fixture as authored-curve sites, retaining row and cadence identity.
+/// An optional disconnected component deliberately restarts its own sequence at zero.
+fn authored_curve_rows(disconnected: bool, bent: bool) -> FamilySiteSet {
+    let mut sites = rows().sites().to_vec();
+    for site in &mut sites {
+        let FamilySiteProvenance::AlongGuide {
+            guide_id,
+            guide_order,
+            sequence,
+            absolute_arc_position_bits,
+            local_arc_position_bits,
+        } = site.provenance
+        else {
+            unreachable!("fixture contains only AlongGuide sites")
+        };
+        site.provenance = FamilySiteProvenance::CurveAlongGuide {
+            location: StructuralPathLocationProvenance {
+                path: StructuralPathInstanceId::guide_dimension(
+                    GuideDimensionId(guide_id.dimension_id),
+                    guide_id.index,
+                    0,
+                ),
+                segment_index: 0,
+                parameter_bits: (sequence as f64 / 2.0).to_bits(),
+            },
+            guide_order,
+            sequence,
+            absolute_arc_position_bits,
+            local_arc_position_bits,
+        };
+        if bent && sequence == 1 {
+            site.position.y += 3.0;
+        }
+    }
+    if disconnected {
+        let mut component = sites[..3].to_vec();
+        for site in &mut component {
+            site.id.ordinal += sites.len();
+            site.position.x += 100.0;
+            if let FamilySiteProvenance::CurveAlongGuide { location, .. } = &mut site.provenance {
+                location.path.component_ordinal = 1;
+            }
+        }
+        sites.extend(component);
+    }
+    FamilySiteSet::new(
+        "authored-curve-motif-test".into(),
+        PatternMechanismId(7),
+        sites,
+    )
+    .expect("authored guide provenance validates")
+}
+
+/// Proves authored straight conversion retains exact output, negative-row mirror/phase, and cancellation.
+#[test]
+fn curve_motif_authored_guide_provenance_preserves_straight_output() {
+    let motif = CurvePath::polyline(
+        vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(0.5, 0.25),
+            Point2::new(1.0, 0.0),
+        ],
+        PathClosure::Open,
+    )
+    .expect("open motif validates");
+    for mirror in [false, true] {
+        for phase in [None, Some(0.25)] {
+            let expected =
+                chain_curve_motif_rows_cancellable(&rows(), &motif, mirror, phase, &|| false)
+                    .expect("straight fixture chains");
+            let actual = chain_curve_motif_rows_cancellable(
+                &authored_curve_rows(false, false),
+                &motif,
+                mirror,
+                phase,
+                &|| false,
+            )
+            .expect("authored guide fixture chains");
+            assert_eq!(expected, actual);
+        }
+    }
+    let error = chain_curve_motif_rows_cancellable(
+        &authored_curve_rows(false, false),
+        &motif,
+        false,
+        None,
+        &|| true,
+    )
+    .expect_err("authored rows honor cancellation");
+    assert_eq!(error.path(), "evaluation.cancelled");
+}
+
+/// Proves nonlinear adjacent chords meet exactly and disconnected components remain separate rows.
+#[test]
+fn curve_motif_curved_guides_keep_component_boundaries_and_exact_joins() {
+    let sites = authored_curve_rows(true, true);
+    let motif = CurvePath::polyline(
+        vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(0.5, 0.25),
+            Point2::new(1.0, 0.0),
+        ],
+        PathClosure::Open,
+    )
+    .expect("open motif validates");
+    let paths = chain_curve_motif_rows_cancellable(&sites, &motif, true, None, &|| false)
+        .expect("nonlinear disconnected rows chain independently");
+    assert_eq!(paths.len(), 3);
+    for path in &paths {
+        assert_eq!(path.segments().len(), 4);
+        assert_eq!(path.segments()[1].end(), path.segments()[2].start());
+        assert_eq!(path.end().x - path.start().x, 20.0);
+        assert_eq!(path.segments()[1].end().y, path.start().y + 3.0);
+    }
+    assert!(paths.iter().any(|path| path.start().x == 100.0));
+}
+
+/// Splits curved cadence gaps created by envelope culling without bridging omitted positions.
+/// Duplicate sequence values still reject instead of hiding ambiguous guide provenance.
+#[test]
+fn curve_motif_curved_cadence_gaps_form_separate_runs() {
+    let mut sites = authored_curve_rows(false, false).sites().to_vec();
+    sites[2].position.x = 40.0;
+    if let FamilySiteProvenance::CurveAlongGuide { sequence, .. } = &mut sites[2].provenance {
+        *sequence = 4;
+    }
+    let mut final_site = sites[2].clone();
+    final_site.id.ordinal = sites.len();
+    final_site.position.x = 50.0;
+    if let FamilySiteProvenance::CurveAlongGuide { sequence, .. } = &mut final_site.provenance {
+        *sequence = 5;
+    }
+    sites.push(final_site);
+    let source = FamilySiteSet::new("curved-gap".into(), PatternMechanismId(7), sites.clone())
+        .expect("gapped curved sites validate");
+    let motif = CurvePath::line(Point2::new(0.0, 0.0), Point2::new(1.0, 0.0)).expect("open motif");
+    let paths = chain_curve_motif_rows_cancellable(&source, &motif, true, None, &|| false)
+        .expect("curved gaps split into runs");
+    assert_eq!(paths.len(), 3);
+    assert_eq!((paths[0].start().x, paths[0].end().x), (0.0, 10.0));
+    assert_eq!((paths[1].start().x, paths[1].end().x), (40.0, 50.0));
+    if let FamilySiteProvenance::CurveAlongGuide { sequence, .. } = &mut sites[2].provenance {
+        *sequence = 1;
+    }
+    let duplicate = FamilySiteSet::new("curved-duplicate".into(), PatternMechanismId(7), sites)
+        .expect("duplicate sequence fixture retains unique site IDs");
+    assert_eq!(
+        chain_curve_motif_rows_cancellable(&duplicate, &motif, false, None, &|| false)
+            .expect_err("ambiguous duplicate rejects")
+            .path(),
+        "curve_motif.sites"
+    );
 }
 
 /// Proves cancellation aborts before publishing any independently scheduled row output.

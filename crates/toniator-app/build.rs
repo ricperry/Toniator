@@ -25,6 +25,7 @@ fn main() {
         println!("cargo:rerun-if-changed={blueprint}");
     }
     println!("cargo:rerun-if-changed=resources/toniator.css");
+    println!("cargo:rerun-if-changed=../../assets/Stage21D_Mockup/SplashMockup.png");
     println!("cargo:rerun-if-changed=resources/toniator.gresource.xml");
     println!("cargo:rerun-if-changed=../../assets/stage20s-preset-icon-source.svg");
     for icon in [

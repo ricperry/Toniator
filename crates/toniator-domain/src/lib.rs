@@ -8145,7 +8145,7 @@ impl Document {
         } else {
             candidate.pattern_settings.definition_id = neutral.id;
         }
-        candidate.apply_recipe_controls(neutral.id, definition_recipe)?;
+        candidate.apply_recipe_controls(neutral.id, definition_recipe, true)?;
         if let Some((program, style)) = connection {
             let definition = candidate
                 .pattern_definition_bundles
@@ -8412,7 +8412,10 @@ impl Document {
         } else {
             candidate.pattern_settings.definition_id = neutral.id;
         }
-        candidate.apply_recipe_controls(neutral.id, family_recipe)?;
+        let family_orientation_is_used = outputs
+            .iter()
+            .any(|output| matches!(output, PatternOutputRealizationRecipe::Marks));
+        candidate.apply_recipe_controls(neutral.id, family_recipe, family_orientation_is_used)?;
         let mut definition =
             candidate
                 .definition(neutral.id)
@@ -8966,9 +8969,11 @@ impl Document {
         }
     }
 
-    /// Applies a recipe's scalar controls and compound alternatives to a
-    /// private candidate definition. All payload-bearing alternatives pass
-    /// through `variant_transition_draft`; scalar leaves use existing edits.
+    /// Applies a recipe's scalar controls and applicable family orientation to a private candidate.
+    ///
+    /// All payload-bearing alternatives pass through `variant_transition_draft`; scalar leaves use
+    /// existing edits. Ordered outputs suppress an unused family orientation while their final
+    /// realizations are assembled from the temporary neutral mark.
     ///
     /// # Errors
     ///
@@ -8978,10 +8983,11 @@ impl Document {
         &mut self,
         definition_id: PatternDefinitionId,
         recipe: &PatternStructureRecipe,
+        apply_family_orientation: bool,
     ) -> Result<(), ValidationError> {
         match recipe {
             PatternStructureRecipe::AuthoredResources { definition, .. } => {
-                self.apply_recipe_controls(definition_id, definition)
+                self.apply_recipe_controls(definition_id, definition, apply_family_orientation)
             }
             PatternStructureRecipe::StraightGrid(_) => Ok(()),
             PatternStructureRecipe::ParametricCurve { .. } => Ok(()),
@@ -9121,6 +9127,9 @@ impl Document {
                             },
                         )?;
                     }
+                }
+                if !apply_family_orientation {
+                    return Ok(());
                 }
                 let (choice, dimension_index) = match orientation {
                     MarkOrientationDraft::Fixed => return Ok(()),
@@ -13748,6 +13757,7 @@ fn validate_single_output_definition_structure(
             *id,
             root_site_id,
             &ids,
+            site,
         )?;
         if let [
             PatternOutputRealization::Regions {
@@ -15186,6 +15196,7 @@ fn validate_generalized_output_layers_ids(
     guide_id: PatternMechanismId,
     site_id: PatternMechanismId,
     dimensions: &[GuideDimensionId],
+    site_mechanism: &PatternMechanism,
 ) -> Result<(), ValidationError> {
     if let [
         PatternOutputRealization::ConnectionPaths {
@@ -15263,7 +15274,43 @@ fn validate_generalized_output_layers_ids(
             "pattern_definitions.output_layers.orientation",
             "orientation references a missing guide dimension",
         )),
-    }
+    }?;
+    validate_mark_orientation_site_provenance(orientation, site_mechanism)
+}
+
+/// Validates that a guide-relative mark is present in every emitted Along Guides provenance.
+///
+/// Fixed marks and intersection products need no additional check. Callers invoke this only after
+/// proving the output is a selected mark realization that consumes `site_mechanism`.
+///
+/// # Errors
+///
+/// Returns a stable provenance diagnostic when Along Guides emits sites outside the requested
+/// orientation dimension.
+fn validate_mark_orientation_site_provenance(
+    orientation: &MarkOrientation,
+    site_mechanism: &PatternMechanism,
+) -> Result<(), ValidationError> {
+    let required = match orientation {
+        MarkOrientation::Fixed => return Ok(()),
+        MarkOrientation::GuideTangent { dimension_id }
+        | MarkOrientation::GuideNormal { dimension_id } => *dimension_id,
+    };
+    let PatternMechanism::AlongGuideSites {
+        dimensions: selected,
+        ..
+    } = site_mechanism
+    else {
+        return Ok(());
+    };
+    (selected.as_slice() == [required])
+        .then_some(())
+        .ok_or_else(|| {
+            ValidationError::new(
+                "pattern_definitions.output_layers.orientation.provenance",
+                "guide-relative mark orientation must be the sole Along Guides dimension",
+            )
+        })
 }
 
 /// Validates the typed source binding for one fixed full region output.
@@ -15510,7 +15557,8 @@ fn validate_generalized_output_layers(
             "pattern_definitions.output_layers.orientation",
             "orientation references a missing straight-guide dimension",
         )),
-    }
+    }?;
+    validate_mark_orientation_site_provenance(orientation, site_mechanism)
 }
 
 fn validate_layout(layout: &ChannelPatternLayout) -> Result<(), ValidationError> {
@@ -19689,12 +19737,7 @@ impl PatternDefinitionRecipe {
                 )
             })?;
         let mut parts = decompose_recipe_outputs(self)?;
-        replace_recipe_site_generation(
-            &mut parts.definition,
-            PatternRecipeSiteGenerationKind::AlongGuides,
-        )?;
         reset_removed_recipe_family_orientation(&mut parts.definition, 1);
-        resize_recipe_guide_dimensions(&mut parts.definition, old_count, 1)?;
         for output in &mut parts.outputs {
             match output {
                 PatternOutputRealizationRecipe::MazeWalls { style, .. } => {
@@ -19713,6 +19756,11 @@ impl PatternDefinitionRecipe {
                 | PatternOutputRealizationRecipe::VoronoiRegions => {}
             }
         }
+        replace_recipe_site_generation(
+            &mut parts.definition,
+            PatternRecipeSiteGenerationKind::AlongGuides,
+        )?;
+        resize_recipe_guide_dimensions(&mut parts.definition, old_count, 1)?;
         compose_recipe_outputs(parts)
     }
 
@@ -19831,10 +19879,12 @@ impl PatternDefinitionRecipe {
 
     /// Rebuilds this recipe with one artist-selected site-construction method.
     ///
-    /// Guide selections default to all current dimensions. Enabling sites on a curve-only
-    /// parametric recipe atomically converts its raw path to marks; disabling sites atomically
-    /// converts incompatible site-backed outputs to structural paths. Neither direction exposes
-    /// an invalid intermediate draft between wizard cards.
+    /// Guide selections default to all current dimensions when active marks use fixed orientation.
+    /// A guide-relative mark instead selects its one requested contributor so every Along Guides
+    /// site can realize that orientation. Enabling sites on a curve-only parametric recipe
+    /// atomically converts its raw path to marks; disabling sites atomically converts incompatible
+    /// site-backed outputs to structural paths. Neither direction exposes an invalid intermediate
+    /// draft between wizard cards.
     ///
     /// # Errors
     ///
@@ -20329,6 +20379,113 @@ fn canonicalize_triangular_intersection_layout(structure: &mut PatternStructureR
     }
 }
 
+/// Returns the guide index requested by a guide-relative mark orientation.
+fn mark_orientation_dimension_index(orientation: &MarkOrientationDraft) -> Option<usize> {
+    match orientation {
+        MarkOrientationDraft::Fixed => None,
+        MarkOrientationDraft::GuideTangent { dimension_index }
+        | MarkOrientationDraft::GuideNormal { dimension_index } => Some(*dimension_index),
+    }
+}
+
+/// Returns the family orientation inherited by ordinary Marks outputs.
+///
+/// Output wrappers are intentionally not traversed because they replace the implicit mark output.
+fn recipe_family_mark_orientation(
+    structure: &PatternStructureRecipe,
+) -> Option<&MarkOrientationDraft> {
+    match structure {
+        PatternStructureRecipe::GeneralizedStraightGuides { orientation, .. }
+        | PatternStructureRecipe::GenericGuides { orientation, .. } => Some(orientation),
+        PatternStructureRecipe::AuthoredResources { definition, .. } => {
+            recipe_family_mark_orientation(definition)
+        }
+        PatternStructureRecipe::StraightGrid(_)
+        | PatternStructureRecipe::RandomSites { .. }
+        | PatternStructureRecipe::ParametricCurve { .. }
+        | PatternStructureRecipe::ConnectionPaths { .. }
+        | PatternStructureRecipe::MazeWalls { .. }
+        | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
+        | PatternStructureRecipe::CurveMotifPaths { .. }
+        | PatternStructureRecipe::VoronoiRegions { .. }
+        | PatternStructureRecipe::GuideFaceRegions { .. }
+        | PatternStructureRecipe::OrderedOutputs { .. } => None,
+    }
+}
+
+/// Collects guide indices requested only by mark outputs that are actually selected.
+///
+/// Structural paths, connections, mazes, motifs, and regions do not consume orientation. Legacy
+/// authored-shape wrappers materialize fixed orientation; explicit ordered authored shapes carry
+/// their own orientation rather than inheriting the family value.
+fn active_recipe_mark_orientation_dimensions(
+    structure: &PatternStructureRecipe,
+) -> BTreeSet<usize> {
+    match structure {
+        PatternStructureRecipe::AuthoredResources { definition, .. } => {
+            active_recipe_mark_orientation_dimensions(definition)
+        }
+        PatternStructureRecipe::OrderedOutputs {
+            definition,
+            outputs,
+        } => {
+            let family_orientation = recipe_family_mark_orientation(definition);
+            outputs
+                .iter()
+                .filter_map(|output| match output {
+                    PatternOutputRealizationRecipe::Marks => {
+                        family_orientation.and_then(mark_orientation_dimension_index)
+                    }
+                    PatternOutputRealizationRecipe::AuthoredClosedShapeMarks {
+                        orientation,
+                        ..
+                    } => mark_orientation_dimension_index(orientation),
+                    PatternOutputRealizationRecipe::StructuralPaths { .. }
+                    | PatternOutputRealizationRecipe::CurveMotifPaths { .. }
+                    | PatternOutputRealizationRecipe::ConnectionPaths { .. }
+                    | PatternOutputRealizationRecipe::MazeWalls { .. }
+                    | PatternOutputRealizationRecipe::VoronoiRegions
+                    | PatternOutputRealizationRecipe::GuideFaceRegions { .. } => None,
+                })
+                .collect()
+        }
+        PatternStructureRecipe::GeneralizedStraightGuides { orientation, .. }
+        | PatternStructureRecipe::GenericGuides { orientation, .. } => {
+            mark_orientation_dimension_index(orientation)
+                .into_iter()
+                .collect()
+        }
+        PatternStructureRecipe::StraightGrid(_)
+        | PatternStructureRecipe::RandomSites { .. }
+        | PatternStructureRecipe::ParametricCurve { .. }
+        | PatternStructureRecipe::ConnectionPaths { .. }
+        | PatternStructureRecipe::MazeWalls { .. }
+        | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
+        | PatternStructureRecipe::CurveMotifPaths { .. }
+        | PatternStructureRecipe::VoronoiRegions { .. }
+        | PatternStructureRecipe::GuideFaceRegions { .. } => BTreeSet::new(),
+    }
+}
+
+/// Resolves the sole guide dimension required by active guide-relative marks.
+///
+/// # Errors
+///
+/// Returns a stable incompatibility diagnostic when selected mark outputs request different guide
+/// dimensions and therefore cannot share one Along Guides site product.
+fn required_along_guide_orientation_dimension(
+    structure: &PatternStructureRecipe,
+) -> Result<Option<usize>, ValidationError> {
+    let dimensions = active_recipe_mark_orientation_dimensions(structure);
+    if dimensions.len() > 1 {
+        return Err(ValidationError::new(
+            "preset.recipe.site_generation.orientation",
+            "Along Guides cannot serve mark outputs oriented to different guide dimensions",
+        ));
+    }
+    Ok(dimensions.into_iter().next())
+}
+
 /// Replaces only the family-owned site construction below output wrappers.
 ///
 /// # Errors
@@ -20339,6 +20496,24 @@ fn replace_recipe_site_generation(
     structure: &mut PatternStructureRecipe,
     kind: PatternRecipeSiteGenerationKind,
 ) -> Result<(), ValidationError> {
+    let orientation_dimension = if kind == PatternRecipeSiteGenerationKind::AlongGuides {
+        required_along_guide_orientation_dimension(structure)?
+    } else {
+        None
+    };
+    replace_recipe_site_generation_inner(structure, kind, orientation_dimension)
+}
+
+/// Replaces the family-owned site construction after output-aware orientation admission.
+///
+/// # Errors
+///
+/// Returns a stable family or cardinality diagnostic without inspecting catalog or UI state.
+fn replace_recipe_site_generation_inner(
+    structure: &mut PatternStructureRecipe,
+    kind: PatternRecipeSiteGenerationKind,
+    orientation_dimension: Option<usize>,
+) -> Result<(), ValidationError> {
     match structure {
         PatternStructureRecipe::AuthoredResources { definition, .. }
         | PatternStructureRecipe::ConnectionPaths { definition, .. }
@@ -20348,18 +20523,18 @@ fn replace_recipe_site_generation(
         | PatternStructureRecipe::VoronoiRegions { definition }
         | PatternStructureRecipe::GuideFaceRegions { definition, .. }
         | PatternStructureRecipe::OrderedOutputs { definition, .. } => {
-            replace_recipe_site_generation(definition, kind)
+            replace_recipe_site_generation_inner(definition, kind, orientation_dimension)
         }
         PatternStructureRecipe::GeneralizedStraightGuides {
             dimensions,
             product,
             ..
-        } => replace_guide_site_product(product, dimensions.len(), kind),
+        } => replace_guide_site_product(product, dimensions.len(), kind, orientation_dimension),
         PatternStructureRecipe::GenericGuides {
             dimensions,
             product,
             ..
-        } => replace_guide_site_product(product, dimensions.len(), kind),
+        } => replace_guide_site_product(product, dimensions.len(), kind, orientation_dimension),
         PatternStructureRecipe::ParametricCurve { sites, .. } => match kind {
             PatternRecipeSiteGenerationKind::ParametricCurve => {
                 *sites = None;
@@ -20398,16 +20573,17 @@ fn replace_recipe_site_generation(
     }
 }
 
-/// Replaces one generalized guide product using all current dimensions in stored order.
+/// Replaces one generalized guide product using its active mark-orientation requirement.
 ///
 /// # Errors
 ///
 /// Returns a stable family or cardinality diagnostic when intersections are requested with fewer
-/// than two dimensions or a non-guide choice is supplied.
+/// than two dimensions, an orientation index is stale, or a non-guide choice is supplied.
 fn replace_guide_site_product(
     product: &mut GeneralizedSiteProductDraft,
     dimension_count: usize,
     kind: PatternRecipeSiteGenerationKind,
+    orientation_dimension: Option<usize>,
 ) -> Result<(), ValidationError> {
     match kind {
         PatternRecipeSiteGenerationKind::GuideIntersections => {
@@ -20428,6 +20604,12 @@ fn replace_guide_site_product(
             Ok(())
         }
         PatternRecipeSiteGenerationKind::AlongGuides => {
+            if orientation_dimension.is_some_and(|index| index >= dimension_count) {
+                return Err(ValidationError::new(
+                    "preset.recipe.site_generation.orientation",
+                    "guide-relative mark orientation references an unavailable dimension",
+                ));
+            }
             let (interval_multiplier, phase) = match product {
                 GeneralizedSiteProductDraft::AlongGuides {
                     interval_multiplier,
@@ -20437,7 +20619,8 @@ fn replace_guide_site_product(
                 GeneralizedSiteProductDraft::Intersections { .. } => (1.0, 0.0),
             };
             *product = GeneralizedSiteProductDraft::AlongGuides {
-                dimension_indices: (0..dimension_count).collect(),
+                dimension_indices: orientation_dimension
+                    .map_or_else(|| (0..dimension_count).collect(), |index| vec![index]),
                 interval_multiplier,
                 phase,
             };
@@ -21380,7 +21563,63 @@ fn resolve_recipe_resource_draft(
 fn validate_pattern_structure_recipe(
     recipe: &PatternStructureRecipe,
 ) -> Result<(), ValidationError> {
-    validate_pattern_structure_recipe_with_resources(recipe, None)
+    validate_pattern_structure_recipe_with_resources(recipe, None)?;
+    validate_active_recipe_mark_orientation_provenance(recipe)
+}
+
+/// Returns the generalized guide product below canonical output and resource wrappers.
+fn recipe_guide_site_product(
+    structure: &PatternStructureRecipe,
+) -> Option<&GeneralizedSiteProductDraft> {
+    match structure {
+        PatternStructureRecipe::GeneralizedStraightGuides { product, .. }
+        | PatternStructureRecipe::GenericGuides { product, .. } => Some(product),
+        PatternStructureRecipe::AuthoredResources { definition, .. }
+        | PatternStructureRecipe::ConnectionPaths { definition, .. }
+        | PatternStructureRecipe::MazeWalls { definition, .. }
+        | PatternStructureRecipe::AuthoredClosedShapeMarks { definition, .. }
+        | PatternStructureRecipe::CurveMotifPaths { definition, .. }
+        | PatternStructureRecipe::VoronoiRegions { definition }
+        | PatternStructureRecipe::GuideFaceRegions { definition, .. }
+        | PatternStructureRecipe::OrderedOutputs { definition, .. } => {
+            recipe_guide_site_product(definition)
+        }
+        PatternStructureRecipe::StraightGrid(_)
+        | PatternStructureRecipe::RandomSites { .. }
+        | PatternStructureRecipe::ParametricCurve { .. } => None,
+    }
+}
+
+/// Ensures every active guide-relative mark can consume every emitted Along Guides site.
+///
+/// Fixed marks and non-mark outputs require no contributor. Intersections retain their existing
+/// contributor validation; this invariant applies only to the sole-contributor Along Guides
+/// product and therefore does not reinterpret stored orientation intent.
+///
+/// # Errors
+///
+/// Returns a stable orientation-provenance diagnostic when active marks disagree or the selected
+/// Along Guides dimension is not their one requested contributor.
+fn validate_active_recipe_mark_orientation_provenance(
+    recipe: &PatternStructureRecipe,
+) -> Result<(), ValidationError> {
+    let Some(GeneralizedSiteProductDraft::AlongGuides {
+        dimension_indices, ..
+    }) = recipe_guide_site_product(recipe)
+    else {
+        return Ok(());
+    };
+    let Some(required) = required_along_guide_orientation_dimension(recipe)? else {
+        return Ok(());
+    };
+    (dimension_indices.as_slice() == [required])
+        .then_some(())
+        .ok_or_else(|| {
+            ValidationError::new(
+                "preset.recipe.orientation.provenance",
+                "guide-relative mark orientation must be the sole Along Guides dimension",
+            )
+        })
 }
 
 /// Validates one structural recipe while carrying its canonical root table through wrappers.

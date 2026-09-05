@@ -46,6 +46,15 @@ available. Loading reconstructs a fresh document/history at revision zero,
 and history, dirty state, and filesystem source paths are not serialized.
 
 Stage 13A GTK document lifecycle is complete at checkpoint `36c7b44`.
+
+The current app opens to a startup screen with a single **Start New Project**
+button for opening artwork or an existing project, plus persistent Recent Files.
+Successful opens and saves populate that list; **Clear List** clears only history.
+**Close** (Ctrl+W) returns to startup. **Exit** (Ctrl+Q) and the window X quit.
+Unsaved documents first offer Save, Discard, or Cancel; cancelling Save As also
+keeps the document open. The startup screen follows the system light/dark theme.
+See [startup implementation and verification](docs/STARTUP_SCREEN_IMPLEMENTATION.md).
+
 `toniator-app [PATH]` accepts zero or one supported still image or `.toniator`
 path at startup. New creates an untitled, unsourced document; Open accepts
 direct PNG, SVG, JPEG/JPG, WebP, BMP, TIFF, OpenEXR, AVIF, or a `.toniator`
@@ -575,19 +584,38 @@ Lines, Even Random Circles, and Round Spiral Line, a shared layered catalog,
 256-longest-edge/512×512 private previews, latest-ticket/last-success behavior,
 one-Apply publication, and wide/narrow layouts. The gate adopts exact stored
 SVGs for all 17 built-ins, including the corrected density-10 Curve Motif icon;
-only personal entries use synthetic thumbnail fallback. Gates 21B-3 and 21B-4
-remain separately gated and planned.
+only personal entries use synthetic thumbnail fallback. Gate 21B-3 is accepted
+at `68ef02e`, with acceptance documentation at `8cd4a2f`: descriptor-driven
+editing covers all seventeen Patterns and nested Guide, Shape, and Motif editors.
 
-The main inspector defaults to runtime-only **ALL** or a real named channel.
-Its compact recipe dropdown is non-mutating until **Apply Pattern**; applying
-to ALL discloses and clears pattern-relative channel intent in one exactly
-undoable transaction. Capability-valid common controls, visible inheritance
-and reset actions, and the Blueprint-owned private-history **Advanced
-Settings** dialog are included. **Edit Pattern** is enabled by accepted Gate
-21B-2. Stage 21B remains In progress through its separately accepted gates;
-the exact four-gate contract is
+The Gate 21B-4 main window follows the v1.2 UI reference: a dominant canvas,
+right inspector, model-specific channel segments, Pattern Recipe summary and
+**Change…**, and shared zoom/Fit with **Preview / Source** comparison. Appearance,
+Variation, Options, and collapsed Advanced groups project existing domain values.
+The application follows GNOME's light/dark preference, including live changes,
+and otherwise retains GTK theme behavior where that setting is unavailable.
+
+The wizard follows **Choose a layout → Shape the layout → Choose placement →
+Draw and style → Review**, with artist-facing labels and explanatory tooltips.
+Invalid input remains visible with its reason and blocks navigation/publication;
+Apply publishes one undoable document change. **All** replacement discloses its
+effect on channel-relative Pattern intent. Curve Motif supports authored curved
+guides, preserves independent components, and resumes after omitted cadence
+points without bridging a gap.
+
+Personal Pattern management includes save/update, fresh-ID copies, stable-ID
+rename, recoverable trash/Undo, root selection, Refresh, and stale-write recovery.
+Saving a Pattern remains separate from applying it. Current Pattern and document
+formats remain unchanged. Known deferred work is tracked in [ISSUES.md](ISSUES.md).
+Stage 21B remains In progress through five separately accepted gates; the contract is
 [`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](docs/STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md),
-Gates 21B-3 and 21B-4 remain separately gated and not begun.
+and [ProgressTracker.md](ProgressTracker.md) records the current review status.
+Gate 21B-4 and its startup follow-up are complete and user-accepted on
+2026-09-04; their checkpoint is recorded in ProgressTracker.md. Gate behavior, verification, and
+limitations are recorded in [the implementation notes](docs/STAGE_21B_GATE4_IMPLEMENTATION.md).
+Gate 21B-5 is planned for distinct document-level Presets, with **Load preset...**
+and **Save preset** under **New**, reusing document serialization without source
+data once that format is explicitly defined. It has not begun.
 
 Advanced Settings presents one modal immediately and evaluates only a bounded
 source proxy on its own cancelable scheduler. Its status exposes current

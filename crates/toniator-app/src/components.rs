@@ -27,6 +27,8 @@ mod main_shell {
         #[template_child]
         pub file_button: gtk::TemplateChild<gtk::MenuButton>,
         #[template_child]
+        pub new_button: gtk::TemplateChild<gtk::MenuButton>,
+        #[template_child]
         pub channel_settings_drawer: gtk::TemplateChild<gtk::ToggleButton>,
         #[template_child]
         pub window_title: gtk::TemplateChild<gtk::Label>,
@@ -36,6 +38,20 @@ mod main_shell {
         pub preview_picture: gtk::TemplateChild<gtk::Picture>,
         #[template_child]
         pub viewer: gtk::TemplateChild<gtk::Overlay>,
+        #[template_child]
+        pub viewport_scroll: gtk::TemplateChild<gtk::ScrolledWindow>,
+        #[template_child]
+        pub zoom_out_button: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub zoom_label: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub zoom_in_button: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub fit_button: gtk::TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub preview_view_button: gtk::TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub source_view_button: gtk::TemplateChild<gtk::ToggleButton>,
         #[template_child]
         pub preview_progress: gtk::TemplateChild<gtk::Box>,
         #[template_child]
@@ -55,11 +71,23 @@ mod main_shell {
         #[template_child]
         pub model_selector: gtk::TemplateChild<gtk::DropDown>,
         #[template_child]
-        pub channel_selector: gtk::TemplateChild<gtk::DropDown>,
+        pub channel_segments: gtk::TemplateChild<gtk::Box>,
         #[template_child]
         pub inspector_catalog: gtk::TemplateChild<gtk::Box>,
         #[template_child]
-        pub inspector_descriptors: gtk::TemplateChild<gtk::Box>,
+        pub recipe_family: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub recipe_sites: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub recipe_connections: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub appearance_controls: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub variation_controls: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub options_controls: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub advanced_controls: gtk::TemplateChild<gtk::Box>,
     }
 
     #[glib::object_subclass]
@@ -122,6 +150,11 @@ impl ToniatorMainShell {
         self.imp().file_button.get()
     }
 
+    /// Returns the persistent New menu button whose current actions are runtime-owned.
+    pub fn new_button(&self) -> gtk::MenuButton {
+        self.imp().new_button.get()
+    }
+
     /// Returns the static channel-settings visibility control.
     pub fn drawer(&self) -> gtk::ToggleButton {
         self.imp().channel_settings_drawer.get()
@@ -153,6 +186,41 @@ impl ToniatorMainShell {
     /// Returns the template-owned preview overlay.
     pub fn viewer(&self) -> gtk::Overlay {
         self.imp().viewer.get()
+    }
+
+    /// Returns the shared scroll viewport used by Preview and Source.
+    pub fn viewport_scroll(&self) -> gtk::ScrolledWindow {
+        self.imp().viewport_scroll.get()
+    }
+
+    /// Returns the bounded zoom-out control.
+    pub fn zoom_out(&self) -> gtk::Button {
+        self.imp().zoom_out_button.get()
+    }
+
+    /// Returns the visible current zoom readback.
+    pub fn zoom_label(&self) -> gtk::Label {
+        self.imp().zoom_label.get()
+    }
+
+    /// Returns the bounded zoom-in control.
+    pub fn zoom_in(&self) -> gtk::Button {
+        self.imp().zoom_in_button.get()
+    }
+
+    /// Returns the explicit fit-to-viewport control.
+    pub fn fit(&self) -> gtk::ToggleButton {
+        self.imp().fit_button.get()
+    }
+
+    /// Returns the Preview half of the exclusive main view switcher.
+    pub fn preview_view(&self) -> gtk::ToggleButton {
+        self.imp().preview_view_button.get()
+    }
+
+    /// Returns the Source half of the exclusive main view switcher.
+    pub fn source_view(&self) -> gtk::ToggleButton {
+        self.imp().source_view_button.get()
     }
 
     /// Returns the template-owned main-preview progress overlay.
@@ -200,9 +268,9 @@ impl ToniatorMainShell {
         self.imp().model_selector.get()
     }
 
-    /// Returns the template-owned selected-channel selector.
-    pub fn channel_selector(&self) -> gtk::DropDown {
-        self.imp().channel_selector.get()
+    /// Returns the dynamic segmented real-channel selector container.
+    pub fn channel_segments(&self) -> gtk::Box {
+        self.imp().channel_segments.get()
     }
 
     /// Returns the dynamic catalog slot beneath the static sidebar controls.
@@ -210,9 +278,39 @@ impl ToniatorMainShell {
         self.imp().inspector_catalog.get()
     }
 
-    /// Returns the dynamic descriptor slot beneath the static sidebar controls.
-    pub fn inspector_descriptors(&self) -> gtk::Box {
-        self.imp().inspector_descriptors.get()
+    /// Returns the Pattern Recipe family summary value.
+    pub fn recipe_family(&self) -> gtk::Label {
+        self.imp().recipe_family.get()
+    }
+
+    /// Returns the Pattern Recipe site-generation summary value.
+    pub fn recipe_sites(&self) -> gtk::Label {
+        self.imp().recipe_sites.get()
+    }
+
+    /// Returns the Pattern Recipe connection summary value.
+    pub fn recipe_connections(&self) -> gtk::Label {
+        self.imp().recipe_connections.get()
+    }
+
+    /// Returns the frequent appearance control group.
+    pub fn appearance_controls(&self) -> gtk::Box {
+        self.imp().appearance_controls.get()
+    }
+
+    /// Returns the repeatable variation control group.
+    pub fn variation_controls(&self) -> gtk::Box {
+        self.imp().variation_controls.get()
+    }
+
+    /// Returns the contextual options control group.
+    pub fn options_controls(&self) -> gtk::Box {
+        self.imp().options_controls.get()
+    }
+
+    /// Returns the collapsed advanced action and control group.
+    pub fn advanced_controls(&self) -> gtk::Box {
+        self.imp().advanced_controls.get()
     }
 }
 

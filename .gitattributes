@@ -1,0 +1,2 @@
+# Preserve design-reference PDF bytes and avoid treating compressed streams as text.
+*.pdf binary

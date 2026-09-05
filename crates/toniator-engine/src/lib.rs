@@ -2699,6 +2699,7 @@ pub struct EvaluationScheduler {
     shutdown: Arc<AtomicBool>,
     completions: Mutex<Receiver<DocumentWorkerCompletion>>,
     progress: Mutex<Receiver<EvaluationProgress>>,
+    publication: Arc<Mutex<()>>,
 }
 impl EvaluationScheduler {
     pub fn new() -> Result<Self, SchedulerError> {
@@ -2728,6 +2729,12 @@ impl EvaluationScheduler {
         Self::new_with_limits_and_gate(limits, None, Some(decode_observer))
     }
 
+    /// Starts one reusable worker with bounded evaluation limits and atomic completion publication.
+    ///
+    /// Test-only probes observe stage/cancellation boundaries without changing production authority.
+    ///
+    /// # Errors
+    /// Returns `WorkerSpawn` when the operating system cannot start the evaluation thread.
     fn new_with_limits_and_gate(
         limits: EvaluationLimits,
         #[cfg(test)] gate: Option<Arc<EvaluationStageGate>>,
@@ -2738,6 +2745,8 @@ impl EvaluationScheduler {
         let (progress_sender, progress) = mpsc::channel::<EvaluationProgress>();
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
+        let publication = Arc::new(Mutex::new(()));
+        let worker_publication = Arc::clone(&publication);
         #[cfg(test)]
         let worker_gate = gate;
         let worker = thread::Builder::new()
@@ -2802,6 +2811,9 @@ impl EvaluationScheduler {
                         },
                         Err(EvaluationRunError::Cancelled) => continue,
                     };
+                    let _publication = worker_publication
+                        .lock()
+                        .expect("document scheduler publication lock poisoned");
                     if !job.cancelled.load(Ordering::Acquire) {
                         worker_cancellation.report_progress(
                             EvaluationProgressStage::Complete,
@@ -2830,6 +2842,7 @@ impl EvaluationScheduler {
             shutdown,
             completions: Mutex::new(completions),
             progress: Mutex::new(progress),
+            publication,
         })
     }
 
@@ -2873,6 +2886,47 @@ impl EvaluationScheduler {
             })
             .map_err(|_| SchedulerError::WorkerUnavailable)?;
         Ok(ticket)
+    }
+
+    /// Cancels private work and releases accepted/pending caches while retaining the worker.
+    ///
+    /// Ticket allocation remains monotonic. A publication gate excludes cancellation-racing
+    /// completed payloads while queues are drained after releasing the state mutex. Queued work
+    /// becomes stale; an already running job releases its snapshot after observing cancellation.
+    /// This resets derived state only and never mutates a caller's document or session.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the scheduler state mutex is poisoned.
+    pub fn cancel_and_clear(&self) {
+        let _publication = self
+            .publication
+            .lock()
+            .expect("document scheduler publication lock poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .expect("document scheduler state lock poisoned");
+        if let Some(cancelled) = state.latest_cancellation.take() {
+            cancelled.store(true, Ordering::Release);
+        }
+        state.latest_ticket = None;
+        self.latest_ticket.store(0, Ordering::Release);
+        state.pending = None;
+        state.accepted = None;
+        state.cache = DocumentDerivedCache::default();
+        drop(state);
+        // Receive paths lock receiver before state. Never retain state while draining.
+        let completions = self
+            .completions
+            .lock()
+            .expect("document scheduler completion lock poisoned");
+        while completions.try_recv().is_ok() {}
+        let progress = self
+            .progress
+            .lock()
+            .expect("document scheduler progress lock poisoned");
+        while progress.try_recv().is_ok() {}
     }
 
     pub fn is_latest(&self, ticket: EvaluationTicket) -> bool {

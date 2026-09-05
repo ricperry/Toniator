@@ -7,66 +7,58 @@ template $ToniatorMainShell : Gtk.Box {
   Gtk.HeaderBar header {
     [start]
     Gtk.MenuButton file_button {
-      label: "File";
+      icon-name: "open-menu-symbolic";
       tooltip-text: "Document and export actions";
+      accessibility { label: "Main menu"; }
     }
-
+    [start]
+    Gtk.MenuButton new_button {
+      label: "_New";
+      use-underline: true;
+      tooltip-text: "Create or open artwork";
+      styles [ "suggested-action" ]
+    }
     [start]
     Gtk.Button undo_button {
-      label: "_Undo";
-      use-underline: true;
+      icon-name: "edit-undo-symbolic";
       action-name: "app.undo";
       tooltip-text: "Undo the last change (Ctrl+Z)";
+      accessibility { label: "Undo"; }
     }
-
     [start]
     Gtk.Button redo_button {
-      label: "_Redo";
-      use-underline: true;
+      icon-name: "edit-redo-symbolic";
       action-name: "app.redo";
       tooltip-text: "Redo the last change (Ctrl+Shift+Z)";
+      accessibility { label: "Redo"; }
     }
-
+    [start]
+    Gtk.Button help_button {
+      icon-name: "help-about-symbolic";
+      action-name: "app.help";
+      tooltip-text: "About Toniator and keyboard shortcuts";
+      accessibility { label: "Help"; }
+    }
     [title]
-    Gtk.Label window_title {
-      label: "Toniator";
-      ellipsize: end;
-      styles [ "title-4" ]
+    Gtk.Box {
+      orientation: vertical;
+      spacing: 0;
+      Gtk.Label application_title {
+        label: "Toniator";
+        styles [ "title-4" ]
+      }
+      Gtk.Label window_title {
+        label: "No document";
+        ellipsize: middle;
+        styles [ "caption", "dim-label" ]
+      }
     }
-
     [end]
     Gtk.ToggleButton channel_settings_drawer {
-      label: "_Channel settings";
-      use-underline: true;
+      icon-name: "sidebar-show-symbolic";
       active: true;
-      tooltip-text: "Show or hide channel settings";
-    }
-  }
-
-  Gtk.Revealer main_banner_revealer {
-    transition-type: slide_down;
-
-    Gtk.Box {
-      margin-top: 6;
-      margin-bottom: 6;
-      margin-start: 12;
-      margin-end: 12;
-
-      Gtk.Label main_banner {
-        hexpand: true;
-        xalign: 0;
-        wrap: true;
-      }
-
-      Gtk.Button main_banner_dismiss {
-        icon-name: "window-close-symbolic";
-        tooltip-text: "Dismiss this message";
-        valign: center;
-        styles [ "flat" ]
-        accessibility {
-          label: "Dismiss message";
-        }
-      }
+      tooltip-text: "Show or hide settings";
+      accessibility { label: "Show settings"; }
     }
   }
 
@@ -80,108 +72,170 @@ template $ToniatorMainShell : Gtk.Box {
     shrink-end-child: false;
 
     [start]
-    Gtk.Stack page_stack {
-      transition-type: crossfade;
+    Gtk.Box canvas_column {
+      orientation: vertical;
       hexpand: true;
       vexpand: true;
 
-      Gtk.StackPage {
-        name: "empty";
-        child: Gtk.Box empty_page {
-          orientation: vertical;
-          valign: center;
-          halign: center;
+      Gtk.Stack page_stack {
+        transition-type: crossfade;
+        hexpand: true;
+        vexpand: true;
 
-          Gtk.Label {
-            label: "Create or open a Toniator document.";
-            wrap: true;
-          }
-        };
-      }
-
-      Gtk.StackPage {
-        name: "loading";
-        child: Gtk.Box loading_page {
-          orientation: vertical;
-          valign: center;
-          halign: center;
-
-          Gtk.Label {
-            label: "Working…";
-          }
-        };
-      }
-
-      Gtk.StackPage {
-        name: "error";
-        child: Gtk.Box error_page {
-          orientation: vertical;
-          valign: center;
-          halign: center;
-
-          Gtk.Label error_label {
-            max-width-chars: 70;
-            justify: center;
-            wrap: true;
-          }
-        };
-      }
-
-      Gtk.StackPage {
-        name: "success";
-        child: Gtk.Overlay viewer {
-          hexpand: true;
-          vexpand: true;
-          styles [ "toniator-viewer", "toniator-viewer-rgb" ]
-
-          Gtk.Picture preview_picture {
-            can-shrink: true;
-            content-fit: contain;
+        Gtk.StackPage {
+          name: "empty";
+          child: Gtk.Box {
+            orientation: vertical;
+            spacing: 12;
+            valign: center;
+            halign: center;
+            Gtk.Image { icon-name: "image-x-generic-symbolic"; pixel-size: 48; }
+            Gtk.Label {
+              label: "Create or open artwork to begin.";
+              wrap: true;
+              styles [ "title-3" ]
+            }
+          };
+        }
+        Gtk.StackPage {
+          name: "loading";
+          child: Gtk.Box {
+            orientation: vertical;
+            spacing: 12;
+            valign: center;
+            halign: center;
+            Gtk.Spinner { spinning: true; }
+            Gtk.Label { label: "Working…"; }
+          };
+        }
+        Gtk.StackPage {
+          name: "error";
+          child: Gtk.Box {
+            orientation: vertical;
+            valign: center;
+            halign: center;
+            Gtk.Label error_label {
+              max-width-chars: 70;
+              justify: center;
+              wrap: true;
+            }
+          };
+        }
+        Gtk.StackPage {
+          name: "success";
+          child: Gtk.Overlay viewer {
             hexpand: true;
             vexpand: true;
-          }
-
-          [overlay]
-          Gtk.Box preview_progress {
-            orientation: vertical;
-            spacing: 6;
-            halign: center;
-            valign: center;
-            width-request: 360;
-            styles [ "osd" ]
-
-            Gtk.Label preview_overall_progress_label {
-              label: "Overall preview · 0%";
-              xalign: 0.0;
-              styles [ "caption" ]
-            }
-
-            Gtk.ProgressBar preview_progress_bar {
-              show-text: true;
-              text: "Overall 0%";
-              tooltip-text: "Overall preview progress";
-              accessibility {
-                label: "Overall preview progress";
+            styles [ "toniator-viewer", "toniator-viewer-rgb" ]
+            Gtk.ScrolledWindow viewport_scroll {
+              hscrollbar-policy: automatic;
+              vscrollbar-policy: automatic;
+              Gtk.Picture preview_picture {
+                can-shrink: true;
+                content-fit: contain;
+                hexpand: true;
+                vexpand: true;
               }
             }
-
-            Gtk.Label preview_progress_label {
-              label: "Preparing preview… · 0%";
-              wrap: true;
-              justify: center;
-              styles [ "heading" ]
-            }
-
-            Gtk.ProgressBar preview_stage_progress_bar {
-              show-text: true;
-              text: "Stage 0%";
-              tooltip-text: "Current preview stage progress";
-              accessibility {
-                label: "Preparing preview stage progress";
+            [overlay]
+            Gtk.Box preview_progress {
+              orientation: vertical;
+              spacing: 6;
+              halign: center;
+              valign: center;
+              width-request: 360;
+              styles [ "osd" ]
+              Gtk.Label preview_overall_progress_label {
+                label: "Overall preview · 0%";
+                xalign: 0.0;
+                styles [ "caption" ]
+              }
+              Gtk.ProgressBar preview_progress_bar {
+                show-text: true;
+                text: "Overall 0%";
+                accessibility { label: "Overall preview progress"; }
+              }
+              Gtk.Label preview_progress_label {
+                label: "Preparing preview… · 0%";
+                wrap: true;
+                justify: center;
+                styles [ "heading" ]
+              }
+              Gtk.ProgressBar preview_stage_progress_bar {
+                show-text: true;
+                text: "Stage 0%";
+                accessibility { label: "Preparing preview stage progress"; }
               }
             }
+          };
+        }
+      }
+
+      Gtk.Box viewport_toolbar {
+        spacing: 6;
+        margin-top: 6;
+        margin-bottom: 6;
+        margin-start: 8;
+        margin-end: 8;
+        valign: center;
+        styles [ "toolbar", "toniator-viewport-toolbar" ]
+        Gtk.Button zoom_out_button {
+          icon-name: "zoom-out-symbolic";
+          tooltip-text: "Zoom out";
+          accessibility { label: "Zoom out"; }
+        }
+        Gtk.Label zoom_label {
+          label: "100%";
+          width-chars: 5;
+          justify: center;
+          accessibility { label: "Zoom level"; }
+        }
+        Gtk.Button zoom_in_button {
+          icon-name: "zoom-in-symbolic";
+          tooltip-text: "Zoom in";
+          accessibility { label: "Zoom in"; }
+        }
+        Gtk.ToggleButton fit_button {
+          label: "_Fit";
+          use-underline: true;
+          active: true;
+          tooltip-text: "Fit the artwork in the viewport";
+        }
+        Gtk.Revealer main_banner_revealer {
+          hexpand: true;
+          transition-type: crossfade;
+          Gtk.Box {
+            spacing: 4;
+            Gtk.Image { icon-name: "dialog-warning-symbolic"; }
+            Gtk.Label main_banner {
+              hexpand: true;
+              xalign: 0;
+              ellipsize: end;
+            }
+            Gtk.Button main_banner_dismiss {
+              icon-name: "window-close-symbolic";
+              tooltip-text: "Dismiss this message";
+              styles [ "flat" ]
+              accessibility { label: "Dismiss message"; }
+            }
           }
-        };
+        }
+        Gtk.Box view_switcher {
+          spacing: 0;
+          styles [ "linked" ]
+          Gtk.ToggleButton preview_view_button {
+            label: "_Preview";
+            use-underline: true;
+            active: true;
+            tooltip-text: "Show the rendered pattern preview";
+          }
+          Gtk.ToggleButton source_view_button {
+            label: "_Source";
+            use-underline: true;
+            group: preview_view_button;
+            tooltip-text: "Show the original source artwork";
+          }
+        }
       }
     }
 
@@ -191,72 +245,95 @@ template $ToniatorMainShell : Gtk.Box {
       vscrollbar-policy: automatic;
       min-content-width: 300;
       max-content-width: 420;
-
       Gtk.Box inspector_content {
         orientation: vertical;
-        spacing: 12;
-        margin-top: 12;
+        spacing: 10;
+        margin-top: 10;
         margin-bottom: 12;
-        margin-start: 12;
-        margin-end: 12;
+        margin-start: 10;
+        margin-end: 10;
         valign: start;
         styles [ "toniator-inspector" ]
-
         Gtk.Label inspector_status {
-          label: "Open a source-backed document to inspect channels.";
+          label: "Open artwork to adjust its pattern.";
           xalign: 0;
           wrap: true;
           styles [ "dim-label" ]
         }
 
-        Gtk.Box selection_row {
+        Gtk.Box color_channel_group {
           orientation: vertical;
-          spacing: 6;
-
+          spacing: 8;
+          styles [ "toniator-inspector-group" ]
+          Gtk.Label { label: "Color & Channel"; xalign: 0; styles [ "heading" ] }
           Gtk.Box {
-            orientation: horizontal;
             spacing: 8;
-
             Gtk.Label {
-              label: "Color model";
+              label: "Model";
               xalign: 0;
               hexpand: true;
               mnemonic-widget: model_selector;
             }
-
             Gtk.DropDown model_selector {
-              tooltip-text: "Choose the channel color model";
+              tooltip-text: "Choose RGB, CMYK, or source color with alpha";
             }
           }
-
-          Gtk.Box {
-            orientation: horizontal;
-            spacing: 8;
-
-            Gtk.Label {
-              label: "Channel";
-              xalign: 0;
-              hexpand: true;
-              mnemonic-widget: channel_selector;
-            }
-
-            Gtk.DropDown channel_selector {
-              sensitive: false;
-              tooltip-text: "Choose the channel to adjust";
-            }
+          Gtk.Label { label: "Edit"; xalign: 0; }
+          Gtk.Box channel_segments {
+            spacing: 0;
+            styles [ "linked", "toniator-channel-segments" ]
+            accessibility { label: "Channel to edit"; }
           }
         }
 
-        Gtk.Box inspector_catalog {
+        Gtk.Box pattern_recipe_group {
           orientation: vertical;
-          spacing: 8;
-          valign: start;
+          spacing: 7;
+          styles [ "toniator-inspector-group" ]
+          Gtk.Label { label: "Pattern Recipe"; xalign: 0; styles [ "heading" ] }
+          Gtk.Grid {
+            column-spacing: 8;
+            row-spacing: 3;
+            Gtk.Label { label: "Family"; xalign: 0; layout { column: 0; row: 0; } }
+            Gtk.Label recipe_family { label: "—"; xalign: 1; hexpand: true; ellipsize: end; layout { column: 1; row: 0; } }
+            Gtk.Label { label: "Sites"; xalign: 0; layout { column: 0; row: 1; } }
+            Gtk.Label recipe_sites { label: "—"; xalign: 1; hexpand: true; ellipsize: end; layout { column: 1; row: 1; } }
+            Gtk.Label { label: "Connections"; xalign: 0; layout { column: 0; row: 2; } }
+            Gtk.Label recipe_connections { label: "—"; xalign: 1; hexpand: true; ellipsize: end; layout { column: 1; row: 2; } }
+          }
+          Gtk.Box inspector_catalog { orientation: vertical; spacing: 6; }
         }
 
-        Gtk.Box inspector_descriptors {
+        Gtk.Box appearance_group {
           orientation: vertical;
-          spacing: 8;
-          valign: start;
+          spacing: 7;
+          styles [ "toniator-inspector-group" ]
+          Gtk.Label { label: "Appearance"; xalign: 0; styles [ "heading" ] }
+          Gtk.Box appearance_controls { orientation: vertical; spacing: 7; }
+        }
+        Gtk.Box variation_group {
+          orientation: vertical;
+          spacing: 7;
+          styles [ "toniator-inspector-group" ]
+          Gtk.Label { label: "Variation"; xalign: 0; styles [ "heading" ] }
+          Gtk.Box variation_controls { orientation: vertical; spacing: 7; }
+        }
+        Gtk.Box options_group {
+          orientation: vertical;
+          spacing: 7;
+          styles [ "toniator-inspector-group" ]
+          Gtk.Label { label: "Options"; xalign: 0; styles [ "heading" ] }
+          Gtk.Box options_controls { orientation: vertical; spacing: 7; }
+        }
+        Gtk.Expander advanced_expander {
+          label: "Advanced";
+          expanded: false;
+          styles [ "toniator-inspector-group" ]
+          Gtk.Box advanced_controls {
+            orientation: vertical;
+            spacing: 7;
+            margin-top: 7;
+          }
         }
       }
     }

@@ -43,6 +43,8 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 /// Current-only XDG personal preset and authored-resource library authority.
 pub mod personal_library;
+/// Recent source/project metadata for frontend startup navigation.
+pub mod recent;
 
 pub const CONTAINER_VERSION: u32 = 1;
 pub const DOCUMENT_SCHEMA_VERSION: u32 = 7;

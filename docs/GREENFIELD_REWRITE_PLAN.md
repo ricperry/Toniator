@@ -2240,18 +2240,25 @@ prerequisite on 2026-08-28 and its implementation checkpoint is
 presets, reusable shape storage, and wizard design work remain paused in Stage
 21B.
 
-### Stage 21B — Pattern Wizard and Personal Preset Library
+### Stage 21B — Pattern Wizard, Personal Pattern Library, and Document Presets
 
-Stage 21B is **In progress** as four separately reviewed and accepted gates.
+Stage 21B is **In progress** as five separately reviewed and accepted gates.
 Gate 21B-1 is complete and user-accepted at implementation checkpoint
 `f77998c`; Gate 21B-2 is complete and user-accepted at implementation
 checkpoint `63fd9fb` on 2026-08-28, with its accepted CMYK/SourceColorAlpha
 stabilization at `b67a3483d2a1670e01b29716a1a33df51e10f7a1`. The accepted
 cross-stage CMYK source-fidelity correction is `a2633e1`; the intermittent
 RGB-edit-to-CMYK crash is deliberately deferred until the user supplies a
-reliable reproducer and does not block Gate 21B-3. Gates 21B-3 and 21B-4 remain
-planned, separately gated, and not begun. The exact
-decision-complete contract is
+reliable reproducer and does not block Gate 21B-3. Gate 21B-3 is complete at
+`68ef02e`, user-accepted on 2026-09-01 with acceptance documentation at
+`8cd4a2f`. Gate 21B-4 is Complete and user-accepted on 2026-09-04, together
+with the startup/Recent Files/Close/Exit follow-up; its
+implementation/evidence record is `docs/STAGE_21B_GATE4_IMPLEMENTATION.md`.
+Gate 21B-5 was added by
+user instruction on 2026-09-04 for document-level Presets; it is planned,
+not begun, and requires detailed planning and separate authorization after
+Gate 21B-4 acceptance and checkpointing. The decision-complete contract for
+Gates 21B-1 through 21B-4 and the Gate 21B-5 planning brief are in
 [`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md).
 
 Gate 21B-1 establishes the current-only reusable-resource v1 and library-config
@@ -2279,9 +2286,20 @@ and one Apply publishes one history transition. Gate 21B-3 completes
 capability-driven editing for all
 17 cards, structural reconstruction, ordered outputs, nested Guide/Shape/Motif
 editors, reusable insertion, copy/shared behavior, local history, and focus
-restoration. Gate 21B-4 adds personal management and final persistence,
+restoration. Gate 21B-4 adds personal Pattern management and final persistence,
 filesystem, concurrency, performance, memory, accessibility, keyboard, and UX
-verification.
+verification for that work. Gate 21B-5 adds distinct reusable document-level
+Presets containing document/per-channel settings and potentially different
+Patterns on different channels. Its entry points are **Load preset...** and
+**Save preset** under the main-window **New** drop-down, preserving the
+primary New action. Exact capture, storage, load, and history semantics must
+be settled before implementation. The preferred Preset format reuses the
+`.toniator` document structure without source bytes or source-specific
+references, sharing its serialization authority. Current project I/O requires
+an embedded source; the source-free variant and its identification/versioning
+must be explicitly defined in Gate 21B-5. Current internal Pattern format names and
+versions are unchanged. Stage 21B completes only after all five gates are
+accepted.
 
 Gate 21B-2 verification passed its focused app/engine tests, formatting,
 strict Clippy, architecture, and diff checks, plus independent UX and
@@ -2308,7 +2326,7 @@ descriptor projection owns page/control visibility. ALL preset replacement
 resets pattern-relative channel deltas; ordinary base edits preserve compatible
 deltas; named-channel edits use selected-copy/fresh-resource rules. Built-ins
 remain immutable, and saving a personal preset is separate from applying it.
-Cloud sync, a database, import/export, multiple mounted libraries, recovery
+Cloud sync, a database, Pattern import/export, multiple mounted libraries, recovery
 drafts, Stage 22 media, TSP, wraparound endpoints, aligned curved-guide
 sampling, new topology mechanisms, renderer branches, and compatibility
 adapters remain excluded.

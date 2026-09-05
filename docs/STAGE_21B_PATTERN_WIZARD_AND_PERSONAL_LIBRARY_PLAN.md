@@ -1,17 +1,26 @@
-# Stage 21B — Pattern Wizard and Personal Library
+# Stage 21B — Pattern Wizard, Personal Pattern Library, and Document Presets
 
-Status: **approved decision-complete plan; Gates 21B-1, 21B-2, and 21B-3
-complete and accepted; Gate 21B-4 planned and not begun** (updated
-2026-09-01).
+Status: **approved decision-complete plan for Gates 21B-1 through 21B-4;
+Gates 21B-1 through 21B-4 complete and accepted;
+Gate 21B-5 added to the roadmap, detailed planning pending**
+(updated 2026-09-04).
 This plan is
 subordinate to the protected project specifications, especially the Addendum,
 and does not by itself authorize later gates or publication.
 
 Stage 21B follows the accepted Stage 21A checkpoint and the accepted headless
-Curve Motif prerequisite. It is one product stage with four separately
+Curve Motif prerequisite. It is one product stage with five separately
 reviewed gates, each requiring its own acceptance transition and checkpoint.
 The parent owns those transitions. A gate does not authorize the next gate
 automatically.
+
+Gates 21B-1 through 21B-4 manage structural **Patterns**, reusable recipes
+applicable to All or a named channel. Historical/internal names such as
+`preset_format_version`, preset-v4, and `presets/` remain unchanged. Gate
+21B-5 introduces distinct document-level **Presets**, reusable configurations
+that may contain different Patterns and settings for different channels.
+Neither reusable resource is the actual `.toniator` project. The addition of
+Gate 21B-5 does not expand Gate 21B-4 or authorize either gate to begin.
 
 ## Authority and boundaries
 
@@ -177,7 +186,12 @@ persisted when the geometry already determines the result.
 
 ### Gate 21B-4 — Personal Management and Final Verification
 
-**Planned; not begun.** Before acceptance, perform an in-depth bug hunt across
+**Complete and user-accepted, 2026-09-04.** The resulting behavior, focused
+verification, and review limitations are recorded in
+[`STAGE_21B_GATE4_IMPLEMENTATION.md`](STAGE_21B_GATE4_IMPLEMENTATION.md).
+The user accepted this gate and its startup follow-up; checkpoint details are
+recorded in `ProgressTracker.md`. The fulfilled gate contract follows:
+Before acceptance, perform an in-depth bug hunt across
 the wizard's validity and application flow. In particular, every invalid
 recipe state must explain the cause at the relevant page/control, focus the
 first actionable error, and keep Apply disabled truthfully; an enabled Apply
@@ -195,7 +209,7 @@ a preset-specific branch.
 Then add user-facing save/update, copy, rename, trash,
 undo, configurable-root switching, external refresh, conflict handling,
 thumbnail behavior, warnings, accessibility, and keyboard workflows. Built-ins
-remain immutable. Saving a user preset and applying a pattern remain separate
+remain immutable. Saving a personal Pattern and applying a Pattern remain separate
 decisions.
 
 Run the final persistence, filesystem, concurrency, performance, memory, and
@@ -203,18 +217,77 @@ UX verification, including both immutable source assets at intrinsic
 dimensions, before stopping for acceptance. Final durable documentation is
 updated only from verified implementation state.
 
-Personal preset IDs use `user-<uuid>` and remain stable across rename; file
+Personal Pattern IDs use `user-<uuid>` and remain stable across rename; file
 identity follows the stable ID rather than display text. Names are
 case-insensitively unique within the combined gallery and within each resource
 kind. Duplicate and **Save a Copy** allocate a fresh ID. Delete moves files to
 `.trash`, Undo restores them, and no automatic purge policy is introduced.
-Built-ins offer **Save as New** only. Personal presets offer confirmed **Save
+Built-ins offer **Save as New** only. Personal Patterns offer confirmed **Save
 Changes**, **Save a Copy**, Rename, and Delete; none of those actions implicitly
 applies the pattern. A fingerprint mismatch refuses overwrite and offers
 Reload or Save a Copy. Switching the configured library root activates the new
 root without moving or deleting the old one.
 
-## Product contract
+### Gate 21B-5 — Document-level Presets
+
+**Planned; not begun; detailed planning pending.** Added by user instruction
+on 2026-09-04. Begin only after Gate 21B-4 is accepted and checkpointed and
+the user separately authorizes this gate. Gate 21B-4's final verification
+closes the Pattern Wizard and personal Pattern management work; Stage 21B
+remains open until Gate 21B-5 is also accepted.
+
+Add saving and loading of reusable document-level configurations containing
+document settings, per-channel settings, and heterogeneous Pattern assignments
+(for example, C uses one Pattern while M, Y, and K use different Patterns).
+This is separate from saving a personal Pattern or applying a Pattern to the
+current All/named-channel edit target, and from saving/opening a `.toniator`
+project.
+
+The user's preferred format direction is **the `.toniator` document format
+without a source file**: reuse its authored document, channel, Pattern, and
+embedded authored-resource representation while omitting source bytes and
+source-specific references/manifest metadata. Share serialization and
+validation authority rather than maintain an independently copied document
+schema. Preserve configuration such as source-mapping settings where it is
+reusable without the original image; settle the exact field boundary during
+detailed planning.
+
+Current container-v1/document-v7 I/O requires one embedded source and a
+matching assigned reference, so an archive with that entry simply removed is
+currently invalid. Gate 21B-5 must explicitly define the source-free Preset
+variant, identification/file extension, versioning, and reader/writer
+contracts. This direction does not claim that source-free `.toniator` files
+already work or authorize format changes before the gate begins.
+
+Use the main-window **New** split/dropdown button for the entries
+**Load preset...** and **Save preset**, in that order. Preserve the primary
+New action. This is a user-directed supplement to the current main-window
+mockup, recorded in `docs/ui/REFERENCES.md`; it does not require a separate
+permanent Preset manager panel or turn the Pattern Gallery into one.
+
+Before implementation, settle the exact captured settings and exclusions,
+canvas treatment and source attachment when loading, load destination and
+unsaved-document/history behavior, naming and overwrite workflow, storage
+location and the source-free format details above, resource ownership,
+and validation/error recovery. Reconcile the pending protected-specification
+terminology correction before defining new semantics. Do not assume existing
+Pattern preset-v4 records encode document Presets or rename/migrate those
+records as part of this roadmap addition.
+
+Acceptance must cover save/load round trips preserving distinct per-channel
+Patterns and settings, independence from personal Pattern files, separation
+from Pattern Save/Apply and project Save/Open, cancellation and failed-load
+state preservation, and the settled history behavior. Inspect saved Presets
+to verify that source bytes and source-specific references are absent; verify
+shared document serialization preserves embedded authored resources and that
+ordinary project source-integrity checks still hold. Verify both New-menu
+entries and their dialogs through keyboard and AT-SPI action/readback,
+accessible names/state/focus, screenshots, and logs in the private Sway
+harness. Exercise both immutable sources through the canonical rendering
+pipeline and obtain independent regression and hands-on UX review. Stop at
+Implemented awaiting review; acceptance and checkpointing remain separate.
+
+## Pattern Wizard product contract (Gates 21B-1 through 21B-4)
 
 The wizard is a modal transient private draft. It starts from the current
 dropdown candidate without applying it to the document. **Cancel** discards
@@ -279,13 +352,16 @@ settled RSS growth over either 15% or 32 MiB after 30 open/edit/cancel cycles,
 Curve Motif RSS growth over 15%, or cold-time regression over 25% requires
 investigation rather than an application-authored ceiling.
 
-The following are outside Stage 21B: cloud synchronization, a preset database,
-preset import/export, multiple mounted libraries, recovery drafts, Stage 22
+The following are outside Stage 21B: cloud synchronization, a library database,
+Pattern import/export, multiple mounted libraries, recovery drafts, Stage 22
 media/sequence work, TSP routing, wraparound endpoints, aligned curved-guide
 sampling, new topology mechanisms, renderer-specific branches, compatibility
 adapters, and any unapproved icon or asset adoption. GTK/Blueprint work,
 personal management UI, and reusable closed-shape storage are not retroactively
 part of Gate 21B-1.
+Gate 21B-5's document-Preset save/load is a separate planned capability; the
+Pattern import/export exclusion does not prohibit it. Additional Preset
+management features beyond save/load require separate scope agreement.
 
 ## Acceptance and Git gates
 
@@ -293,8 +369,9 @@ Each gate uses one writer, focused verification, independent review, and a
 parent-owned acceptance transition. Update `ProgressTracker.md` only to the
 verified status: Gate 21B-1 is Complete at `f77998c`; Gate 21B-2 is Complete
 at `63fd9fb`; Gate 21B-3 is Complete at `68ef02e` and user-accepted on
-2026-09-01; Gate 21B-4 remains Planned/not begun; Stage 21B overall remains
-In progress.
+2026-09-01; Gate 21B-4 is Complete and user-accepted on 2026-09-04; Gate 21B-5 remains
+Planned/not begun with detailed planning pending; Stage 21B overall remains
+In progress until all five gates are accepted.
 
 Do not commit, push, publish, or begin the next gate without its explicit
 authorization. At closeout, inspect the exact milestone diff, preserve

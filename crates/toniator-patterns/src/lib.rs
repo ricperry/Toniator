@@ -1577,9 +1577,17 @@ pub fn chain_curve_motif_rows_cancellable(
 
 /// Chains motif rows while reporting completed stable guide rows in output order.
 ///
+/// Straight and authored-curve guide sites retain their complete guide/component identity,
+/// so disconnected paths never acquire an invented joining motif. Each copy uses the existing
+/// adjacent-site chord mapping; curved guides do not introduce a separate deformation model.
 /// The callback observes only completed rows and never changes row geometry,
 /// Rayon scheduling, or the ordered result. It may be called from worker
 /// threads and therefore must be thread-safe.
+///
+/// # Errors
+///
+/// Returns invalid motif, cadence, provenance, allocation, or cancellation diagnostics before
+/// publishing any partial row collection.
 ///
 /// # Panics
 ///
@@ -1608,44 +1616,55 @@ fn chain_curve_motif_rows_with_progress_cancellable(
             "Curve Motif alternate row phase must be finite and strictly between zero and one",
         ));
     }
-    let mut rows = BTreeMap::<GuideInstanceId, Vec<(i64, Point2)>>::new();
+    let mut rows = BTreeMap::<(GuideInstanceId, bool), Vec<(i64, Point2)>>::new();
     for site in sites.sites() {
-        let FamilySiteProvenance::AlongGuide {
-            guide_id, sequence, ..
-        } = site.provenance
-        else {
-            return Err(PatternPipelineError::new(
-                "curve_motif.sites",
-                "Curve Motif requires Along Guides site provenance",
-            ));
+        let row_site = match site.provenance {
+            FamilySiteProvenance::AlongGuide {
+                guide_id, sequence, ..
+            } => Some((guide_id, false, sequence)),
+            FamilySiteProvenance::CurveAlongGuide {
+                location, sequence, ..
+            } => location
+                .path
+                .guide_instance()
+                .map(|guide_id| (guide_id, true, sequence)),
+            _ => None,
         };
-        rows.entry(guide_id)
+        let (guide_id, curved, sequence) = row_site.ok_or_else(|| {
+            PatternPipelineError::new(
+                "curve_motif.sites",
+                "Curve Motif requires sites placed along a guide",
+            )
+        })?;
+        rows.entry((guide_id, curved))
             .or_default()
             .push((sequence, site.position));
     }
-    let row_specs = rows
-        .into_iter()
-        .map(|(guide_id, mut row)| {
-            row.sort_by_key(|(sequence, _)| *sequence);
-            (guide_id, row)
-        })
-        .collect::<Vec<_>>();
+    let mut row_specs = Vec::new();
+    for ((guide_id, curved), mut row) in rows {
+        row.sort_by_key(|(sequence, _)| *sequence);
+        let mut run: Vec<(i64, Point2)> = Vec::new();
+        for site in row {
+            if let Some(previous) = run.last()
+                && site.0.checked_sub(previous.0) != Some(1)
+            {
+                // A curved path may leave the generation envelope and return. Omitted cadence
+                // positions split that path into runs; joining across the gap invents geometry.
+                if !curved || site.0 == previous.0 {
+                    return Err(PatternPipelineError::new(
+                        "curve_motif.sites",
+                        "Curve Motif guide sequences must be unique; straight rows must be consecutive",
+                    ));
+                }
+                row_specs.push((guide_id, std::mem::take(&mut run)));
+            }
+            run.push(site);
+        }
+        row_specs.push((guide_id, run));
+    }
     let motif_segment_count = motif.segments().len();
     let mut total_work = 0_usize;
     for (_, row) in &row_specs {
-        for pair in row.windows(2) {
-            if pair[1]
-                .0
-                .checked_sub(pair[0].0)
-                .filter(|difference| *difference == 1)
-                .is_none()
-            {
-                return Err(PatternPipelineError::new(
-                    "curve_motif.sites",
-                    "Curve Motif Along Guides sequences must be unique and consecutive",
-                ));
-            }
-        }
         let copies = row.len().saturating_sub(1);
         let segment_work = copies.checked_mul(motif_segment_count).ok_or_else(|| {
             PatternPipelineError::new(
