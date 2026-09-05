@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.sbdd.Toniator</id>
+  <name>Toniator</name>
+  <summary>Create halftone and pattern artwork</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <developer id="com.sbdd"><name>Silent But Digital</name></developer>
+  <description>
+    <p>Toniator transforms source images into RGB and CMYK pattern artwork.
+    Explore built-in Patterns, design your own with the Pattern Wizard, and
+    export PNG or SVG artwork.</p>
+    <p>Save portable projects, manage a personal Pattern library, and reopen
+    projects from the startup screen.</p>
+  </description>
+  <launchable type="desktop-id">com.sbdd.Toniator.desktop</launchable>
+  <url type="homepage">https://github.com/ricperry/Toniator</url>
+  <url type="bugtracker">https://github.com/ricperry/Toniator/issues</url>
+  <releases><release version="0.2.0" date="2026-09-04"/></releases>
+  <content_rating type="oars-1.1"/>
+</component>

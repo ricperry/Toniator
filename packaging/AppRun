@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+APPDIR=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
+export APPDIR
+export PATH="$APPDIR/usr/bin:$PATH"
+export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export GSETTINGS_SCHEMA_DIR="$APPDIR/usr/share/glib-2.0/schemas"
+# Relocate image-loader definitions without changing the user's XDG data home.
+toniator_loader_root=$(mktemp -d "${TMPDIR:-/tmp}/toniator-loaders.XXXXXXXX")
+trap 'rm -rf -- "$toniator_loader_root"' EXIT HUP INT TERM
+mkdir -p "$toniator_loader_root/glycin-loaders/2+/conf.d"
+for toniator_config in "$APPDIR"/usr/share/glycin-loaders/2+/conf.d/*.conf; do
+    sed "s|Exec=/usr/|Exec=$APPDIR/usr/|g" "$toniator_config" > "$toniator_loader_root/glycin-loaders/2+/conf.d/$(basename "$toniator_config")"
+done
+export XDG_DATA_DIRS="$toniator_loader_root:$APPDIR/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+if [ "${1:-}" = "--cli" ]; then
+    shift
+    "$APPDIR/usr/bin/toniator" "$@"
+else
+    "$APPDIR/usr/bin/toniator-app" "$@"
+fi

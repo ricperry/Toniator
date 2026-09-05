@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Toniator
+Comment=Create halftone and pattern artwork
+Exec=toniator-app %f
+Icon=com.sbdd.Toniator
+Terminal=false
+Categories=Graphics;2DGraphics;
+Keywords=halftone;pattern;CMYK;RGB;
+StartupNotify=true
+StartupWMClass=com.sbdd.Toniator

@@ -932,6 +932,26 @@ limits are recorded in `docs/STARTUP_SCREEN_IMPLEMENTATION.md`. This follow-up
 and Gate 21B-4 were accepted together; Gate 21B-5 has not begun. The requested
 `Test Pattern - Diagonal Dots` is saved in the user's default personal library;
 Save as New, reopened confirmed update, and listing after restart are verified.
+
+On 2026-09-04, after pushing the accepted checkpoints, the user authorized
+AppImage and Flatpak packaging of release 0.2.0. This follow-up is
+**Implemented; GitHub publication authorized**: local x86_64 bundles, reusable packaging
+scripts/desktop metadata with ID `com.sbdd.Toniator`, and Settings-portal theme
+inheritance for packaged apps. Both bundles pass isolated launch/file/save/close
+workflow checks and produce matching intrinsic PNG/SVG exports. The Flatpak
+bundle installs into a private test installation; AppImage extraction also works.
+Build/install instructions, provenance, and runtime/portal verification limits
+are in `packaging/README.md` and `dist/build-info.json`. The user subsequently
+requested GitHub publication of both packages and a reader-focused README with
+build instructions and actual output examples. The release target is
+[`v0.2.0`](https://github.com/ricperry/Toniator/releases/tag/v0.2.0), marked as a
+pre-release, with notes in `docs/releases/v0.2.0.md` and repeatable publication
+instructions in `docs/RELEASING.md`. Gate 21B-5 has not begun.
+The subsequent author-supplied icon follow-up replaces the placeholder in both
+bundles with `assets/appicon.svg` and `assets/appicon.png`; their packaged bytes
+and refreshed checksums are verified, with `assets/ToniatorIcon.svg` preserved
+as the editable source.
+
 The user then accepted a Gate 21B-2 CMYK/SourceColorAlpha stabilization at
 commit `b67a3483d2a1670e01b29716a1a33df51e10f7a1`. Ordinary development builds
 now use optimization level 2 while retaining development assertions and debug

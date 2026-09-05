@@ -1,667 +1,178 @@
+<img src="assets/appicon.png" alt="Toniator icon" width="112" />
+
 # Toniator
 
-Toniator is a GPL-3.0-only native Linux creative tool in a greenfield rewrite.
-The current first-party release is version `0.2.0`; `toniator --version`
-reports `toniator 0.2.0`.
-The accepted Stage 9 headless authoritative multi-channel render path is
-checkpointed at `67e831a`, after the Stage 1 foundation, authoritative document
-boundary, deterministic guide family, source sampling, rendering, scheduling,
-cache, channel-model, compositor, and CLI integration stages. It provides
-authoritative RGB, CMYK, and SourceColorAlpha PNG/SVG rendering over both
-baseline sources, with native review artifacts under `target/validation/`.
+**Turn images into halftone artwork made from dots, lines, curves, and shapes.**
 
-Stage 10's accepted view-only GTK/libadwaita preview is checkpointed at
-`980af50` and opens with
-`toniator-app [PATH]` (zero or one local supported still-image path) or its Open
-action. Decoded raster dimensions and SVG intrinsic/`viewBox` dimensions define the
-authoritative canvas and aspect; the app has no canvas override. A visible
-selector switches among RGB, CMYK, and SourceColorAlpha evaluation. Evaluation
-is asynchronous, and only source loads and completions accepted for the
-current document revision are presented, so stale work cannot replace the
-preview.
+Toniator is a native Linux application for artists and designers who want to
+explore the patterns behind an image. Open artwork, choose a Pattern, adjust its
+scale and appearance, and export a PNG or editable SVG. Work in RGB, CMYK, or
+source colors, with independent Pattern settings for each color channel.
 
-The preview rerasterizes the unchanged canonical scene to the fitted viewport,
-clips to the transformed intrinsic canvas so guard geometry cannot leak into
-letterbox margins, and presents the exact straight raw RGBA raster without
-PNG encoding, premultiplication, flattening, checkerboarding, or channel
-recomposition. Persistence, command-bound editing, and later app/CLI export
-controls remain planned.
+Built with Rust and GTK4, Toniator includes a visual Pattern Wizard, a personal
+Pattern library, and a headless command-line renderer. It is free software under
+the [GPL-3.0-only license](LICENSE).
 
-Stage 11 headless undo and redo are complete at checkpoint `341ad8e` through
-`DocumentHistory`, an accepted wrapper around `DocumentSession` that stores
-exact validated document snapshots and preserves monotonic revision authority
-with stale-result rejection after apply, undo, and redo. GTK undo controls and
-history persistence remain planned.
+**Current version: 0.2.0 — pre-release, under active development.**
+[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.2.0)
+or [browse known issues](ISSUES.md).
 
-Stage 12 portable `.toniator` persistence is complete at checkpoint `dd7ca56`.
-The headless `toniator-io` boundary writes and loads deterministic version-1
-ZIP containers containing the complete supported document and the exact
-embedded source bytes. Canonical v1 saves contain exactly
-`document.json` and one embedded source entry in normalized, uncompressed
-Stored form; the reader also tolerates Deflated required files and one exact
-empty `sources/` directory marker from a benign manual repack. Other topology
-or compression remains invalid. The CLI supports `document create`, container
-`validate -i`, and container `render -i`; direct-source behavior remains
-available. Loading reconstructs a fresh document/history at revision zero,
-and history, dirty state, and filesystem source paths are not serialized.
+## Examples
 
-Stage 13A GTK document lifecycle is complete at checkpoint `36c7b44`.
+The same [source artwork](assets/raster-sample.png), rendered as circular marks
+in two color modes. These are actual 1024×1024 PNG exports from Toniator 0.2.0,
+with no image editing afterward. Open either image to inspect it at full size.
 
-The current app opens to a startup screen with a single **Start New Project**
-button for opening artwork or an existing project, plus persistent Recent Files.
-Successful opens and saves populate that list; **Clear List** clears only history.
-**Close** (Ctrl+W) returns to startup. **Exit** (Ctrl+Q) and the window X quit.
-Unsaved documents first offer Save, Discard, or Cancel; cancelling Save As also
-keeps the document open. The startup screen follows the system light/dark theme.
-See [startup implementation and verification](docs/STARTUP_SCREEN_IMPLEMENTATION.md).
+| RGB — colored marks on black | CMYK — overlapping ink colors on white |
+| --- | --- |
+| ![RGB circular halftone artwork](docs/examples/rgb-dots.png) | ![CMYK circular halftone artwork](docs/examples/cmyk-dots.png) |
 
-`toniator-app [PATH]` accepts zero or one supported still image or `.toniator`
-path at startup. New creates an untitled, unsourced document; Open accepts
-direct PNG, SVG, JPEG/JPG, WebP, BMP, TIFF, OpenEXR, AVIF, or a `.toniator`
-container; Save and Save As write `.toniator`
-documents (direct artwork uses Save As); and Close plus window close share a
-Cancel/Discard/Save confirmation when work is unsaved. The app-owned workspace
-keeps the headless history and immutable source bundle, while dirty state
-compares the exact current document plus source-bundle content and identity
-with the accepted savepoint rather than revision numbers, so undoing to saved
-content and semantic no-ops are clean. Atomic save failures preserve the
-current content, history, location, title, and dirty state; successful saves update the
-location, title, and savepoint only after IO succeeds. Load/save errors and
-generic migration information are reported in-window. GTK delegates default
-document construction to the headless factory and remains ignorant of pattern
-internals; at this checkpoint, channel/pattern controls and GTK undo controls
-remained out of scope.
-The separately accepted app-only reentrancy correction at `02bc2c9` preserves
-this lifecycle behavior while preventing nested model-selector and window-close
-callbacks; it is not part of the Stage 14 schema checkpoint.
+Toniator also turns vector artwork into new editable geometry:
+[source SVG](assets/vector-sample.svg) → [exported SVG](docs/examples/vector-dots.svg).
+See [example settings and reproduction commands](docs/examples/README.md).
 
-Stage 13B is complete at checkpoint `2a773a3`. Direct-source `toniator render`
-uses decoded PNG dimensions or resolved SVG intrinsic/`viewBox` dimensions by
-default; an explicit `--canvas` remains a direct-source-only override, while
-containers keep their stored canvas. PNG output accepts `--antialiasing
-on|off` (default `on`); `off` is intentionally hard-edged, and SVG output is
-unaffected.
+## Download and run
 
-The GTK Export action writes native PNG or editable SVG. PNG options are
-consumer-only transparent/black/white backing, antialiasing, and an optional
-`WIDTHxHEIGHT` output target. If backing is not explicitly chosen, RGB defaults
-to black, CMYK to white, and SourceColorAlpha to transparent. SVG remains
-transparent semantic vector output.
-Output targets are checked against the renderer's allocation safety limit.
-Exports rerasterize the unchanged canonical scene and do not resize the
-authoritative document or preview canvas, or mutate document, source,
-history, revision, savepoint, location, title, dirty state, or preview state.
+Download **one** of the x86_64 packages from the
+[v0.2.0 release](https://github.com/ricperry/Toniator/releases/tag/v0.2.0).
+Both include the graphical app and CLI, with application ID `com.sbdd.Toniator`.
 
-The accepted native app-test outputs use source-native aspect and resolution
-(1024×1024 raster, 900×620 vector). This corrected the earlier tiny-output
-moire diagnostic; AA-off edge stepping remains the intentional hard-edge
-consumer policy. The checkpoint records automated GTK snapshot coverage and
-native artifact inspection; it does not claim exhaustive manual dialog,
-accessibility, or interactive GTK acceptance.
+### AppImage
 
-Stage 14 is complete at implementation checkpoint `88fc6dd`. The headless
-domain now owns one-root typed pattern definitions with document-wide stable
-definition, mechanism, and output-layer IDs and deterministic ordering.
-`DocumentHistory` is the sole authority for atomic definition add, duplicate,
-retarget, unreferenced removal, selected-channel copy-on-edit, and explicit
-shared-definition edits, including exact stale-base, invalidation,
-affected-channel, undo, and redo behavior. The immutable private v1 parser is
-unchanged: container layout remains v1, loading dispatches through the v1 DTO
-and deterministic v1-to-v2 migration, and current or migrated documents save
-as schema v2 only. Embedded source bytes remain exact, and the supported typed
-configuration preserves accepted RGB, CMYK, and SourceColorAlpha geometry,
-raster, PNG, and editable SVG parity across both frozen v1 containers and
-equivalent v2 documents. Native artifacts were inspected as raw RGBA and
-editable SVG; this does not claim exhaustive manual GTK dialog,
-accessibility, or interactive acceptance.
-
-Stage 15 generic pattern evaluation is complete at implementation checkpoint
-`711058b`. Typed capability validation now resolves the supported family,
-explicit modulation, ordered output realization, canonical geometry, and
-final-consumer clipping without renderer-owned pattern dispatch. Stable
-definition, mechanism, and output-layer provenance is retained; family,
-realization, source/decode, scene, and raster identities now invalidate and
-reuse at their respective boundaries. Structural planning is bounded by
-candidate limits and cancellation, unsupported combinations fail before
-partial output, and scheduler cache publication remains transactional for
-accepted current work. The supported straight-guide/intersection/circular
-configuration preserves exact geometry and RGB/CMYK/SourceColorAlpha output
-parity. Frozen v1 containers migrated, saved as v2, reopened, and rendered
-with byte-identical PNG/SVG results across all three models; v1/v2 persistence,
-`DocumentHistory`, renderer, app, and GTK lifecycle behavior remain unchanged.
-Native artifacts and bounded app launches are liveness/review evidence, not
-exhaustive manual visual, interactive, or accessibility acceptance. Stage 16A
-was provisionally accepted on 2026-08-09 and is implemented at checkpoint
-`ccec466`; Stage 16B is complete at checkpoint `77bad7c`, and Stage 17 is
-complete at checkpoint `e777270`.
-
-Stage 16A generalizes the typed straight-guide family through the same generic
-headless pipeline. A definition may contain one to four ordered straight-guide
-dimensions with document-wide stable IDs, independent finite baseline angles,
-phase and repetition state, and the shared channel transform. Explicit
-intersection products evaluate selected dimensions, deterministically merge
-coincident multiway intersections, and retain every contributing guide. Along-
-guide products use regular arc-length sampling over an explicit dimension
-selection and retain stable guide, sequence, absolute/local arc-position, and
-Canvas/Guard provenance. Both products are typed, addressable mechanisms; no
-consumer reconstructs guides or sites.
-
-Typed circle mark prototypes and fixed or contributing-guide orientation rules
-are validated as part of realization identity without renderer pattern dispatch.
-Analytical transformed coverage, guard support, checked candidate limits,
-cancellation, transactional scheduling, and family/realization/scene/raster
-cache boundaries remain generic. The accepted two-guide/intersection/circle
-configuration retains its Stage 15 geometry and RGB/CMYK/SourceColorAlpha
-parity. The private immutable v1 parser and migration remain unchanged; new
-definitions use only additive current-v2 DTO variants and deterministically
-save and reopen without evaluator or cache state.
-
-Stage 16B adds a typed `RandomSites` family through the same headless path. Its
-ordered chain combines raw-uniform, genuinely even, or clustered base
-processes; uniform or artwork-weighted density modulation (Linear or
-Smoothstep); and minimum-center or visible-mark exclusion before circular mark
-realization. A deterministic xorshift32 stream consumes each authored `u32`
-seed, and accepted sites retain stable candidate/accepted ordinals with
-Canvas/Guard provenance. Diagnostics report requested versus achieved sites,
-candidate/rejection counts, and scope counts under bounded candidate,
-neighbor-work, and cancellation policies.
-
-Source identity is intentionally narrow: only artwork-weighted structure uses
-decoded content and pixel identity; source-independent random families remain
-source-free, while logical source references stay at decoder lookup. New
-families use additive current-v2 persistence variants while the immutable v1
-parser/migration and existing v2 forms remain preserved. Random variants reuse
-the shared canonical geometry, clipping, preview, PNG, and SVG output pipeline.
-High-density natural-resolution validation covers the 1024×1024 PNG and
-900×620 SVG baselines, including raw/native artifact and save/reopen parity.
-Automated checks, raw artifact inspection, CLI parity, and bounded app launches
-are evidence only; no separate manual visual, interactive, or accessibility
-acceptance is claimed.
-
-Stage 17 headless editing authority is complete at checkpoint `e777270`.
-`DocumentHistory` accepts typed commands for supported channel properties and
-structural edits, validates each transition atomically, reports deterministic
-affected channels, and returns the earliest applicable invalidation level:
-Presentation, Realization, Family, Source, or ChannelTopology. Schema-derived
-read-only descriptors expose stable typed field IDs, value kinds, choices,
-bounds, units, dependencies, support, and invalidation metadata without owning
-values, validation, serialization, or UI behavior. The generic
-`toniator capabilities [--input PATH]` command emits those descriptors in
-deterministic order. Stable-ID allocation, copy-on-edit and explicit shared
-editing, undo/redo, persistence/CLI parity, cache reuse, and restored canonical
-render output are covered by the accepted headless tests. GTK channel controls
-are implemented in the descriptor-driven Stage 18 inspector below.
-
-Stage 17A and Stage 18 are complete at checkpoint `2a85252`. Stage 17A adds
-immutable transient compound-variant drafts for random character,
-density-modulation, exclusion-policy, and guided-orientation changes. Drafts
-derive complete typed payloads from domain contracts, require visible explicit
-confirmation, finalize only existing typed edits, and remain outside descriptors,
-document/history state, persistence, cache/evaluator inputs, and frontend state.
-
-Stage 18 adds a descriptor-driven selected-channel GTK inspector. It reads
-current values through a separate immutable typed reader, selects and falls back
-by stable channel ID, renders generic controls with progressive disclosure, and
-routes selected copy-on-edit or deliberate shared editing through
-`DocumentHistory`. Compound transitions show their domain draft before
-confirmation; invalid, rejected, and semantic no-op drafts preserve the draft,
-status, document/history state, and last-successful preview. Selection, drafts,
-disclosure, status, and focus remain runtime-only. Existing lifecycle,
-v1/current-v2 persistence, and canonical preview/PNG/SVG output behavior are
-preserved, including guarded asynchronous preview updates.
-
-Automated and static checks, raw native output inspection, and bounded app
-evidence do not claim actual GNOME/Wayland manual visual, keyboard/focus, or
-assistive-technology acceptance; that review remains outstanding.
-
-Stage 19A is complete at implementation checkpoint `9919d85`. The headless
-preset registry is version 1, with standalone serialized records using
-`preset_format_version: 1`. Its stable bundled order is
-`even-random-circles` followed by `straight-grid-circles`; IDs, names,
-categories, descriptions, and thumbnails are metadata only and never enter
-document evaluation, cache identity, or renderer dispatch. Applying a record
-reconstructs an ordinary typed pattern definition through the existing typed
-command and Stage 17A draft authority. Selected-channel application creates an
-independent document-owned definition; explicit shared replacement first
-discloses the ordered affected channels and then requires confirmation against
-that scope. The registry does not add GTK preset controls.
-
-Every bundled record is serialized and reloaded, reconstructed independently,
-and checked for canonical PNG/SVG parity at the natural 1024×1024 raster and
-900×620 SVG dimensions. The strengthened RGB-independence evidence applies
-different preset definitions to independent channels, verifies stable channel
-and definition identities, proves an isolated red edit leaves green/blue
-definitions, identities, isolated PNG bytes, and visible geometry unchanged,
-and records the modeled SVG document-identity metadata caveat. Document schema v2,
-`.toniator` container v1, and the immutable v1 parser/migration remain
-unchanged; current and migrated documents continue to save as schema v2.
-The accepted channel-selector correction is included in `9919d85`: it uses a
-persistent `StringList`, `splice`, deferred rebuild, and invalid-position
-rejection. This is a bounded GTK selector correction, not GTK preset UI.
-
-Stage 19B is complete at implementation checkpoint `b0b84e4`. It supersedes the
-first descriptor-driven Pattern Editor after artist-usability review found that
-raw artwork could not apply Random or Grid patterns, edits changed the main
-document immediately, Blueprint was only an unused probe, and engine
-terminology dominated the workflow. The remediation uses the actual
-Blueprint/GResource composition, an adaptive artist-facing channel editor with
-immediate bundled Even Random Circles and Straight Grid Circles application,
-visible Undo/Redo, and a separate private-draft Pattern Editor over the accepted
-headless command/history/scheduler and canonical preview, PNG, and SVG paths.
-`Save as Preset...` remains disabled; preset authoring, library management, and
-the remaining Stage 20F+ mechanisms remain planned.
-
-Stage-owned validation under
-`target/validation/stage-19b-gui-remediation/` includes private Sway/AT-SPI
-layout and selector evidence, focused private-draft transition tests, and
-direct persistence/canonical-output witnesses for both immutable inputs. These
-results do not claim manual GNOME Shell/Mutter or exhaustive usability
-acceptance: portal dialogs and a private-session keyring surface were external,
-and injected WayVNC keyboard/pointer actions did not reach GTK. The user
-accepted the implementation checkpoint; this evidence boundary remains in
-force.
-
-Stage 20A is complete at implementation checkpoint `b7fbd81`. The headless
-geometry/pattern interchange now publishes `FamilySiteSet` as the truthful,
-deterministic derived-site authority for typed family results, and
-`TypedFamilyOutput` is an opaque result carrying actual generalized,
-along-guide, and random provenance. A private circle compatibility adapter
-retains the accepted canonical circle IDs and contributor bytes without
-publishing fabricated structural output. Schema, persistence, cache keys,
-canonical circle/render behavior, and GTK behavior are unchanged. Focused
-complete-document checks cover cache/output identity and the immutable PNG at
-1024×1024 plus structural/live-text SVG evidence at 900×620; read-only review
-passed. The checkpoint is headless-only and claims no GTK evidence.
-
-Stage 20B is complete in the single Stage 20B acceptance checkpoint. Its
-headless geometry boundary provides finite line/polyline and cubic Bézier path
-construction, deterministic evaluation, bounds, arc-length lookup,
-intersections, and ordered clipping without adding document schema,
-persistence, rendering, export, CLI, GTK, or canvas-created topology. The
-checkpoint includes the authorized current-format real-world fixture
-`assets/HolidayMugs_2024_2025.toniator`, whose SHA-256 is
-`717fd7e03cba2c92d2730db05028c39b7a8e8de8e0bcc7054abcb3c56d5e5947`.
-
-Stage 20C is complete in its single named acceptance checkpoint. Its bounded
-headless domain/IO boundary adds document-owned authored open paths and closed
-shapes, authoritative add/duplicate/replace/remove commands, descriptors,
-history, deterministic current-v2 persistence, and exact conversion to Stage
-20B construction geometry. The checkpoint's direct parent is the Stage 20B
-checkpoint `08d970a`; the checkpoint is intentionally named rather than
-self-referenced by a hash. It adds no consumer, evaluator, cache,
-canonical-output, renderer/export, CLI, GTK, preset, schema-version, or later
-stage behavior.
-
-Stage 20D is complete in the Stage 20D acceptance checkpoint. Its headless
-boundary adds authored-open-path and circular-arc guide prototypes, bounded
-`Single` and `TransformStack` repetition, baseline/phase/stack transforms,
-deterministic conservative coverage, existing guide-site product consumption,
-document-aware identity/invalidation, transactional cancellation/cache
-behavior, and deterministic current-v2 persistence. The checkpoint is
-intentionally named rather than self-referenced by a hash. A narrow
-post-review `toniator-app` compilation correction adds presentation labels for
-the new typed guide fields, choices, and authored references only; it does not
-add Stage 20D editing UI or move authority into the frontend. Private
-Sway/AT-SPI evidence is automated only and does not claim manual GNOME/Mutter
-acceptance. Stage 20E1 is complete in the Stage 20E1 acceptance checkpoint.
-
-Stage 20E1 replaces the temporary absolute mark-size/support-capability model
-with per-site nominal cell bases, normalized `0.0..=2.0` fill, derived
-family-aware coverage, and synchronized existing GUI/CLI controls (`Minimum
-fill`, `Maximum fill`, and `Rotation offset`). At the Stage 20E1 checkpoint,
-documents used schema v3 only and presets used format v2 only; obsolete schemas
-were rejected rather than migrated. The independent repair re-review is PASS.
-The later accepted Stage 20N transition supersedes those checkpoint-era current
-formats with schema v5 and preset v3.
-
-Stage 20E2 is complete at implementation checkpoint
-`0c6b6a2e268f9306835038be747352a0cd64044c`. It realizes document-owned authored
-closed shapes as ordinary family-site marks with exact normalized line/cubic
-geometry, Fixed/Tangent/Normal orientation plus channel rotation, explicit
-even-odd fill, shared preview/PNG/SVG canonical consumers, bounded cancellable
-path work, and complete realization/cache/scene identity. At that checkpoint,
-document-v3 and preset-v2 persistence remained additive without obsolete
-decoders or migration; Stage 20N later supersedes those formats with v5/v3.
-Focused verification, both immutable intrinsic source-artwork
-witnesses, private Sway app consumption, independent repair re-review, and the
-final zero-alpha engine-to-render review pass. Shape authoring and later Stage
-20F+ mechanisms remain separately gated.
-
-Stages 20F–20I are accepted foundations: provisional private-draft guide/shape
-resource editing, document-base effective pattern authority with channel
-deltas, read-only capability projection, and canonical guide paths with
-compact variable-width filled strokes. Those stages retain headless domain and
-geometry authority; their mechanical GTK exposure is not the final Pattern
-Wizard.
-
-Stage 20J is complete at implementation checkpoint
-`2edbb8659a82106ce8de904ef1ce9155e3b4d777`. It adds persisted absolute-gap
-`NormalOffset` guide repetition backed by one reusable geometry-owned compact
-line/cubic centerline offset service, deterministic crossing cleanup and
-component identity, Stage 20I outline reuse, and additive current-v4
-persistence. Intrinsic raster/vector, compact cubic, divergent Holiday,
-Inkscape, and private Sway/AT-SPI witnesses passed. Automated wlroots evidence
-is not manual GNOME/Mutter review. The Pattern Wizard remains separately
-gated. This is retained checkpoint terminology only: current `NormalOffset`
-means positive parallel-centerline spacing and is not region absolute-gap or
-negative-space computation.
-
-Stage 20K is **Complete at implementation checkpoint
-`f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`** under
-[`STAGE_20K_PARAMETRIC_CURVES_PLAN.md`](docs/STAGE_20K_PARAMETRIC_CURVES_PLAN.md).
-It adds the accepted headless finite round/square parametric-curve family,
-raw canonical curve paths or equal-arc curve sites, reusable repetition,
-current schema-v4 intent-only persistence, and canonical PNG/SVG output. The
-verified intrinsic evidence uses five full turns with artboard-derived pitch
-for both immutable inputs; all eight native PNG outputs and all eight
-Inkscape-rendered SVG outputs were inspected directly. Bounded adaptive
-five-point Gauss-Legendre arc-length measurement and row-active outline
-filtering keep the complete eight-artifact matrix within the existing limits
-without changing geometry ownership or final-consumer clipping. The user
-accepted Stage 20K on 2026-08-22; publication remains separate.
-
-Stage 20L is complete at implementation checkpoint
-`b41fa3fcf2e1089ea422ba18524c2c4a26f568e8`. It adds the headless
-deterministic, mechanism-neutral derived site-adjacency boundary over eligible
-`FamilySiteSet` outputs, including guard-inclusive evaluation, bounded
-cancellation, ordered graph identity, and failure-atomic engine derivation. It
-adds no persisted connection intent, schema or preset field, renderer path,
-CLI/GTK behavior, or connection-program selection. The user accepted Stage
-20L on 2026-08-23; publication remains separate.
-
-Stage 20M is complete at implementation checkpoint
-`33f1bde3be9afdc3fb88f479c4ee7ec52b80114a`. It adds deterministic positive
-nearest/random/tree connection paths and conventional two-/three-guide wall
-mazes over the accepted adjacency and straight-grid face/dual authority. Grid
-prototypes use the geometric canvas center as local `(0, 0)`; its checkpoint-era
-current-v4 and preset-v2 persistence stored authored intent only, with normalized
-`0.0..=2.0` response. The accepted scope is headless: GTK and renderer-side
-topology repair remain out of scope. The user accepted Stage 20M on 2026-08-24;
-publication remains separate.
-
-Stage 20N is complete at implementation checkpoint
-`b8701686042a69fcd1ac68a4038adbad4c0ccdc9`. It establishes ordered keyed
-per-output settings and deltas, explicit output-bound realization/cache units,
-maximum-support family aggregation, canonical-region identity/normalization
-and validation, and ordered render-output layers with solid nonzero region
-fills and final canvas clipping. Schema v5 documents and preset v3 recipes
-persist authored bundles/settings only; derived effective values, regions,
-diagnostics, limits, caches, and scheduler state are absent. The deliberate
-one-output authoring/validation gate remains in force, so this foundation does
-not provide concrete Voronoi, guide-face, region-treatment, or heterogeneous
-composite output. Focused tests, strict checks, architecture validation, raw
-intrinsic PNG/SVG and canonical-region artifacts, and independent correction
-re-review passed; native evidence is recorded locally under
-`target/validation/stage20n/intrinsic/`.
-No GTK/Wayland run was required. The accepted
-[Stages 20N–20S headless completion roadmap](docs/STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md)
-moves all remaining pattern-authoring GTK work to Stage 21, all headless
-frame/media/sequence/simple-transition work to Stage 22, and temporal GTK to
-Stage 23. Every future stage remains separately gated.
-
-Stage 20O is complete at implementation checkpoint
-`7ab97f01ec372ab1e6201b3913742476a1511c02`. Its accepted headless authority
-realizes ordinary Voronoi regions from eligible `FamilySiteSet` products,
-including along-guide sites and `AlongParametricCurveSites`, while rejecting
-direct raw `ParametricPaths`. Exact duplicates co-own a region; the private
-Spade adapter remains geometry-owned. Schema-v5 documents and preset-v3
-recipes persist authored intent only. Regions are fixed solid Full fills with
-no channel-specific treatment, and renderers apply only the final canvas clip.
-Stage 20P is complete at implementation checkpoint
-`cd531eb65dd2e161e62f355905ad936b8c1ca3c4`. Its accepted headless authority
-derives deterministic complete bounded faces from two or three selected
-straight or authored-open guide dimensions through the production family
-evaluator, shared centered document origin, and equal physical spacing. The
-phase-aligned 0/60/120 witness produces three-line equilateral faces. Schema-v5
-documents and preset-v3 recipes persist authored intent only; Guide Faces use
-fixed solid Full regions and final canvas clipping. Existing generic
-one-through-four guide support remains unchanged; Stage 20P adds no four-guide
-Guide Faces behavior or evidence. Direct raw `ParametricPaths` remain
-Guide-Faces-ineligible, while typed parametric site/Voronoi mechanisms remain
-valid. Stage 20R is now complete; at that historical checkpoint, Stage 20S
-remained Planned and separately gated.
-
-Stage 20Q is complete at implementation checkpoint
-`071f3604098c0660a876fbe30050a64223fe41b3`. It adds headless fill-only
-`Full`, `Scale`, and `ConstantGap` realization for accepted ordinary Voronoi
-and Guide Face regions, ReferencePoint and AreaAverage source sampling,
-sampled per-region paint, bounded geometry/cache orchestration, and canonical
-PNG/SVG rendering with final clipping only. Positive ConstantGap shrinks and
-negative ConstantGap grows; convex outward growth uses subdivided smooth cubic
-round joins, while inward shrink uses tangent intersection and
-crossing/coincident-branch dissolution. Schema-v5/preset-v3 persistence stores
-authored intent only, and the headless-only boundary remains in force. The
-three-guide evidence uses positive inward gap and
-triangular line rings; the authored-cubic outward witness uses fixed `-40` gap
-for 20-unit outward edge growth and 40-unit neighbor overlap with smooth joins.
-Collapse evidence is intentionally transparent. Sparse authored-cubic coverage
-reflects six complete bounded faces, not raster resolution. The user reaccepted
-Stage 20Q on 2026-08-26; publication remains separate. This historical
-Full/ConstantGap account is superseded for current authority by Stage 20S
-normalized positive-only Scale/UniformOffset fill, with no absolute region gap
-or negative-space computation.
-
-Stage 20R is complete at implementation checkpoint
-`458c9a981dd349999240a18052e055a71c7b6c3c`. It lifts the one-output gate and
-adds ordered heterogeneous marks, paths, connections, maze walls, and treated
-regions over one family, with authored painter order separated from a
-deterministic site-use dependency DAG. `All`, `SitesUsedBy`, and `SitesUnusedBy`
-filters require compatible site mechanisms; derived usage is computed before
-final clipping, and structural paths/Guide Faces publish empty usage. Current
-schema v5/preset v3 persist authored layers, filters, settings, and deltas only.
-Per-output cache identity, request-wide composite limits, atomic cancellation
-and stale-publication handling, canonical PNG/SVG consumption, and channel-wide
-paint/opacity are headless authorities. Connections, maze walls, and sampled
-regions are kept in separate visual witnesses; a cross-channel witness covers
-connections in one channel and regions in another. No GTK workflow, renderer
-topology repair, compatibility adapter, or Stage 20S work is included. The
-user accepted Stage 20R on 2026-08-26; publication remains separate.
-
-Stage 20S is complete at implementation checkpoint
-`55651dee7c744c2aa207924bf0dbb7737609942d`. The user accepted the headless
-capability and gallery-recipe completion on 2026-08-26 after independent review
-and re-review, focused verification, verified evidence, and parent intrinsic
-RGB/alpha inspection. It provides typed capability/descriptors, strict nested
-preset-v3 DTO rejection, a 16-card registry after retiring
-`regions-plus-marks`, normalized positive-only Scale/UniformOffset fill in
-`0.0..=2.0` with zero-region omission, and no negative-space or absolute region
-gap. Ordinary evidence uses matching R/G/B source components and
-pairwise-distinct typed seeds, while CoverCanvas/variable-width spiral and
-centered-local curved-guide corrections remain headless. No GTK workflow or
-compatibility adapter was added. Project documentation remains architecture
-authority; `scripts/validate_architecture.sh` is mechanical validation only,
-and `semantic-map check` is unavailable because Toniator has no corresponding
-architecture schema. The later integrated Stage 20 scrub is recorded below.
-
-The integrated final Stage 20 scrub is complete at implementation checkpoint
-`dc7e988200c5be4d22791ca1d231336caac19a24` (accepted 2026-08-27). Its [final architecture and concurrency
-record](docs/STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md) documents the
-single headless authority path, current-v5 persistence, output-scoped caches,
-request-wide limits, evaluation-local performance metrics, deterministic
-Rayon work inside one coordinated evaluation, and the intentionally serial
-global-topology/publication boundaries. The bundled registry remains exactly
-16 cards; `regions-plus-marks` remains retired and direct mixed-output evidence
-is not a recipe. The GTK4/Blueprint re-baseline is recorded below; Stage 21
-remains separately gated. Publication and push are not implied by this
-checkpoint.
-
-The GTK4/Blueprint re-baseline is complete in the accepted local checkpoint
-`ToniatorGUI` (2026-08-27). `toniator-app` now uses GTK4-only application
-widgets: libadwaita has been removed from its dependencies and resources.
-Blueprint sources and the compiled GResource own the static main shell,
-private Pattern Editor shell, and PNG-export-options structure. Rust retains
-document and command authority, dynamic descriptor/catalog population, signal
-handlers, preview scheduling, canvas interaction, export validation, and the
-GTK-only responsive allocation policy. The app preserves the accepted
-Stage 19B workflow and canonical preview/PNG/SVG paths; this infrastructure
-re-baseline does not implement Stage 21's workflow, information-architecture,
-pattern-wizard, or broader controller decomposition work.
-
-Focused Blueprint compilation, GTK resource registration, app checks and
-Clippy, formatting, architecture validation, and diff checks passed. Fresh
-private Sway/AT-SPI/grim runs covered raster and SVG inputs, normal and narrow
-layouts, sidebar visibility, Pattern Editor reflow, draft/discard actions, and
-accessible control actions. These are automated wlroots evidence and direct
-native artifact inspection; they do not claim manual GNOME Shell/Mutter
-acceptance.
-
-Stage 21A is complete at implementation checkpoint
-`3028193b787960fb402b0af6807d6e8e8ab174db` on the existing `ToniatorGUI`
-branch and was user-accepted on 2026-08-28. Current documents use schema v6 only:
-positive Density and Density aspect replace stored axis counts/lock, channel
-deltas remain additive/resettable, and obsolete v5 documents are rejected.
-The main inspector presents effective Density as inverse **Pattern zoom
-level** (`1.0` default, smaller for more geometry, larger for less) and presents
-Density aspect as **Pattern aspect**; persistence, history, cache identity, and
-evaluation continue to use Density/Density aspect exclusively.
-For fresh documents and direct still-image imports, `1.0` uses the
-resolution-independent reference `100 × sqrt(min(width, height) / max(width,
-height))` at aspect `1.0`: approximately square 100×100, 2:1 100×50, and 1:2
-50×100 site coverage. Opening a schema-v6 `.toniator` preserves its stored
-Density unchanged.
-Normal app and CLI renders have no application-authored geometry/work-count
-ceiling; overflow checks, fallible allocation, cancellation, deterministic
-approximation bounds, and stale-result rejection remain enforced. Long main
-previews expose ticketed determinate progress in one overlay with an overall
-bar above a current-stage bar and visible percentages through
-source decode, family generation, output realization, scene composition,
-rasterization, and final publication. Expensive family loops, site-bound
-output work (including parallel workers), canonical raster primitives, and
-final pixel-processing phases advance within their fixed stage shares.
-AreaAverage advances from completed source cells, and duplicate inner-loop
-observations are coalesced before they can accumulate in the frontend queue;
-this observation does not alter geometry, pixels, cache identity, or atomic
-publication.
-AreaAverage classifies each literal decoded-source pixel footprint by exact
-polygon overlap: coverage of at least 50% includes that pixel's full mapped
-value once, while lower coverage contributes nothing. It never scales a pixel
-value by fractional coverage. Indexed region batches remain Rayon-parallel and
-publish results in deterministic input order.
-The first source-backed workspace exposes the same pending stages on the
-visible canvas before idle viewport submission; source-less New remains empty.
-Derived counts never authorize eager infallible allocation: dispersion builds
-accepted final sites directly, releases transient parent/spatial storage, and
-fails machine-unrepresentable work before allocation. Cached results share
-immutable scene/raster values. Raster composition retains only an accumulator
-and one transient layer with fallible full-pixel/final-byte allocation, never
-an estimate-based creative refusal.
-Guide-path thickness uses one source-response sample per nominal pattern
-interval (or decoded-source-pixel footprint for denser patterns) instead of
-half-pixel supersampling every long guide; centerline curvature retains its
-independent geometric refinement and the current response interpolation is
-linear.
-Pattern rotation is available for every current pattern definition except
-source-weighted site placement. Source-weighted capability views omit Rotation and reject
-channel-rotation commands; their effective evaluator rotation is zero. Named
-replacement/structural transitions prune only an incompatible channel rotation
-delta, while shared base rotation remains dormant for later compatible
-patterns. Canonical-stroke rasterization schedules flattened edges by active
-row and visits only nonzero-winding spans, with bounded cancellation polling,
-so rotating long guide strokes no longer expands work to every pixel and every
-edge in their full axis-aligned bounds.
-The tracked Holiday v5 file remains only as an explicit rejection-test witness.
-Stage 21A used preset-v3 recipes; the accepted Curve Motif prerequisite and
-Gate 21B-1 now use current preset-v4 recipes. Still import now covers PNG, SVG,
-JPEG/JPG, WebP, BMP, TIFF, OpenEXR, and AVIF with exact embedded-byte
-round-trips, single-image enforcement, native dav1d AVIF decoding, and linear
-finite-clamped OpenEXR handling without implicit tone mapping.
-
-The separately accepted headless Curve Motif prerequisite is complete at
-`b8826c95f3be2abd13d0e007cd59c49c2ce16915` and supersedes that current
-persistence boundary with document schema v7 and preset format v4
-(container v1 unchanged); v6 documents and v3 presets reject. It chains one
-embedded authored open path across adjacent one-guide Along Guides sites into
-continuous canonical variable-width stroke rows. Odd provenance rows can mirror
-and then use an optional fractional interval phase, while guide layout remains
-the sole layout authority and phase receives padded coverage. The implementation
-uses ordinary source sampling, paint, PNG, and SVG paths. Gate 21B-1 is now
-complete at `f77998c`: the registry is v3 with seventeen built-ins, including
-`curve-motif-rows` displayed as Curve Motif in Guides, and the layered personal
-resource/library foundation is current. Gate 21B-2 is complete and user-accepted
-at `63fd9fb` on 2026-08-28: its modal Pattern Wizard gallery exposes all 17
-**Use as is** cards, initial Edit support for exactly Curve Motif, One Guide
-Lines, Even Random Circles, and Round Spiral Line, a shared layered catalog,
-256-longest-edge/512×512 private previews, latest-ticket/last-success behavior,
-one-Apply publication, and wide/narrow layouts. The gate adopts exact stored
-SVGs for all 17 built-ins, including the corrected density-10 Curve Motif icon;
-only personal entries use synthetic thumbnail fallback. Gate 21B-3 is accepted
-at `68ef02e`, with acceptance documentation at `8cd4a2f`: descriptor-driven
-editing covers all seventeen Patterns and nested Guide, Shape, and Motif editors.
-
-The Gate 21B-4 main window follows the v1.2 UI reference: a dominant canvas,
-right inspector, model-specific channel segments, Pattern Recipe summary and
-**Change…**, and shared zoom/Fit with **Preview / Source** comparison. Appearance,
-Variation, Options, and collapsed Advanced groups project existing domain values.
-The application follows GNOME's light/dark preference, including live changes,
-and otherwise retains GTK theme behavior where that setting is unavailable.
-
-The wizard follows **Choose a layout → Shape the layout → Choose placement →
-Draw and style → Review**, with artist-facing labels and explanatory tooltips.
-Invalid input remains visible with its reason and blocks navigation/publication;
-Apply publishes one undoable document change. **All** replacement discloses its
-effect on channel-relative Pattern intent. Curve Motif supports authored curved
-guides, preserves independent components, and resumes after omitted cadence
-points without bridging a gap.
-
-Personal Pattern management includes save/update, fresh-ID copies, stable-ID
-rename, recoverable trash/Undo, root selection, Refresh, and stale-write recovery.
-Saving a Pattern remains separate from applying it. Current Pattern and document
-formats remain unchanged. Known deferred work is tracked in [ISSUES.md](ISSUES.md).
-Stage 21B remains In progress through five separately accepted gates; the contract is
-[`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](docs/STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md),
-and [ProgressTracker.md](ProgressTracker.md) records the current review status.
-Gate 21B-4 and its startup follow-up are complete and user-accepted on
-2026-09-04; their checkpoint is recorded in ProgressTracker.md. Gate behavior, verification, and
-limitations are recorded in [the implementation notes](docs/STAGE_21B_GATE4_IMPLEMENTATION.md).
-Gate 21B-5 is planned for distinct document-level Presets, with **Load preset...**
-and **Save preset** under **New**, reusing document serialization without source
-data once that format is explicitly defined. It has not begun.
-
-Advanced Settings presents one modal immediately and evaluates only a bounded
-source proxy on its own cancelable scheduler. Its status exposes current
-private-preview progress; newer edits cancel/supersede older tickets, stale
-results cannot replace the private texture, and repeated activation returns to
-the existing modal rather than opening another. Apply still publishes exactly
-one main-history change, while Cancel/close discards the draft.
-
-The final isolated stress matrix exercised all sixteen bundled recipes with
-both immutable sources at intrinsic `1024×1024` PNG and `900×620` SVG sizes,
-including zoom, aspect, eligible rotation, response endpoints, combined
-zoom/rotation, shape rotation, and both region-sampling strategies. Every
-eligible final case passed; artwork-weighted rotation retained its explicit
-rejection. The largest measured Guide Faces cases now use roughly 60–85% less
-peak RSS than the pre-fix runs, and directly inspected native PNG/SVG witnesses
-cover rotated One Guide Lines, rotated Three-Guide Cells, colored
-Source-Weighted Voronoi, and zero-minimum Two-Guide Maze response. Private
-Sway/AT-SPI/grim evidence remains automated non-human, non-Mutter evidence.
-The user accepted Stage 21A on 2026-08-28; no additional automated native-file-
-portal inspection is claimed.
-
-Low-resolution fixtures and outputs are supplementary only. Every future stage
-that exercises source loading, sampling, rendering, preview, or export must
-also test the immutable PNG at its natural 1024×1024 dimensions and the SVG at
-its natural 900×620 dimensions through the applicable canonical consumer
-boundary.
-
-## Build and run
-
-On Fedora, the GTK4 development files (GTK 4.10 or newer) and
-`blueprint-compiler` build the GTK resources; `libdav1d-devel` supplies the
-open-source native AVIF decoder dependency. Then launch the preview with:
+In the folder containing your download:
 
 ```bash
-cargo run --bin toniator-app -- assets/raster-sample.png
+chmod +x Toniator-0.2.0-x86_64.AppImage
+./Toniator-0.2.0-x86_64.AppImage
 ```
 
-The approved execution roadmap is [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md),
-the exact Stage 21B gate plan is
-[`STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md`](docs/STAGE_21B_PATTERN_WIZARD_AND_PERSONAL_LIBRARY_PLAN.md),
-and the current checkpoint ledger is [ProgressTracker.md](ProgressTracker.md).
-The normative design is in [Architecture Schema](Project%20Specification/ArchitectureSchema.md),
-[Pattern Schema](Project%20Specification/PatternSchema.md),
-[Channel Schema](Project%20Specification/ChannelSchema.md),
-[Module Structure](Project%20Specification/ModuleStructure.md), and the
-precedence-setting [Addendum](Project%20Specification/Addendum.md).
+This build requires **glibc 2.39 or newer**; it was tested on Fedora 44/Wayland.
+If FUSE mounting is unavailable, run it with:
 
-The headless CLI and GTK app are separate peer frontends over the shared
-`toniator-engine` boundary; neither frontend owns document or pattern state.
+```bash
+APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.2.0-x86_64.AppImage
+```
+
+### Flatpak
+
+With Flatpak installed, run:
+
+```bash
+flatpak install --user ./Toniator-0.2.0-x86_64.flatpak
+flatpak run com.sbdd.Toniator
+```
+
+The bundle uses the shared GNOME 50 runtime, which Flatpak may download during
+installation. It is distributed here on GitHub; it is not a Flathub listing.
+Flatpak keeps its own settings, recent files, and personal Patterns under
+`~/.var/app/com.sbdd.Toniator/`, separate from a native or AppImage installation.
+
+Download `SHA256SUMS` alongside the packages to verify their integrity with
+`sha256sum --ignore-missing -c SHA256SUMS`. See the
+[packaging guide](packaging/README.md) for permissions and build details.
+
+## Make your first artwork
+
+1. Click **Start New Project** and select an image. The same button opens an
+   existing `.toniator` project; **Recent Files** provides quick access later.
+2. Choose a color mode and edit **All** channels together or select one channel.
+3. Use **Change…** to choose a Pattern. Use it as supplied or edit its layout,
+   placement, and styling in the Pattern Wizard.
+4. Adjust Pattern size, rotation, and appearance. Use **Preview / Source** to
+   compare the result with your original artwork, and zoom or Fit to inspect it.
+5. Save a `.toniator` project to keep the source image and editable settings.
+   Export **PNG** for a raster image or **SVG** for editable vector geometry.
+
+Personal Patterns can be saved, updated, copied, renamed, and moved to recoverable
+trash. Saving a Pattern to your library is separate from applying it to artwork.
+Undo and Redo operate on document edits. **Close** returns to startup; **Exit**
+quits. Both prompt when a document has unsaved changes. The app follows the
+system light/dark preference where supported.
+
+Supported still-image inputs: PNG, SVG, JPEG, WebP, BMP, TIFF, OpenEXR, and AVIF.
+PNG exports offer background, antialiasing, and output-size options. SVG exports
+keep a transparent background. RGB PNG defaults to black, CMYK to white, and
+source-color output to transparent.
+
+## Build from source
+
+Requirements: **Rust 1.94+**, a C compiler, `pkg-config`, **GTK 4.12+**, GLib
+development tools, `blueprint-compiler`, and the native `dav1d` development
+library for AVIF decoding. On Fedora, install the system dependencies with:
+
+```bash
+sudo dnf install git gcc pkgconf-pkg-config gtk4-devel glib2-devel \
+  blueprint-compiler libdav1d-devel
+```
+
+Install a current Rust toolchain through [rustup](https://rustup.rs/), then:
+
+```bash
+git clone https://github.com/ricperry/Toniator.git
+cd Toniator
+cargo build --release --locked -p toniator-app -p toniator-cli
+./target/release/toniator-app
+```
+
+To open the included sample directly:
+
+```bash
+./target/release/toniator-app assets/raster-sample.png
+```
+
+For development, `cargo run -p toniator-app` builds and launches the application.
+For a headless build, use `cargo build --release --locked -p toniator-cli`;
+GTK and Blueprint are unnecessary, but the native `dav1d` dependency still applies.
+
+### Command-line rendering
+
+Render a source image using the default circular-mark Pattern:
+
+```bash
+mkdir -p target/validation/examples
+./target/release/toniator render \
+  --input assets/raster-sample.png \
+  --output target/validation/examples/halftone.png \
+  --channel-model cmyk --density 30 --density-aspect 1 \
+  --rotation 0 --offset-x 0 --offset-y 0 --guard-steps 2
+```
+
+Use an `.svg` output filename for vector export. Render a saved project using
+its stored settings with `toniator render -i artwork.toniator -o artwork.svg`.
+Run `toniator --help` or `toniator render --help` for the supported commands.
+
+In an AppImage, prepend `./Toniator-0.2.0-x86_64.AppImage --cli` in place of
+`toniator`. The Flatpak CLI is available through
+`flatpak run --command=toniator com.sbdd.Toniator`; direct CLI file paths must be
+accessible inside its sandbox.
+
+### Build or publish the packages
+
+The [packaging guide](packaging/README.md) covers building AppImage and Flatpak
+bundles with the GNOME SDK. [Release instructions](docs/RELEASING.md) explain
+GitHub tags, release notes, and uploading the packages.
+
+## Development status
+
+Toniator is a pre-release native rewrite. Project formats can change between
+development versions; obsolete formats are rejected rather than automatically
+migrated. Document-level **Presets** are planned separately from the current
+personal **Pattern** library.
+
+Known limitations include slow previews at very fine Pattern sizes, first-use
+personal thumbnail latency, an intermittent reported RGB-to-CMYK crash, and
+second-launch file forwarding. Details and follow-up work are in [ISSUES.md](ISSUES.md).
+Package workflow checks use an isolated Wayland compositor; they do not claim
+exhaustive GNOME/Mutter or native file-portal acceptance.
+
+For development history and architecture, see [ProgressTracker.md](ProgressTracker.md),
+the [rewrite plan](docs/GREENFIELD_REWRITE_PLAN.md), and
+[current UI references](docs/ui/REFERENCES.md). The protected
+[Addendum](Project%20Specification/Addendum.md) takes precedence over other design
+documents. The GTK app and CLI share the same domain, evaluation, and rendering
+core; the archived `ToniatorLegacy/` tree is a read-only reference.
+
+Contributions follow [AGENTS.md](AGENTS.md): bounded changes, focused checks,
+and inspection of real output. GTK controls need meaningful accessibility
+names, roles, state, and keyboard paths; private Wayland checks verify semantic
+actions and screenshots. Semantic-map is retired from this project's workflow.
