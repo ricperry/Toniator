@@ -888,7 +888,7 @@ not manual GNOME/Mutter acceptance. The accepted follow-up also fixes the
 main-window random-seed row reordering and prevents seed-one random connections
 from collapsing a saved CMYK channel to empty geometry; the saved-project
 regression realizes positive geometry for all four CMYK channels. Gate 21B-4
-(Personal Management and Final Verification) is **Complete and user-accepted**
+(Personal Management and Final Verification) is **Complete at commit `4ed29d4`**
 on 2026-09-04. It adds personal Pattern save/update/copy/rename/trash/Undo and
 root/conflict recovery, five artist-facing wizard steps with explained validation,
 the v1.2 main-window presentation with system theme inheritance and shared
@@ -900,7 +900,10 @@ source-format evaluation/export paths; 30 quiescent wizard cycles show 7.07 MiB
 (2.86%) settled RSS growth, below both limits and without strictly monotonic
 growth. Private GTK workflow, tooltip, screenshot, and log checks pass; this is
 not human GNOME/Mutter acceptance. The user accepted all session work and
-authorized acceptance actions on 2026-09-04; the local checkpoint is recorded below.
+authorized acceptance actions on 2026-09-04. The implementation checkpoint is
+`4ed29d4f5e3733ab487ae433139b302c27a80c44`, including the startup follow-up.
+Acceptance reuses completed test/visual evidence; closeout checks the staged
+diff and immutable hashes without rerunning unchanged suites. No push occurred.
 Details and evidence limits are in
 [`STAGE_21B_GATE4_IMPLEMENTATION.md`](docs/STAGE_21B_GATE4_IMPLEMENTATION.md).
 The exact
@@ -919,7 +922,7 @@ checkpoint; Stage 21B now has five separately accepted gates. This roadmap
 addition does not authorize Gate 21B-5 to begin.
 
 On 2026-09-04 the user separately authorized a startup-screen follow-up, now
-**Complete and user-accepted**: `assets/Stage21D_Mockup/SplashMockup.png`, persistent
+**Complete at commit `4ed29d4`**: `assets/Stage21D_Mockup/SplashMockup.png`, persistent
 Recent Files for source images/projects, Close returning to startup after the
 unsaved-change decision, and Exit/window X quitting after that decision.
 The left card has one Start New Project button and an explanatory hint, per

@@ -189,8 +189,9 @@ persisted when the geometry already determines the result.
 **Complete and user-accepted, 2026-09-04.** The resulting behavior, focused
 verification, and review limitations are recorded in
 [`STAGE_21B_GATE4_IMPLEMENTATION.md`](STAGE_21B_GATE4_IMPLEMENTATION.md).
-The user accepted this gate and its startup follow-up; checkpoint details are
-recorded in `ProgressTracker.md`. The fulfilled gate contract follows:
+The user accepted this gate and its startup follow-up at implementation
+checkpoint `4ed29d4f5e3733ab487ae433139b302c27a80c44`; details are recorded in
+`ProgressTracker.md`. The fulfilled gate contract follows:
 Before acceptance, perform an in-depth bug hunt across
 the wizard's validity and application flow. In particular, every invalid
 recipe state must explain the cause at the relevant page/control, focus the

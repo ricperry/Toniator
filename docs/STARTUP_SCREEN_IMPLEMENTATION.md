@@ -1,7 +1,8 @@
 # Startup screen follow-up
 
 User-authorized follow-up to Gate 21B-4, **Complete and user-accepted** on
-2026-09-04. Local checkpoint details are in `ProgressTracker.md`. Acceptance
+2026-09-04 at implementation checkpoint
+`4ed29d4f5e3733ab487ae433139b302c27a80c44`, recorded in `ProgressTracker.md`. Acceptance
 reuses the verified implementation evidence below; no new application run is
 claimed for documentation/Git closeout. Document Presets remain planned Gate 21B-5.
 

@@ -2252,7 +2252,8 @@ RGB-edit-to-CMYK crash is deliberately deferred until the user supplies a
 reliable reproducer and does not block Gate 21B-3. Gate 21B-3 is complete at
 `68ef02e`, user-accepted on 2026-09-01 with acceptance documentation at
 `8cd4a2f`. Gate 21B-4 is Complete and user-accepted on 2026-09-04, together
-with the startup/Recent Files/Close/Exit follow-up; its
+with the startup/Recent Files/Close/Exit follow-up at implementation checkpoint
+`4ed29d4f5e3733ab487ae433139b302c27a80c44`; its
 implementation/evidence record is `docs/STAGE_21B_GATE4_IMPLEMENTATION.md`.
 Gate 21B-5 was added by
 user instruction on 2026-09-04 for document-level Presets; it is planned,

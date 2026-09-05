@@ -2,7 +2,8 @@
 
 Gate 21B-4 is **Complete and user-accepted** on 2026-09-04, together with the
 [startup follow-up](STARTUP_SCREEN_IMPLEMENTATION.md). The user authorized
-local acceptance actions. Checkpoint details are in `ProgressTracker.md`;
+local acceptance actions. Implementation checkpoint:
+`4ed29d4f5e3733ab487ae433139b302c27a80c44`, recorded in `ProgressTracker.md`;
 Gate 21B-5 has not begun. Acceptance reuses the verified implementation evidence
 below; documentation/Git closeout does not claim a fresh test or visual run.
 
