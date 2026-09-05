@@ -6,7 +6,7 @@ an entry does not authorize a later stage or change an accepted contract.
 
 ## TON-004 — A second launch does not forward a file to the running app
 
-- Status: Fixed and user-accepted (2026-09-05); acceptance checkpoint pending.
+- Status: Fixed and user-accepted (2026-09-05), checkpoint `8deb02d`.
 - Evidence: The app parses its initial path locally and registers activation,
   without a GApplication file-open handler. A second launch presents the existing
   window, but its requested file is not forwarded to that window.
@@ -28,7 +28,7 @@ an entry does not authorize a later stage or change an accepted contract.
 
 ## TON-005 — Overall preview progress understates rasterization and updates sparsely
 
-- Status: Fixed and user-accepted (2026-09-05); acceptance checkpoint pending.
+- Status: Fixed and user-accepted (2026-09-05), checkpoint `8deb02d`.
 - Report: Overall reserves only roughly its last 5% for rasterization, which
   often takes about half the rendering time; updates also arrive too infrequently.
 - Scope: Rebalance stage contributions and improve real progress reporting across
@@ -46,7 +46,7 @@ an entry does not authorize a later stage or change an accepted contract.
 
 ## TON-006 — Preset actions remain disabled after applying a customized Pattern
 
-- Status: Fixed and user-accepted (2026-09-05); acceptance checkpoint pending.
+- Status: Fixed and user-accepted (2026-09-05), checkpoint `8deb02d`.
 - Reproducer: Customize and Apply `assets/AuthoredPresets/TestPatternDoc.toniator`;
   after the document preview updates, Load preset and Save preset stay disabled.
   Saving the project refreshes them again.
@@ -62,7 +62,7 @@ an entry does not authorize a later stage or change an accepted contract.
 
 ## TON-007 — Wizard titlebar close can leave a detached window until another click
 
-- Status: Fixed and user-accepted (2026-09-05); acceptance checkpoint pending.
+- Status: Fixed and user-accepted (2026-09-05), checkpoint `8deb02d`.
 - Report: Wizard Cancel or X sometimes requires repeated clicks.
 - Confirmed reproducer: Open the user's TestPatternDoc, open its unchanged
   Pattern Wizard, and invoke one native window.close action. The wizard remains

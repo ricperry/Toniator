@@ -1,10 +1,14 @@
 # Gate 21B-5 — Document Presets
 
-Date: 2026-09-05. Status: **Accepted awaiting checkpoint**. All five Stage 21B
+Date: 2026-09-05. Status: **Complete at commit `8deb02d`**. All five Stage 21B
 gates are accepted. The user authorized this gate and explicitly required
 `Load preset...` to accept `.toniator-preset` and valid `.toniator` files.
 The user accepted the gate and follow-up fixes and authorized local acceptance
 actions on 2026-09-05. No push or release is authorized.
+Implementation checkpoint: `8deb02db4d0384409185edf24b76fd578230db85`, including
+the accepted issue follow-up below. Acceptance documentation records this real
+checkpoint separately; unrelated version/packaging/tooling/artwork edits remain
+uncommitted.
 Implementation started on `main` at `bc3131f256ab663adf38e54243ed7702a66a8238`.
 Existing version, packaging, tooling, documentation and user-artwork changes
 remain outside this gate. Protected specifications and legacy files are untouched;

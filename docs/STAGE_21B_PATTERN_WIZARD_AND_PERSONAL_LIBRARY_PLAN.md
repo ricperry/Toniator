@@ -2,7 +2,7 @@
 
 Status: **approved decision-complete plan for Gates 21B-1 through 21B-4;
 Gates 21B-1 through 21B-4 complete and accepted;
-Gate 21B-5 accepted awaiting checkpoint; all five gates accepted**
+Gate 21B-5 Complete at commit `8deb02d`; all five gates accepted**
 (updated 2026-09-05).
 This plan is
 subordinate to the protected project specifications, especially the Addendum,
@@ -231,7 +231,7 @@ root without moving or deleting the old one.
 
 ### Gate 21B-5 — Document-level Presets
 
-**Accepted awaiting checkpoint; user acceptance and checkpoint authorization 2026-09-05.** The
+**Complete at commit `8deb02d`; user-accepted 2026-09-05.** The
 implementation/evidence record is
 [`STAGE_21B_GATE5_IMPLEMENTATION.md`](STAGE_21B_GATE5_IMPLEMENTATION.md).
 The detailed contract is
@@ -379,8 +379,8 @@ parent-owned acceptance transition. Update `ProgressTracker.md` only to the
 verified status: Gate 21B-1 is Complete at `f77998c`; Gate 21B-2 is Complete
 at `63fd9fb`; Gate 21B-3 is Complete at `68ef02e` and user-accepted on
 2026-09-01; Gate 21B-4 is Complete and user-accepted on 2026-09-04; Gate 21B-5 is
-Accepted awaiting checkpoint on 2026-09-05. All five gates are accepted; Stage 21B
-is Accepted awaiting checkpoint.
+Complete at commit `8deb02d`, accepted on 2026-09-05. All five gates are accepted;
+Stage 21B is Complete at commit `8deb02d`.
 
 Do not commit, push, publish, or begin the next gate without its explicit
 authorization. At closeout, inspect the exact milestone diff, preserve

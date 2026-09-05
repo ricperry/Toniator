@@ -2242,7 +2242,7 @@ presets, reusable shape storage, and wizard design work remain paused in Stage
 
 ### Stage 21B — Pattern Wizard, Personal Pattern Library, and Document Presets
 
-Stage 21B is **Accepted awaiting checkpoint**; all five gates are user-accepted.
+Stage 21B is **Complete at commit `8deb02d`**; all five gates are user-accepted.
 Gate 21B-1 is complete and user-accepted at implementation checkpoint
 `f77998c`; Gate 21B-2 is complete and user-accepted at implementation
 checkpoint `63fd9fb` on 2026-08-28, with its accepted CMYK/SourceColorAlpha
@@ -2256,7 +2256,7 @@ with the startup/Recent Files/Close/Exit follow-up at implementation checkpoint
 `4ed29d4f5e3733ab487ae433139b302c27a80c44`; its
 implementation/evidence record is `docs/STAGE_21B_GATE4_IMPLEMENTATION.md`.
 Gate 21B-5 was added by user instruction on 2026-09-04 for document-level
-Presets, authorized and user-accepted on 2026-09-05. It is **Accepted awaiting checkpoint**;
+Presets, authorized and user-accepted on 2026-09-05. It is **Complete at commit `8deb02d`**;
 see [`STAGE_21B_GATE5_IMPLEMENTATION.md`](STAGE_21B_GATE5_IMPLEMENTATION.md).
 The user authorized local acceptance checkpointing. The decision-complete contract for
 Gates 21B-1 through 21B-4 and the Gate 21B-5 planning brief are in

@@ -841,7 +841,7 @@ and the local implementation checkpoint is
 Stage 21B remained Planned and still required separate planning completion and
 implementation authorization.
 
-**Stage 21B — Pattern Wizard, Personal Pattern Library, and Document Presets — Accepted awaiting checkpoint.**
+**Stage 21B — Pattern Wizard, Personal Pattern Library, and Document Presets — Complete at commit `8deb02d`.**
 The user authorized the original decision-complete four-gate Stage 21B plan on
 2026-08-28 and accepted Gate 21B-1 on 2026-08-28. Gate 21B-1 is **Complete at
 commit `f77998c`** and covers the headless Storage and Registry Foundation
@@ -921,7 +921,7 @@ management remains Gate 21B-4. The new gate has no implementation or
 checkpoint; Stage 21B now has five separately accepted gates. This roadmap
 addition does not authorize Gate 21B-5 to begin.
 
-On 2026-09-05 the user authorized and accepted **Gate 21B-5 — Accepted awaiting checkpoint**, including
+On 2026-09-05 the user authorized and accepted **Gate 21B-5 — Complete at commit `8deb02d`**, including
 Load preset... support for both source-free `.toniator-preset` files and valid
 `.toniator` projects. Both apply reusable configuration to the current project
 while retaining its source/canvas, through one undoable domain transition.
@@ -937,8 +937,8 @@ were addressed. The user accepted the gate and authorized acceptance actions on
 0.3.0/package/tooling work is preserved. Protected-spec terminology edits have
 not been performed.
 
-On 2026-09-05 the user accepted the bounded issue follow-up, **Accepted awaiting
-checkpoint**: TON-004 forwards a second launch's file through the existing save/discard
+On 2026-09-05 the user accepted the bounded issue follow-up, **Complete at commit
+`8deb02d`**: TON-004 forwards a second launch's file through the existing save/discard
 guard; TON-006 restores Preset actions after private editor dismissal; TON-007
 closes the wizard after one terminal Cancel/X decision. TON-005 rebalances Overall
 preview progress and exposes finer real-work increments. Private GTK observation
@@ -946,7 +946,8 @@ also identified and removed TON-003's quadratic circular-mark usage
 lookup while preserving exact site membership; broader dense-pattern performance
 remains open. Focused checks and private GTK evidence are recorded in `ISSUES.md`
 and `target/validation/ton004/`.
-The gate and these fixes share the acceptance checkpoint. Completed focused test
+The gate and these fixes share checkpoint `8deb02db4d0384409185edf24b76fd578230db85`.
+Completed focused test
 and native-artifact evidence is reused; acceptance adds scope/index/diff and
 immutable-input checks. No later gate, push or release is authorized.
 

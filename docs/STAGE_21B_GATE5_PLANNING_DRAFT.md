@@ -1,6 +1,6 @@
 # Gate 21B-5 — Document Presets planning draft
 
-Date: 2026-09-05. Status: **accepted awaiting checkpoint**.
+Date: 2026-09-05. Status: **Complete at commit `8deb02d`**, user-accepted.
 Verified behavior and review disposition are in
 [`STAGE_21B_GATE5_IMPLEMENTATION.md`](STAGE_21B_GATE5_IMPLEMENTATION.md).
 The user authorized this gate with the explicit addition that Load preset...
@@ -16,7 +16,7 @@ implementation instruction; their bounded terminology correction remains pending
   local `origin/main` matches, ahead/behind 0/0. No remote refresh was needed
   for planning; this is a local-ref observation.
 - Gate 21B-4/startup acceptance: implementation `4ed29d4`, documentation
-  `b4afd6d`. Stage 21B remains In progress; Gate 21B-5 was Planned at entry.
+  `b4afd6d`. Stage 21B was In progress and Gate 21B-5 was Planned at entry.
 - Existing uncommitted 0.3.0 version, packaging, tooling, documentation, asset
   deletions, and untracked user artwork are outside this planning change.
 - [Addendum](../Project%20Specification/Addendum.md) remains normative.
