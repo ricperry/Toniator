@@ -1,6 +1,6 @@
 # Stages 22–23: media, animation, and frame export
 
-Date: 2026-09-05. Accepted: 2026-09-06. Status: **Accepted awaiting checkpoint.**
+Date: 2026-09-05. Accepted: 2026-09-06. Status: **Complete at commit `0f862512a86b7bb0eb25b915a496a7b68018b333`.**
 The user accepts this combined implementation and its subsequent desktop layout
 corrections. This document remains the implementation contract. Evidence is tracked in
 [`STAGE_22_23_IMPLEMENTATION.md`](STAGE_22_23_IMPLEMENTATION.md).

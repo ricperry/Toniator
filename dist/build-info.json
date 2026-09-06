@@ -1,0 +1,28 @@
+{
+  "version": "0.3.0",
+  "app_id": "com.sbdd.Toniator",
+  "base_commit": "0f862512a86b7bb0eb25b915a496a7b68018b333",
+  "packaging_diff": "",
+  "rust": "rustc 1.94.1 (e408947bf 2026-03-25)",
+  "sdk_commit": "c87589be513db588f67de1a27879315dc9697ed2bd8467bd3d55860bf4da2f42",
+  "runtime_commit": "545da92354a265d2c3572c91c39ac14dd7e74f9d8f9b66744ad50f478d2497c5",
+  "artifact": "Toniator-0.3.0-x86_64.flatpak",
+  "sha256": "e69ba9a0bb967d7478722f164385727cc5450cebb6518d0335783e68d6b485a5",
+  "icons": {
+    "appicon.svg": "3261ef8a6297f6e0db12964fdc2b7702d8a58808cd5819ecb69d363ca69e8a67",
+    "appicon.png": "946183f418be2305c7bab3ee4cfa2bf29e59847ec31ad17b90f4ddd333eceb57"
+  },
+  "appimage_minimum_glibc": "2.39",
+  "artifacts": [
+    {
+      "name": "Toniator-0.3.0-x86_64.AppImage",
+      "bytes": 117611000,
+      "sha256": "fec771d0f354a8e128b9bcf5d02e54a3956fe801ff631484cd9f776a9962034a"
+    },
+    {
+      "name": "Toniator-0.3.0-x86_64.flatpak",
+      "bytes": 62435784,
+      "sha256": "e69ba9a0bb967d7478722f164385727cc5450cebb6518d0335783e68d6b485a5"
+    }
+  ]
+}

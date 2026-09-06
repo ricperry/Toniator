@@ -952,7 +952,7 @@ and native-artifact evidence is reused; acceptance adds scope/index/diff and
 immutable-input checks. No later gate, push or release is authorized.
 
 On 2026-09-05 the user authorized **combined Stage 22–23 implementation**, now
-**Accepted awaiting checkpoint**, following the user's 2026-09-06 acceptance of
+**Complete at commit `0f862512a86b7bb0eb25b915a496a7b68018b333`**, following the user's 2026-09-06 acceptance of
 all implementation and desktop corrections. The headless temporal pipeline and its
 GTK workflow are intended to be delivered together with one end-to-end
 acceptance. The [planning draft](docs/STAGE_22_23_TEMPORAL_WORKFLOW_PLAN.md)
@@ -1012,7 +1012,7 @@ restart reuse, revoked-grant diagnostics and regrant export. All 20 scalar field
 pass six easing modes and five frame positions; achromatic hue and the supported
 curve reset scope also pass focused checks. Final local builds and scoped checks
 pass. Automated Sway/GTK portal evidence does not claim human GNOME/Mutter
-acceptance. Both stages are ready for user acceptance and remain uncheckpointed.
+acceptance. Both stages are user-accepted and complete at source checkpoint `0f862512a86b7bb0eb25b915a496a7b68018b333`.
 No protected specification was revised.
 
 On 2026-09-04 the user separately authorized a startup-screen follow-up, now

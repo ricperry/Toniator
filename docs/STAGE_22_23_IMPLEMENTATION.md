@@ -1,6 +1,6 @@
 # Combined Stages 22–23 implementation
 
-Status: **Accepted awaiting checkpoint**, 2026-09-06. The user accepts the combined
+Status: **Complete at commit `0f862512a86b7bb0eb25b915a496a7b68018b333`**, 2026-09-06. The user accepts the combined
 Stages 22–23 delivery and subsequent startup, toolbar and divider corrections.
 Contract: [temporal workflow plan](STAGE_22_23_TEMPORAL_WORKFLOW_PLAN.md).
 Baseline HEAD: `c54ad44d224cab60142c901718e329a242518259` (main and origin/main).
@@ -44,7 +44,29 @@ checkpoint; `dist/build-info.json` and `dist/SHA256SUMS` identify the exact resu
 The requested packages are tracked using Git LFS. No later stage, production
 research integration, remote push, tag or release publication is performed.
 
+The acceptance packages built from `0f862512a86b7bb0eb25b915a496a7b68018b333`
+supersede every earlier review hash below:
+
+- AppImage (117,611,000 bytes): `fec771d0f354a8e128b9bcf5d02e54a3956fe801ff631484cd9f776a9962034a`.
+- Flatpak (62,435,784 bytes): `e69ba9a0bb967d7478722f164385727cc5450cebb6518d0335783e68d6b485a5`.
+
+Both package CLIs report 0.3.0, checksums pass, and the SDK build provenance has
+an empty application-source diff. Actual Flatpak startup and welcome X→Untitled
+checks pass in `ui-run-20260906-115119-281125`; the actual AppImage passes in
+`ui-run-20260906-115250-282774`, including the copied long-warning profile and
+Message details scroll range 0..250. Native screenshots are inspected at 200%
+scale. The Flatpak retains its isolated installation profile, so its absent
+Message details lookup is not counted as a warning reproduction. A first
+cross-package restart reused the previous app's D-Bus owner and is not counted
+as AppImage launch evidence; a fresh private session supplies the successful
+check. Earlier full media/portal checks are reused for unchanged consumers.
+All owned private sessions are stopped. Git LFS pointers retain the exact
+package hashes and sizes; the following artifact checkpoint includes them.
+
 ## Work log
+
+The entries below retain historical milestone state and superseded review
+artifacts. Current completion and acceptance-package hashes are recorded above.
 
 - Final contract audit (2026-09-06): all 20 animatable scalar field types
   materialize through active mark, connected-curve and region descriptors under

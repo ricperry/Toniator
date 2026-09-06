@@ -2341,7 +2341,7 @@ evaluation paths.
 
 ## Stages 22–23 — Combined temporal workflow
 
-**Accepted awaiting checkpoint; user acceptance 2026-09-06.**
+**Complete at commit `0f862512a86b7bb0eb25b915a496a7b68018b333`; user acceptance 2026-09-06.**
 The user requested one effort encompassing the previously separated headless
 media/animation stage and temporal GTK stage. This supersedes their separate
 delivery sequencing in the earlier roadmap; it does not change the protected
