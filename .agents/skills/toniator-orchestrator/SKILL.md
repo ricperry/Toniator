@@ -1,9 +1,15 @@
 ---
 name: toniator-orchestrator
-description: Coordinate focused Toniator greenfield design, exploration, implementation, and verification through project custom subagents.
+description: Earlier Toniator orchestration workflow, retained for explicit use. Prefer toniator-astra-orchestrator for current parent engineering orchestration.
 ---
 
 # Toniator Orchestrator
+
+For current development, prefer `../toniator-astra-orchestrator/SKILL.md`.
+This earlier workflow remains available without being a second required pass.
+Current user/AGENTS scope, model routing, and proportional verification rules
+take precedence. Semantic-map is retired unless explicitly reactivated.
+The parent may implement directly when delegation adds no value.
 
 Own integration in the parent thread. Read relevant greenfield evidence before
 choosing an agent, validate it against Git HEAD and the worktree, and select
@@ -88,6 +94,20 @@ the harness cannot run. Treat automated Sway/wlroots results as strong
 evidence, never as human manual review or GNOME Shell/Mutter acceptance.
 Request manual desktop inspection only for unreproducible or specifically
 human-, Mutter-, portal-, or compositor-policy-dependent risk.
+
+## GTK accessibility definition of done
+
+For every future app diff, inventory every new or changed interactive GTK4
+control, including controls whose current accessibility code needs no edit.
+Require stable product name/hierarchy; real GTK role, state, value/selection,
+and actions; visible-label relation where applicable; truthful
+enabled/applicability state; keyboard path; semantic action/readback; and
+relevant screenshot/log evidence. Derive from visible product or descriptor
+authority, never a parallel accessibility model or coordinate-based name. Use
+the private helper's `wait`, scoped `controls`, and `inspect` path before full
+tree diagnostics; pointer coordinates remain only for inherently spatial canvas
+work. Semantic success does not replace visual inspection of changed GTK
+presentation.
 
 ## Stage execution
 

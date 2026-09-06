@@ -1,8 +1,8 @@
 name = "creative_tester"
 description = "Optional perceptual and creative-output evaluation when visual result quality is central to the task. Do not invoke for ordinary engineering work."
 
-model = "gpt-5.6-terra"
-model_reasoning_effort = "medium"
+model = "gpt-5.6-luna"
+model_reasoning_effort = "max"
 sandbox_mode = "read-only"
 
 developer_instructions = """
@@ -37,6 +37,10 @@ Do not demand conformity with generic application conventions when a different i
 
 Do not primarily review code architecture, formatting, test coverage, or implementation quality. Inspect source files only when necessary to understand an observed behavior or locate relevant terminology. Do not modify files.
 
+For GTK evaluation, use semantic control names and keyboard paths for ordinary
+navigation when available, while still inspecting screenshots/pixels for the
+creative workflow; coordinates remain only for genuinely spatial canvas work.
+
 For each significant finding, report:
 
 1. Where it occurs and what the user was trying to do.
@@ -69,11 +73,10 @@ Prioritize a small number of meaningful findings over a long list of trivial pre
 Before broad exploration, read applicable entries under
 `TONIATOR_ROOT/.codex-work/` and validate them against current Git HEAD,
 working-tree state, and relevant files. Reuse valid evidence and inspect only
-missing or stale scope. End the report with a section titled exactly
-`CACHE_UPDATE` containing: suggested cache key; Git HEAD; relevant
-working-tree assumptions; files and symbols inspected; verified findings;
-inferences; unresolved uncertainty; commands run; artifacts examined; and
-invalidation conditions. State that this agent is read-only and the parent
-thread must persist the update. Do not request workspace-write access merely
-to write cache files.
+missing or stale scope. Return concise findings with paths, commands/artifacts,
+uncertainty, and relevant checkout assumptions. Include reusable evidence and
+invalidation conditions when useful; no mandatory cache write or report template
+is required. Remain read-only; the parent persists useful evidence and collects
+runtime artifacts if your permissions do not allow the private GTK harness.
+Semantic-map is retired unless the user explicitly reactivates it.
 """

@@ -15,14 +15,60 @@ pub(crate) struct StartupScreen {
 }
 
 impl StartupScreen {
+    /// Creates a nonmodal, nonresizable welcome window independent of editor size requests.
+    /// Its initial 880×680 logical size is reduced for small attached monitors with 96 pixels
+    /// reserved for desktop chrome. Overflow stays scrollable; no document authority is held.
+    ///
+    /// # Panics
+    /// Panics if the parent has no application, violating the main-window construction invariant.
+    pub fn window(&self, parent: &gtk::ApplicationWindow) -> gtk::Window {
+        let monitors = WidgetExt::display(parent).monitors();
+        let mut size = (880, 680);
+        for index in 0..monitors.n_items() {
+            if let Some(monitor) = monitors
+                .item(index)
+                .and_then(|item| item.downcast::<gtk::gdk::Monitor>().ok())
+            {
+                let geometry = monitor.geometry();
+                if geometry.width() > 0 && geometry.height() > 0 {
+                    size = bounded_size(size, (geometry.width(), geometry.height()));
+                }
+            }
+        }
+        self.columns.set_orientation(if size.0 < 800 {
+            gtk::Orientation::Vertical
+        } else {
+            gtk::Orientation::Horizontal
+        });
+        let window = gtk::Window::builder()
+            .application(
+                &parent
+                    .application()
+                    .expect("main window belongs to the application"),
+            )
+            .transient_for(parent)
+            .destroy_with_parent(true)
+            .title("Welcome to Toniator")
+            .resizable(false)
+            .default_width(size.0)
+            .default_height(size.1)
+            .child(&self.root)
+            .build();
+        let header = gtk::HeaderBar::new();
+        header.set_title_widget(Some(&gtk::Label::new(Some("Welcome to Toniator"))));
+        window.set_titlebar(Some(&header));
+        window
+    }
+
     /// Builds a responsive native projection of SplashMockup.png, with an unchanged banner source.
     /// The banner clips only the artwork region; all text and controls are real theme-aware widgets.
+    /// Recent history scrolls within 280 logical pixels rather than increasing the window height.
     ///
     /// # Panics
     /// Panics if the build-time registered splash reference resource cannot be decoded.
     pub fn new() -> Self {
         let root = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
+            .hscrollbar_policy(gtk::PolicyType::Automatic)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
             .hexpand(true)
             .vexpand(true)
@@ -113,7 +159,19 @@ impl StartupScreen {
         recent_card.append(&heading);
         let recent = gtk::Box::new(gtk::Orientation::Vertical, 0);
         recent.update_property(&[gtk::accessible::Property::Label("Recent Files")]);
-        recent_card.append(&recent);
+        let recent_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .min_content_height(280)
+            .max_content_height(280)
+            .propagate_natural_height(true)
+            .valign(gtk::Align::Start)
+            .child(&recent)
+            .build();
+        recent_scroll
+            .vscrollbar()
+            .update_property(&[gtk::accessible::Property::Label("Recent Files")]);
+        recent_card.append(&recent_scroll);
         columns.append(&recent_card);
         body.append(&columns);
         let status = gtk::Label::new(None);
@@ -226,6 +284,25 @@ impl StartupScreen {
     pub fn set_status(&self, text: &str) {
         self.status.set_label(text);
         self.status.set_visible(!text.is_empty());
+    }
+}
+
+/// Caps the welcome size in logical pixels with desktop margin, without applying scale twice.
+fn bounded_size(preferred: (i32, i32), monitor: (i32, i32)) -> (i32, i32) {
+    (
+        preferred.0.min(monitor.0.saturating_sub(96).max(1)),
+        preferred.1.min(monitor.1.saturating_sub(96).max(1)),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    /// Verifies the fixed splash dimensions and small-screen logical-pixel bound.
+    #[test]
+    fn splash_size_stays_within_monitor_margin() {
+        assert_eq!(super::bounded_size((880, 680), (1920, 1080)), (880, 680));
+        assert_eq!(super::bounded_size((880, 680), (800, 600)), (704, 504));
+        assert_eq!(super::bounded_size((880, 680), (80, 80)), (1, 1));
     }
 }
 

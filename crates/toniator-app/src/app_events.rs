@@ -6,6 +6,20 @@ use toniator_engine::{EvaluationCompletion, EvaluationProgress};
 /// Carries worker results without granting workers GTK or document authority.
 #[allow(clippy::large_enum_variant)] // Save events deliberately own one authoritative document snapshot.
 pub(crate) enum AppEvent {
+    /// Carries phase progress and terminal recovery ownership for one desktop export sheet.
+    TemporalExport(crate::temporal_export::Event),
+    /// Supplies the current decoded endpoint before immutable preview evaluation.
+    MediaPreview(crate::temporal_preview::Completion),
+    /// Supplies one decoded Pattern Editor endpoint before its private evaluation submission.
+    DraftMediaPreview {
+        epoch: u64,
+        completion: crate::temporal_preview::Completion,
+    },
+    /// Supplies the bounded source for one still-live Advanced Settings endpoint.
+    AdvancedSource {
+        epoch: u64,
+        result: Result<crate::AdvancedPreviewSource, String>,
+    },
     /// Completes a captured document-Preset read, destination check, or immutable save.
     DocumentPreset(crate::document_presets::Completion),
     /// Finishes one generation-scoped open request.

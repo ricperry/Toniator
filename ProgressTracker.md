@@ -869,8 +869,8 @@ all 17 **Use as is** cards, initial Edit support for exactly Curve Motif,
 One Guide Lines, Even Random Circles, and Round Spiral Line, 256-longest-edge
 source proxy to 512×512 preview, latest-ticket/last-success semantics, one
 Apply publication, specified ALL delta reset/named behavior, and wide/narrow
-layout. All first-party crates are version `0.2.0`; `toniator --version`
-reports `toniator 0.2.0`. Gates
+layout. At that checkpoint all first-party crates were version `0.2.0`;
+`toniator --version` reported `toniator 0.2.0`. Gates
 21B-3 (Complete Editing and Nested Editors) is **Complete at commit `68ef02e`
 and user-accepted on 2026-09-01**.
 The actual New/Edit wizard now follows Family → Family Settings → Sites →
@@ -951,6 +951,70 @@ Completed focused test
 and native-artifact evidence is reused; acceptance adds scope/index/diff and
 immutable-input checks. No later gate, push or release is authorized.
 
+On 2026-09-05 the user authorized **combined Stage 22–23 implementation**, now
+**Accepted awaiting checkpoint**, following the user's 2026-09-06 acceptance of
+all implementation and desktop corrections. The headless temporal pipeline and its
+GTK workflow are intended to be delivered together with one end-to-end
+acceptance. The [planning draft](docs/STAGE_22_23_TEMPORAL_WORKFLOW_PLAN.md)
+enumerates 20 existing animatable scalar properties, adds selected-frame HEX/picker
+and hue-rotation authoring, and explicitly includes each CMYK channel's paint,
+opacity and sampling response. It proposes media/frame authority, start/end
+editing, prompted or default export directories, PNG sequences and
+lossless FFV1/Matroska video, plus optional AV1/WebM sharing. The user's temporary
+lossless-AV1 choice was withdrawn. A codec-only probe preserved all pixels in
+the bundled video's ten frames; this is planning evidence, not Toniator video
+implementation or stage acceptance. The active goal authorizes implementation
+of the discussed plan; evidence and remaining work are recorded in
+[the implementation ledger](docs/STAGE_22_23_IMPLEMENTATION.md).
+The preview workflow is limited to Start frame / End frame selection below the
+canvas. Scrubbing is excluded until render-pipeline hardware acceleration is
+available. Current verified foundations include container-2 media persistence,
+shared frame opening, CLI project endpoint rendering, and immutable PNG/SVG
+sequence jobs with exact preflight, cancellation and exclusive publication.
+Software FFV1/AV1 export and recoverable PNG staging now pass focused checks,
+including ten native 1080×1920 FFV1 frames with exact RGBA round-trip fidelity.
+Shared local-media import, exact CLI frame/time selectors, ordered sequences,
+portable moving-media project creation and AVIF timed-track selection now pass
+focused checks. Desktop Start/End selection, asynchronous media previews, selected
+endpoint single-file export, and inline and private Advanced Settings End
+scalar/reset/easing controls now pass focused tests and private GTK checks.
+Advanced Settings uses an asynchronous bounded decoded endpoint proxy, preserves
+separate channel values and publishes one undoable Apply. Advanced color assignment now
+uses one selected-frame picker/HEX/alpha editor. First End selection captures equal values;
+later Start edits preserve End, and pattern replacements reset only affected dependencies.
+Focused domain/persistence and private GTK checks cover these corrected semantics.
+Desktop temporal export now projects the shared PNG/FFV1/AV1 jobs with inclusive
+range selection, personal destination/temporary-folder defaults, phase progress,
+cancel/close cleanup and explicit PNG recovery. Focused tests and private GTK checks
+cover those paths, native folder selection, silent-audio notices and accessibility
+states. ALL scalar/response batches now preserve compatible channel differences,
+selected-frame values and interpolation through domain-owned atomic edits. Focused
+domain/app tests and private GTK saved-state Apply/Cancel/Undo/Redo checks pass.
+Project timing now uses the main menu's Animation settings sheet with exact shared
+rate/range parsing, live validation, cancellable metadata and one undoable Apply.
+Focused app/CLI tests and private GTK saved-state/close/one-frame checks pass.
+Ordered-sequence import now provides a reviewable order, exact rate, cancellable
+worker and complete unique-image validation before replacing the workspace.
+Focused app/CLI tests and native ordering/error/cancel/save/reopen checks pass;
+long-import cancellation, keyboard traversal and native unsaved-guard checks now pass.
+Pattern Editor moving-source previews now use the selected endpoint with owned
+cancellable media/preview workers; focused tests and private GTK checks pass.
+VP8/VP9/FFV1 alpha and sample-aspect normalization pass exact-alpha/RGBA witnesses.
+Source VFR/audio notices now use current exact timing, survive reopening and support
+session dismissal; focused and private GTK rate/Undo/keyboard checks pass.
+Both actual packages pass native still and ten-frame video export, exact FFV1
+RGBA/alpha comparison, AV1 and missing-private-tool checks. Final correctness and
+UX reviews are complete. Review fixes cover hue-alpha easing, shared-base End
+dependency reset and initial preview allocation; focused regressions and native
+pixel comparison pass. Refreshed packages pass the bounded media checks again.
+Actual Flatpak checks with isolated real portals verify persistent folder grants,
+restart reuse, revoked-grant diagnostics and regrant export. All 20 scalar fields
+pass six easing modes and five frame positions; achromatic hue and the supported
+curve reset scope also pass focused checks. Final local builds and scoped checks
+pass. Automated Sway/GTK portal evidence does not claim human GNOME/Mutter
+acceptance. Both stages are ready for user acceptance and remain uncheckpointed.
+No protected specification was revised.
+
 On 2026-09-04 the user separately authorized a startup-screen follow-up, now
 **Complete at commit `4ed29d4`**: `assets/Stage21D_Mockup/SplashMockup.png`, persistent
 Recent Files for source images/projects, Close returning to startup after the
@@ -962,6 +1026,17 @@ limits are recorded in `docs/STARTUP_SCREEN_IMPLEMENTATION.md`. This follow-up
 and Gate 21B-4 were accepted together; Gate 21B-5 has not begun. The requested
 `Test Pattern - Diagonal Dots` is saved in the user's default personal library;
 Save as New, reopened confirmed update, and listing after restart are verified.
+
+On 2026-09-06 the user requested a separate fixed welcome window over the main
+editor, with a bounded scrolling recent list and dismissal into an empty document
+when clicking the editor behind it. This follow-up is implemented in the worktree;
+the user confirms the splash is fixed. The main-window defect was then traced to
+a long personal-library warning forcing a 13,731-pixel minimum height on GNOME.
+Messages now use a full-width scrolling row capped at 96 logical pixels; the same
+warning profile fits a small private desktop, and the user confirms “That fixed
+it.” Subsequent toolbar grouping and functional sidebar resizing pass focused
+private GTK checks and are included in the user's combined acceptance. Verification and the separately
+unconfirmed Print Screen recovery are recorded in `docs/STARTUP_SCREEN_IMPLEMENTATION.md`.
 
 On 2026-09-04, after pushing the accepted checkpoints, the user authorized
 AppImage and Flatpak packaging of release 0.2.0. This follow-up is
@@ -981,6 +1056,23 @@ The subsequent author-supplied icon follow-up replaces the placeholder in both
 bundles with `assets/appicon.svg` and `assets/appicon.png`; their packaged bytes
 and refreshed checksums are verified, with `assets/ToniatorIcon.svg` preserved
 as the editable source.
+
+On 2026-09-05, after publication of v0.2.0 at `bc3131f`, the user authorized
+the next development version, **0.3.0 (unreleased)**. All nine first-party Cargo
+packages, the lockfile, and packaging output/metadata versions now target 0.3.0.
+The README distinguishes this development version from the published 0.2.0
+downloads and examples. This version bump does not start a product gate or
+authorize another release.
+
+The separately authorized pre-refactor research was delivered on 2026-09-05 in
+[`docs/PRE_REFACTOR_RESEARCH_2026_09.md`](docs/PRE_REFACTOR_RESEARCH_2026_09.md).
+It covers the current-code audit, upstream library survey, creative algorithm
+matrices, memory/CPU/GPU opportunities, isolated weighted-CVT experiments and a
+16-item prioritized investigation backlog. The standalone POC passed release
+execution, focused assertions, formatting and strict Clippy; native raster/SVG
+fixtures from both baseline assets were inspected. This completes the research
+deliverable only: no production refactor, roadmap advancement, acceptance
+checkpoint, commit or new release is implied.
 
 The user then accepted a Gate 21B-2 CMYK/SourceColorAlpha stabilization at
 commit `b67a3483d2a1670e01b29716a1a33df51e10f7a1`. Ordinary development builds

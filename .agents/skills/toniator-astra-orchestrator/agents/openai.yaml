@@ -1,0 +1,4 @@
+interface:
+  display_name: "Toniator-Astra-Orchestrator"
+  short_description: "Astra orchestration for focused Toniator engineering"
+  default_prompt: "Use $toniator-astra-orchestrator to complete this Toniator task with focused verification and only useful specialist delegation."

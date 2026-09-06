@@ -64,6 +64,7 @@ template $ToniatorMainShell : Gtk.Box {
 
   Gtk.Paned workspace_split {
     orientation: horizontal;
+    accessibility { label: "Canvas and settings"; }
     vexpand: true;
     wide-handle: true;
     resize-start-child: true;
@@ -196,31 +197,32 @@ template $ToniatorMainShell : Gtk.Box {
           accessibility { label: "Zoom in"; }
         }
         Gtk.ToggleButton fit_button {
+          valign: center;
           label: "_Fit";
           use-underline: true;
           active: true;
           tooltip-text: "Fit the artwork in the viewport";
         }
-        Gtk.Revealer main_banner_revealer {
-          hexpand: true;
-          transition-type: crossfade;
-          Gtk.Box {
-            spacing: 4;
-            Gtk.Image { icon-name: "dialog-warning-symbolic"; }
-            Gtk.Label main_banner {
-              hexpand: true;
-              xalign: 0;
-              ellipsize: end;
-            }
-            Gtk.Button main_banner_dismiss {
-              icon-name: "window-close-symbolic";
-              tooltip-text: "Dismiss this message";
-              styles [ "flat" ]
-              accessibility { label: "Dismiss message"; }
-            }
+        Gtk.Box { hexpand: true; }
+        Gtk.Box endpoint_controls {
+          spacing: 0;
+          valign: center;
+          visible: false;
+          styles [ "linked" ]
+          accessibility { label: "Animation endpoint"; }
+          Gtk.ToggleButton start_frame_button {
+            label: "Start frame";
+            active: true;
+            tooltip-text: "Show the start of the selected animation range";
+          }
+          Gtk.ToggleButton end_frame_button {
+            label: "End frame";
+            group: start_frame_button;
+            tooltip-text: "Show the end of the selected animation range";
           }
         }
         Gtk.Box view_switcher {
+          valign: center;
           spacing: 0;
           styles [ "linked" ]
           Gtk.ToggleButton preview_view_button {
@@ -234,6 +236,40 @@ template $ToniatorMainShell : Gtk.Box {
             use-underline: true;
             group: preview_view_button;
             tooltip-text: "Show the original source artwork";
+          }
+        }
+      }
+
+      Gtk.Revealer main_banner_revealer {
+        transition-type: crossfade;
+        Gtk.Box {
+          spacing: 6;
+          margin-top: 6;
+          Gtk.Image { icon-name: "dialog-warning-symbolic"; valign: start; }
+          Gtk.ScrolledWindow main_banner_scroll {
+            hexpand: true;
+            hscrollbar-policy: never;
+            vscrollbar-policy: automatic;
+            max-content-height: 96;
+            propagate-natural-height: true;
+            focusable: true;
+            accessibility { label: "Message details"; }
+            Gtk.Label main_banner {
+              hexpand: true;
+              xalign: 0;
+              yalign: 0;
+              wrap: true;
+              wrap-mode: word_char;
+              selectable: true;
+              max-width-chars: 64;
+            }
+          }
+          Gtk.Button main_banner_dismiss {
+            valign: start;
+            icon-name: "window-close-symbolic";
+            tooltip-text: "Dismiss this message";
+            styles [ "flat" ]
+            accessibility { label: "Dismiss message"; }
           }
         }
       }

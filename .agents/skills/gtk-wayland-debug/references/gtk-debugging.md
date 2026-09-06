@@ -119,6 +119,49 @@ a harness input-lifetime issue, not grounds for coordinate-based widget clicks.
 They do not prove that a typed command committed, persistence changed, a cache
 invalidated, or the canvas rerendered. Verify those boundaries separately.
 
+`scripts/ui` wraps `atspi_tool.py` with the private session environment. Its
+default navigation path is `wait`, `controls`, `inspect`, one semantic action,
+then `wait` or `inspect` readback; `tree` is the diagnostic fallback for an
+unknown hierarchy. It supports `tree`, `find`, `controls`, `wait`, `inspect`,
+`focus`, `activate`, `set`, `toggle`, `select`, and `type`, plus the compatible
+`action` interface used by `ui-action`. Every result includes the
+real role, accessible name/description, enabled/focus/checked/pressed/selected/expanded
+state, value/range/text/actions, and useful relations when GTK exposes them.
+Use `--ancestor NAME` and `tree --subtree NAME` to disambiguate by actual
+semantic hierarchy rather than object addresses or layout. `select` opens the
+live GTK dropdown and attempts to activate its live option through AT-SPI. If
+the backend exposes only non-propagating list selection, it returns a
+diagnostic rather than reporting a false successful product selection.
+
+`controls` lists only real interactive or state-bearing GTK controls, including
+disabled nodes. It accepts `--subtree NAME`, optional `--subtree-role ROLE`,
+`--ancestor NAME`, `--role ROLE`, `--depth N`, `--limit N`, and `--json`;
+shared label/control matches use the shallowest interactive root, while
+`--subtree-role` is the ambiguity escape hatch. `wait NAME` waits for one normal semantic selector to be present
+(the default), absent (`--absent`), or to expose one native state through
+`--state enabled|disabled|focused|checked|unchecked|pressed|unpressed|selected|unselected|expanded|collapsed`.
+It uses a bounded `--timeout SECONDS` (3 by default, 30 maximum) and
+`--interval MILLISECONDS` (50 by default). A present target must be unique
+unless `--index` disambiguates it; timeouts and ambiguity fail closed. Absence
+returns an explicit `present: false` record, so it is safe to use around GTK
+dialogs and popovers instead of fixed sleeps.
+
+For example:
+
+```bash
+scripts/ui inspect 'Pattern family' --exact
+scripts/ui wait 'Pattern family' --exact --role 'combo box'
+scripts/ui controls --subtree 'Pattern family' --depth 4 --json
+scripts/ui select 'Pattern family' 'Straight grid circles' --exact
+scripts/ui type 'Pattern rotation' 15 --exact --commit
+scripts/ui toggle 'Uniform spacing' --exact
+```
+
+Use this path for ordinary controls. Coordinates remain appropriate only for
+inherently spatial canvas operations. A successful semantic operation does not
+prove pixels, preview, rendering, persistence, or command dispatch; capture
+and inspect a screenshot for visible changes.
+
 ## Diagnostic localization
 
 | Semantic state | Document/CLI state | Pixels/output | Likely boundary |

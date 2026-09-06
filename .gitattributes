@@ -1,2 +1,4 @@
 # Preserve design-reference PDF bytes and avoid treating compressed streams as text.
 *.pdf binary
+dist/*.AppImage filter=lfs diff=lfs merge=lfs -text
+dist/*.flatpak filter=lfs diff=lfs merge=lfs -text

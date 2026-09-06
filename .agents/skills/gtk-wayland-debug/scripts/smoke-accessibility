@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
+
+if (( $# == 1 )) && [[ "$1" == "--help" ]]; then
+    printf 'usage: smoke-accessibility [SOURCE_PATH]\n'
+    exit 0
+fi
+if (( $# > 1 )); then
+    die "usage: smoke-accessibility [SOURCE_PATH]"
+fi
+
+source_path="${1:-$REPO_ROOT/assets/raster-sample.png}"
+[[ -r "$source_path" ]] || die "source path is not readable: $source_path"
+started=0
+
+cleanup() {
+    local status=$?
+    if (( started )); then
+        if [[ -n ${log:-} && -r "$ACTIVE_EVIDENCE_FILE" ]]; then
+            local cleanup_evidence
+            cleanup_evidence="$(<"$ACTIVE_EVIDENCE_FILE")"
+            "$SCRIPT_DIR/screenshot" "$cleanup_evidence/accessibility-smoke-final.png" >>"$log" 2>&1 || printf 'cleanup screenshot failed\n' >>"$log"
+            "$SCRIPT_DIR/evidence-bundle" "$cleanup_evidence" >>"$log" 2>&1 || printf 'cleanup evidence bundle failed\n' >>"$log"
+        fi
+        if [[ -n ${log:-} ]]; then
+            "$SCRIPT_DIR/session-stop" >>"$log" 2>&1 || printf 'cleanup session stop failed\n' >>"$log"
+        else
+            "$SCRIPT_DIR/session-stop" >/dev/null 2>&1 || true
+        fi
+    fi
+    exit "$status"
+}
+trap cleanup EXIT INT TERM
+
+"$SCRIPT_DIR/session-start"
+started=1
+automation_temp="$(mktemp "$EVIDENCE_ROOT/automation-events.XXXXXX.jsonl")"
+export TONIATOR_AUTOMATION_EVENTS="$automation_temp"
+"$SCRIPT_DIR/app-start" "$source_path"
+evidence_dir="$(active_evidence_dir)"
+automation_log="$evidence_dir/automation-events.jsonl"
+mv "$automation_temp" "$automation_log"
+log="$evidence_dir/accessibility-smoke.log"
+
+run() {
+    printf '\n$' >>"$log"
+    printf ' %q' "$@" >>"$log"
+    printf '\n' >>"$log"
+    "$@" 2>&1 | tee -a "$log"
+}
+
+expect_inspect() {
+    local name="$1"
+    local role="$2"
+    local pattern="$3"
+    local output
+    output="$("$SCRIPT_DIR/ui" inspect "$name" --exact --role "$role")"
+    printf '\n$ inspect %q\n%s\n' "$name" "$output" >>"$log"
+    printf '%s\n' "$output"
+    rg -q -- "$pattern" <<<"$output" || die "semantic assertion failed for $name: $pattern"
+}
+
+run "$SCRIPT_DIR/ui" wait Toniator --application Toniator --role application --timeout 5
+run "$SCRIPT_DIR/ui" wait "Pattern family" --exact --role "combo box" --timeout 5
+run "$SCRIPT_DIR/ui" controls --subtree "Pattern family" --depth 4 --json
+run "$SCRIPT_DIR/ui" select "Pattern family" "Straight Grid Circles" --exact --role "combo box"
+expect_inspect "Pattern family" "combo box" "Pattern candidate: Straight Grid Circles"
+run "$SCRIPT_DIR/ui" activate "Apply Pattern" --exact --role button
+for _ in {1..40}; do rg -q '"event":"preset_applied"' "$automation_log" && break; sleep 0.05; done
+rg -q '"event":"preset_applied"' "$automation_log" || die "Apply Pattern did not emit observational preset evidence"
+preset_revision="$(python3 -c "import json,sys; rows=[json.loads(line) for line in open(sys.argv[1])]; print(next(row['document_revision'] for row in reversed(rows) if row.get('event') == 'preset_applied'))" "$automation_log")"
+
+run "$SCRIPT_DIR/ui" select Channel Red --exact --role "combo box"
+expect_inspect Channel "combo box" "Current channel: Red"
+expect_inspect Opacity "spin button" '"minimum": 0.0'
+expect_inspect Opacity "spin button" '"maximum": 1.0'
+run "$SCRIPT_DIR/ui" set Opacity 0.75 --exact --role "spin button"
+for _ in {1..40}; do
+    if python3 -c "import json,sys; preset=int(sys.argv[2]); rows=[json.loads(line) for line in open(sys.argv[1])]; assert any(row.get('event') == 'preview_submitted' and row.get('document_revision', -1) > preset for row in rows); assert any(row.get('event') == 'preview_accepted' and row.get('document_revision', -1) > preset for row in rows)" "$automation_log" "$preset_revision" 2>/dev/null; then
+        break
+    fi
+    sleep 0.05
+done
+python3 -c "import json,sys; preset=int(sys.argv[2]); rows=[json.loads(line) for line in open(sys.argv[1])]; assert any(row.get('event') == 'preview_submitted' and row.get('document_revision', -1) > preset for row in rows); assert any(row.get('event') == 'preview_accepted' and row.get('document_revision', -1) > preset for row in rows)" "$automation_log" "$preset_revision" || die "numeric commit did not advance revision and accept preview evidence"
+expect_inspect Opacity "spin button" '0.7500'
+
+toggle_before="$("$SCRIPT_DIR/ui" inspect "Channel settings" --exact --role "toggle button")"
+printf '\n$ inspect Channel settings (before)\n%s\n' "$toggle_before" >>"$log"
+run "$SCRIPT_DIR/ui" toggle "Channel settings" --exact --role "toggle button"
+toggle_after="$("$SCRIPT_DIR/ui" inspect "Channel settings" --exact --role "toggle button")"
+printf '\n$ inspect Channel settings (after)\n%s\n' "$toggle_after" >>"$log"
+toggle_state_before="$(rg -o '"(checked|pressed)": (true|false)' <<<"$toggle_before" | sort)"
+toggle_state_after="$(rg -o '"(checked|pressed)": (true|false)' <<<"$toggle_after" | sort)"
+if [[ "$toggle_state_before" == "$toggle_state_after" ]]; then
+    die "Channel settings toggle did not expose a changed native semantic state"
+fi
+run "$SCRIPT_DIR/ui" toggle "Channel settings" --exact --role "toggle button"
+
+run "$SCRIPT_DIR/ui" activate "Advanced Settings…" --exact --role button
+run "$SCRIPT_DIR/ui" wait "Advanced Settings" --application Toniator --exact --role frame --timeout 5
+run "$SCRIPT_DIR/ui" activate "Cancel" --exact --ancestor "Advanced Settings" --role button
+run "$SCRIPT_DIR/ui" wait "Advanced Settings" --application Toniator --exact --role frame --absent --timeout 5
+run "$SCRIPT_DIR/ui" focus "Pattern family" --exact --role "combo box" --steps 24
+printf 'accessibility smoke passed: %s\n' "$evidence_dir"

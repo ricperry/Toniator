@@ -11,6 +11,12 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+mod color_authoring;
+mod temporal;
+
+pub use color_authoring::*;
+pub use temporal::*;
+
 /// A stable identifier for an authoritative document.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocumentId(pub u64);
@@ -4669,6 +4675,8 @@ pub struct Document {
     channel_configuration: ChannelConfiguration,
     authored_structures: Vec<AuthoredStructure>,
     pattern_settings: DocumentPatternSettings,
+    project_timing: ProjectTiming,
+    temporal_end_overrides: Vec<TemporalEndOverride>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -4692,10 +4700,11 @@ pub struct DocumentConfiguration {
     channel_configuration: ChannelConfiguration,
     authored_structures: Vec<AuthoredStructure>,
     pattern_settings: DocumentPatternSettings,
+    temporal_end_overrides: Vec<TemporalEndOverride>,
 }
 
 impl DocumentConfiguration {
-    /// Captures the four reusable authored authorities from one validated document.
+    /// Captures the reusable authored authorities from one validated document.
     ///
     /// The snapshot preserves exact IDs, sharing relationships, channel order,
     /// inheritance versus explicit channel intent, and source-interpretation
@@ -4706,6 +4715,7 @@ impl DocumentConfiguration {
             channel_configuration: document.channel_configuration.clone(),
             authored_structures: document.authored_structures.clone(),
             pattern_settings: document.pattern_settings.clone(),
+            temporal_end_overrides: document.temporal_end_overrides.clone(),
         }
     }
 
@@ -4725,6 +4735,8 @@ impl DocumentConfiguration {
             channel_configuration: self.channel_configuration.clone(),
             authored_structures: self.authored_structures.clone(),
             pattern_settings: self.pattern_settings.clone(),
+            project_timing: destination.project_timing.clone(),
+            temporal_end_overrides: self.temporal_end_overrides.clone(),
         };
         candidate.validate()?;
         Ok(candidate)
@@ -4767,6 +4779,11 @@ impl DocumentConfiguration {
     /// Returns the complete captured document-owned authored resource store.
     pub fn authored_structures(&self) -> &[AuthoredStructure] {
         &self.authored_structures
+    }
+
+    /// Returns reusable End-frame overrides without project-only timing or source state.
+    pub fn temporal_end_overrides(&self) -> &[TemporalEndOverride] {
+        &self.temporal_end_overrides
     }
 }
 
@@ -4885,6 +4902,8 @@ impl Document {
             channel_configuration: ChannelConfiguration::Legacy(channels),
             authored_structures: Vec::new(),
             pattern_settings,
+            project_timing: ProjectTiming::default(),
+            temporal_end_overrides: Vec::new(),
         };
         document.validate()?;
         Ok(document)
@@ -4917,6 +4936,8 @@ impl Document {
             channel_configuration: ChannelConfiguration::Topology { model, topology },
             authored_structures: Vec::new(),
             pattern_settings,
+            project_timing: ProjectTiming::default(),
+            temporal_end_overrides: Vec::new(),
         };
         document.validate()?;
         Ok(document)
@@ -4945,6 +4966,8 @@ impl Document {
             channel_configuration: ChannelConfiguration::Legacy(channels),
             authored_structures,
             pattern_settings,
+            project_timing: ProjectTiming::default(),
+            temporal_end_overrides: Vec::new(),
         };
         document.validate()?;
         Ok(document)
@@ -4975,6 +4998,8 @@ impl Document {
             channel_configuration: ChannelConfiguration::Topology { model, topology },
             authored_structures,
             pattern_settings,
+            project_timing: ProjectTiming::default(),
+            temporal_end_overrides: Vec::new(),
         };
         document.validate()?;
         Ok(document)
@@ -4990,6 +5015,16 @@ impl Document {
 
     pub fn source(&self) -> &SourceReference {
         &self.source
+    }
+
+    /// Returns the project-only constant-frame-rate and selected output range authority.
+    pub fn project_timing(&self) -> &ProjectTiming {
+        &self.project_timing
+    }
+
+    /// Returns normalized authored End-frame overrides in deterministic stored order.
+    pub fn temporal_end_overrides(&self) -> &[TemporalEndOverride] {
+        &self.temporal_end_overrides
     }
 
     pub fn pattern_definition_bundles(&self) -> &[PatternDefinitionBundle] {
@@ -7582,6 +7617,7 @@ impl Document {
                     != contract.copy_on_edit_escalates_to_family
                 || descriptor.reference_constraint != contract.reference_constraint
                 || descriptor.choice_policy != contract.choice_policy
+                || descriptor.temporal != temporal_capability(descriptor.field, descriptor.target)
             {
                 return Err(ValidationError::new(
                     "capabilities.descriptors",
@@ -10047,6 +10083,7 @@ impl Document {
                 ));
             }
         }
+        validate_temporal_authority(self)?;
         Ok(())
     }
 
@@ -10067,6 +10104,7 @@ impl Document {
         command.validate(self)?;
         let mut candidate = self.clone();
         command.apply_to_valid_document(&mut candidate);
+        temporal::reconcile_end_after_start(self, &mut candidate, command)?;
         candidate.validate()?;
         if candidate == *self {
             return Err(ValidationError::new(
@@ -16567,6 +16605,8 @@ pub struct PropertyDescriptor {
     pub choice_policy: PropertyChoicePolicy,
     pub authority: PropertyAuthority,
     pub reset_capable: bool,
+    /// Declares whether this exact field/target pair accepts an End-frame override.
+    pub temporal: TemporalCapability,
 }
 
 /// An immutable typed value paired with one active descriptor.  This is a
@@ -18454,6 +18494,7 @@ pub struct PropertyFieldContract {
     pub choice_policy: PropertyChoicePolicy,
 }
 
+/// Returns exhaustive target-independent metadata for one stable property field.
 pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldContract {
     PropertyFieldContract {
         field,
@@ -18694,6 +18735,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
         },
         bounds: match field {
             PropertyFieldId::Density
+            | PropertyFieldId::DensityAspect
             | PropertyFieldId::GuideSpacingMultiplier
             | PropertyFieldId::GuideArcRadius
             | PropertyFieldId::GuideOffsetSpacing
@@ -19193,6 +19235,7 @@ enum DescriptorRuntimeContext {
     },
 }
 
+/// Projects one field contract for an exact runtime target, including temporal authority.
 const fn descriptor_from_contract(
     field: PropertyFieldId,
     target: PropertyTarget,
@@ -19214,9 +19257,11 @@ const fn descriptor_from_contract(
         choice_policy: contract.choice_policy,
         authority: property_authority(field, target),
         reset_capable: property_reset_capable(field, target),
+        temporal: temporal_capability(field, target),
     }
 }
 
+/// Projects one field contract with its current choice/dependency context and temporal authority.
 const fn descriptor_with_runtime_context(
     field: PropertyFieldId,
     target: PropertyTarget,
@@ -19257,13 +19302,20 @@ const fn descriptor_with_runtime_context(
         choice_policy: contract.choice_policy,
         authority: property_authority(field, target),
         reset_capable: property_reset_capable(field, target),
+        temporal: temporal_capability(field, target),
     }
 }
 
-/// Identifies the document base, optional channel delta, or independent
-/// authority represented by one stable field.
+/// Identifies the persisted authority for a field at its actual target scope.
+///
+/// Definition/output-layer defaults remain structural even when a matching
+/// channel-output field supports an optional response delta.
 const fn property_authority(field: PropertyFieldId, target: PropertyTarget) -> PropertyAuthority {
     match target {
+        PropertyTarget::Definition(_)
+        | PropertyTarget::Mechanism(_, _)
+        | PropertyTarget::OutputLayer(_, _)
+        | PropertyTarget::GuideDimension(_, _, _) => PropertyAuthority::StructuralDefinition,
         PropertyTarget::Document
             if matches!(
                 field,
@@ -19287,6 +19339,7 @@ const fn property_authority(field: PropertyFieldId, target: PropertyTarget) -> P
             | PropertyFieldId::MarkMaximumFill
             | PropertyFieldId::ConnectedMinimumThickness
             | PropertyFieldId::ConnectedMaximumThickness
+            | PropertyFieldId::CurveResponseBias
             | PropertyFieldId::RegionMinimumFill
             | PropertyFieldId::RegionMaximumFill
             | PropertyFieldId::DefinitionSelection => PropertyAuthority::ChannelDelta,
@@ -19312,9 +19365,13 @@ const fn property_authority(field: PropertyFieldId, target: PropertyTarget) -> P
     }
 }
 
-/// States whether reset removes optional Stage 20G channel intent for one
-/// field rather than copying its current effective value.
+/// Identifies channel settings whose reset removes optional authored intent.
+/// Layout and every supported geometry-response delta, including curve alignment,
+/// return to inherited definition values without copying their effective values.
 const fn property_reset_capable(field: PropertyFieldId, target: PropertyTarget) -> bool {
+    if matches!(field, PropertyFieldId::CurveResponseBias) {
+        return matches!(target, PropertyTarget::ChannelOutput(_, _));
+    }
     matches!(
         target,
         PropertyTarget::Channel(_) | PropertyTarget::ChannelOutput(_, _)
@@ -26233,7 +26290,7 @@ impl DocumentHistory {
     }
 }
 
-/// Summarizes the net draft document difference without replaying draft command history.
+/// Summarizes static and temporal authored differences without replaying draft history.
 fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
     let changed_structures = before
         .authored_structures
@@ -26267,6 +26324,15 @@ fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
                 != after.modeled_channel(*id).map(|value| value.role)
         });
     let mut changed_channels = HashSet::new();
+    if before.temporal_end_overrides != after.temporal_end_overrides
+        || before.project_timing != after.project_timing
+    {
+        let temporal = temporal::temporal_command_result(before, after);
+        if let Some(temporal_level) = temporal.invalidation {
+            level = strongest_invalidation(level, temporal_level);
+        }
+        changed_channels.extend(temporal.affected_channels);
+    }
     for channel_id in &after_channel_ids {
         let before_effective = before.effective_channel_pattern(*channel_id).ok();
         let after_effective = after.effective_channel_pattern(*channel_id).ok();

@@ -1643,7 +1643,8 @@ struct RasterWork<'a> {
 fn ignore_raster_progress(_completed: usize, _total: usize) {}
 
 impl<'a> RasterWork<'a> {
-    /// Initializes one nonzero request-wide edge budget and caller-selected sampling policy.
+    /// Initializes a test raster budget without observing production primitive progress.
+    #[cfg(test)]
     fn new(
         limits: RasterizationLimits,
         antialiasing: RasterAntialiasing,
@@ -1946,15 +1947,54 @@ pub fn rasterize_output_cancellable(
     limits: RasterizationLimits,
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<RasterSurface, RenderError> {
+    rasterize_output_cancellable_with_progress(
+        scene,
+        background,
+        target,
+        antialiasing,
+        limits,
+        is_cancelled,
+        &|_, _| {},
+    )
+}
+
+/// Rasterizes a final output target with actual primitive progress and cooperative cancellation.
+///
+/// Consumer background, dimensions and antialiasing never mutate canonical geometry. Native
+/// antialiased output retains the existing renderer path and its pixel authority.
+///
+/// # Errors
+/// Returns cancellation or checked target, flattening, edge-limit, and surface diagnostics.
+pub fn rasterize_output_cancellable_with_progress(
+    scene: &RenderScene,
+    background: RasterBackground,
+    target: Option<OutputRasterTarget>,
+    antialiasing: RasterAntialiasing,
+    limits: RasterizationLimits,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+    report_progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<RasterSurface, RenderError> {
     if target.is_none() && matches!(antialiasing, RasterAntialiasing::On) {
-        return rasterize_cancellable(scene, background, limits, is_cancelled);
+        return rasterize_cancellable_with_progress(
+            scene,
+            background,
+            limits,
+            is_cancelled,
+            report_progress,
+        );
     }
     let target = match target {
         Some(target) => target,
         None => native_output_target(scene)?,
     };
     let transform = OutputTransform::for_scene(scene, target);
-    let mut work = RasterWork::new(limits, antialiasing, is_cancelled);
+    let mut work = RasterWork::with_progress(
+        limits,
+        antialiasing,
+        is_cancelled,
+        raster_progress_unit_count(scene),
+        report_progress,
+    );
     let model = scene.model;
     let mut pixels = match model {
         Some(model) => begin_model_composition(model, target.width, target.height)?,
@@ -1971,8 +2011,12 @@ pub fn rasterize_output_cancellable(
     if let Some(model) = model {
         finish_model_composition(model, &mut pixels, is_cancelled)?;
     }
+    work.parallel_phase();
     apply_background(&mut pixels, background, is_cancelled)?;
-    pixels_from_linear(target.width, target.height, pixels, is_cancelled)
+    work.parallel_phase();
+    let surface = pixels_from_linear(target.width, target.height, pixels, is_cancelled)?;
+    work.parallel_phase();
+    Ok(surface)
 }
 
 /// Stable consumer-only identity suitable for a PNG cache. It intentionally

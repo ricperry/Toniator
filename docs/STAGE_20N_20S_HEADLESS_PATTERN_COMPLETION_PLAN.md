@@ -294,17 +294,18 @@ integrated Stage 20A–20S scrub is recorded at implementation checkpoint
   editors, progressive disclosure, preview workflow, accessibility, private
   Sway evidence, and eventual human GNOME/Mutter acceptance. GTK projects
   domain capabilities and commands; it owns no pattern semantics.
-- **Stage 22 — Headless temporal pipeline:** still-frame abstraction, bounded
-  multi-frame decoding, deterministic frame sequences and CLI export, then
-  simple start/end transitions. Media backend selection receives its own
-  planning decision.
-- **Stage 23 — Temporal GTK:** start/end pins appear only for
-  descriptor-declared continuous values: density X/Y, rotation, X/Y
-  translation, mark size, path thickness, region scale/gap, opacity, color
-  components, and sampling gain/bias. Seeds, counts, IDs, algorithms, topology,
-  output kinds, and other discrete or pattern-definition settings remain
-  static. Arbitrary keyframes, multiple segments, editable curves, timeline
-  lanes, and a dope sheet remain excluded.
+- **Stages 22–23 — Combined temporal workflow:** on 2026-09-05 the user
+  authorized planning headless frame/media/sequence/transition authority and
+  its temporal GTK workflow as one effort with one end-to-end acceptance.
+  The [combined planning draft](STAGE_22_23_TEMPORAL_WORKFLOW_PLAN.md) specifies
+  frame timing, 20 animatable property fields, FFmpeg integration, PNG sequence
+  or lossless FFV1/Matroska output, optional AV1/WebM, destination defaults,
+  persistence, and verification. Density/aspect remains authored authority;
+  X/Y density is derived. Seeds, counts, IDs, algorithms, topology, output
+  kinds, and other discrete or Pattern-definition settings remain static.
+  Arbitrary keyframes, multiple segments, editable curves, timeline lanes,
+  and a dope sheet remain excluded. The user accepts the combined implementation
+  and desktop corrections on 2026-09-06; the current tracker records its checkpoint.
 
 ## Deferred work
 

@@ -49,6 +49,7 @@ def sdk_build():
     run('flatpak', 'build', '--unshare=network', f'--filesystem={ROOT}',
         f'--filesystem={toolchain.parent}:ro', f'--filesystem={cargo_home}',
         f'--env=PATH={toolchain}:/usr/bin', f'--env=CARGO_HOME={cargo_home}',
+        '--env=TONIATOR_PACKAGED_MEDIA=1',
         f'--env=CARGO_TARGET_DIR={WORK / "cargo"}', build,
         toolchain / 'cargo', 'build', '--manifest-path', ROOT / 'Cargo.toml',
         '--release', '--locked', '--offline', '-p', 'toniator-app', '-p', 'toniator-cli')
@@ -57,6 +58,8 @@ def sdk_build():
 
 def payload(prefix):
     """Install the two binaries and standard desktop integration into a private prefix."""
+    from media import install_tools
+    install_tools(prefix)
     for name in ['toniator-app', 'toniator']:
         install(WORK / 'cargo/release' / name, prefix / 'bin' / name)
         run('strip', '--strip-unneeded', prefix / 'bin' / name)
@@ -78,7 +81,7 @@ def flatpak_bundle():
     run('flatpak', 'build-finish', '--command=toniator-app', '--socket=wayland',
         '--socket=fallback-x11', '--share=ipc', '--device=dri', build)
     run('flatpak', 'build-export', '--disable-sandbox', WORK / 'repo', build, 'stable')
-    bundle = DIST / 'Toniator-0.2.0-x86_64.flatpak'
+    bundle = DIST / 'Toniator-0.3.0-x86_64.flatpak'
     temporary = DIST / ('.Toniator-' + str(time.time_ns()) + '.flatpak')
     run('flatpak', 'build-bundle', WORK / 'repo', temporary, APP_ID, 'stable',
         '--runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo')
@@ -98,7 +101,7 @@ def main():
     if not args.skip_build:
         sdk_build()
     bundle = flatpak_bundle()
-    record = {'version': '0.2.0', 'app_id': APP_ID,
+    record = {'version': '0.3.0', 'app_id': APP_ID,
               'base_commit': output('git', 'rev-parse', 'HEAD'),
               'packaging_diff': output('git', 'diff', '--', 'crates/toniator-app/src/main.rs',
                                         'crates/toniator-app/src/main_view_state.rs'),

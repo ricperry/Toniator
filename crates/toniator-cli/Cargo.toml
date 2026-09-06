@@ -1,6 +1,6 @@
 [package]
 name = "toniator-cli"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -16,6 +16,7 @@ serde.workspace = true
 toniator-domain = { path = "../toniator-domain" }
 toniator-engine = { path = "../toniator-engine" }
 toniator-io = { path = "../toniator-io" }
+signal-hook = { version = "0.4.4", default-features = false }
 
 [dev-dependencies]
 image.workspace = true

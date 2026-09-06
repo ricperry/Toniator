@@ -31,13 +31,24 @@ Evidence is not durable product documentation and never supersedes the
 normative files under `Project Specification/`; the Addendum has precedence
 when those documents conflict.
 
-An agent with workspace-write access updates the appropriate cache directory
-directly. A read-only agent returns a final section titled exactly
-`CACHE_UPDATE`; the parent thread persists that section directly under
-`.codex-work/` immediately after collecting it. Never spawn another agent just
-to summarize or persist cache evidence.
+For GTK/app evidence, inventory every new or changed interactive control in
+the affected diff: stable product name/hierarchy, real role/state/value or
+selection/actions, label relation, enabled/applicability truth, keyboard path,
+semantic action/readback, and screenshot/log witness. Record controls that
+remain compliant without a code change. Prefer the private helper's `wait`,
+scoped `controls`, and `inspect` records; retain full trees only when needed to
+diagnose hierarchy. This evidence projects existing GTK authority and must not
+create a second accessibility model.
 
-## Required entry fields
+Persist evidence when a gate requires it or future work benefits from reuse.
+A concise task report is enough for trivial or already-recorded findings.
+An authorized writer updates the appropriate cache directory directly. A
+read-only agent returns reusable findings and invalidation conditions; the
+parent persists them when useful. No fixed report heading or immediate cache
+write is required. Never spawn another agent merely to persist evidence.
+Semantic-map is retired; do not refresh it or require its historical logs.
+
+## Fields for persisted evidence
 
 - `generation: greenfield-rewrite`
 - Repository absolute path

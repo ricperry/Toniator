@@ -17,6 +17,14 @@ use crate::{PreviewModel, Workspace, preview_coordinator::PreviewCoordinator};
 /// selected artist channel and scheduler identity. GTK may borrow it only long
 /// enough to project immutable view models or dispatch existing typed commands.
 pub(crate) struct ApplicationModel {
+    /// Prepares decoded source frames on its own worker before evaluator submission.
+    pub(crate) media_worker: Option<crate::temporal_preview::Worker>,
+    /// Selects Start or End without creating a document edit or playback position.
+    pub(crate) endpoint: crate::temporal_preview::Endpoint,
+    /// Invalidates older decode results even when document revision is unchanged.
+    pub(crate) media_epoch: u64,
+    /// Identifies the newest source frame requested for the current workspace.
+    pub(crate) media_preview_key: Option<crate::temporal_preview::RequestKey>,
     /// Tracks exclusive document-Preset operations without owning GTK or duplicate document state.
     pub(crate) document_presets: crate::document_presets::OperationState,
     /// Evaluates immutable snapshots and never receives GTK widgets.
@@ -52,6 +60,10 @@ impl ApplicationModel {
     /// constructed; without it the desktop application cannot render previews.
     pub(crate) fn new() -> Self {
         Self {
+            media_worker: None,
+            endpoint: crate::temporal_preview::Endpoint::Start,
+            media_epoch: 0,
+            media_preview_key: None,
             document_presets: crate::document_presets::OperationState::default(),
             scheduler: Arc::new(
                 EvaluationScheduler::new().expect("failed to start evaluation scheduler"),

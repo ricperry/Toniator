@@ -26,6 +26,7 @@ def main():
     private = appdir / 'usr/lib'
     private.mkdir(parents=True, exist_ok=True)
     binaries = [str(WORK / 'cargo/release' / name) for name in ['toniator-app', 'toniator']]
+    binaries += [str(WORK / 'media/prefix/bin' / name) for name in ['ffmpeg', 'ffprobe']]
     # GTK's PNG/SVG resources and icons may use Glycin loaders at runtime.
     for name in ['glycin-image-rs', 'glycin-svg']:
         source = sdk_files / 'libexec/glycin-loaders/2+' / name
@@ -61,7 +62,7 @@ def main():
     if hashlib.sha256(tool.read_bytes()).hexdigest() != TOOL_SHA256:
         raise SystemExit('appimagetool checksum mismatch.')
     tool.chmod(0o755)
-    destination = DIST / 'Toniator-0.2.0-x86_64.AppImage'
+    destination = DIST / 'Toniator-0.3.0-x86_64.AppImage'
     temporary = DIST / ('.Toniator-' + str(time.time_ns()) + '.AppImage')
     environment = dict(os.environ, ARCH='x86_64', APPIMAGE_EXTRACT_AND_RUN='1')
     run(tool, '--no-appstream', appdir, temporary, env=environment)

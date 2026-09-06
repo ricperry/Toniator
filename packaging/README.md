@@ -5,7 +5,7 @@ Download the AppImage or Flatpak from the
 For maintainers, [release instructions](../docs/RELEASING.md) cover publishing
 the two bundles and their checksums together under one version tag.
 
-Local x86_64 packages of version **0.2.0** use **com.sbdd.Toniator** as the
+Local x86_64 packages use **com.sbdd.Toniator** as the
 application/desktop ID. The internal GResource prefix and project/Pattern formats
 stay unchanged. Both formats include the GUI and headless `toniator` CLI.
 
@@ -57,6 +57,12 @@ including live changes; native GNOME/GTK settings provide the fallback.
 
 ## Rebuild locally
 
+The current development checkout builds **0.3.0 (unreleased)**, producing
+`dist/Toniator-0.3.0-x86_64.AppImage` and `dist/Toniator-0.3.0-x86_64.flatpak`.
+The download/install examples above and verification record below refer to the
+published 0.2.0 release. Substitute 0.3.0 when running your local development
+packages; this version bump does not publish new packages.
+
 Prerequisites: Python 3, Flatpak, GNOME SDK and Platform 50, Rust/rustup with
 Rust 1.94 or newer, Cargo dependencies cached for Cargo.lock, binutils, tar, and
 network access for the pinned AppImage packaging tool/runtime. The SDK supplies
@@ -67,11 +73,18 @@ If the SDK/runtime are missing, install them through your configured Flathub rem
 ```sh
 flatpak install flathub org.gnome.Sdk//50 org.gnome.Platform//50
 cargo fetch --locked
+python packaging/media.py
 python packaging/build.py
 python packaging/appimage.py
 ```
 
-The first script compiles locked/offline sources inside the GNOME SDK using the
+The media script verifies pinned FFmpeg, SVT-AV1, dav1d and libvpx sources and
+builds software tools offline in the SDK. Both packages carry these private tools,
+their original corresponding sources, recipe and build logs. See
+[media provenance and notices](MEDIA-NOTICES.md). Packaged Toniator resolves the
+tools beside its executable, without host FFmpeg fallback.
+
+The build script compiles locked/offline sources inside the GNOME SDK using the
 host's installed Rust toolchain, stages desktop metadata, exports a local OSTree
 repository, and writes the Flatpak bundle. The second bundles SDK-built binaries
 and libraries and runs checksum-pinned appimagetool 1.9.1. Previous generated
@@ -80,11 +93,33 @@ user library, installed app, Git state, or remote repository is modified.
 
 Outputs are in `dist/`: the two bundles, `build-info.json` with source/runtime
 provenance, and `SHA256SUMS`. Verify them with `sha256sum -c SHA256SUMS` from dist.
+The user-requested 0.3.0 acceptance checkpoint includes these four files. Both
+package files use Git LFS; after cloning, run `git lfs pull` to download their
+contents. Build provenance points to the preceding accepted source checkpoint.
+Repository inclusion does not publish a GitHub release.
 The AppImage runtime comes from AppImage's official type2-runtime release; the
 final artifact checksum records the actual assembled file. This is a reproducible
 build procedure, not a claim of bit-for-bit reproducible archives across SDK updates.
 
-## Verification for this build
+## Development media verification
+
+Both locally built 0.3.0 packages pass the media checks recorded in
+`target/validation/stage22-packaged-media/1788671372198098377/`. The actual AppImage
+and an isolated test-installation Flatpak render identical native 1024×1024 PNG
+and 900×620 SVG outputs. All ten supplied 1080×1920 video frames round-trip through
+FFV1 exactly, as do two frames with fractional alpha and hidden RGB. Optional
+AV1/WebM encoding passes with an explicit opaque matte. Native artifacts are
+visually inspected; AV1 is not claimed lossless.
+
+Private-tool selection is tested independently: moving-media work succeeds with
+host tool names masked, while relocating the packaged CLI without its private
+tools fails without publishing output. Media dependency logs contain only SDK
+system/compression libraries. No host codec extension is copied into the bundles.
+The test Flatpak adds scoped file access for CLI fixtures; production permissions
+are unchanged. Desktop portal-grant persistence and GNOME/Mutter behavior remain
+separate acceptance checks. These local artifacts are unreleased.
+
+## Verification for the published 0.2.0 build
 
 - Installed the actual Flatpak bundle into an isolated test installation;
   both packaged CLIs report version 0.2.0.

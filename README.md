@@ -13,7 +13,7 @@ Built with Rust and GTK4, Toniator includes a visual Pattern Wizard, a personal
 Pattern library, and a headless command-line renderer. It is free software under
 the [GPL-3.0-only license](LICENSE).
 
-**Current version: 0.2.0 — pre-release, under active development.**
+**Development version: 0.3.0 (unreleased). Latest published pre-release: 0.2.0.**
 [Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.2.0)
 or [browse known issues](ISSUES.md).
 
@@ -73,6 +73,10 @@ Download `SHA256SUMS` alongside the packages to verify their integrity with
 
 ## Make your first artwork
 
+The fixed welcome window appears over the editor. Click the editor behind it,
+press Escape, or close welcome to begin with an empty document. Recent Files
+scrolls within its own bounded area.
+
 1. Click **Start New Project** and select an image. The same button opens an
    existing `.toniator` project; **Recent Files** provides quick access later.
 2. Choose a color mode and edit **All** channels together or select one channel.
@@ -98,6 +102,38 @@ Supported still-image inputs: PNG, SVG, JPEG, WebP, BMP, TIFF, OpenEXR, and AVIF
 PNG exports offer background, antialiasing, and output-size options. SVG exports
 keep a transparent background. RGB PNG defaults to black, CMYK to white, and
 source-color output to transparent.
+
+### Animate artwork in the development build
+
+The combined animation/video work is implemented in the development checkout
+and undergoing final review; it is not part of the published 0.2.0 release.
+
+1. Start a project with a video or animated image, or use **New → Import image
+   sequence…** to review an ordered image list and its frame rate. Still images
+   can also supply the artwork for an animation.
+2. Edit **Start frame** with the normal Pattern, channel and appearance controls.
+   In Advanced settings, assign **Color** with the picker or HEX entry and use
+   **Alpha** for strength. These controls edit the currently selected frame.
+3. Select **End frame** below the canvas. Its first selection copies the Start
+   settings. Make the desired changes, then toggle between frames to inspect
+   them. Each frame retains its settings. Changing one channel's Pattern
+   reinitializes only its dependent End settings, preserving the other channels.
+4. Choose interpolation in a property's Animation disclosure when needed.
+   Use **Animation settings…** in the main menu for exact frame rate and source
+   interval. The renderer interpolates supported continuous values between the
+   two states; this version has no playback or scrubbing.
+5. Export a PNG sequence or lossless **FFV1/Matroska** video. Optional
+   **AV1/WebM** provides a smaller lossy sharing file with an opaque background.
+   Choose a destination each time or save a personal folder default. Video uses
+   private temporary PNGs, with recovery options if encoding fails.
+
+Save the `.toniator` project to retain its source media and animation settings.
+Project Preset loading keeps the current artwork and timing. Audio is retained
+inside the original source but exports are silent. Variable-rate sources are
+sampled at the displayed project rate; frames may repeat or be skipped.
+Development builds need FFmpeg and ffprobe on PATH for moving media and video
+export. The development AppImage and Flatpak bundle their own software tools;
+see [the packaging guide](packaging/README.md).
 
 ## Build from source
 

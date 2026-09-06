@@ -119,7 +119,12 @@ def main() -> int:
                 key = {"escape": "esc", "return": "enter"}.get(
                     arguments.key.lower(), arguments.key.lower()
                 )
-                client.keyPress(key)
+                if key == "shift-tab":
+                    client.keyDown("shift")
+                    client.keyPress("tab")
+                    client.keyUp("shift")
+                else:
+                    client.keyPress(key)
                 client.pause(0.08)
             else:
                 raise AssertionError(f"unhandled command: {arguments.command}")

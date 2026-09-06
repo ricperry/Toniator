@@ -40,6 +40,17 @@
   review or GNOME Shell/Mutter acceptance. Ask for manual desktop inspection
   only when the private harness cannot reproduce the behavior or the remaining
   risk is specifically human-, Mutter-, portal-, or compositor-policy-dependent.
+- For every future `toniator-app` diff, account for every new or changed
+  interactive GTK4 control even when its existing accessibility code remains
+  sufficient. Check stable product name/hierarchy; real GTK role, state,
+  value/selection, and actions; visible-label relation where applicable;
+  truthful enabled/applicability state; keyboard path; semantic action/readback
+  test; and relevant screenshot/log evidence. Derive metadata from visible
+  product vocabulary and descriptor authority; do not create a second
+  accessibility schema. Use `ui wait`, scoped `ui controls`, and `ui inspect`
+  before full-tree diagnostics. AT-SPI is the normal route for ordinary widgets;
+  coordinates remain for genuinely spatial canvas interaction. Any visible UI
+  change still requires screenshot inspection in the private harness.
 - Read `docs/GREENFIELD_REWRITE_PLAN.md` and `ProgressTracker.md` before
   choosing scope. Treat the plan as the approved stage contract and the
   tracker as the current ledger, both subordinate to the protected normative
@@ -51,13 +62,21 @@
   computed `#[doc = ...]` attributes for this purpose. Apply this rule on touch;
   do not initiate a repository-wide documentation pass without explicit
   authorization.
-- Use semantic-map for the architecture-sensitive work described by its skill.
-  Whenever it is inadequate or less efficient than standard codebase
-  exploration, append an evidence-backed observation to
-  `.codex-work/semantic-map/USAGE_EVALUATION.md` before handoff. Record the
-  semantic-map attempt, the standard fallback, observable command/output or
-  round-trip cost, limitations, and a proposed improvement. Do not count the
-  act of documenting the observation as semantic-map inefficiency.
+- Prefer `.agents/skills/toniator-astra-orchestrator/SKILL.md` for parent
+  orchestration. The existing orchestrator remains available; do not load both
+  routinely. Select specialists only when their work materially helps, and
+  preserve one writer, including the parent. Agent model/effort defaults live in
+  `.codex/agents/`; verify live runtime support before changing assignments.
+- Semantic-map is retired for Toniator unless the user explicitly reactivates
+  it. Do not run it, refresh its cache, or require usage-evaluation entries.
+  Historical tool requirements are superseded. Use focused `rg`, Git, Cargo,
+  and available rust-analyzer/LSP navigation; verify real callers/consumers.
+  Keep the separate semantic-map project untouched.
+- Project-local development skills and agent instructions may be refined for
+  concrete tooling deficiencies within the current goal. This does not permit
+  product/specification changes, later-stage work, destructive actions, or
+  unrelated cleanup. Current UI references are indexed in `docs/ui/REFERENCES.md`;
+  presentation guidance never creates a second domain authority.
 - Update `ProgressTracker.md` at every stage transition. The parent owns
   accepted/complete transitions and checkpoint hashes; evidence cannot
   substitute for user acceptance or a commit. Plan or roadmap changes require

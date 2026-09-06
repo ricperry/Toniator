@@ -21,6 +21,8 @@ mod main_shell {
         #[template_child]
         pub main_banner: gtk::TemplateChild<gtk::Label>,
         #[template_child]
+        pub main_banner_scroll: gtk::TemplateChild<gtk::ScrolledWindow>,
+        #[template_child]
         pub main_banner_dismiss: gtk::TemplateChild<gtk::Button>,
         #[template_child]
         pub workspace_split: gtk::TemplateChild<gtk::Paned>,
@@ -52,6 +54,12 @@ mod main_shell {
         pub preview_view_button: gtk::TemplateChild<gtk::ToggleButton>,
         #[template_child]
         pub source_view_button: gtk::TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub endpoint_controls: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub start_frame_button: gtk::TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub end_frame_button: gtk::TemplateChild<gtk::ToggleButton>,
         #[template_child]
         pub preview_progress: gtk::TemplateChild<gtk::Box>,
         #[template_child]
@@ -120,9 +128,24 @@ glib::wrapper! {
 }
 
 impl ToniatorMainShell {
-    /// Creates the immutable resource-defined shell before dynamic views attach.
+    /// Returns the exclusive Start/End controls below the canvas without any scrub transport.
+    pub fn endpoint_controls(&self) -> (gtk::Box, gtk::ToggleButton, gtk::ToggleButton) {
+        (
+            self.imp().endpoint_controls.get(),
+            self.imp().start_frame_button.get(),
+            self.imp().end_frame_button.get(),
+        )
+    }
+    /// Creates the resource-defined shell and names its native message scrollbar.
+    /// Message text remains complete within the bounded viewport; document authority is untouched.
     pub fn new() -> Self {
-        glib::Object::builder().build()
+        let shell: Self = glib::Object::builder().build();
+        shell
+            .imp()
+            .main_banner_scroll
+            .vscrollbar()
+            .update_property(&[gtk::accessible::Property::Label("Message details")]);
+        shell
     }
 
     /// Applies one visible banner message without affecting application authority.

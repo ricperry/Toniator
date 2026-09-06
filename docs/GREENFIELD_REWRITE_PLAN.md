@@ -2339,6 +2339,34 @@ final-consumer clipping. Artistic names remain pure-schema presets and adequacy
 tests; they never become private variables, renderer branches, or alternate
 evaluation paths.
 
+## Stages 22–23 — Combined temporal workflow
+
+**Accepted awaiting checkpoint; user acceptance 2026-09-06.**
+The user requested one effort encompassing the previously separated headless
+media/animation stage and temporal GTK stage. This supersedes their separate
+delivery sequencing in the earlier roadmap; it does not change the protected
+Addendum's source, geometry, or simple-transition authority.
+
+The accepted contract is
+[`STAGE_22_23_TEMPORAL_WORKFLOW_PLAN.md`](STAGE_22_23_TEMPORAL_WORKFLOW_PLAN.md):
+bounded moving-media and image-sequence input, deterministic frame selection,
+20 existing continuous property fields plus explicit start/end color and hue
+animation, including all Cyan/Magenta/Yellow/Black channel paints, start/end GTK
+controls, and shared CLI/GTK export. Primary outputs are PNG sequences or lossless
+FFV1/Matroska video, with optional AV1/WebM sharing and normative headless SVG
+sequences. Destinations are prompted or use a user-set default directory;
+video encodes from private temporary PNG frames. The user withdrew the
+temporary lossless-AV1 preference in favor of the agent recommendation.
+
+One final end-to-end acceptance covers both stages. Internal dependency steps
+do not redefine the combined delivery. The user has authorized implementing
+the discussed detailed plan. Preview selection is limited to Start frame and
+End frame below the canvas; scrubbing is deferred until render pipeline hardware
+acceleration is available. Arbitrary keyframes, timeline lanes,
+discrete/definition animation, new Pattern mechanisms, and unrelated research
+refactors remain excluded. Use its focused verification contract rather than
+historical broad test sweeps below.
+
 ## Common validation and Git gates
 
 Unless a bounded stage contract specifies a proportional checkpoint gate,

@@ -31,6 +31,10 @@ printf '%s\n' "$AT_SPI_BUS_ADDRESS" >"$evidence_dir/atspi-bus.txt"
 
 app_args=()
 (( $# == 1 )) && app_args+=("$1")
+automation_env=()
+if [[ -n "${TONIATOR_AUTOMATION_EVENTS:-}" ]]; then
+    automation_env+=(--setenv="TONIATOR_AUTOMATION_EVENTS=$TONIATOR_AUTOMATION_EVENTS")
+fi
 app_unit="toniator-debug-app-$run_id.service"
 
 user_systemd_run \
@@ -50,6 +54,7 @@ user_systemd_run \
     --setenv=GTK_A11Y=atspi \
     --setenv="RUST_BACKTRACE=${RUST_BACKTRACE:-full}" \
     --setenv="WAYLAND_DEBUG=${WAYLAND_DEBUG:-}" \
+    "${automation_env[@]}" \
     "$binary" "${app_args[@]}" \
     >/dev/null
 app_pid="$(user_systemctl show "$app_unit" --property=MainPID --value)"

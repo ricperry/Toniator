@@ -1,5 +1,11 @@
 #![forbid(unsafe_code)]
 
+mod temporal;
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::{error::Error, fmt, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -13,17 +19,15 @@ use toniator_domain::{
     PatternOutputLayerId, PatternOutputSettings, SourceComponent, SourcePlacement, SourceReference,
     SourceReferenceId, ValidationError,
 };
+use toniator_engine::export::video::{VideoCodec, VideoExportOptions};
 use toniator_engine::{
     CanonicalCircleMark, EvaluationLimits, GridError, GridInspectRequest, MarkResponse,
-    MarksInspectError, MarksInspectRequest, Point2, RasterAntialiasing, RasterBackground,
-    ResolvedSource, SiteId, SiteScope, SourceFormat, SourceFormatHint, SvgTextDiagnostic,
-    encode_png, evaluate_with_limits, inspect_circular_marks, inspect_straight_grid,
-    resolve_source_identity, write_svg,
+    MarksInspectError, MarksInspectRequest, MediaTools, Point2, RasterAntialiasing,
+    RasterBackground, SiteId, SiteScope, SourceFormat, SourceFormatHint, SvgTextDiagnostic,
+    encode_png, evaluate_cancellable_with_limits, frame_evaluation_request, inspect_circular_marks,
+    inspect_straight_grid, open_source_media, write_svg,
 };
-use toniator_io::{
-    EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load as load_document,
-    save as save_document,
-};
+use toniator_io::{SourceBundle, load as load_document, save as save_document};
 
 /// Headless Toniator command-line frontend.
 #[derive(Debug, Parser)]
@@ -39,7 +43,7 @@ enum Command {
     Validate(ValidateArgs),
     /// Inspect deterministic family output without realizing marks or rendering.
     Inspect(InspectArgs),
-    /// Render a complete authoritative document to PNG or SVG.
+    /// Render artwork or animation to PNG/SVG frames or video.
     Render(RenderArgs),
     /// Create one portable source-backed `.toniator` document.
     Document(DocumentArgs),
@@ -85,6 +89,11 @@ enum DocumentCommandArgs {
 struct DocumentCreateArgs {
     #[arg(short = 'i', long)]
     input: PathBuf,
+    /// Append still images in this explicit order; supply --fps for the sequence.
+    #[arg(long)]
+    sequence_frame: Vec<PathBuf>,
+    #[command(flatten)]
+    timing: temporal::TimingArgs,
     #[arg(short, long)]
     output: PathBuf,
     #[arg(long, value_enum)]
@@ -198,8 +207,20 @@ struct MarksArgs {
 struct RenderArgs {
     #[arg(short = 'i', long, visible_alias = "source")]
     input: PathBuf,
+    /// Append still images in this explicit order; supply --fps for the sequence.
+    #[arg(long)]
+    sequence_frame: Vec<PathBuf>,
+    #[command(flatten)]
+    timing: temporal::TimingArgs,
+    /// PNG/SVG file, numbered frame pattern, lossless .mkv video, or lossy .webm video.
     #[arg(short, long)]
     output: PathBuf,
+    /// Absolute output frame in the selected range; omitted selects its Start frame.
+    #[arg(long, conflicts_with_all = ["start_frame", "end_frame", "start_time", "end_time"])]
+    frame: Option<u64>,
+    /// Temporary parent for video PNG intermediates; omitted uses /tmp.
+    #[arg(long)]
+    temporary_directory: Option<PathBuf>,
     /// Authoritative ordered halftone channel topology for a direct source.
     #[arg(long, value_enum)]
     channel_model: Option<CliChannelModel>,
@@ -418,7 +439,13 @@ fn document_command(arguments: DocumentArgs) -> Result<(), CliError> {
     }
 }
 
+/// Creates a portable current-schema project from shared bounded local-media import.
+///
+/// # Errors
+/// Rejects unsupported media, invalid explicit construction/timing, and persistence failures.
 fn document_create(arguments: DocumentCreateArgs) -> Result<(), CliError> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let _signals = temporal::ExportSignals::new(Arc::clone(&cancelled))?;
     if arguments
         .output
         .extension()
@@ -432,12 +459,15 @@ fn document_create(arguments: DocumentCreateArgs) -> Result<(), CliError> {
             "document output extension must be .toniator",
         ));
     }
-    let format = source_hint(&arguments.input)?;
-    let bytes = std::fs::read(&arguments.input)
-        .map_err(|_| CliError::new("source", "could not read source file"))?;
-    let source_id = SourceReferenceId::new("source-1")?;
+    let imported = import_cli_media(
+        &arguments.input,
+        &arguments.sequence_frame,
+        &arguments.timing,
+        &cancelled,
+    )?;
+    let timing = arguments.timing.select(&imported.metadata, None)?;
     let document = build_document(
-        source_id.clone(),
+        imported.source_id,
         parse_canvas(&arguments.canvas)?,
         arguments.channel_model.into(),
         arguments.density,
@@ -450,34 +480,49 @@ fn document_create(arguments: DocumentCreateArgs) -> Result<(), CliError> {
         arguments.fill_max,
         arguments.opacity,
     )?;
-    let embedded = EmbeddedSource::new(
-        source_id,
-        match format {
-            SourceFormatHint::Png => EmbeddedSourceFormat::Png,
-            SourceFormatHint::Svg => EmbeddedSourceFormat::Svg,
-            SourceFormatHint::Jpeg => EmbeddedSourceFormat::Jpeg,
-            SourceFormatHint::Webp => EmbeddedSourceFormat::Webp,
-            SourceFormatHint::Bmp => EmbeddedSourceFormat::Bmp,
-            SourceFormatHint::Tiff => EmbeddedSourceFormat::Tiff,
-            SourceFormatHint::OpenExr => EmbeddedSourceFormat::OpenExr,
-            SourceFormatHint::Avif => EmbeddedSourceFormat::Avif,
-            SourceFormatHint::Unsupported => unreachable!(),
-        },
-        bytes,
-        arguments
-            .input
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_owned),
-    )
-    .map_err(|error| CliError::new(error.path(), error.context()))?;
-    save_document(
-        &arguments.output,
-        &document,
-        &SourceBundle::new([embedded])
-            .map_err(|error| CliError::new(error.path(), error.context()))?,
-    )
-    .map_err(|error| CliError::new(error.path(), error.context()))
+    let document = document.with_temporal_authority(timing, Vec::new())?;
+    check_cli_cancelled(&cancelled)?;
+    save_document(&arguments.output, &document, &imported.sources)
+        .map_err(|error| CliError::new(error.path(), error.context()))
+}
+
+/// Imports direct source arguments through shared media authority, preserving explicit order.
+///
+/// # Errors
+/// Rejects a sequence without its assigned rate and shared source validation failures.
+fn import_cli_media(
+    input: &std::path::Path,
+    remaining: &[PathBuf],
+    timing: &temporal::TimingArgs,
+    cancelled: &AtomicBool,
+) -> Result<toniator_engine::ImportedMedia, CliError> {
+    let rate =
+        if remaining.is_empty() {
+            None
+        } else {
+            Some(timing.sequence_rate().ok_or_else(|| {
+                CliError::new("source.sequence", "--sequence-frame requires --fps")
+            })?)
+        };
+    let paths = std::iter::once(input.to_owned())
+        .chain(remaining.iter().cloned())
+        .collect::<Vec<_>>();
+    toniator_engine::import_source_media(&paths, rate, MediaTools::default(), &|| {
+        cancelled.load(Ordering::Acquire)
+    })
+    .map_err(|error| CliError::new(error.path(), error.message()))
+}
+
+/// Rejects a cancelled command before output publication or another expensive pipeline step.
+///
+/// # Errors
+/// Returns the shared terminal cancellation diagnostic when SIGINT/SIGTERM requested a stop.
+fn check_cli_cancelled(cancelled: &AtomicBool) -> Result<(), CliError> {
+    if cancelled.load(Ordering::Acquire) {
+        Err(CliError::new("export.cancelled", "command was cancelled"))
+    } else {
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -599,6 +644,8 @@ fn build_document(
 
 /// Evaluates one current document or direct source and writes its requested consumer output.
 ///
+/// Project frame selection uses shared media decoding and domain temporal materialization;
+/// direct media rendering retains its existing explicit construction arguments.
 /// Model-sensitive PNG backing is resolved only after canonical evaluation. Explicit backing
 /// remains an output-only override, while SVG rejects explicit opaque backing and stays transparent.
 ///
@@ -606,7 +653,15 @@ fn build_document(
 ///
 /// Returns stable argument, source, document, evaluation, rendering, or output diagnostics.
 fn render(arguments: RenderArgs) -> Result<(), CliError> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let _signals = temporal::ExportSignals::new(Arc::clone(&cancelled))?;
     let format = output_format(&arguments.output)?;
+    if arguments.temporary_directory.is_some() && !matches!(format, OutputFormat::Video(_)) {
+        return Err(CliError::new(
+            "render.arguments",
+            "--temporary-directory applies only to video output",
+        ));
+    }
     if matches!(format, OutputFormat::Svg)
         && arguments
             .background
@@ -619,6 +674,7 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
     }
     if is_toniator_path(&arguments.input) {
         if arguments.channel_model.is_some()
+            || !arguments.sequence_frame.is_empty()
             || arguments.canvas.is_some()
             || arguments.density.is_some()
             || arguments.density_aspect.is_some()
@@ -637,65 +693,43 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
         }
         let loaded = load_document(&arguments.input)
             .map_err(|error| CliError::new(error.path(), error.context()))?;
-        let source_id = match loaded.document().source() {
-            SourceReference::Assigned(id) => id,
-            SourceReference::Unassigned => {
-                return Err(CliError::new(
-                    "source.document",
-                    "container document has no assigned source",
-                ));
-            }
-        };
-        let source = loaded.sources().get(source_id).ok_or_else(|| {
-            CliError::new(
-                "source.document",
-                "container source bundle does not match document",
-            )
-        })?;
-        let hint = match source.format() {
-            EmbeddedSourceFormat::Png => SourceFormatHint::Png,
-            EmbeddedSourceFormat::Svg => SourceFormatHint::Svg,
-            EmbeddedSourceFormat::Jpeg => SourceFormatHint::Jpeg,
-            EmbeddedSourceFormat::Webp => SourceFormatHint::Webp,
-            EmbeddedSourceFormat::Bmp => SourceFormatHint::Bmp,
-            EmbeddedSourceFormat::Tiff => SourceFormatHint::Tiff,
-            EmbeddedSourceFormat::OpenExr => SourceFormatHint::OpenExr,
-            EmbeddedSourceFormat::Avif => SourceFormatHint::Avif,
-        };
-        let session = DocumentSession::new(loaded.document().clone())?;
-        let result = evaluate_with_limits(
-            toniator_engine::EvaluationRequest::new(
-                session.document_evaluation_snapshot(),
-                ResolvedSource::new(source_id.clone(), source.bytes().to_vec(), hint)?,
-            ),
-            EvaluationLimits::new(
-                arguments
-                    .max_family_candidates
-                    .unwrap_or(EvaluationLimits::UNBOUNDED_WORK_LIMIT),
-            )?,
+        let media = open_source_media(loaded.sources(), MediaTools::default(), &|| {
+            cancelled.load(Ordering::Acquire)
+        })
+        .map_err(|error| CliError::new(error.path(), error.message()))?;
+        let timing = arguments.timing.select(
+            toniator_engine::FrameSource::metadata(&media),
+            Some(loaded.document().project_timing()),
         )?;
-        return write_render_result(
-            &arguments.output,
+        drop(media);
+        let document = loaded.document().clone().with_temporal_authority(
+            timing,
+            loaded.document().temporal_authority().end_overrides,
+        )?;
+        return render_media(
+            document,
+            loaded.sources().clone(),
+            arguments,
             format,
-            arguments.background,
-            arguments.antialiasing.into(),
-            &result,
+            &cancelled,
         );
     }
-    let source_format = source_hint(&arguments.input)?;
-    let source_bytes = std::fs::read(&arguments.input)
-        .map_err(|_| CliError::new("source", "could not read source file"))?;
-    let source_identity = resolve_source_identity(&source_bytes, source_format)?;
-    let source_reference = SourceReferenceId::new("cli-input-1")?;
+    let imported = import_cli_media(
+        &arguments.input,
+        &arguments.sequence_frame,
+        &arguments.timing,
+        &cancelled,
+    )?;
+    let timing = arguments.timing.select(&imported.metadata, None)?;
     let canvas = match arguments.canvas.as_deref() {
         Some(value) => parse_canvas(value)?,
         None => CanvasSpec {
-            width: f64::from(source_identity.width),
-            height: f64::from(source_identity.height),
+            width: f64::from(imported.metadata.width),
+            height: f64::from(imported.metadata.height),
         },
     };
     let document = build_document(
-        source_reference.clone(),
+        imported.source_id,
         canvas,
         arguments
             .channel_model
@@ -746,31 +780,121 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
         arguments.fill_max.unwrap_or(1.0),
         arguments.opacity,
     )?;
-    let session = DocumentSession::new(document)?;
-    let result = evaluate_with_limits(
-        toniator_engine::EvaluationRequest::new(
-            session.document_evaluation_snapshot(),
-            ResolvedSource::new(source_reference, source_bytes, source_format)?,
-        ),
-        EvaluationLimits::new(
-            arguments
-                .max_family_candidates
-                .unwrap_or(EvaluationLimits::UNBOUNDED_WORK_LIMIT),
-        )?,
+    let document = document.with_temporal_authority(timing, Vec::new())?;
+    render_media(document, imported.sources, arguments, format, &cancelled)
+}
+
+/// Dispatches an immutable selected document through the same frame, sequence, and video paths.
+///
+/// # Errors
+/// Rejects conflicting output selection, invalid frame materialization, or shared job failures.
+fn render_media(
+    document: Document,
+    sources: SourceBundle,
+    arguments: RenderArgs,
+    format: OutputFormat,
+    cancelled: &AtomicBool,
+) -> Result<(), CliError> {
+    check_cli_cancelled(cancelled)?;
+    let limits = EvaluationLimits::new(
+        arguments
+            .max_family_candidates
+            .unwrap_or(EvaluationLimits::UNBOUNDED_WORK_LIMIT),
     )?;
-    write_render_result(
-        &arguments.output,
-        format,
-        arguments.background,
-        arguments.antialiasing.into(),
-        &result,
-    )
+    if let OutputFormat::Video(codec) = format {
+        if arguments.frame.is_some() {
+            return Err(CliError::new(
+                "render.arguments",
+                "--frame selects a single PNG or SVG; video uses the selected range",
+            ));
+        }
+        return temporal::render_project_video(
+            document,
+            sources,
+            VideoExportOptions {
+                destination: arguments.output,
+                codec,
+                temporary_directory: arguments.temporary_directory,
+                background: arguments.background.map(RasterBackground::from),
+                target: None,
+                antialiasing: arguments.antialiasing.into(),
+                limits,
+            },
+            cancelled,
+        );
+    }
+    if let Some(format) = temporal::sequence_format(&arguments.output) {
+        if arguments.frame.is_some() {
+            return Err(CliError::new(
+                "render.arguments",
+                "--frame selects one output file and cannot be combined with a sequence filename",
+            ));
+        }
+        return temporal::render_project_sequence(
+            document,
+            sources,
+            toniator_engine::export::SequenceExportOptions {
+                destination: arguments
+                    .output
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .to_owned(),
+                format,
+                background: arguments.background.map(RasterBackground::from),
+                target: None,
+                antialiasing: arguments.antialiasing.into(),
+                limits,
+            },
+            cancelled,
+        );
+    }
+    let session = DocumentSession::new(document)?;
+    let frame = arguments
+        .frame
+        .unwrap_or_else(|| session.document().project_timing().frame_range().start());
+    let mut media = open_source_media(&sources, MediaTools::default(), &|| {
+        cancelled.load(Ordering::Acquire)
+    })
+    .map_err(|error| CliError::new(error.path(), error.message()))?;
+    let request = frame_evaluation_request(&session, &mut media, frame, &|| {
+        cancelled.load(Ordering::Acquire)
+    })
+    .map_err(|error| CliError::new(error.path(), error.message()))?;
+    let request = match format {
+        OutputFormat::Png => request.for_output(
+            arguments
+                .background
+                .map(RasterBackground::from)
+                .unwrap_or_else(|| {
+                    RasterBackground::default_for_model(session.document().channel_model())
+                }),
+            None,
+            arguments.antialiasing.into(),
+        ),
+        OutputFormat::Svg => request.for_output(
+            RasterBackground::Transparent,
+            Some(toniator_engine::OutputRasterTarget::new(1, 1).map_err(render_error)?),
+            RasterAntialiasing::On,
+        ),
+        OutputFormat::Video(_) => unreachable!("video returns through its shared job"),
+    };
+    let result =
+        evaluate_cancellable_with_limits(request, limits, cancelled).map_err(
+            |error| match error {
+                toniator_engine::EvaluationRunError::Cancelled => {
+                    CliError::new("export.cancelled", "command was cancelled")
+                }
+                toniator_engine::EvaluationRunError::Evaluation(error) => error.into(),
+            },
+        )?;
+    check_cli_cancelled(cancelled)?;
+    write_render_result(&arguments.output, format, &result, cancelled)
 }
 
 /// Writes one already-evaluated canonical result through the selected consumer format.
 ///
-/// An omitted PNG background resolves from the result's authoritative model without mutating or
-/// re-identifying the scene. SVG always serializes the unchanged transparent canonical geometry.
+/// PNG consumes the raster already evaluated with its output-only backing and antialiasing.
+/// SVG serializes unchanged canonical geometry. Cancellation is checked again before file I/O.
 ///
 /// # Errors
 ///
@@ -778,31 +902,27 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
 fn write_render_result(
     output: &PathBuf,
     format: OutputFormat,
-    background: Option<CliBackground>,
-    antialiasing: RasterAntialiasing,
     result: &toniator_engine::EvaluationResult,
+    cancelled: &AtomicBool,
 ) -> Result<(), CliError> {
     match format {
         OutputFormat::Png => {
-            let background = background.map_or_else(
-                || RasterBackground::default_for_model(result.scene().model()),
-                RasterBackground::from,
-            );
-            let raster = if matches!(background, RasterBackground::Transparent)
-                && matches!(antialiasing, RasterAntialiasing::On)
-            {
-                result.raster().clone()
-            } else {
-                toniator_engine::rasterize_output(result.scene(), background, None, antialiasing)
-                    .map_err(render_error)?
-            };
-            let png = encode_png(&raster).map_err(render_error)?;
+            let png = encode_png(result.raster()).map_err(render_error)?;
+            check_cli_cancelled(cancelled)?;
             std::fs::write(output, png)
                 .map_err(|_| CliError::new("output", "could not write PNG output"))?;
         }
         OutputFormat::Svg => {
-            std::fs::write(output, write_svg(result.scene()))
+            let svg = write_svg(result.scene());
+            check_cli_cancelled(cancelled)?;
+            std::fs::write(output, svg)
                 .map_err(|_| CliError::new("output", "could not write SVG output"))?;
+        }
+        OutputFormat::Video(_) => {
+            return Err(CliError::new(
+                "render.video",
+                "video output requires the shared multi-frame job",
+            ));
         }
     }
     Ok(())
@@ -1008,8 +1128,13 @@ fn parse_color(value: &str) -> Result<String, CliError> {
 enum OutputFormat {
     Png,
     Svg,
+    Video(VideoCodec),
 }
 
+/// Selects a concrete supported consumer format from its output suffix.
+///
+/// # Errors
+/// Rejects unsupported suffixes instead of silently choosing an incompatible container or codec.
 fn output_format(path: &std::path::Path) -> Result<OutputFormat, CliError> {
     match path
         .extension()
@@ -1019,9 +1144,11 @@ fn output_format(path: &std::path::Path) -> Result<OutputFormat, CliError> {
     {
         Some("png") => Ok(OutputFormat::Png),
         Some("svg") => Ok(OutputFormat::Svg),
+        Some("mkv") => Ok(OutputFormat::Video(VideoCodec::Ffv1Matroska)),
+        Some("webm") => Ok(OutputFormat::Video(VideoCodec::Av1Webm)),
         _ => Err(CliError::new(
             "output.format",
-            "output extension must be .png or .svg",
+            "output extension must be .png, .svg, .mkv or .webm",
         )),
     }
 }

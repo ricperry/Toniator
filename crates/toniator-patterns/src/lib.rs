@@ -12474,7 +12474,7 @@ fn append_source_identity(bytes: &mut Vec<u8>, source: &SourceField) {
     bytes.extend(identity.height.to_le_bytes());
 }
 
-/// Assigns every persisted decoder format a stable distinct byte for derived identity hashing.
+/// Assigns every encoded or direct-frame decoder format a distinct byte for derived identity hashing.
 ///
 /// The code is not a file-format contract; the decoder contract ID and decoded pixel hash remain
 /// the source authority. Adding a format must assign a new byte rather than aliasing an existing
@@ -12489,6 +12489,7 @@ const fn source_format_identity_code(format: toniator_sampling::SourceFormat) ->
         toniator_sampling::SourceFormat::Tiff => 6,
         toniator_sampling::SourceFormat::OpenExr => 7,
         toniator_sampling::SourceFormat::Avif => 8,
+        toniator_sampling::SourceFormat::RawRgba => 9,
     }
 }
 

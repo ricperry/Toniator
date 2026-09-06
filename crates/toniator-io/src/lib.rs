@@ -49,11 +49,21 @@ pub use document_presets::{
     DocumentPresetError, DocumentPresetSaveOutcome, DocumentPresetWriteGuard,
     capture_document_preset_destination, load_document_preset, save_document_preset,
 };
+pub mod export_defaults;
 /// Recent source/project metadata for frontend startup navigation.
 pub mod recent;
 
-pub const CONTAINER_VERSION: u32 = 1;
-pub const DOCUMENT_SCHEMA_VERSION: u32 = 7;
+/// Project timing and End-only configuration persistence.
+mod temporal;
+use temporal::{EndOverrideDto, ProjectTimingDto};
+mod media;
+pub mod sequence;
+pub mod video_output;
+use media::MediaManifestDto;
+pub use media::SourceMediaManifest;
+
+pub const CONTAINER_VERSION: u32 = 2;
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 8;
 /// Current source-free document Preset archive envelope version.
 pub const DOCUMENT_PRESET_FORMAT_VERSION: u32 = 1;
 /// Standalone pure-schema preset JSON format version. It is deliberately
@@ -63,6 +73,8 @@ pub const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_UNCOMPRESSED_BYTES: u64 = 132 * 1024 * 1024;
+/// Caps unique embedded entries independently of aggregate compressed bytes and JSON size.
+pub const MAX_SOURCE_ENTRIES: usize = 10_000;
 
 /// Failure at the standalone preset serialization boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,6 +152,8 @@ pub enum EmbeddedSourceFormat {
     Tiff,
     OpenExr,
     Avif,
+    Gif,
+    Video,
 }
 
 impl EmbeddedSourceFormat {
@@ -154,10 +168,12 @@ impl EmbeddedSourceFormat {
             Self::Tiff => "tiff",
             Self::OpenExr => "exr",
             Self::Avif => "avif",
+            Self::Gif => "gif",
+            Self::Video => "video",
         }
     }
 
-    /// Resolves one case-insensitive supported still-image suffix to its persisted format.
+    /// Resolves a supported local media suffix to its persisted encoded format.
     pub fn from_extension(value: &str) -> Option<Self> {
         match value.to_ascii_lowercase().as_str() {
             "png" => Some(Self::Png),
@@ -168,6 +184,9 @@ impl EmbeddedSourceFormat {
             "tif" | "tiff" => Some(Self::Tiff),
             "exr" => Some(Self::OpenExr),
             "avif" => Some(Self::Avif),
+            "gif" => Some(Self::Gif),
+            "mp4" | "m4v" | "mov" | "mkv" | "webm" | "avi" | "ogv" | "mpeg" | "mpg" | "ts"
+            | "m2ts" | "video" => Some(Self::Video),
             _ => None,
         }
     }
@@ -182,6 +201,10 @@ pub struct EmbeddedSource {
 }
 
 impl EmbeddedSource {
+    /// Retains one bounded nonempty encoded entry with a safe ID and optional display label.
+    ///
+    /// # Errors
+    /// Rejects unsafe identifiers, control characters, empty input, or input above 128 MiB.
     pub fn new(
         id: SourceReferenceId,
         format: EmbeddedSourceFormat,
@@ -193,7 +216,7 @@ impl EmbeddedSource {
         if bytes.is_empty() || bytes.len() as u64 > MAX_SOURCE_BYTES {
             return Err(SourceBundleError::new(
                 "source.bytes",
-                "source bytes exceed the v1 limit",
+                "source bytes must contain 1 byte through 128 MiB",
             ));
         }
         if display_name
@@ -222,6 +245,10 @@ impl EmbeddedSource {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+    /// Shares immutable compressed media with a worker without copying the source payload.
+    pub fn shared_bytes(&self) -> Arc<[u8]> {
+        Arc::clone(&self.bytes)
+    }
     pub fn display_name(&self) -> Option<&str> {
         self.display_name.as_deref()
     }
@@ -230,14 +257,32 @@ impl EmbeddedSource {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceBundle {
     entries: BTreeMap<SourceReferenceId, EmbeddedSource>,
+    media: Option<SourceMediaManifest>,
 }
 
 impl SourceBundle {
+    /// Collects uniquely identified source entries under the aggregate byte and entry bounds.
+    ///
+    /// A single entry defaults to its corresponding still, GIF, or video manifest. Empty bundles
+    /// support source-less drafts; multiple entries require an explicit ordered media manifest.
+    ///
+    /// # Errors
+    /// Rejects duplicate IDs, aggregate source bytes above 128 MiB, or excessive entry counts.
     pub fn new(
         entries: impl IntoIterator<Item = EmbeddedSource>,
     ) -> Result<Self, SourceBundleError> {
         let mut mapped = BTreeMap::new();
+        let mut bytes = 0_u64;
         for entry in entries {
+            bytes = bytes.checked_add(entry.bytes.len() as u64).ok_or_else(|| {
+                SourceBundleError::new("source.bytes", "aggregate source size overflowed")
+            })?;
+            if bytes > MAX_SOURCE_BYTES || mapped.len() >= MAX_SOURCE_ENTRIES {
+                return Err(SourceBundleError::new(
+                    "source.limits",
+                    "source bundle exceeds aggregate byte or entry limits",
+                ));
+            }
             if mapped.insert(entry.id.clone(), entry).is_some() {
                 return Err(SourceBundleError::new(
                     "source.id",
@@ -245,7 +290,43 @@ impl SourceBundle {
                 ));
             }
         }
-        Ok(Self { entries: mapped })
+        let media = if mapped.len() == 1 {
+            let source = mapped.values().next().expect("one entry");
+            Some(match source.format {
+                EmbeddedSourceFormat::Gif => SourceMediaManifest::AnimatedImage {
+                    source_id: source.id.clone(),
+                },
+                EmbeddedSourceFormat::Video => SourceMediaManifest::Video {
+                    source_id: source.id.clone(),
+                },
+                _ => SourceMediaManifest::StillImage {
+                    source_id: source.id.clone(),
+                },
+            })
+        } else {
+            None
+        };
+        Ok(Self {
+            entries: mapped,
+            media,
+        })
+    }
+    /// Binds explicit ordered media ownership to a bounded set of encoded entries.
+    ///
+    /// # Errors
+    /// Rejects missing or unreferenced entries, incompatible formats, or invalid sequence order.
+    pub fn new_media(
+        entries: impl IntoIterator<Item = EmbeddedSource>,
+        media: SourceMediaManifest,
+    ) -> Result<Self, SourceBundleError> {
+        let mut bundle = Self::new(entries)?;
+        media.validate(&bundle)?;
+        bundle.media = Some(media);
+        Ok(bundle)
+    }
+    /// Returns the source container and authored sequence order, independent of document settings.
+    pub fn media(&self) -> Option<&SourceMediaManifest> {
+        self.media.as_ref()
     }
     pub fn get(&self, id: &SourceReferenceId) -> Option<&EmbeddedSource> {
         self.entries.get(id)
@@ -416,7 +497,7 @@ impl std::error::Error for SaveError {}
 
 /// Validates ordinary ZIP32 central-directory topology from the bounded end-record search tail.
 ///
-/// Container v1 writes at most three entries. The raw directory span and every record boundary are
+/// Container 2 writes bounded source entries. The raw directory span and every record boundary are
 /// checked before the ZIP reader can ignore records beyond the end record's declared cardinality or
 /// collapse duplicate names in its internal map.
 ///
@@ -477,7 +558,7 @@ fn declared_zip_entry_count(file: &mut File, length: u64) -> Result<usize, LoadE
     }
     if total_entries == u16::MAX {
         return Err(LoadError::Archive {
-            context: "ZIP64 entry cardinality is unsupported by container v1".into(),
+            context: "ZIP64 entry cardinality is unsupported by container 2".into(),
         });
     }
     let end_offset = tail_start + end as u64;
@@ -539,7 +620,7 @@ fn declared_zip_entry_count(file: &mut File, length: u64) -> Result<usize, LoadE
     Ok(scanned_entries)
 }
 
-/// Loads one current-v7 document through the immutable container-v1 dispatch pipeline.
+/// Loads one current-schema document and its portable media from container 2.
 ///
 /// Raw central-directory cardinality is retained before `zip` can collapse duplicate names;
 /// topology, limits, integrity, and current-domain validation then complete transactionally.
@@ -579,7 +660,7 @@ fn load_opened(path: &Path, mut file: File) -> Result<LoadedDocument, LoadError>
     }
     if metadata.len() > MAX_ARCHIVE_BYTES {
         return Err(LoadError::Limits {
-            context: "archive exceeds the 256 MiB v1 limit".into(),
+            context: "archive exceeds the 256 MiB limit".into(),
         });
     }
     let declared_entry_count = declared_zip_entry_count(&mut file, metadata.len())?;
@@ -591,16 +672,16 @@ fn load_opened(path: &Path, mut file: File) -> Result<LoadedDocument, LoadError>
             context: "duplicate or conflicting central-directory entry names".into(),
         });
     }
-    if !(2..=3).contains(&archive.len()) {
+    if !(2..=MAX_SOURCE_ENTRIES + 2).contains(&archive.len()) {
         return Err(LoadError::EntryTopology {
-            context: "v1 archive must contain exactly two file entries; the only optional marker is an empty sources/ directory entry".into(),
+            context: "archive must contain document.json and bounded source entries, with an optional empty sources/ marker".into(),
         });
     }
 
     let mut names = HashSet::new();
     let mut uncompressed = 0_u64;
     let mut document_index = None;
-    let mut source_index = None;
+    let mut source_indices = BTreeMap::new();
     let mut sources_marker = false;
     for index in 0..archive.len() {
         let entry = archive
@@ -631,7 +712,7 @@ fn load_opened(path: &Path, mut file: File) -> Result<LoadedDocument, LoadError>
             })?;
         if uncompressed > MAX_UNCOMPRESSED_BYTES {
             return Err(LoadError::Limits {
-                context: "total uncompressed data exceeds the 132 MiB v1 limit".into(),
+                context: "total uncompressed data exceeds the 132 MiB limit".into(),
             });
         }
         match name.as_str() {
@@ -657,11 +738,7 @@ fn load_opened(path: &Path, mut file: File) -> Result<LoadedDocument, LoadError>
                 ensure_supported_file_compression(&name, entry.compression())?;
             }
             _ if name.starts_with("sources/") && entry.is_file() => {
-                if source_index.replace(index).is_some() {
-                    return Err(LoadError::EntryTopology {
-                        context: "multiple source file entries".into(),
-                    });
-                }
+                source_indices.insert(name.clone(), index);
                 ensure_supported_file_compression(&name, entry.compression())?;
             }
             _ => {
@@ -673,9 +750,6 @@ fn load_opened(path: &Path, mut file: File) -> Result<LoadedDocument, LoadError>
     }
     let document_index = document_index.ok_or_else(|| LoadError::EntryTopology {
         context: "missing document.json".into(),
-    })?;
-    let source_index = source_index.ok_or_else(|| LoadError::EntryTopology {
-        context: "missing source entry".into(),
     })?;
     let document_bytes = read_limited(
         &mut archive,
@@ -695,17 +769,31 @@ fn load_opened(path: &Path, mut file: File) -> Result<LoadedDocument, LoadError>
             ),
         });
     }
-    let (current, manifest) = match envelope.document_schema_version {
+    let (current, manifests, media_manifest) = match envelope.document_schema_version {
         DOCUMENT_SCHEMA_VERSION => {
-            let stored: StoredDocumentDtoV7 =
-                serde_json::from_slice(&document_bytes).map_err(|error| LoadError::Json {
+            let mut ignored = Vec::new();
+            let mut deserializer = serde_json::Deserializer::from_slice(&document_bytes);
+            let stored: StoredDocumentDtoV8 =
+                serde_ignored::deserialize(&mut deserializer, |path| {
+                    ignored.push(path.to_string())
+                })
+                .map_err(|error| LoadError::Json {
                     context: error.to_string(),
                 })?;
+            deserializer.end().map_err(|error| LoadError::Json {
+                context: error.to_string(),
+            })?;
+            if !ignored.is_empty() {
+                return Err(LoadError::Json {
+                    context: format!("unknown field at {}", ignored.join(", ")),
+                });
+            }
             (
                 CurrentDocumentDto {
                     document: stored.document,
                 },
-                stored.source,
+                stored.sources,
+                stored.media,
             )
         }
         value => {
@@ -714,62 +802,17 @@ fn load_opened(path: &Path, mut file: File) -> Result<LoadedDocument, LoadError>
             });
         }
     };
-    let source_id = dto_source_id(&manifest.id).map_err(domain_error)?;
-    validate_source_id(&source_id).map_err(|error| LoadError::EntryTopology {
-        context: error.to_string(),
-    })?;
-    let expected_entry =
-        source_entry_name(&source_id, manifest.format.into()).map_err(|error| {
-            LoadError::EntryTopology {
-                context: error.context().into(),
-            }
-        })?;
-    if manifest.entry_name != expected_entry {
-        return Err(LoadError::EntryTopology {
-            context: "manifest source entry name is not canonical".into(),
-        });
-    }
-    let actual_name = archive
-        .by_index(source_index)
-        .map_err(|error| LoadError::Archive {
-            context: error.to_string(),
-        })?
-        .name()
-        .to_owned();
-    if actual_name != manifest.entry_name {
-        return Err(LoadError::EntryTopology {
-            context: "manifest source entry does not match archive topology".into(),
-        });
-    }
-    let source_bytes = read_limited(&mut archive, source_index, MAX_SOURCE_BYTES, &actual_name)?;
-    if source_bytes.len() as u64 != manifest.byte_length {
-        return Err(LoadError::Integrity {
-            context: "source byte length does not match manifest".into(),
-        });
-    }
-    if sha256_hex(&source_bytes) != manifest.sha256 {
-        return Err(LoadError::Integrity {
-            context: "source SHA-256 does not match manifest".into(),
-        });
-    }
-    let source = EmbeddedSource::new(
-        source_id.clone(),
-        manifest.format.into(),
-        source_bytes,
-        manifest.display_name.clone(),
-    )
-    .map_err(|error| LoadError::EntryTopology {
-        context: error.to_string(),
-    })?;
-    let sources = SourceBundle::new([source]).map_err(|error| LoadError::EntryTopology {
-        context: error.to_string(),
-    })?;
+    let sources = media::read_bundle(&mut archive, &source_indices, manifests, media_manifest)?;
+    let source_id = sources
+        .media()
+        .and_then(SourceMediaManifest::primary_source_id)
+        .expect("validated media has a primary source");
     let document = current.document.into_domain().map_err(domain_error)?;
     match document.source() {
-        SourceReference::Assigned(id) if id == &source_id => {}
+        SourceReference::Assigned(id) if id == source_id => {}
         _ => {
             return Err(LoadError::SourceDocumentMismatch {
-                context: "document source reference must match the single embedded source".into(),
+                context: "document source reference must match the primary media source".into(),
             });
         }
     }
@@ -797,34 +840,37 @@ fn ensure_supported_file_compression(
     })
 }
 
-/// Saves one fully source-backed current document using deterministic v7 JSON
-/// inside the immutable v1 ZIP container layout.
+/// Saves one fully source-backed current document with a deterministic container-2 media manifest.
+///
+/// # Errors
+/// Rejects invalid documents, mismatched source ownership, oversized JSON, and filesystem/archive
+/// failures. Atomic replacement publishes only a fully written and synchronized archive.
 pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<(), SaveError> {
     document.validate().map_err(save_domain_error)?;
     let source_id = match document.source() {
         SourceReference::Assigned(id) => id,
         SourceReference::Unassigned => {
             return Err(SaveError::SourceDocumentMismatch {
-                context: "v7 saving requires an assigned document source".into(),
+                context: "saving requires an assigned document source".into(),
             });
         }
     };
-    if sources.len() != 1 {
+    let media = sources
+        .media()
+        .ok_or_else(|| SaveError::SourceDocumentMismatch {
+            context: "source media manifest is missing".into(),
+        })?;
+    media
+        .validate(sources)
+        .map_err(|error| SaveError::SourceDocumentMismatch {
+            context: error.to_string(),
+        })?;
+    if media.primary_source_id() != Some(source_id) {
         return Err(SaveError::SourceDocumentMismatch {
-            context: "v7 saving requires exactly one embedded source".into(),
+            context: "document must reference the primary media source".into(),
         });
     }
-    let source = sources
-        .get(source_id)
-        .ok_or_else(|| SaveError::SourceDocumentMismatch {
-            context: "source bundle does not contain the document source".into(),
-        })?;
-    let entry_name = source_entry_name(source.id(), source.format()).map_err(|error| {
-        SaveError::EntryTopology {
-            context: error.context().into(),
-        }
-    })?;
-    let dto = StoredDocumentDtoV7::from_domain(document, source, entry_name.clone())?;
+    let dto = StoredDocumentDtoV8::from_domain(document, sources)?;
     let mut document_json = serde_json::to_vec(&dto).map_err(|error| SaveError::Archive {
         context: error.to_string(),
     })?;
@@ -836,7 +882,7 @@ pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<
     }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let (temporary_path, file) = create_temp(parent, path)?;
-    let result = write_archive(file, &document_json, &entry_name, source);
+    let result = write_archive(file, &document_json, sources);
     match result.and_then(|()| {
         fs::rename(&temporary_path, path).map_err(|error| SaveError::Filesystem {
             path: path.to_owned(),
@@ -851,11 +897,14 @@ pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<
     }
 }
 
+/// Writes and synchronizes all declared media entries in stable ID order.
+///
+/// # Errors
+/// Returns the first archive/write/synchronization failure without publishing the temporary file.
 fn write_archive(
     file: File,
     document_json: &[u8],
-    entry_name: &str,
-    source: &EmbeddedSource,
+    sources: &SourceBundle,
 ) -> Result<(), SaveError> {
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Stored)
@@ -872,16 +921,18 @@ fn write_archive(
         .map_err(|error| SaveError::Archive {
             context: error.to_string(),
         })?;
-    writer
-        .start_file(entry_name, options)
-        .map_err(|error| SaveError::Archive {
-            context: error.to_string(),
-        })?;
-    writer
-        .write_all(source.bytes())
-        .map_err(|error| SaveError::Archive {
-            context: error.to_string(),
-        })?;
+    for (index, source) in sources.entries().enumerate() {
+        writer
+            .start_file(media::entry_name(index, source.format()), options)
+            .map_err(|error| SaveError::Archive {
+                context: error.to_string(),
+            })?;
+        writer
+            .write_all(source.bytes())
+            .map_err(|error| SaveError::Archive {
+                context: error.to_string(),
+            })?;
+    }
     let file = writer.finish().map_err(|error| SaveError::Archive {
         context: error.to_string(),
     })?;
@@ -923,6 +974,10 @@ fn create_temp(parent: &Path, destination: &Path) -> Result<(PathBuf, File), Sav
     })
 }
 
+/// Reads one bounded ZIP entry and checks both advertised and actual expanded length.
+///
+/// # Errors
+/// Returns archive/read failures or a limit diagnostic before returning any oversized payload.
 fn read_limited(
     archive: &mut ZipArchive<File>,
     index: usize,
@@ -936,7 +991,7 @@ fn read_limited(
         })?;
     if entry.size() > limit {
         return Err(LoadError::Limits {
-            context: format!("{name} exceeds its v1 size limit"),
+            context: format!("{name} exceeds its current size limit"),
         });
     }
     let mut bytes = Vec::with_capacity(entry.size() as usize);
@@ -949,7 +1004,7 @@ fn read_limited(
         })?;
     if bytes.len() as u64 > limit {
         return Err(LoadError::Limits {
-            context: format!("{name} exceeds its v1 size limit"),
+            context: format!("{name} exceeds its current size limit"),
         });
     }
     Ok(bytes)
@@ -977,13 +1032,6 @@ fn validate_source_id(id: &SourceReferenceId) -> Result<(), SourceBundleError> {
         ));
     }
     Ok(())
-}
-fn source_entry_name(
-    id: &SourceReferenceId,
-    format: EmbeddedSourceFormat,
-) -> Result<String, SourceBundleError> {
-    validate_source_id(id)?;
-    Ok(format!("sources/{}.{}", id.as_str(), format.extension()))
 }
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -1230,6 +1278,7 @@ enum MarkOrientationDraftDto {
     GuideNormal { dimension_index: usize },
 }
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SourceManifestDto {
     id: String,
     entry_name: String,
@@ -1239,61 +1288,72 @@ struct SourceManifestDto {
     display_name: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
-struct StoredDocumentDtoV7 {
+#[serde(deny_unknown_fields)]
+struct StoredDocumentDtoV8 {
     container_version: u32,
     document_schema_version: u32,
-    document: DocumentDtoV6,
-    source: SourceManifestDto,
+    document: DocumentDtoV8,
+    sources: Vec<SourceManifestDto>,
+    media: MediaManifestDto,
 }
 #[derive(Serialize, Deserialize)]
 struct CurrentDocumentDto {
-    document: DocumentDtoV6,
+    document: DocumentDtoV8,
 }
 
-impl StoredDocumentDtoV7 {
-    /// Projects a validated document and its matching source into the exact v7 archive envelope.
+impl StoredDocumentDtoV8 {
+    /// Projects a validated document and its matching source into the current archive envelope.
     ///
     /// # Errors
     ///
-    /// Returns a save error when the document cannot be represented by current-v7 persistence.
-    fn from_domain(
-        document: &Document,
-        source: &EmbeddedSource,
-        entry_name: String,
-    ) -> Result<Self, SaveError> {
+    /// Returns a save error when the document cannot be represented by current persistence.
+    fn from_domain(document: &Document, sources: &SourceBundle) -> Result<Self, SaveError> {
         Ok(Self {
             container_version: CONTAINER_VERSION,
             document_schema_version: DOCUMENT_SCHEMA_VERSION,
-            document: DocumentDtoV6::from_domain(document)?,
-            source: SourceManifestDto {
-                id: source.id().as_str().into(),
-                entry_name,
-                format: source.format().into(),
-                byte_length: source.bytes().len() as u64,
-                sha256: sha256_hex(source.bytes()),
-                display_name: source.display_name().map(str::to_owned),
-            },
+            document: DocumentDtoV8::from_domain(document)?,
+            sources: sources
+                .entries()
+                .enumerate()
+                .map(|(index, source)| SourceManifestDto {
+                    id: source.id().as_str().into(),
+                    entry_name: media::entry_name(index, source.format()),
+                    format: source.format().into(),
+                    byte_length: source.bytes().len() as u64,
+                    sha256: sha256_hex(source.bytes()),
+                    display_name: source.display_name().map(str::to_owned),
+                })
+                .collect(),
+            media: MediaManifestDto::from_media(sources.media().ok_or_else(|| {
+                SaveError::SourceDocumentMismatch {
+                    context: "source media manifest is missing".into(),
+                }
+            })?),
         })
     }
 }
 
 #[derive(Serialize, Deserialize)]
-struct DocumentDtoV6 {
+#[serde(deny_unknown_fields)]
+struct DocumentDtoV8 {
     id: u64,
     canvas: CanvasDto,
     source_reference_id: String,
+    project_timing: ProjectTimingDto,
     #[serde(flatten)]
-    configuration: DocumentConfigurationDtoV7,
+    configuration: DocumentConfigurationDtoV8,
 }
 
-/// The shared current-v7 authored-configuration shape used by projects and document Presets.
+/// The shared current-v8 configuration includes End overrides without project timing or Start copies.
 #[derive(Serialize, Deserialize)]
-struct DocumentConfigurationDtoV7 {
+struct DocumentConfigurationDtoV8 {
     pattern_definition_bundles: Vec<PatternDefinitionBundleDtoV6>,
     pattern_settings: DocumentPatternSettingsDto,
     channel_configuration: ChannelConfigurationDto,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     authored_structures: Vec<AuthoredStructureDtoV6>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    end_overrides: Vec<EndOverrideDto>,
 }
 
 /// Current-v7 persistence representation of one document-owned authored structure.
@@ -2864,8 +2924,11 @@ enum EmbeddedSourceFormatDto {
     Tiff,
     OpenExr,
     Avif,
+    Gif,
+    Video,
 }
 impl From<EmbeddedSourceFormat> for EmbeddedSourceFormatDto {
+    /// Projects each supported encoded format without conflating media kind and image sampling.
     fn from(value: EmbeddedSourceFormat) -> Self {
         match value {
             EmbeddedSourceFormat::Png => Self::Png,
@@ -2876,10 +2939,13 @@ impl From<EmbeddedSourceFormat> for EmbeddedSourceFormatDto {
             EmbeddedSourceFormat::Tiff => Self::Tiff,
             EmbeddedSourceFormat::OpenExr => Self::OpenExr,
             EmbeddedSourceFormat::Avif => Self::Avif,
+            EmbeddedSourceFormat::Gif => Self::Gif,
+            EmbeddedSourceFormat::Video => Self::Video,
         }
     }
 }
 impl From<EmbeddedSourceFormatDto> for EmbeddedSourceFormat {
+    /// Reconstructs the exact stored encoded format for subsequent media-provider validation.
     fn from(value: EmbeddedSourceFormatDto) -> Self {
         match value {
             EmbeddedSourceFormatDto::Png => Self::Png,
@@ -2890,6 +2956,8 @@ impl From<EmbeddedSourceFormatDto> for EmbeddedSourceFormat {
             EmbeddedSourceFormatDto::Tiff => Self::Tiff,
             EmbeddedSourceFormatDto::OpenExr => Self::OpenExr,
             EmbeddedSourceFormatDto::Avif => Self::Avif,
+            EmbeddedSourceFormatDto::Gif => Self::Gif,
+            EmbeddedSourceFormatDto::Video => Self::Video,
         }
     }
 }
@@ -2936,13 +3004,13 @@ dto_enum!(
     }
 );
 
-impl DocumentDtoV6 {
-    /// Projects an authoritative document into deterministic current-v7 persistence without runtime state.
+impl DocumentDtoV8 {
+    /// Projects authored Start settings, End overrides and timing without runtime frame state.
     ///
     /// # Errors
     ///
     /// Returns a save error for an unassigned source or incoherent channel configuration before an
-    /// archive is written; an empty authored store is omitted to preserve current-v7 bytes.
+    /// archive is written; no intermediate evaluated frames are persisted.
     fn from_domain(document: &Document) -> Result<Self, SaveError> {
         let source_reference_id = match document.source() {
             SourceReference::Assigned(id) => id.as_str().to_owned(),
@@ -2959,7 +3027,8 @@ impl DocumentDtoV6 {
                 height: document.canvas().height,
             },
             source_reference_id,
-            configuration: DocumentConfigurationDtoV7::from_domain(document)?,
+            project_timing: ProjectTimingDto::from_domain(document.project_timing()),
+            configuration: DocumentConfigurationDtoV8::from_domain(document)?,
         })
     }
     /// Rebuilds and validates the complete authoritative document before a loaded archive commits.
@@ -2970,19 +3039,22 @@ impl DocumentDtoV6 {
     /// or existing document state; no partially rebuilt document escapes this boundary.
     fn into_domain(self) -> Result<Document, ValidationError> {
         let source = SourceReference::Assigned(dto_source_id(&self.source_reference_id)?);
-        self.configuration.into_document(
+        let timing = self.project_timing.into_domain()?;
+        let document = self.configuration.into_document(
             DocumentId(self.id),
             CanvasSpec {
                 width: self.canvas.width,
                 height: self.canvas.height,
             },
             source,
-        )
+        )?;
+        let overrides = document.temporal_end_overrides().to_vec();
+        document.with_temporal_authority(timing, overrides)
     }
 }
 
-impl DocumentConfigurationDtoV7 {
-    /// Projects the exact reusable authored configuration using current-v7 field authority.
+impl DocumentConfigurationDtoV8 {
+    /// Projects reusable Start settings and End intent using current-v8 authority.
     ///
     /// # Errors
     ///
@@ -2992,7 +3064,7 @@ impl DocumentConfigurationDtoV7 {
         Self::from_configuration(&DocumentConfiguration::capture(document))
     }
 
-    /// Projects a source-free domain configuration into the shared current-v7 field shape.
+    /// Projects source-free Start settings and End intent into the shared current-v8 field shape.
     ///
     /// # Errors
     ///
@@ -3036,6 +3108,11 @@ impl DocumentConfigurationDtoV7 {
                 .iter()
                 .map(AuthoredStructureDtoV6::from_domain)
                 .collect(),
+            end_overrides: configuration
+                .temporal_end_overrides()
+                .iter()
+                .map(EndOverrideDto::from_domain)
+                .collect::<Result<_, _>>()?,
         })
     }
 
@@ -3061,7 +3138,12 @@ impl DocumentConfigurationDtoV7 {
             .into_iter()
             .map(AuthoredStructureDtoV6::into_domain)
             .collect::<Result<Vec<_>, _>>()?;
-        match self.channel_configuration {
+        let end_overrides = self
+            .end_overrides
+            .into_iter()
+            .map(EndOverrideDto::into_domain)
+            .collect::<Result<Vec<_>, _>>()?;
+        let document = match self.channel_configuration {
             ChannelConfigurationDto::Legacy { channels } => {
                 Document::with_source_and_authored_structures(
                     id,
@@ -3093,7 +3175,8 @@ impl DocumentConfigurationDtoV7 {
                     authored_structures,
                 )
             }
-        }
+        }?;
+        document.with_temporal_authority(toniator_domain::ProjectTiming::default(), end_overrides)
     }
 
     /// Rebuilds and captures one reusable configuration against a destination's validation context.

@@ -1,7 +1,7 @@
 name = "documentation_maintainer"
 description = "Milestone-only documentation reconciliation after a completed and verified change materially affects durable project documentation. Do not invoke for ordinary tasks."
 model = "gpt-5.6-luna"
-model_reasoning_effort = "high"
+model_reasoning_effort = "max"
 sandbox_mode = "workspace-write"
 developer_instructions = """
 Run only after implementation, review, and any required corrections are
@@ -30,11 +30,19 @@ a normative specification revision.
 This agent has workspace-write access because the current Codex sandbox cannot
 limit writes to documentation paths. Limit edits to documentation files,
 Codex guidance and skill/agent instructions when required by verified
-documentation, and documentation cache files. Write a cache entry under
+documentation, and documentation cache files. When useful for reuse or required
+by the gate, write a cache entry under
 `TONIATOR_ROOT/.codex-work/agents/documentation-maintainer/` recording:
 documentation files reviewed; documentation files changed; implementation
 evidence used; stale or contradictory documentation found; remaining
 documentation gaps; Git HEAD and working-tree assumptions; and invalidation
 conditions. Do not commit, push, publish, deploy, or delete existing
 implementations.
+Semantic-map is retired unless the user explicitly reactivates it.
+
+When a qualifying milestone changes GTK interaction, preserve the verified
+control contract: stable name/hierarchy, real role/state/value or selection/actions,
+label relation, enabled/applicability truth, keyboard path, semantic readback,
+and visual/log evidence. Document GTK/descriptor authority, never a parallel
+accessibility model.
 """

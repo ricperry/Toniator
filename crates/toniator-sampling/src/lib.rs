@@ -22,6 +22,14 @@ pub use toniator_domain::{
 };
 use toniator_geometry::{CurvePath, CurveSegment, Point2};
 
+pub mod media;
+
+pub use media::{
+    AnimatedImageFormat, AnimatedImageSource, FrameIdentity, FrameSource, ImageSequenceEntry,
+    ImageSequenceSource, MediaTools, SourceError, SourceFrame, SourceMedia, SourceMediaKind,
+    SourceMediaMetadata, StillImageSource, VideoSource,
+};
+
 const MAX_SOURCE_PIXELS: u64 = 64 * 1024 * 1024;
 
 /// Versioned identity for the decoder behavior that participates in derived
@@ -42,6 +50,8 @@ pub enum SourceFormat {
     Tiff,
     OpenExr,
     Avif,
+    #[serde(rename = "raw-rgba")]
+    RawRgba,
 }
 
 /// A caller-supplied decoding hint. Decoding never opens a filesystem path.
@@ -174,6 +184,55 @@ pub struct SourceField {
 }
 
 impl SourceField {
+    /// Constructs an immutable decoded field directly from straight 8-bit sRGB RGBA samples.
+    ///
+    /// This is the decoded-frame boundary used by moving-media providers; it deliberately avoids
+    /// a PNG encode/decode handoff. The byte slice must contain exactly four bytes per pixel and
+    /// dimensions remain subject to the shared 64-megapixel source bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns `source.dimensions` for unsafe dimensions or `source.decode` for a byte-length
+    /// mismatch or an allocation-size overflow.
+    pub fn from_straight_rgba8(
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> Result<Self, SamplingError> {
+        validate_dimensions(width, height)?;
+        let expected = usize::try_from(u64::from(width) * u64::from(height) * 4).map_err(|_| {
+            SamplingError::new("source.decode", "decoded RGBA byte length is unsafe")
+        })?;
+        if rgba.len() != expected {
+            return Err(SamplingError::new(
+                "source.decode",
+                "decoded RGBA byte length does not match source dimensions",
+            ));
+        }
+        let decoded_pixel_hash = sha256(&rgba);
+        let mut pixels = Vec::new();
+        pixels
+            .try_reserve_exact(expected / 4)
+            .map_err(|_| SamplingError::new("source.decode", "decoded RGBA allocation failed"))?;
+        pixels.extend(rgba.chunks_exact(4).map(|pixel| SourcePixel {
+            red: f64::from(pixel[0]) / 255.0,
+            green: f64::from(pixel[1]) / 255.0,
+            blue: f64::from(pixel[2]) / 255.0,
+            alpha: f64::from(pixel[3]) / 255.0,
+        }));
+        Ok(Self {
+            identity: SourceIdentity {
+                format: SourceFormat::RawRgba,
+                width,
+                height,
+                content_hash: decoded_pixel_hash.clone(),
+                decoded_pixel_hash,
+                svg_text: None,
+            },
+            pixels,
+        })
+    }
+
     pub fn identity(&self) -> &SourceIdentity {
         &self.identity
     }
@@ -1419,7 +1478,7 @@ pub fn reduced_preview_png(
             maximum_long_edge,
         )
     };
-    let proxy = bounded_preview_rgba(&source, width, height)?;
+    let proxy = bounded_preview_rgba(&source, width, height, &|| false)?;
     let mut png_bytes = Vec::new();
     PngEncoder::new(&mut png_bytes)
         .write_image(&proxy, width, height, ColorType::Rgba8.into())
@@ -1428,6 +1487,47 @@ pub fn reduced_preview_png(
         png_bytes,
         width,
         height,
+    })
+}
+
+/// Reduces one decoded media frame for a private preview while retaining exact source timing.
+///
+/// Box averaging uses the existing still-preview resampler. Only bounded proxy storage is added;
+/// native source pixels remain immutable. The identity records the reduction contract and actual
+/// resulting pixel hash, so reduced and native frames cannot alias in derived caches.
+///
+/// # Errors
+/// Rejects zero bounds, cancellation and invalid dimensions or storage without publishing pixels.
+pub fn reduced_preview_frame(
+    frame: &SourceFrame,
+    maximum_long_edge: u32,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<SourceFrame, SamplingError> {
+    if maximum_long_edge == 0 || cancelled() {
+        return Err(SamplingError::new(
+            "preview.proxy",
+            "preview was cancelled or has a zero size bound",
+        ));
+    }
+    let identity = frame.field.identity();
+    let edge = identity.width.max(identity.height);
+    if edge <= maximum_long_edge {
+        return Ok(frame.clone());
+    }
+    let width = rounded_scaled_dimension(identity.width, maximum_long_edge, edge);
+    let height = rounded_scaled_dimension(identity.height, maximum_long_edge, edge);
+    let rgba = bounded_preview_rgba(&frame.field, width, height, cancelled)?;
+    let field = std::sync::Arc::new(SourceField::from_straight_rgba8(width, height, rgba)?);
+    let mut identity = frame.identity.clone();
+    identity.decoded_pixel_hash = field.identity().decoded_pixel_hash.clone();
+    identity
+        .decoder_contract
+        .push_str(&format!(";box-preview-v1:{width}x{height}"));
+    Ok(SourceFrame {
+        field,
+        identity,
+        index: frame.index,
+        normalized_time: frame.normalized_time,
     })
 }
 
@@ -1440,11 +1540,13 @@ pub fn reduced_preview_png(
 /// # Errors
 ///
 /// Returns a stable proxy diagnostic when source storage is inconsistent or the bounded output
-/// byte count cannot be represented or reserved. It does not mutate the source field.
+/// byte count cannot be represented or reserved, or when cancellation is requested. It does not
+/// mutate the source field and polls cancellation at every source row.
 fn bounded_preview_rgba(
     source: &SourceField,
     width: u32,
     height: u32,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, SamplingError> {
     let source_width = source.identity.width;
     let source_height = source.identity.height;
@@ -1489,6 +1591,9 @@ fn bounded_preview_rgba(
             let last_x = right.ceil() as u32;
             let mut totals = [0.0; 4];
             for source_y in first_y..last_y {
+                if cancelled() {
+                    return Err(SamplingError::new("preview.proxy", "preview was cancelled"));
+                }
                 let y_coverage =
                     (bottom.min(f64::from(source_y + 1)) - top.max(f64::from(source_y))).max(0.0);
                 for source_x in first_x..last_x {
@@ -4191,7 +4296,7 @@ mod tests {
                 4_096
             ],
         );
-        let proxy = bounded_preview_rgba(&source, 128, 1)
+        let proxy = bounded_preview_rgba(&source, 128, 1, &|| false)
             .expect("bounded proxy directly resamples decoded source pixels");
         assert_eq!(proxy.len(), 128 * 4);
         assert!(proxy.len() < source.pixels.len());

@@ -4,6 +4,8 @@
 //! portable-container boundaries.  The workspace below is controller state;
 //! `DocumentHistory` remains the only mutable document authority.
 
+mod advanced_batches;
+mod advanced_temporal;
 mod app_events;
 mod application_model;
 mod automation;
@@ -11,11 +13,19 @@ mod components;
 mod controller;
 mod document_presets;
 mod main_view_state;
+mod paint_editor;
 mod personal_pattern_management;
 mod preview_coordinator;
+mod sequence_import;
+mod source_notice;
 mod stage20f_editor;
 mod startup;
+mod temporal_edit;
+mod temporal_export;
+mod temporal_preview;
+mod temporal_settings;
 mod view_models;
+mod viewport_paintable;
 
 use std::{
     cell::{Cell, RefCell},
@@ -76,16 +86,18 @@ use toniator_domain::{
 use toniator_engine::{
     EvaluationLimits, EvaluationRequest, EvaluationScheduler, OutputRasterTarget,
     RasterAntialiasing, RasterBackground, RasterSurface, ResolvedSource, SourceFormatHint,
-    SourceIdentity, encode_png, evaluate_with_limits, rasterize_output, reduced_preview_png,
-    resolve_source_identity, write_svg,
+    SourceIdentity, encode_png, evaluate_with_limits, write_svg,
 };
+#[cfg(test)]
+use toniator_engine::{rasterize_output, reduced_preview_png, resolve_source_identity};
+#[cfg(test)]
+use toniator_io::EmbeddedSource;
 use toniator_io::personal_library::{
     LibraryEnvironment, PersonalEntryKind, PersonalLibrary, PersonalLibraryFingerprint,
     PersonalLibraryPaths, PersonalLibrarySnapshot, PersonalLibraryTrashToken,
 };
 use toniator_io::{
-    EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load as load_container,
-    save as save_container,
+    EmbeddedSourceFormat, SourceBundle, load as load_container, save as save_container,
 };
 #[cfg(test)]
 use toniator_io::{load_preset, save_preset};
@@ -145,7 +157,11 @@ const LIFECYCLE_BUTTONS: [(&str, &str, &str); 7] = [
     ("_Open", "app.open", "Open a document or artwork (Ctrl+O)"),
     ("_Save", "app.save", "Save document (Ctrl+S)"),
     ("Save _As", "app.save-as", "Save document as (Ctrl+Shift+S)"),
-    ("_Export", "app.export", "Export PNG or SVG (Ctrl+E)"),
+    (
+        "_Export",
+        "app.export",
+        "Export animation or the current frame (Ctrl+E)",
+    ),
     ("_Close", "app.close", "Close document (Ctrl+W)"),
     ("E_xit", "app.exit", "Exit Toniator (Ctrl+Q)"),
 ];
@@ -355,8 +371,11 @@ pub(crate) struct SavedContent {
 #[derive(Clone, Debug)]
 struct SourcePresentation {
     id: SourceReferenceId,
+    #[allow(dead_code)]
+    // Used by test-only still proxy fixtures; moving preview uses decoded frames.
     format: SourceFormatHint,
     identity: SourceIdentity,
+    notice: source_notice::SourceNotice,
 }
 
 /// Private lifecycle state.  It holds no independently mutable document:
@@ -392,6 +411,11 @@ impl Workspace {
         })
     }
 
+    /// Builds a still-backed test workspace through existing source/document constructors.
+    ///
+    /// # Errors
+    /// Rejects invalid fixture bytes or a source/document construction failure.
+    #[cfg(test)]
     fn from_direct(
         bytes: Arc<[u8]>,
         format: SourceFormatHint,
@@ -426,6 +450,7 @@ impl Workspace {
                 id,
                 format,
                 identity,
+                notice: Default::default(),
             }),
             migration_notice: false,
             // Direct artwork has not been accepted as persisted document
@@ -434,6 +459,10 @@ impl Workspace {
         })
     }
 
+    /// Opens a current portable project and validates its selected media range on the load worker.
+    ///
+    /// # Errors
+    /// Rejects container, source, timing and decode failures before installing any workspace state.
     fn from_container(path: &Path) -> Result<Self, String> {
         // This is deliberately the only container-opening call site.
         let loaded = load_container(path).map_err(|error| error.to_string())?;
@@ -448,8 +477,27 @@ impl Workspace {
             }
         };
         let format = source_format_hint(source.format());
-        let identity =
-            resolve_source_identity(source.bytes(), format).map_err(|error| error.to_string())?;
+        let mut media = toniator_engine::open_source_media(
+            &sources,
+            toniator_engine::MediaTools::default(),
+            &|| false,
+        )
+        .map_err(|error| error.to_string())?;
+        toniator_engine::select_media_timing(
+            toniator_engine::FrameSource::metadata(&media),
+            Some(document.project_timing()),
+            &toniator_engine::MediaTimingSelection::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        let position = document
+            .project_timing()
+            .source_time_for_frame(document.project_timing().frame_range().start())
+            .map_err(|error| error.to_string())?;
+        let notice =
+            source_notice::SourceNotice::new(toniator_engine::FrameSource::metadata(&media));
+        let frame = toniator_engine::FrameSource::frame_at(&mut media, position, &|| false)
+            .map_err(|error| error.to_string())?;
+        let identity = frame.field.identity().clone();
         let display_name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -464,9 +512,68 @@ impl Workspace {
                 id: source.id().clone(),
                 format,
                 identity,
+                notice,
             }),
             migration_notice: false,
             savepoint: Some(SavedContent { document, sources }),
+        })
+    }
+
+    /// Constructs a new source-backed project using shared import metadata and timing defaults.
+    ///
+    /// # Errors
+    /// Rejects missing source entries, invalid source timing, cancellation or domain construction failures.
+    fn from_imported(
+        imported: toniator_engine::ImportedMedia,
+        display_name: String,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, String> {
+        let timing = toniator_engine::select_media_timing(
+            &imported.metadata,
+            None,
+            &toniator_engine::MediaTimingSelection::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        let document = Document::new_default_document(
+            CanvasSpec {
+                width: imported.metadata.width.into(),
+                height: imported.metadata.height.into(),
+            },
+            SourceReference::Assigned(imported.source_id.clone()),
+        )
+        .map_err(|error| error.to_string())?
+        .with_temporal_authority(timing, Vec::new())
+        .map_err(|error| error.to_string())?;
+        let source = imported
+            .sources
+            .get(&imported.source_id)
+            .ok_or("Imported source is missing")?;
+        let format = source_format_hint(source.format());
+        let mut media = toniator_engine::open_source_media(
+            &imported.sources,
+            toniator_engine::MediaTools::default(),
+            cancelled,
+        )
+        .map_err(|error| error.to_string())?;
+        let frame = toniator_engine::FrameSource::frame_at(
+            &mut media,
+            toniator_domain::RationalTime::default(),
+            cancelled,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(Self {
+            history: fresh_history(document)?,
+            sources: imported.sources,
+            location: None,
+            display_name,
+            source_presentation: Some(SourcePresentation {
+                id: imported.source_id,
+                format,
+                identity: frame.field.identity().clone(),
+                notice: source_notice::SourceNotice::new(&imported.metadata),
+            }),
+            migration_notice: false,
+            savepoint: None,
         })
     }
 
@@ -517,6 +624,7 @@ fn fresh_history(document: Document) -> Result<DocumentHistory, String> {
         .map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
 fn source_id_from_content(identity: &SourceIdentity) -> Result<SourceReferenceId, String> {
     // Decoder hashes are namespaced (`sha256:<hex>`); the archive component
     // deliberately retains only the deterministic digest portion.
@@ -533,6 +641,7 @@ fn source_id_from_content(identity: &SourceIdentity) -> Result<SourceReferenceId
 ///
 /// Returns a user-facing error for the deliberately unsupported sentinel; no guessed container
 /// format is ever persisted.
+#[cfg(test)]
 fn embedded_format(format: SourceFormatHint) -> Result<EmbeddedSourceFormat, String> {
     match format {
         SourceFormatHint::Png => Ok(EmbeddedSourceFormat::Png),
@@ -558,6 +667,7 @@ const fn source_format_hint(format: EmbeddedSourceFormat) -> SourceFormatHint {
         EmbeddedSourceFormat::Tiff => SourceFormatHint::Tiff,
         EmbeddedSourceFormat::OpenExr => SourceFormatHint::OpenExr,
         EmbeddedSourceFormat::Avif => SourceFormatHint::Avif,
+        EmbeddedSourceFormat::Gif | EmbeddedSourceFormat::Video => SourceFormatHint::Unsupported,
     }
 }
 
@@ -585,6 +695,7 @@ impl Page {
 pub(crate) enum LifecycleAction {
     New,
     Open,
+    ImportSequence,
     OpenFile(PathBuf),
     Close,
     WindowClose,
@@ -855,6 +966,8 @@ struct Actions {
     save: gio::SimpleAction,
     save_as: gio::SimpleAction,
     export: gio::SimpleAction,
+    animation_settings: gio::SimpleAction,
+    import_sequence: gio::SimpleAction,
     close: gio::SimpleAction,
     exit: gio::SimpleAction,
     undo: gio::SimpleAction,
@@ -875,6 +988,14 @@ struct PatternEditorSurface {
     picture: gtk::Picture,
     preview_spinner: gtk::Spinner,
     draft: Rc<RefCell<PatternEditorDraft>>,
+    /// Captures the selected endpoint for this modal's source-frame preview.
+    endpoint: temporal_preview::Endpoint,
+    /// Owns native media decoding for this editor lifetime only.
+    source_worker: Option<temporal_preview::Worker>,
+    /// Stops the one scheduler completion bridge when the editor closes.
+    preview_bridge_stop: Arc<AtomicBool>,
+    /// Delivers private scheduler completions without spawning one thread per edit.
+    preview_bridge: Option<thread::JoinHandle<()>>,
     introduction: gtk::Label,
     history: gtk::Label,
     current_pattern: gtk::Label,
@@ -898,6 +1019,24 @@ struct PatternEditorSurface {
     corner_direction: gtk::ToggleButton,
     edit_left_terminal_handle: gtk::Button,
     edit_right_terminal_handle: gtk::Button,
+}
+
+impl Drop for PatternEditorSurface {
+    /// Cancels and joins private media/evaluation workers before the editor leaves memory.
+    ///
+    /// The surface owns every preview worker and bridge created for its modal epoch. Dropping it
+    /// therefore cannot leave a decoder iterator, scheduler job, or polling bridge targeting a
+    /// later editor instance.
+    fn drop(&mut self) {
+        self.preview_bridge_stop.store(true, Ordering::Release);
+        self.draft.borrow().scheduler.cancel_and_clear();
+        if let Some(bridge) = self.preview_bridge.take() {
+            let _ = bridge.join();
+        }
+        if let Some(worker) = self.source_worker.as_mut() {
+            worker.cancel();
+        }
+    }
 }
 
 /// Identifies the one authored resource and descriptor purpose exposed by a private editor.
@@ -1298,18 +1437,21 @@ const fn main_split_position_for_window(width: i32) -> i32 {
     if position < 0 { 0 } else { position }
 }
 
-/// Applies the active-settings split policy without changing window, document, or preview state.
+/// Initializes the settings split without replacing a user-selected divider position.
 ///
-/// A hidden sidebar leaves the existing paned position alone. An active visible sidebar receives a
-/// width derived from its current allocation, keeping selectors and descriptors usable at the app's
-/// narrow minimum and avoiding oversized inspector allocation on wide displays.
+/// A hidden or already positioned sidebar stays untouched. GTK owns subsequent drag and window
+/// resize allocation; this initial width does not change document or preview state.
 fn apply_main_sidebar_width_policy(
     width: i32,
     drawer: &gtk::ToggleButton,
     inspector: &gtk::ScrolledWindow,
     split: &gtk::Paned,
 ) {
-    if width > 0 && drawer.is_active() && inspector.is_visible() {
+    if width > 0
+        && drawer.is_active()
+        && inspector.is_visible()
+        && !split.property::<bool>("position-set")
+    {
         split.set_position(main_split_position_for_window(width));
     }
 }
@@ -1359,9 +1501,10 @@ struct PatternEditorDraft {
     initial_document: Document,
     discard_confirmed: bool,
     sources: SourceBundle,
-    presentation: SourcePresentation,
     scheduler: Arc<EvaluationScheduler>,
     preview_submission: Option<u64>,
+    /// Rejects source completions after an edit, endpoint switch, or newer request.
+    media_preview_key: Option<temporal_preview::RequestKey>,
     epoch: u64,
     geometry_editor: stage20f_editor::Stage20fEditorState,
     construction_attachment: Option<AuthoredStructureAttachment>,
@@ -1391,6 +1534,7 @@ struct DescriptorComponent {
     detail: gtk::Label,
     reset: Option<gtk::Button>,
     value: PropertyCurrentValue,
+    temporal: Option<temporal_edit::Controls>,
 }
 
 /// Routes one Advanced Settings control back to its still-current private modal epoch.
@@ -1401,6 +1545,8 @@ struct DescriptorComponent {
 struct AdvancedCommitContext {
     state: Rc<RefCell<AppState>>,
     epoch: u64,
+    target: InspectorTarget,
+    refreshing: Rc<Cell<bool>>,
 }
 
 /// Holds one modal Advanced Settings history and its cancelable private preview scheduler.
@@ -1413,6 +1559,13 @@ struct AdvancedSettingsSurface {
     window: gtk::Window,
     draft: Rc<RefCell<DocumentHistory>>,
     preview_source: AdvancedPreviewSource,
+    _source_worker: Option<advanced_temporal::SourceWorker>,
+    endpoint: temporal_preview::Endpoint,
+    fields: gtk::Box,
+    bindings: Vec<advanced_temporal::Binding>,
+    paint_editors: Vec<paint_editor::Controls>,
+    batch_editors: Vec<advanced_batches::Controls>,
+    refreshing: Rc<Cell<bool>>,
     target: InspectorTarget,
     picture: gtk::Picture,
     status: gtk::Label,
@@ -3323,11 +3476,13 @@ enum WizardPreviewSource {
 
 /// Holds the only source admitted to an Advanced Settings preview evaluation.
 ///
-/// A ready value retains the original source reference ID but supplies bounded PNG proxy bytes.
+/// Pending preparation runs off GTK. A ready value retains the original source reference ID
+/// and exact endpoint identity but supplies a bounded decoded-frame proxy without re-encoding.
 /// An unavailable value is a visible private-preview failure only; it never blocks editing or
 /// publishing the authoritative draft, and it never falls back to the full-resolution source.
 #[derive(Clone)]
 enum AdvancedPreviewSource {
+    Pending,
     Ready {
         source: ResolvedSource,
         width: u32,
@@ -3394,7 +3549,7 @@ struct AppState {
     lifecycle_prompt: bool,
     actions: Actions,
     window: gtk::ApplicationWindow,
-    root_stack: gtk::Stack,
+    startup_window: Option<gtk::Window>,
     startup: startup::StartupScreen,
     recent_path: Option<PathBuf>,
     recent_files: Vec<toniator_io::recent::RecentFile>,
@@ -3410,9 +3565,14 @@ struct AppState {
     fit: gtk::ToggleButton,
     preview_view: gtk::ToggleButton,
     source_view: gtk::ToggleButton,
+    endpoint_controls: gtk::Box,
+    start_frame: gtk::ToggleButton,
+    end_frame: gtk::ToggleButton,
+    syncing_endpoint: Rc<Cell<bool>>,
     view_state: MainViewState,
     source_texture: Option<gtk::gdk::Texture>,
     source_texture_generation: Option<u64>,
+    presented_texture: Option<(gtk::gdk::Texture, MainViewMode, f64, f64)>,
     preview_progress: gtk::Box,
     preview_overall_progress_label: gtk::Label,
     preview_progress_label: gtk::Label,
@@ -3441,6 +3601,10 @@ struct AppState {
     draft_epoch: u64,
     advanced_settings: Option<AdvancedSettingsSurface>,
     advanced_epoch: u64,
+    temporal_export: Option<temporal_export::Surface>,
+    temporal_export_epoch: u64,
+    temporal_settings: Option<temporal_settings::Surface>,
+    sequence_import: Option<sequence_import::Surface>,
     pattern_wizard: Option<PatternWizardSurface>,
     wizard_epoch: u64,
     pattern_library_surface: Option<PatternLibrarySurface>,
@@ -3500,10 +3664,10 @@ fn main() {
     let activation_controller = Rc::clone(&controller);
     app.connect_activate(move |app| {
         let state = activation_workspace(app, &activation_controller);
-        if let Some(window) = app.active_window() {
+        if let Some(window) = app.active_window().filter(|window| window.is_modal()) {
             window.present();
         } else {
-            state.borrow().window.present();
+            presentation_parent(&state.borrow()).present();
         }
     });
     app.connect_open(move |app, files, _| {
@@ -3742,6 +3906,9 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     window.set_size_request(480, 360);
     let file_menu = gio::Menu::new();
     for (label, action, tooltip) in LIFECYCLE_BUTTONS {
+        if action == "app.close" {
+            file_menu.append(Some("Animation settings…"), Some("app.animation-settings"));
+        }
         file_menu.append(Some(&label.replace('_', "")), Some(action));
         let _ = tooltip;
     }
@@ -3750,15 +3917,17 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     window.set_titlebar(Some(&titlebar));
     let file_button = shell.file_button();
     file_button.set_menu_model(Some(&file_menu));
+    document_presets::label_menu(&file_button);
     let new_menu = gio::Menu::new();
     new_menu.append(Some("New document"), Some("app.new"));
     new_menu.append(Some("Open artwork or document…"), Some("app.open"));
+    new_menu.append(Some("Import image sequence…"), Some("app.import-sequence"));
     let preset_menu = gio::Menu::new();
     preset_menu.append(Some("Load preset..."), Some("app.load-document-preset"));
     preset_menu.append(Some("Save preset"), Some("app.save-document-preset"));
     new_menu.append_section(None, &preset_menu);
     shell.new_button().set_menu_model(Some(&new_menu));
-    document_presets::label_new_menu(&shell.new_button());
+    document_presets::label_menu(&shell.new_button());
     let selector = shell.model_selector();
     selector.set_model(Some(&gtk::StringList::new(
         &PreviewModel::ALL.map(PreviewModel::label),
@@ -3814,31 +3983,20 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         );
     });
     let startup = startup::StartupScreen::new();
-    let root_stack = gtk::Stack::new();
-    root_stack.add_named(&startup.root, Some("startup"));
-    root_stack.add_named(&shell, Some("workspace"));
-    window.set_child(Some(&root_stack));
-    let startup_columns = startup.columns.clone();
-    let sidebar_window = window.clone();
+    window.set_child(Some(&shell));
     let sidebar_drawer = drawer.clone();
     let sidebar_inspector = inspector_scroll.clone();
-    let sidebar_split = split.clone();
-    glib::timeout_add_local(Duration::from_millis(100), move || {
-        if !sidebar_window.is_visible() {
-            return glib::ControlFlow::Break;
+    split.add_tick_callback(move |sidebar_split, _| {
+        if sidebar_split.width() <= 0 {
+            return glib::ControlFlow::Continue;
         }
-        startup_columns.set_orientation(if sidebar_window.width() < 800 {
-            gtk::Orientation::Vertical
-        } else {
-            gtk::Orientation::Horizontal
-        });
         apply_main_sidebar_width_policy(
             sidebar_split.width(),
             &sidebar_drawer,
             &sidebar_inspector,
-            &sidebar_split,
+            sidebar_split,
         );
-        glib::ControlFlow::Continue
+        glib::ControlFlow::Break
     });
 
     let actions = Actions {
@@ -3849,6 +4007,8 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         save: gio::SimpleAction::new("save", None),
         save_as: gio::SimpleAction::new("save-as", None),
         export: gio::SimpleAction::new("export", None),
+        animation_settings: gio::SimpleAction::new("animation-settings", None),
+        import_sequence: gio::SimpleAction::new("import-sequence", None),
         close: gio::SimpleAction::new("close", None),
         exit: gio::SimpleAction::new("exit", None),
         undo: gio::SimpleAction::new("undo", None),
@@ -3863,6 +4023,8 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         &actions.save,
         &actions.save_as,
         &actions.export,
+        &actions.animation_settings,
+        &actions.import_sequence,
         &actions.close,
         &actions.exit,
         &actions.undo,
@@ -3908,7 +4070,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         lifecycle_prompt: false,
         actions,
         window: window.clone(),
-        root_stack,
+        startup_window: None,
         startup,
         recent_path,
         recent_files,
@@ -3924,9 +4086,14 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         fit,
         preview_view,
         source_view,
+        endpoint_controls: shell.endpoint_controls().0,
+        start_frame: shell.endpoint_controls().1,
+        end_frame: shell.endpoint_controls().2,
+        syncing_endpoint: Rc::new(Cell::new(false)),
         view_state: MainViewState::default(),
         source_texture: None,
         source_texture_generation: None,
+        presented_texture: None,
         preview_progress,
         preview_overall_progress_label,
         preview_progress_label,
@@ -3955,6 +4122,10 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         draft_epoch: 0,
         advanced_settings: None,
         advanced_epoch: 0,
+        temporal_export: None,
+        temporal_export_epoch: 0,
+        temporal_settings: None,
+        sequence_import: None,
         pattern_wizard: None,
         wizard_epoch: 0,
         pattern_library_surface: None,
@@ -3991,6 +4162,11 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
             handle_app_event(&event_state, event);
         }
     });
+    let media_sender = state.borrow().event_sender.clone();
+    state.borrow_mut().media_worker = Some(
+        temporal_preview::Worker::new(media_sender).expect("failed to start source preview worker"),
+    );
+    connect_endpoint_controls(&state);
     start_preview_event_bridge(
         Arc::clone(&state.borrow().scheduler),
         state.borrow().event_sender.clone(),
@@ -3998,6 +4174,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     );
     connect_actions(&state);
     connect_startup(&state);
+    connect_startup_dismissal(&state);
     rebuild_recent_files(&state);
     {
         let state = Rc::clone(&state);
@@ -4013,13 +4190,24 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     {
         let state = Rc::clone(&state);
         window.connect_close_request(move |_| {
+            sequence_import::close(&state);
+            temporal_settings::close(&state);
+            if temporal_export::request_close(&state, true) {
+                return glib::Propagation::Stop;
+            }
             let request = {
                 let mut state = state.borrow_mut();
                 let busy = lifecycle_is_busy(&state);
                 request_window_close(&mut state.window_close, busy)
             };
             match request {
-                WindowCloseRequest::Proceed => glib::Propagation::Proceed,
+                WindowCloseRequest::Proceed => {
+                    let mut state = state.borrow_mut();
+                    state.media_worker.take();
+                    state.preview_bridge_stop.store(true, Ordering::Release);
+                    state.scheduler.cancel_and_clear();
+                    glib::Propagation::Proceed
+                }
                 WindowCloseRequest::Ignore => glib::Propagation::Stop,
                 WindowCloseRequest::Dispatch => {
                     request_lifecycle(&state, LifecycleAction::WindowClose);
@@ -4030,8 +4218,106 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     }
     sync_ui(&mut state.borrow_mut());
     rebuild_inspector(&state);
+    // Map the editor's first frame before presenting its transient welcome window.
+    // Otherwise asynchronous Wayland mapping can place the editor above the splash.
+    let weak = Rc::downgrade(&state);
+    window.add_tick_callback(move |_, _| {
+        let weak = weak.clone();
+        glib::idle_add_local_once(move || {
+            if let Some(state) = weak.upgrade() {
+                present_startup(&state);
+            }
+        });
+        glib::ControlFlow::Break
+    });
     window.present();
     state
+}
+
+/// Returns the visible welcome window or editor as the parent for startup-capable dialogs.
+fn presentation_parent(state: &AppState) -> gtk::Window {
+    if let Some(window) = state
+        .startup_window
+        .as_ref()
+        .filter(|window| window.is_visible())
+    {
+        window.clone()
+    } else {
+        state.window.clone().upcast()
+    }
+}
+
+/// Dismisses welcome into a new empty document only while no file operation owns startup.
+/// Returns whether the initiating input is consumed; document creation uses the normal lifecycle.
+fn dismiss_startup(state: &Rc<RefCell<AppState>>) -> bool {
+    let dismiss = {
+        let state = state.borrow();
+        state
+            .startup_window
+            .as_ref()
+            .is_some_and(|window| window.is_visible())
+            && !lifecycle_is_busy(&state)
+    };
+    if dismiss {
+        request_lifecycle(state, LifecycleAction::New);
+        state.borrow().window.present();
+    }
+    dismiss
+}
+
+/// Presents a fresh welcome toplevel over the editor, reusing only its detached content.
+/// Dismissed windows are destroyed, avoiding stale hidden toplevel accessibility contexts.
+/// X and Escape use guarded document creation; chooser focus changes never dismiss welcome.
+fn present_startup(state: &Rc<RefCell<AppState>>) {
+    let splash = {
+        let state = state.borrow();
+        if state.workspace.is_some() || state.window_close.deferred {
+            return;
+        }
+        if let Some(window) = &state.startup_window {
+            window.present();
+            return;
+        }
+        state.startup.window(&state.window)
+    };
+    let weak = Rc::downgrade(state);
+    splash.connect_close_request(move |_| {
+        if let Some(state) = weak.upgrade() {
+            dismiss_startup(&state);
+        }
+        glib::Propagation::Stop
+    });
+    let keys = gtk::EventControllerKey::new();
+    let weak = Rc::downgrade(state);
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk::gdk::Key::Escape
+            && weak.upgrade().is_some_and(|state| dismiss_startup(&state))
+        {
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    splash.add_controller(keys);
+    state.borrow_mut().startup_window = Some(splash.clone());
+    splash.present();
+}
+
+/// Wires clicks on the editor behind welcome to guarded empty-document creation.
+/// The first background click is consumed; a weak capture avoids a controller ownership cycle.
+fn connect_startup_dismissal(state: &Rc<RefCell<AppState>>) {
+    let click = gtk::GestureClick::new();
+    click.set_button(0);
+    click.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let weak = Rc::downgrade(state);
+    click.connect_pressed(move |gesture, _, _, _| {
+        if let Some(state) = weak.upgrade()
+            && dismiss_startup(&state)
+        {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        }
+    });
+    state.borrow().window.add_controller(click);
 }
 
 /// Connects startup history clearing; only metadata is changed and filesystem targets stay intact.
@@ -4120,6 +4406,14 @@ fn remember_recent_file(state: &Rc<RefCell<AppState>>, path: &Path) {
 /// Exit calls the window's close request so it shares exactly the compositor-X save/cancel path.
 fn connect_actions(state: &Rc<RefCell<AppState>>) {
     {
+        let handle = state.clone();
+        state
+            .borrow()
+            .actions
+            .animation_settings
+            .connect_activate(move |_, _| temporal_settings::open(&handle));
+    }
+    {
         let handle = Rc::clone(state);
         state
             .borrow()
@@ -4144,6 +4438,10 @@ fn connect_actions(state: &Rc<RefCell<AppState>>) {
     for (action, lifecycle) in [
         (state.borrow().actions.new.clone(), LifecycleAction::New),
         (state.borrow().actions.open.clone(), LifecycleAction::Open),
+        (
+            state.borrow().actions.import_sequence.clone(),
+            LifecycleAction::ImportSequence,
+        ),
         (state.borrow().actions.close.clone(), LifecycleAction::Close),
     ] {
         let state = Rc::clone(state);
@@ -4178,12 +4476,15 @@ fn connect_actions(state: &Rc<RefCell<AppState>>) {
     {
         let state = Rc::clone(state);
         let action = state.borrow().actions.help.clone();
-        action.connect_activate(move |_, _| show_main_help(&state.borrow().window));
+        action.connect_activate(move |_, _| {
+            let parent = presentation_parent(&state.borrow());
+            show_main_help(&parent);
+        });
     }
 }
 
 /// Presents bounded application help without changing workspace or view authority.
-fn show_main_help(parent: &gtk::ApplicationWindow) {
+fn show_main_help(parent: &gtk::Window) {
     let dialog = gtk::AboutDialog::builder()
         .program_name("Toniator")
         .comments("Create expressive halftone patterns from your artwork. Keyboard shortcuts are shown in the main menu.")
@@ -4342,29 +4643,110 @@ fn connect_main_view_controls(state: &Rc<RefCell<AppState>>) {
     }
 }
 
-/// Decodes a bounded source proxy through the canonical source loader for Source view.
+/// Returns the worker-prepared source comparison image for the current workspace.
 ///
-/// The decode is presentation-only and leaves source, history, and evaluation
-/// state untouched. It never substitutes a rendered pattern preview.
+/// GTK performs no source I/O or decoding here and never substitutes a pattern preview.
 ///
 /// # Errors
 ///
-/// Returns a visible diagnostic when canonical source decoding or the resulting
-/// PNG texture fails. Large artwork is reduced, without changing authored dimensions.
-fn source_texture_for_workspace(workspace: &Workspace) -> Result<gtk::gdk::Texture, String> {
-    let presentation = workspace
-        .source_presentation
-        .as_ref()
-        .ok_or_else(|| "Source view is unavailable until artwork is loaded.".to_owned())?;
-    let source = workspace
-        .sources
-        .get(&presentation.id)
-        .ok_or_else(|| "Source view cannot find the embedded artwork.".to_owned())?;
-    let proxy = reduced_preview_png(source.bytes(), presentation.format, SOURCE_VIEW_MAX_EDGE)
-        .map_err(|error| format!("Source view could not decode the embedded artwork: {error}"))?;
-    let bytes = glib::Bytes::from_owned(proxy.png_bytes);
-    gtk::gdk::Texture::from_bytes(&bytes)
-        .map_err(|error| format!("Source view could not decode the embedded artwork: {error}"))
+/// Returns a pending-source diagnostic until a matching worker result is available.
+fn source_texture_for_workspace(state: &AppState) -> Result<gtk::gdk::Texture, String> {
+    state
+        .source_texture
+        .clone()
+        .filter(|_| state.source_texture_generation == Some(state.workspace_generation))
+        .ok_or_else(|| "Source frame is still being prepared.".to_owned())
+}
+
+/// Connects the two endpoint buttons to presentation selection and cancellable preview intent.
+///
+/// First End selection captures missing End values in history; later switches only select.
+/// Clearing inspector drafts prevents a half-entered Start
+/// value from becoming an End edit. There is no arbitrary-frame transport or playback callback.
+fn connect_endpoint_controls(state: &Rc<RefCell<AppState>>) {
+    let syncing = state.borrow().syncing_endpoint.clone();
+    for (button, endpoint) in [
+        (
+            state.borrow().start_frame.clone(),
+            temporal_preview::Endpoint::Start,
+        ),
+        (
+            state.borrow().end_frame.clone(),
+            temporal_preview::Endpoint::End,
+        ),
+    ] {
+        let state = Rc::clone(state);
+        let syncing = Rc::clone(&syncing);
+        button.connect_toggled(move |button| {
+            if syncing.get() || !button.is_active() {
+                return;
+            }
+            {
+                let mut state = state.borrow_mut();
+                if state.endpoint == endpoint {
+                    return;
+                }
+                if endpoint == temporal_preview::Endpoint::End {
+                    let result = state.workspace.as_mut().map(|workspace| {
+                        let command = workspace
+                            .document()
+                            .initialize_end_command()
+                            .map_err(|error| error.to_string())?;
+                        if command.replacement() != &workspace.document().temporal_authority() {
+                            workspace
+                                .history
+                                .apply_temporal(&command)
+                                .map_err(|error| error.to_string())?;
+                        }
+                        Ok::<(), String>(())
+                    });
+                    if let Some(Err(error)) = result {
+                        set_inspector_status(&mut state, error);
+                        sync_endpoint_controls(&state);
+                        return;
+                    }
+                }
+                state.endpoint = endpoint;
+                state.inspector_runtime.drafts.clear();
+                state.inspector_runtime.focus = None;
+                set_preview_pending(&mut state);
+                sync_ui(&mut state);
+            }
+            rebuild_inspector(&state);
+            schedule_main_preview_submission(&state);
+        });
+    }
+}
+
+/// Projects endpoint applicability and selection without issuing document commands.
+fn sync_endpoint_controls(state: &AppState) {
+    let temporal = state.workspace.as_ref().is_some_and(|workspace| {
+        workspace.source_presentation.is_some()
+            && workspace
+                .document()
+                .project_timing()
+                .frame_range()
+                .frame_count()
+                > 1
+    });
+    state.endpoint_controls.set_visible(temporal);
+    state
+        .endpoint_controls
+        .set_sensitive(!state.pending_load && !state.pending_save);
+    state.syncing_endpoint.set(true);
+    state
+        .start_frame
+        .set_active(state.endpoint == temporal_preview::Endpoint::Start);
+    state
+        .end_frame
+        .set_active(state.endpoint == temporal_preview::Endpoint::End);
+    state.syncing_endpoint.set(false);
+    // Structural definitions remain shared across the job. Individual descriptor rows project
+    // their own domain animation capability below instead of disabling the entire inspector.
+    state.inspector_catalog.set_sensitive(true);
+    for component in state.descriptor_components.values() {
+        temporal_edit::sync(state, component);
+    }
 }
 
 /// Projects current view mode and bounded zoom into the shared GTK viewport.
@@ -4375,12 +4757,7 @@ fn apply_main_view_presentation(state: &mut AppState) {
     if state.view_state.mode() == MainViewMode::Source
         && state.source_texture_generation != Some(state.workspace_generation)
     {
-        match state
-            .workspace
-            .as_ref()
-            .ok_or_else(|| "Source view is unavailable until artwork is loaded.".to_owned())
-            .and_then(source_texture_for_workspace)
-        {
+        match source_texture_for_workspace(state) {
             Ok(texture) => {
                 state.source_texture = Some(texture);
                 state.source_texture_generation = Some(state.workspace_generation);
@@ -4398,7 +4775,7 @@ fn apply_main_view_presentation(state: &mut AppState) {
     };
     // GTK requests a paintable's natural size even when Picture can shrink.
     // Give both views the same logical canvas extent, independent of proxy pixels.
-    let logical_paintable = paintable.and_then(|texture| {
+    let presentation = paintable.and_then(|texture| {
         let canvas = state.workspace.as_ref()?.document().canvas();
         let zoom = if state.view_state.is_fit() {
             1.0
@@ -4407,34 +4784,47 @@ fn apply_main_view_presentation(state: &mut AppState) {
         };
         let width = (canvas.width * zoom).round().max(1.0);
         let height = (canvas.height * zoom).round().max(1.0);
-        let snapshot = gtk::Snapshot::new();
-        let canvas_rect = gtk::graphene::Rect::new(0.0, 0.0, width as f32, height as f32);
-        snapshot.push_clip(&canvas_rect);
-        let texture_rect = if state.view_state.mode() == MainViewMode::Preview {
-            // Canonical preview rasters already contain centered viewport letterboxing.
-            // Remove that presentation padding before applying the shared view scale.
-            let bounds = main_preview_texture_bounds(
-                f64::from(texture.width()),
-                f64::from(texture.height()),
-                canvas.width,
-                canvas.height,
-                width,
-                height,
-            );
-            gtk::graphene::Rect::new(bounds.0, bounds.1, bounds.2, bounds.3)
-        } else {
-            canvas_rect
-        };
-        snapshot.append_texture(texture, &texture_rect);
-        snapshot.pop();
-        snapshot.to_paintable(Some(&gtk::graphene::Size::new(width as f32, height as f32)))
+        Some((texture.clone(), state.view_state.mode(), width, height))
     });
-    state.picture.set_paintable(logical_paintable.as_ref());
+    // A completed pattern evaluation does not change the selected Source image. Retain its
+    // paintable instead of repeatedly replacing identical content during GTK layout.
+    if presentation != state.presented_texture {
+        let logical_paintable = presentation
+            .as_ref()
+            .and_then(|(texture, mode, width, height)| {
+                let canvas = state.workspace.as_ref()?.document().canvas();
+                let (width, height) = (*width, *height);
+                let texture_rect = if *mode == MainViewMode::Preview {
+                    // Canonical preview rasters already contain centered viewport letterboxing.
+                    // Remove that presentation padding before applying the shared view scale.
+                    main_preview_texture_bounds(
+                        f64::from(texture.width()),
+                        f64::from(texture.height()),
+                        canvas.width,
+                        canvas.height,
+                        width,
+                        height,
+                    )
+                } else {
+                    (0.0, 0.0, width as f32, height as f32)
+                };
+                Some(viewport_paintable::ViewportPaintable::new(
+                    texture.clone(),
+                    width,
+                    height,
+                    texture_rect,
+                ))
+            });
+        state.picture.set_paintable(logical_paintable.as_ref());
+        state.presented_texture = presentation;
+    }
     let source_available = state
         .workspace
         .as_ref()
         .is_some_and(|workspace| workspace.source_presentation.is_some());
-    state.source_view.set_sensitive(source_available);
+    state
+        .source_view
+        .set_sensitive(source_available && state.source_texture.is_some());
     state
         .preview_view
         .set_active(state.view_state.mode() == MainViewMode::Preview);
@@ -5960,8 +6350,13 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
             state
                 .workspace
                 .as_ref()
-                .map(|workspace| workspace.document().clone())
-        {
+                .and_then(|workspace| match state.endpoint {
+                    temporal_preview::Endpoint::Start => Some(workspace.document().clone()),
+                    temporal_preview::Endpoint::End => workspace
+                        .document()
+                        .materialize_frame(state.endpoint.frame(workspace.document()))
+                        .ok(),
+                }) {
             let ids = authoritative_channel_ids(&document);
             let previous_target = state.inspector_runtime.target;
             state.inspector_runtime.target =
@@ -6141,6 +6536,10 @@ fn reconcile_descriptor_components(
         }
         container.reorder_child_after(&row, previous_rows.get(&section));
         previous_rows.insert(section, row);
+    }
+    let app = state.borrow();
+    for component in app.descriptor_components.values() {
+        temporal_edit::sync(&app, component);
     }
 }
 
@@ -13992,6 +14391,7 @@ fn advanced_settings_values(
 /// The original `SourcePresentation` remains responsible for the dialog summary and its stable
 /// reference ID is retained in the resolved proxy. Proxy creation failure is represented locally
 /// so field edits and Apply remain available without a hidden full-resolution evaluation.
+#[cfg(test)]
 fn prepare_advanced_preview_source(
     sources: &SourceBundle,
     presentation: Option<&SourcePresentation>,
@@ -14235,7 +14635,7 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
         window.present();
         return;
     }
-    let (draft, sources, presentation, display_name, target, parent, epoch) = {
+    let (draft, sources, presentation, display_name, target, parent, epoch, endpoint) = {
         let mut app_state = state.borrow_mut();
         let Some(workspace) = app_state.workspace.as_ref() else {
             return;
@@ -14255,9 +14655,10 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
             target,
             parent,
             app_state.advanced_epoch,
+            app_state.endpoint,
         )
     };
-    let preview_source = prepare_advanced_preview_source(&sources, presentation.as_ref());
+    let preview_source = AdvancedPreviewSource::Pending;
     let window = gtk::Window::builder()
         .title("Advanced Settings")
         .transient_for(&parent)
@@ -14278,8 +14679,14 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
         || "No source artwork is assigned.".to_owned(),
         |presentation| {
             format!(
-                "{display_name} — {} × {} — {:?}",
-                presentation.identity.width, presentation.identity.height, presentation.format
+                "{display_name} — {} × {} — {} frame",
+                presentation.identity.width,
+                presentation.identity.height,
+                if endpoint == temporal_preview::Endpoint::Start {
+                    "Start"
+                } else {
+                    "End"
+                }
             )
         },
     );
@@ -14289,54 +14696,8 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
     summary.add_css_class("dim-label");
     controls.append(&summary);
 
-    let values = advanced_settings_values(draft.borrow().document(), target);
-    if values.is_empty() {
-        let explanation = gtk::Label::new(Some(match target {
-            InspectorTarget::DocumentAll => {
-                "Select a named channel to edit source mapping, paint/color, and compatible response settings. ALL continues to own pattern and layout authority in the main window."
-            }
-            InspectorTarget::Channel(_) => {
-                "This pattern has no additional Source or Output controls."
-            }
-        }));
-        explanation.set_xalign(0.0);
-        explanation.set_wrap(true);
-        controls.append(&explanation);
-    } else {
-        let output_heading = gtk::Label::new(Some("Output"));
-        output_heading.set_xalign(0.0);
-        output_heading.add_css_class("heading");
-        output_heading.set_margin_top(12);
-        for value in values {
-            if matches!(
-                value.descriptor.field,
-                PropertyFieldId::Paint
-                    | PropertyFieldId::ColorRed
-                    | PropertyFieldId::ColorGreen
-                    | PropertyFieldId::ColorBlue
-                    | PropertyFieldId::ColorAlpha
-                    | PropertyFieldId::MarkMinimumFill
-                    | PropertyFieldId::MarkMaximumFill
-                    | PropertyFieldId::ConnectedMinimumThickness
-                    | PropertyFieldId::ConnectedMaximumThickness
-                    | PropertyFieldId::CurveResponseBias
-                    | PropertyFieldId::RegionResizeAlgorithm
-                    | PropertyFieldId::RegionSampling
-                    | PropertyFieldId::RegionMinimumFill
-                    | PropertyFieldId::RegionMaximumFill
-            ) && output_heading.parent().is_none()
-            {
-                controls.append(&output_heading);
-            }
-            controls.append(&advanced_descriptor_row(
-                Rc::clone(&draft),
-                Rc::clone(state),
-                epoch,
-                target,
-                value,
-            ));
-        }
-    }
+    let fields = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    controls.append(&fields);
 
     let cancel = gtk::Button::with_mnemonic("_Cancel");
     let apply = gtk::Button::with_mnemonic("_Apply");
@@ -14389,11 +14750,19 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
         Arc::clone(&preview_bridge_stop),
         epoch,
     );
+    let source_document = draft.borrow().document().clone();
     state.borrow_mut().advanced_settings = Some(AdvancedSettingsSurface {
         epoch,
         window: window.clone(),
         draft,
         preview_source,
+        _source_worker: None,
+        endpoint,
+        fields,
+        bindings: Vec::new(),
+        paint_editors: Vec::new(),
+        batch_editors: Vec::new(),
+        refreshing: Rc::new(Cell::new(false)),
         target,
         picture,
         status,
@@ -14401,6 +14770,19 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
         preview_submission: None,
         preview_bridge_stop,
     });
+    let worker = advanced_temporal::SourceWorker::new(
+        source_document,
+        sources,
+        endpoint,
+        state.borrow().event_sender.clone(),
+        epoch,
+    );
+    if let Some(surface) = state.borrow_mut().advanced_settings.as_mut() {
+        match worker {
+            Ok(worker) => surface._source_worker = Some(worker),
+            Err(error) => surface.preview_source = AdvancedPreviewSource::Unavailable(error),
+        }
+    }
     let state_for_close = Rc::clone(state);
     window.connect_close_request(move |_| {
         let surface = {
@@ -14419,6 +14801,7 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
         glib::Propagation::Proceed
     });
     window.present();
+    advanced_temporal::rebuild_fields(state, epoch);
     submit_advanced_preview(state, epoch);
 }
 
@@ -14429,6 +14812,10 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
 /// without relying on hover-only tooltips. The helper only presents the
 /// descriptor's established semantics; it never changes draft command or
 /// property authority.
+/// Reset buttons use the same visible field vocabulary for their accessible names.
+///
+/// # Panics
+/// Panics if the private surface is absent or GTK omits a text button's label child.
 fn advanced_descriptor_row(
     draft: Rc<RefCell<DocumentHistory>>,
     state: Rc<RefCell<AppState>>,
@@ -14475,13 +14862,25 @@ fn advanced_descriptor_row(
         return row;
     };
     let descriptor = current.descriptor.clone();
-    let commit_context = AdvancedCommitContext { state, epoch };
+    let refreshing = state
+        .borrow()
+        .advanced_settings
+        .as_ref()
+        .expect("private surface is installed before its controls")
+        .refreshing
+        .clone();
+    let commit_context = AdvancedCommitContext {
+        state,
+        epoch,
+        target,
+        refreshing,
+    };
     match current.value.clone() {
         PropertyCurrentValueKind::FiniteF64(value) => {
             let entry = gtk::Entry::new();
             entry.set_width_chars(12);
             entry.set_input_purpose(gtk::InputPurpose::Number);
-            entry.set_text(&format!("{value:.4}"));
+            entry.set_text(&value.to_string());
             label.set_mnemonic_widget(Some(&entry));
             let commit_context = commit_context.clone();
             let commit: Rc<dyn Fn(&gtk::Entry)> = Rc::new(move |entry: &gtk::Entry| {
@@ -14565,6 +14964,13 @@ fn advanced_descriptor_row(
     }
     if current.descriptor.reset_capable {
         let reset = gtk::Button::with_label("Reset to inherit");
+        reset.update_relation(&[gtk::accessible::Relation::LabelledBy(&[
+            label.upcast_ref(),
+            reset
+                .child()
+                .expect("text button has its visible label")
+                .upcast_ref(),
+        ])]);
         reset.set_sensitive(current.inheritance == PropertyInheritance::Explicit);
         reset.set_tooltip_text(Some("Remove this channel override and use the ALL value."));
         let reset_context = commit_context.clone();
@@ -14603,13 +15009,19 @@ impl AdvancedCommitContext {
     /// Returns current private history, target, and status handles only while this context's modal epoch is live.
     fn surface_handles(
         &self,
-    ) -> Option<(Rc<RefCell<DocumentHistory>>, InspectorTarget, gtk::Label)> {
+    ) -> Option<(
+        Rc<RefCell<DocumentHistory>>,
+        InspectorTarget,
+        temporal_preview::Endpoint,
+        gtk::Label,
+    )> {
         let app_state = self.state.borrow();
         let surface = app_state.advanced_settings.as_ref()?;
         (surface.epoch == self.epoch).then(|| {
             (
                 Rc::clone(&surface.draft),
-                surface.target,
+                self.target,
+                surface.endpoint,
                 surface.status.clone(),
             )
         })
@@ -14617,7 +15029,10 @@ impl AdvancedCommitContext {
 
     /// Replaces private status text only for the still-current modal epoch.
     fn set_status(&self, message: &str) {
-        if let Some((_, _, status)) = self.surface_handles() {
+        if self.refreshing.get() {
+            return;
+        }
+        if let Some((_, _, _, status)) = self.surface_handles() {
             status.set_label(message);
         }
     }
@@ -14627,17 +15042,21 @@ impl AdvancedCommitContext {
     /// A value equal to current draft authority is a no-op. Domain rejection is
     /// reported in the private window and never mutates main history or preview.
     fn commit(&self, locator: AdvancedDescriptorLocator, input: InspectorInput) {
-        let Some((draft, target, status)) = self.surface_handles() else {
+        if self.refreshing.get() {
+            return;
+        }
+        let Some((draft, target, endpoint, status)) = self.surface_handles() else {
             return;
         };
-        let current =
-            match resolve_current_advanced_value(draft.borrow().document(), target, locator) {
-                Ok(current) => current,
-                Err(error) => {
-                    status.set_label(&format!("Couldn’t apply this setting: {error}"));
-                    return;
-                }
-            };
+        let current = match advanced_temporal::display_document(draft.borrow().document(), endpoint)
+            .and_then(|document| resolve_current_advanced_value(&document, target, locator))
+        {
+            Ok(current) => current,
+            Err(error) => {
+                status.set_label(&format!("Couldn’t apply this setting: {error}"));
+                return;
+            }
+        };
         let unchanged = match (&current.value, &input) {
             (PropertyCurrentValueKind::FiniteF64(current), InspectorInput::FiniteF64(next)) => {
                 current == next
@@ -14654,6 +15073,32 @@ impl AdvancedCommitContext {
         if unchanged {
             return;
         }
+        if endpoint == temporal_preview::Endpoint::End
+            && temporal_edit::eligible(&current.descriptor)
+        {
+            let result = match input {
+                InspectorInput::FiniteF64(value) => temporal_edit::scalar_command(
+                    draft.borrow().document(),
+                    &current.descriptor,
+                    value,
+                ),
+                _ => Err("This setting is shared by all frames; edit it at Start frame.".into()),
+            };
+            let result = result.and_then(|command| {
+                draft
+                    .borrow_mut()
+                    .apply_temporal(&command)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
+            match result {
+                Ok(()) => self.refresh_preview(false),
+                Err(error) => {
+                    status.set_label(&format!("Couldn’t apply this End setting: {error}"))
+                }
+            }
+            return;
+        }
         let command = command_for_inspector_input(
             draft.borrow().document(),
             target.channel_id(),
@@ -14668,7 +15113,9 @@ impl AdvancedCommitContext {
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         }) {
-            Ok(()) => submit_advanced_preview(&self.state, self.epoch),
+            Ok(()) => {
+                self.refresh_preview(current.descriptor.value_kind == PropertyValueKind::EnumChoice)
+            }
             Err(error) => status.set_label(&format!("Couldn’t apply this setting: {error}")),
         }
     }
@@ -14679,10 +15126,33 @@ impl AdvancedCommitContext {
     /// reset command. A resolution or validation failure stays in the dialog and never changes
     /// the main workspace, its source, or its preview.
     fn reset(&self, locator: AdvancedDescriptorLocator) {
-        let Some((draft, target, status)) = self.surface_handles() else {
+        if self.refreshing.get() {
+            return;
+        }
+        let Some((draft, target, endpoint, status)) = self.surface_handles() else {
             return;
         };
         let current = resolve_current_advanced_value(draft.borrow().document(), target, locator);
+        if endpoint == temporal_preview::Endpoint::End {
+            let result = current
+                .map(|current| {
+                    temporal_edit::reset_command(draft.borrow().document(), &current.descriptor)
+                })
+                .and_then(|command| {
+                    draft
+                        .borrow_mut()
+                        .apply_temporal(&command)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                });
+            match result {
+                Ok(()) => self.refresh_preview(false),
+                Err(error) => {
+                    status.set_label(&format!("Couldn’t reset this End setting: {error}"))
+                }
+            }
+            return;
+        }
         let result = current.and_then(|current| {
             reset_command_for_descriptor(draft.borrow().document(), &current.descriptor)
         });
@@ -14693,9 +15163,56 @@ impl AdvancedCommitContext {
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         }) {
-            Ok(()) => submit_advanced_preview(&self.state, self.epoch),
+            Ok(()) => self.refresh_preview(false),
             Err(error) => status.set_label(&format!("Couldn’t reset this setting: {error}")),
         }
+    }
+}
+
+impl AdvancedCommitContext {
+    /// Changes only the stored easing of one current private End override.
+    fn set_easing(&self, locator: AdvancedDescriptorLocator, easing: toniator_domain::Easing) {
+        if self.refreshing.get() {
+            return;
+        }
+        let Some((draft, target, endpoint, status)) = self.surface_handles() else {
+            return;
+        };
+        if endpoint != temporal_preview::Endpoint::End {
+            return;
+        }
+        let result = resolve_current_advanced_value(draft.borrow().document(), target, locator)
+            .map(|current| {
+                temporal_edit::easing_command(
+                    draft.borrow().document(),
+                    &current.descriptor,
+                    easing,
+                )
+            });
+        let result = result.and_then(|command| {
+            if command.replacement() == &draft.borrow().document().temporal_authority() {
+                return Ok(());
+            }
+            draft
+                .borrow_mut()
+                .apply_temporal(&command)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        });
+        match result {
+            Ok(()) => self.refresh_preview(false),
+            Err(error) => status.set_label(&format!("Couldn’t change easing: {error}")),
+        }
+    }
+
+    /// Refreshes native private controls and then submits the selected endpoint's bounded preview.
+    fn refresh_preview(&self, rebuild: bool) {
+        if rebuild {
+            advanced_temporal::schedule_rebuild(&self.state, self.epoch);
+        } else {
+            advanced_temporal::refresh(&self.state, self.epoch);
+        }
+        submit_advanced_preview(&self.state, self.epoch);
     }
 }
 
@@ -14713,12 +15230,13 @@ fn submit_advanced_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
         return;
     };
     let AdvancedPreviewSource::Ready { source, .. } = &surface.preview_source else {
-        let AdvancedPreviewSource::Unavailable(error) = &surface.preview_source else {
-            unreachable!("private preview source has two explicit states")
-        };
-        surface
-            .status
-            .set_label(&format!("Settings preview unavailable: {error}"));
+        surface.status.set_label(&match &surface.preview_source {
+            AdvancedPreviewSource::Pending => "Preparing source frame…".to_owned(),
+            AdvancedPreviewSource::Unavailable(error) => {
+                format!("Settings preview unavailable: {error}")
+            }
+            AdvancedPreviewSource::Ready { .. } => unreachable!(),
+        });
         return;
     };
     let target = match toniator_engine::PreviewRasterTarget::new(420, 240) {
@@ -14728,15 +15246,20 @@ fn submit_advanced_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
             return;
         }
     };
-    let request = EvaluationRequest::with_preview_target(
-        surface
-            .draft
-            .borrow()
-            .session()
-            .document_evaluation_snapshot(),
-        source.clone(),
-        target,
-    );
+    let frame = surface.endpoint.frame(surface.draft.borrow().document());
+    let snapshot = match surface
+        .draft
+        .borrow()
+        .session()
+        .document_evaluation_snapshot_at_frame(frame)
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            surface.status.set_label(&error.to_string());
+            return;
+        }
+    };
+    let request = EvaluationRequest::with_preview_target(snapshot, source.clone(), target);
     match surface.scheduler.submit(request) {
         Ok(ticket) => {
             surface.preview_submission = Some(ticket.value());
@@ -15199,7 +15722,8 @@ fn open_wizard_new_guide_editor(
 ///
 /// The selected launch carries typed document references only. A Wizard launch derives its child
 /// history directly from the current wizard draft, while the established standalone launch derives
-/// from main history; neither path can write a personal-library record.
+/// from main history; neither path can write a personal-library record. Both preview the captured
+/// workspace endpoint using real artwork, independently of the Wizard's neutral source preview.
 fn open_pattern_editor_with_launch(
     state: &Rc<RefCell<AppState>>,
     purpose: PatternEditorPurpose,
@@ -15230,15 +15754,17 @@ fn open_pattern_editor_with_launch(
         window.present();
         return;
     }
-    let (parent, draft) = {
+    let (parent, draft, endpoint, epoch) = {
         let mut app_state = state.borrow_mut();
-        let (document, presentation, sources, history, parent_window) = {
+        // The nested editor previews real artwork even when the Wizard's own preview is neutral.
+        let endpoint = app_state.endpoint;
+        let (document, sources, history, parent_window) = {
             let Some(workspace) = app_state.workspace.as_ref() else {
                 return;
             };
-            let Some(presentation) = workspace.source_presentation.clone() else {
+            if workspace.source_presentation.is_none() {
                 return;
-            };
+            }
             let (document, mut history, parent_window) = match &launch.parent {
                 PatternEditorParent::Workspace => (
                     workspace.document().clone(),
@@ -15275,13 +15801,7 @@ fn open_pattern_editor_with_launch(
                 }
                 return;
             }
-            (
-                document,
-                presentation,
-                workspace.sources.clone(),
-                history,
-                parent_window,
-            )
+            (document, workspace.sources.clone(), history, parent_window)
         };
         app_state.draft_epoch = app_state.draft_epoch.saturating_add(1);
         let epoch = app_state.draft_epoch;
@@ -15299,18 +15819,48 @@ fn open_pattern_editor_with_launch(
                 initial_document: document,
                 discard_confirmed: false,
                 sources,
-                presentation,
                 scheduler: Arc::new(
                     EvaluationScheduler::new().expect("private draft scheduler starts"),
                 ),
                 preview_submission: None,
+                media_preview_key: None,
                 epoch,
                 geometry_editor,
                 construction_attachment: None,
                 pending_shared_edit: None,
                 invoking_use: launch.invoking_use,
             })),
+            endpoint,
+            epoch,
         )
+    };
+    let event_sender = state.borrow().event_sender.clone();
+    let source_worker =
+        match temporal_preview::Worker::new_for_pattern_editor(event_sender.clone(), epoch) {
+            Ok(worker) => worker,
+            Err(error) => {
+                set_inspector_status(
+                    &mut state.borrow_mut(),
+                    format!("Couldn’t start the Pattern Editor source preview: {error}"),
+                );
+                return;
+            }
+        };
+    let preview_bridge_stop = Arc::new(AtomicBool::new(false));
+    let preview_bridge = match temporal_preview::start_pattern_editor_preview_bridge(
+        Arc::clone(&draft.borrow().scheduler),
+        event_sender,
+        Arc::clone(&preview_bridge_stop),
+        epoch,
+    ) {
+        Ok(bridge) => bridge,
+        Err(error) => {
+            set_inspector_status(
+                &mut state.borrow_mut(),
+                format!("Couldn’t start the Pattern Editor preview bridge: {error}"),
+            );
+            return;
+        }
     };
     let initial_width = parent.width().clamp(560, 980);
     let window = gtk::Window::builder()
@@ -15887,6 +16437,10 @@ fn open_pattern_editor_with_launch(
         picture,
         preview_spinner,
         draft,
+        endpoint,
+        source_worker: Some(source_worker),
+        preview_bridge_stop,
+        preview_bridge: Some(preview_bridge),
         introduction,
         history,
         current_pattern,
@@ -16628,7 +17182,9 @@ fn close_pattern_editor_after_terminal(
     let surface = {
         let mut state = state.borrow_mut();
         state.pattern_editor.take().inspect(|surface| {
-            surface.draft.borrow_mut().preview_submission = None;
+            let mut draft = surface.draft.borrow_mut();
+            draft.preview_submission = None;
+            draft.media_preview_key = None;
             surface.preview_spinner.stop();
             surface.preview_spinner.set_visible(false);
         })
@@ -16682,7 +17238,10 @@ fn rebuild_pattern_editor(state: &Rc<RefCell<AppState>>) {
         // borrow ends because close-request synchronously re-enters AppState.
         let window = {
             let mut state = state.borrow_mut();
-            state.pattern_editor.take().map(|surface| surface.window)
+            state
+                .pattern_editor
+                .take()
+                .map(|surface| surface.window.clone())
         };
         if let Some(window) = window {
             window.close();
@@ -18175,81 +18734,44 @@ fn apply_draft_history_navigation(state: &Rc<RefCell<AppState>>, redo: bool) {
     submit_draft_preview(state);
 }
 
-/// Submits the private document clone through its own scheduler and source bundle.
+/// Queues the private document clone through its editor-owned media worker.
 ///
-/// This request never shares a ticket, cache acceptance, texture, or document
-/// token with the main workspace preview coordinator.
+/// The worker materializes the captured endpoint through the shared engine frame boundary before
+/// the private scheduler sees the request. This preserves the original draft history and keeps
+/// encoded video or image-sequence bytes out of the evaluator's still-source constructor.
 fn submit_draft_preview(state: &Rc<RefCell<AppState>>) {
-    let (scheduler, request, sender, epoch, ticket_value) = {
-        let app_state = state.borrow();
-        let Some(surface) = app_state.pattern_editor.as_ref() else {
+    {
+        let mut app_state = state.borrow_mut();
+        let workspace_generation = app_state.workspace_generation;
+        let Some(surface) = app_state.pattern_editor.as_mut() else {
             return;
         };
         let mut draft = surface.draft.borrow_mut();
-        let Some(source) = draft.sources.get(&draft.presentation.id) else {
-            return;
-        };
-        let resolved = match ResolvedSource::new(
-            draft.presentation.id.clone(),
-            Arc::<[u8]>::from(source.bytes()),
-            draft.presentation.format,
-        ) {
-            Ok(source) => source,
-            Err(error) => {
-                surface.status.set_label(&format!(
-                    "Couldn’t render this pattern. Your last preview is still shown. {error}"
-                ));
-                return;
-            }
-        };
         let target = toniator_engine::PreviewRasterTarget::new(512, 512)
             .expect("fixed preview target is valid");
-        let request = EvaluationRequest::with_preview_target(
-            draft.history.session().document_evaluation_snapshot(),
-            resolved,
+        let key = temporal_preview::RequestKey {
+            workspace: workspace_generation,
+            revision: draft.history.session().revision().0,
+            epoch: draft.epoch,
+            frame: surface.endpoint.frame(draft.history.document()),
+        };
+        let Some(source_worker) = surface.source_worker.as_mut() else {
+            return;
+        };
+        draft.scheduler.cancel_pending();
+        draft.preview_submission = None;
+        draft.media_preview_key = Some(key);
+        source_worker.submit(
+            key,
+            draft.history.session().clone(),
+            draft.sources.clone(),
             target,
         );
-        let scheduler = Arc::clone(&draft.scheduler);
-        let ticket = match scheduler.submit(request.clone()) {
-            Ok(ticket) => ticket,
-            Err(error) => {
-                surface.status.set_label(&format!(
-                    "Couldn’t render this pattern. Your last preview is still shown. {error}"
-                ));
-                return;
-            }
-        };
-        draft.preview_submission = Some(ticket.value());
-        surface.status.set_label("Updating preview…");
+        surface.status.set_label("Preparing preview source…");
         surface.preview_spinner.set_visible(true);
         surface.preview_spinner.start();
-        (
-            scheduler,
-            request,
-            app_state.event_sender.clone(),
-            draft.epoch,
-            ticket.value(),
-        )
-    };
-    emit_draft_automation_state(
-        &mut state.borrow_mut(),
-        "draft_preview_submitted",
-        Some(ticket_value),
-    );
-    let _ = request;
-    thread::spawn(move || {
-        loop {
-            while matches!(scheduler.try_receive_latest_progress(), Ok(Some(_))) {}
-            match scheduler.try_receive_latest() {
-                Ok(Some(completion)) => {
-                    let _ = sender.send_blocking(AppEvent::DraftPreview { epoch, completion });
-                    break;
-                }
-                Ok(None) => thread::park_timeout(Duration::from_millis(4)),
-                Err(_) => break,
-            }
-        }
-    });
+    }
+    emit_draft_automation_state(&mut state.borrow_mut(), "draft_preview_submitted", None);
 }
 
 /// Requests a private-draft discard, confirming only when local edits exist.
@@ -18350,6 +18872,9 @@ fn commit_numeric_descriptor_control(
     focus: InspectorFocusIdentity,
     control: &impl IsA<gtk::Editable>,
 ) {
+    if state.borrow().syncing_inspector {
+        return;
+    }
     let text = control.text().to_string();
     match descriptor.value_kind {
         PropertyValueKind::FiniteF64 => match text.parse::<f64>() {
@@ -18414,7 +18939,17 @@ fn main_numeric_input_matches_current(
     let Some(workspace) = state.workspace.as_ref() else {
         return false;
     };
-    inline_inspector_values(workspace.document(), state.inspector_runtime.target)
+    let display = match state.endpoint {
+        temporal_preview::Endpoint::Start => workspace.document().clone(),
+        temporal_preview::Endpoint::End => match workspace
+            .document()
+            .materialize_frame(state.endpoint.frame(workspace.document()))
+        {
+            Ok(document) => document,
+            Err(_) => return false,
+        },
+    };
+    inline_inspector_values(&display, state.inspector_runtime.target)
         .into_iter()
         .find(|value| value.descriptor == *descriptor)
         .is_some_and(|value| match (&value.value, input) {
@@ -18906,12 +19441,17 @@ fn append_descriptor_control(
     };
     control.set_valign(gtk::Align::Center);
     component.append(&row);
+    let temporal = temporal_edit::controls(state, &current.descriptor);
+    if let Some(controls) = temporal.as_ref() {
+        temporal_edit::append(controls, &component);
+    }
     DescriptorComponent {
         row: component,
         control,
         detail,
         reset,
         value: current,
+        temporal,
     }
 }
 
@@ -19035,6 +19575,12 @@ fn remember_inspector_draft(
 
 /// Invalidates the accepted preview target and records queued work before idle submission.
 fn set_preview_pending(state: &mut AppState) {
+    state.media_epoch = state.media_epoch.saturating_add(1);
+    state.media_preview_key = None;
+    if let Some(worker) = state.media_worker.as_mut() {
+        worker.cancel();
+    }
+    state.scheduler.cancel_pending();
     state.preview_target = None;
     state.preview_coordinator.queue_refresh();
     state.preview_progress_bar.set_fraction(0.0);
@@ -19122,12 +19668,13 @@ fn sync_draft_preview_pending(surface: &PatternEditorSurface) {
 
 /// Schedules one main preview submission after GTK allocates the visible workspace.
 ///
-/// A generation check cancels old callbacks after Close/replacement. Waiting for allocation handles
-/// the startup-to-workspace transition without a permanently queued first preview. The scheduler
+/// A generation check cancels old callbacks after Close/replacement. Two equal positive allocation
+/// samples let GTK finish the startup-to-workspace layout before choosing raster resolution. The scheduler
 /// remains ticket authority; this helper never changes document/history state.
 fn schedule_main_preview_submission(state: &Rc<RefCell<AppState>>) {
     let generation = state.borrow().workspace_generation;
     let weak = Rc::downgrade(state);
+    let mut previous_target = None;
     glib::timeout_add_local(Duration::from_millis(16), move || {
         let Some(state) = weak.upgrade() else {
             return glib::ControlFlow::Break;
@@ -19142,7 +19689,9 @@ fn schedule_main_preview_submission(state: &Rc<RefCell<AppState>>) {
         {
             return glib::ControlFlow::Break;
         }
-        if preview_target_for(&app_state.stack).is_none() {
+        let target = preview_target_for(&app_state.stack);
+        if target.is_none() || target != previous_target {
+            previous_target = target;
             return glib::ControlFlow::Continue;
         }
         submit_if_viewport_ready(&mut app_state);
@@ -19341,6 +19890,26 @@ fn commit_inspector_input_with_focus(
     input: InspectorInput,
     focus: InspectorFocusIdentity,
 ) {
+    if state.borrow().endpoint == temporal_preview::Endpoint::End
+        && temporal_edit::eligible(&descriptor)
+    {
+        let command = {
+            let app = state.borrow();
+            let Some(workspace) = app.workspace.as_ref() else {
+                return;
+            };
+            match input {
+                InspectorInput::FiniteF64(value) => {
+                    temporal_edit::scalar_command(workspace.document(), &descriptor, value)
+                }
+                _ => {
+                    Err("This setting is shared by all frames. Edit it at Start frame.".to_owned())
+                }
+            }
+        };
+        temporal_edit::apply(state, command, Some(&descriptor), Some(focus));
+        return;
+    }
     if reject_stale_shared_edit_before_command(state) {
         rebuild_pattern_editor(state);
         return;
@@ -20581,11 +21150,13 @@ fn execute_lifecycle(state: &Rc<RefCell<AppState>>, action: LifecycleAction) {
             Err(error) => show_error(&mut state.borrow_mut(), error),
         },
         LifecycleAction::Open => choose_open(state),
+        LifecycleAction::ImportSequence => sequence_import::open(state),
         LifecycleAction::OpenFile(path) => start_load(state, path),
         LifecycleAction::Close => {
             clear_workspace(state);
             rebuild_recent_files(state);
             rebuild_inspector(state);
+            present_startup(state);
             state.borrow().startup.start.grab_focus();
         }
         LifecycleAction::WindowClose => defer_window_close(state),
@@ -20624,7 +21195,10 @@ fn cancel_window_close_after(state: &mut AppState, after: Option<LifecycleAction
 /// Blocks competing lifecycle requests during file I/O, a save decision, or deferred quit.
 /// Portal chooser ownership is explicit even when no GTK modal window exists in this process.
 fn lifecycle_is_busy(state: &AppState) -> bool {
-    state.document_presets.busy()
+    state.sequence_import.is_some()
+        || state.temporal_settings.is_some()
+        || state.temporal_export.is_some()
+        || state.document_presets.busy()
         || state.pending_file_chooser
         || state.pending_load
         || state.pending_save
@@ -20637,7 +21211,10 @@ fn lifecycle_is_busy(state: &AppState) -> bool {
 /// Save/export workers retain their existing immutable-snapshot editing policy. This guard also
 /// protects queued callbacks after widgets become insensitive, before a loaded candidate replaces A.
 fn main_document_edits_blocked(state: &AppState) -> bool {
-    state.pending_load
+    state.sequence_import.is_some()
+        || state.temporal_settings.is_some()
+        || state.temporal_export.is_some()
+        || state.pending_load
         || state.pending_file_chooser
         || state.lifecycle_prompt
         || state.window_close.deferred
@@ -20674,7 +21251,7 @@ fn choose_open(state: &Rc<RefCell<AppState>>) {
     state.borrow_mut().pending_file_chooser = true;
     sync_ui(&mut state.borrow_mut());
     let state = Rc::clone(state);
-    let window = state.borrow().window.clone();
+    let window = presentation_parent(&state.borrow());
     dialog.open(Some(&window), None::<&gio::Cancellable>, move |result| {
         state.borrow_mut().pending_file_chooser = false;
         sync_ui(&mut state.borrow_mut());
@@ -20686,14 +21263,15 @@ fn choose_open(state: &Rc<RefCell<AppState>>) {
     });
 }
 
-/// Builds the native Open-dialog filters with the complete still-image set first.
+/// Builds native Open filters covering current still, animated-image, video and project inputs.
 fn open_filters() -> gio::ListStore {
     let all = gtk::FileFilter::new();
     all.set_name(Some(OPEN_FILTER_LABELS[0]));
     all.add_pattern("*.toniator");
     for pattern in [
         "*.png", "*.svg", "*.jpg", "*.jpeg", "*.webp", "*.bmp", "*.tif", "*.tiff", "*.exr",
-        "*.avif",
+        "*.avif", "*.avifs", "*.apng", "*.gif", "*.mp4", "*.m4v", "*.mov", "*.mkv", "*.webm",
+        "*.avi", "*.ogv", "*.mpeg", "*.mpg", "*.ts",
     ] {
         all.add_pattern(pattern);
     }
@@ -20706,6 +21284,14 @@ fn open_filters() -> gio::ListStore {
         "image/tiff",
         "image/x-exr",
         "image/avif",
+        "image/gif",
+        "video/mp4",
+        "video/quicktime",
+        "video/x-matroska",
+        "video/webm",
+        "video/x-msvideo",
+        "video/ogg",
+        "video/mpeg",
     ] {
         all.add_mime_type(mime_type);
     }
@@ -20808,9 +21394,14 @@ fn save_filters() -> gio::ListStore {
     filters
 }
 
+/// Opens the temporal export sheet with an immutable project snapshot and shared job controls.
+fn choose_export(state: &Rc<RefCell<AppState>>) {
+    temporal_export::open(state);
+}
+
 /// Opens the existing export chooser only when document-Preset file interaction is idle.
 /// Cancelling or rejecting the chooser leaves document/history and output files untouched.
-fn choose_export(state: &Rc<RefCell<AppState>>) {
+fn choose_still_export(state: &Rc<RefCell<AppState>>) {
     if state.borrow().document_presets.busy() {
         return;
     }
@@ -21067,20 +21658,27 @@ fn start_load(state: &Rc<RefCell<AppState>>, path: PathBuf) {
     });
 }
 
+/// Imports one local source or opens a portable project entirely off GTK's main thread.
+///
+/// # Errors
+/// Returns shared bounded import, timing, decoding or persistence diagnostics.
 fn load_workspace(path: &Path) -> Result<Workspace, String> {
     if is_container_path(path) {
         return Workspace::from_container(path);
     }
-    let format = format_hint_for_path(path)?;
-    let bytes: Arc<[u8]> = fs::read(path)
-        .map(Arc::<[u8]>::from)
-        .map_err(|error| format!("source.read: could not read {}: {error}", path.display()))?;
+    let imported = toniator_engine::import_source_media(
+        &[path.to_owned()],
+        None,
+        toniator_engine::MediaTools::default(),
+        &|| false,
+    )
+    .map_err(|error| error.to_string())?;
     let display_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("Untitled source")
         .to_owned();
-    Workspace::from_direct(bytes, format, display_name)
+    Workspace::from_imported(imported, display_name, &|| false)
 }
 
 fn is_container_path(path: &Path) -> bool {
@@ -21093,6 +21691,7 @@ fn is_container_path(path: &Path) -> bool {
 /// # Errors
 ///
 /// Returns a stable source-format error when a path is not one accepted still-image suffix.
+#[cfg(test)]
 fn format_hint_for_path(path: &Path) -> Result<SourceFormatHint, String> {
     match path.extension().and_then(|extension| extension.to_str()) {
         Some(extension) if extension.eq_ignore_ascii_case("png") => Ok(SourceFormatHint::Png),
@@ -21158,8 +21757,9 @@ fn start_save_to(state: &Rc<RefCell<AppState>>, path: PathBuf, after: Option<Lif
     }
 }
 
+/// Captures the selected endpoint and immutable export settings before starting a file worker.
 fn start_export(state: &Rc<RefCell<AppState>>, path: PathBuf, settings: ExportSettings) {
-    let (snapshot, presentation, generation, workspace_generation) = {
+    let (snapshot, frame, generation, workspace_generation) = {
         let mut state = state.borrow_mut();
         if state.pending_export {
             return;
@@ -21167,13 +21767,13 @@ fn start_export(state: &Rc<RefCell<AppState>>, path: PathBuf, settings: ExportSe
         let Some(workspace) = state.workspace.as_ref() else {
             return;
         };
-        let Some(presentation) = workspace.source_presentation.clone() else {
+        if workspace.source_presentation.is_none() {
             show_error(&mut state, "Export requires an active source.".to_owned());
             return;
-        };
+        }
         (
             workspace.snapshot(),
-            presentation,
+            state.endpoint.frame(workspace.document()),
             state.generation,
             state.workspace_generation,
         )
@@ -21181,7 +21781,7 @@ fn start_export(state: &Rc<RefCell<AppState>>, path: PathBuf, settings: ExportSe
     let event_sender = state.borrow().event_sender.clone();
     let format = settings.format;
     thread::spawn(move || {
-        let result = export_snapshot(snapshot, presentation, path, settings);
+        let result = export_snapshot_frame(snapshot, path, settings, frame);
         let _ = event_sender.send_blocking(AppEvent::Export {
             generation,
             workspace_generation,
@@ -21194,48 +21794,61 @@ fn start_export(state: &Rc<RefCell<AppState>>, path: PathBuf, settings: ExportSe
     sync_ui(&mut state);
 }
 
-fn export_snapshot(
+/// Evaluates and writes the captured endpoint through shared source/timing authority.
+///
+/// # Errors
+/// Rejects source, timing, evaluation, rasterization or filesystem failures without editing history.
+fn export_snapshot_frame(
     snapshot: SavedContent,
-    presentation: SourcePresentation,
     path: PathBuf,
     settings: ExportSettings,
+    frame: u64,
 ) -> Result<(), String> {
-    let source = snapshot
-        .sources
-        .get(&presentation.id)
-        .ok_or_else(|| "source.document: source bundle is missing the active source".to_owned())?;
     let session = DocumentSession::new(snapshot.document).map_err(|error| error.to_string())?;
-    let result = evaluate_with_limits(
-        EvaluationRequest::new(
-            session.document_evaluation_snapshot(),
-            ResolvedSource::new(
-                presentation.id,
-                Arc::<[u8]>::from(source.bytes()),
-                presentation.format,
-            )
-            .map_err(|error| error.to_string())?,
-        ),
-        EvaluationLimits::default(),
+    let mut media = toniator_engine::open_source_media(
+        &snapshot.sources,
+        toniator_engine::MediaTools::default(),
+        &|| false,
     )
     .map_err(|error| error.to_string())?;
+    let request = toniator_engine::frame_evaluation_request(&session, &mut media, frame, &|| false)
+        .map_err(|error| error.to_string())?;
+    let request = match settings.format {
+        ExportFormat::Png => request.for_output(
+            settings.background,
+            settings.output_target,
+            settings.antialiasing,
+        ),
+        ExportFormat::Svg => request.for_preview(
+            toniator_engine::PreviewRasterTarget::new(1, 1).map_err(|error| error.to_string())?,
+        ),
+    };
+    let result = evaluate_with_limits(request, EvaluationLimits::default())
+        .map_err(|error| error.to_string())?;
     match settings.format {
-        ExportFormat::Png => {
-            let surface = rasterize_output(
-                result.scene(),
-                settings.background,
-                settings.output_target,
-                settings.antialiasing,
-            )
-            .map_err(|error| error.to_string())?;
-            fs::write(
-                &path,
-                encode_png(&surface).map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| format!("output.write: could not write {}: {error}", path.display()))
-        }
+        ExportFormat::Png => fs::write(
+            &path,
+            encode_png(result.raster()).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("output.write: could not write {}: {error}", path.display())),
         ExportFormat::Svg => fs::write(&path, write_svg(result.scene()))
             .map_err(|error| format!("output.write: could not write {}: {error}", path.display())),
     }
+}
+
+/// Runs existing current-format still-export fixtures at their authored Start endpoint.
+///
+/// # Errors
+/// Returns the shared endpoint export diagnostic; this helper introduces no runtime file adapter.
+#[cfg(test)]
+fn export_snapshot(
+    snapshot: SavedContent,
+    _presentation: SourcePresentation,
+    path: PathBuf,
+    settings: ExportSettings,
+) -> Result<(), String> {
+    let frame = snapshot.document.project_timing().frame_range().start();
+    export_snapshot_frame(snapshot, path, settings, frame)
 }
 
 /// Applies one worker completion on GTK's main context without timer polling.
@@ -21247,6 +21860,7 @@ fn export_snapshot(
 /// pending quit request. Stale results never replace the workspace or populate Recent Files.
 fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
     match event {
+        AppEvent::TemporalExport(event) => temporal_export::event(state, event),
         AppEvent::DocumentPreset(completion) => document_presets::complete(state, completion),
         AppEvent::Load {
             generation,
@@ -21349,8 +21963,15 @@ fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
             }
             sync_ui(&mut app_state);
         }
+        AppEvent::MediaPreview(completion) => handle_media_preview_completion(state, completion),
+        AppEvent::AdvancedSource { epoch, result } => {
+            advanced_temporal::source_ready(state, epoch, result)
+        }
         AppEvent::Preview(completion) => handle_preview_completion(state, completion),
         AppEvent::PreviewProgress(progress) => handle_preview_progress(state, progress),
+        AppEvent::DraftMediaPreview { epoch, completion } => {
+            handle_draft_media_preview_completion(state, epoch, completion)
+        }
         AppEvent::DraftPreview { epoch, completion } => {
             handle_draft_preview_completion(state, epoch, completion)
         }
@@ -21489,6 +22110,64 @@ fn handle_preview_completion(
     }
 }
 
+/// Submits one decoded Pattern Editor endpoint to its private evaluator after all source gates pass.
+///
+/// The endpoint, editor epoch, workspace generation, and draft revision are captured in the source
+/// request key. A stale or canceled decode is discarded before it can allocate a private scheduler
+/// ticket or replace the editor's retained preview.
+fn handle_draft_media_preview_completion(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    completion: temporal_preview::Completion,
+) {
+    let mut app_state = state.borrow_mut();
+    let workspace_generation = app_state.workspace_generation;
+    let Some(surface) = app_state
+        .pattern_editor
+        .as_mut()
+        .filter(|surface| surface.draft.borrow().epoch == epoch)
+    else {
+        return;
+    };
+    let endpoint = surface.endpoint;
+    let mut draft = surface.draft.borrow_mut();
+    if !completion.key.is_current(
+        draft.media_preview_key,
+        workspace_generation,
+        draft.history.session(),
+        endpoint,
+    ) {
+        return;
+    }
+    draft.media_preview_key = None;
+    match completion.result {
+        Ok(prepared) => match draft.scheduler.submit(prepared.request) {
+            Ok(ticket) => {
+                draft.preview_submission = Some(ticket.value());
+                surface.status.set_label("Updating preview…");
+                surface.preview_spinner.set_visible(true);
+                surface.preview_spinner.start();
+            }
+            Err(error) => {
+                draft.preview_submission = None;
+                surface.preview_spinner.stop();
+                surface.preview_spinner.set_visible(false);
+                surface.status.set_label(&format!(
+                    "Couldn’t render this pattern. Your last preview is still shown. {error}"
+                ));
+            }
+        },
+        Err(error) => {
+            draft.preview_submission = None;
+            surface.preview_spinner.stop();
+            surface.preview_spinner.set_visible(false);
+            surface.status.set_label(&format!(
+                "Couldn’t render this pattern. Your last preview is still shown. {error}"
+            ));
+        }
+    }
+}
+
 /// Installs a private draft result only after its private ticket and token pass.
 fn handle_draft_preview_completion(
     state: &Rc<RefCell<AppState>>,
@@ -21610,9 +22289,11 @@ fn handle_advanced_preview_completion(
                         .set_tooltip_text(Some("Settings preview updated."));
                     let (width, height) = match &surface.preview_source {
                         AdvancedPreviewSource::Ready { width, height, .. } => (*width, *height),
-                        AdvancedPreviewSource::Unavailable(_) => unreachable!(
-                            "a completed private evaluation requires a ready source proxy"
-                        ),
+                        AdvancedPreviewSource::Unavailable(_) | AdvancedPreviewSource::Pending => {
+                            unreachable!(
+                                "a completed private evaluation requires a ready source proxy"
+                            )
+                        }
                     };
                     surface.status.set_label(&format!(
                         "Preview updated from a quick {width} × {height} source. Apply makes one undoable change."
@@ -21648,18 +22329,21 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
         sync_main_preview_pending(&state);
         state.inspector_runtime.reset_for_workspace();
         let pattern_editor_window = state.pattern_editor.take().map(|surface| {
-            surface.draft.borrow_mut().preview_submission = None;
+            let mut draft = surface.draft.borrow_mut();
+            draft.preview_submission = None;
+            draft.media_preview_key = None;
             surface.preview_spinner.stop();
             surface.preview_spinner.set_visible(false);
-            surface.window
+            surface.window.clone()
         });
         let advanced_settings_window = state.advanced_settings.take().map(|mut surface| {
             surface.preview_submission = None;
             surface.preview_bridge_stop.store(true, Ordering::Release);
-            surface.window
+            surface.window.clone()
         });
         let pattern_wizard_window = take_pattern_wizard_for_workspace_change(&mut state)
             .map(|surface| surface.window.clone());
+        state.endpoint = temporal_preview::Endpoint::Start;
         state.workspace = Some(workspace);
         state.model = state
             .workspace
@@ -21746,14 +22430,20 @@ fn clear_workspace(state: &Rc<RefCell<AppState>>) {
         state.generation = state.generation.saturating_add(1);
         state.workspace_generation = state.workspace_generation.saturating_add(1);
         state.preview_coordinator.clear_submission();
+        state.media_preview_key = None;
+        if let Some(worker) = state.media_worker.as_mut() {
+            worker.cancel();
+        }
         state.scheduler.cancel_and_clear();
         sync_main_preview_pending(&state);
         state.inspector_runtime.reset_for_workspace();
         let pattern_editor_window = state.pattern_editor.take().map(|surface| {
-            surface.draft.borrow_mut().preview_submission = None;
+            let mut draft = surface.draft.borrow_mut();
+            draft.preview_submission = None;
+            draft.media_preview_key = None;
             surface.preview_spinner.stop();
             surface.preview_spinner.set_visible(false);
-            surface.window
+            surface.window.clone()
         });
         let pattern_wizard_window = take_pattern_wizard_for_workspace_change(&mut state)
             .map(|surface| surface.window.clone());
@@ -21889,6 +22579,10 @@ fn submit_if_viewport_ready(state: &mut AppState) {
     }
 }
 
+/// Queues a frame-specific immutable snapshot for off-thread media decoding and evaluation.
+///
+/// # Errors
+/// Rejects missing source/worker state without modifying document history or accepted pixels.
 fn submit_current_source(
     state: &mut AppState,
     target: toniator_engine::PreviewRasterTarget,
@@ -21897,38 +22591,73 @@ fn submit_current_source(
         .workspace
         .as_ref()
         .ok_or_else(|| "No document is open.".to_owned())?;
-    let presentation = workspace
-        .source_presentation
-        .as_ref()
-        .ok_or_else(|| "No source is loaded.".to_owned())?;
-    let source = workspace
-        .sources
-        .get(&presentation.id)
-        .ok_or_else(|| "source.document: source bundle is missing the active source".to_owned())?;
-    let resolved = ResolvedSource::new(
-        presentation.id.clone(),
-        Arc::<[u8]>::from(source.bytes()),
-        presentation.format,
-    )
-    .map_err(|error| error.to_string())?;
-    let request = EvaluationRequest::with_preview_target(
-        workspace.history.session().document_evaluation_snapshot(),
-        resolved,
-        target,
-    );
-    let ticket = state
-        .scheduler
-        .submit(request)
-        .map_err(|error| error.to_string())?;
-    state.preview_target = Some(target);
-    let workspace_generation = state.workspace_generation;
+    let key = temporal_preview::RequestKey {
+        workspace: state.workspace_generation,
+        revision: workspace.history.session().revision().0,
+        epoch: state.media_epoch,
+        frame: state.endpoint.frame(workspace.document()),
+    };
+    let session = workspace.history.session().clone();
+    let sources = workspace.sources.clone();
     state
-        .preview_coordinator
-        .submit(workspace_generation, ticket.value());
+        .media_worker
+        .as_mut()
+        .ok_or("Source preview worker is unavailable")?
+        .submit(key, session, sources, target);
+    state.media_preview_key = Some(key);
+    state.preview_target = Some(target);
     sync_main_preview_pending(state);
-    set_inspector_status(state, "Preview updating…");
-    emit_automation_state(state, "preview_submitted", Some(ticket.value()));
+    set_inspector_status(state, "Preparing source frame…");
     Ok(())
+}
+
+/// Accepts a decoded endpoint only while its workspace, revision, frame and request epoch match.
+///
+/// Matching source pixels accompany the same immutable evaluator input; stale events never
+/// replace the comparison image or submit a scheduler request. History remains untouched.
+fn handle_media_preview_completion(
+    state: &Rc<RefCell<AppState>>,
+    completion: temporal_preview::Completion,
+) {
+    let mut state = state.borrow_mut();
+    if !state.workspace.as_ref().is_some_and(|workspace| {
+        completion.key.is_current(
+            state.media_preview_key,
+            state.workspace_generation,
+            workspace.history.session(),
+            state.endpoint,
+        )
+    }) {
+        return;
+    }
+    state.media_preview_key = None;
+    let result = completion.result.and_then(|prepared| {
+        let display = prepared.source;
+        let texture = gtk::gdk::MemoryTexture::new(
+            display.width as i32,
+            display.height as i32,
+            gtk::gdk::MemoryFormat::R8g8b8a8,
+            &glib::Bytes::from_owned(display.rgba),
+            display.width as usize * 4,
+        );
+        let ticket = state
+            .scheduler
+            .submit(prepared.request)
+            .map_err(|error| error.to_string())?;
+        state.source_texture = Some(texture.upcast());
+        state.source_texture_generation = Some(state.workspace_generation);
+        let generation = state.workspace_generation;
+        state.preview_coordinator.submit(generation, ticket.value());
+        apply_main_view_presentation(&mut state);
+        set_inspector_status(&mut state, "Preview updating…");
+        emit_automation_state(&mut state, "preview_submitted", Some(ticket.value()));
+        Ok(())
+    });
+    if let Err(error) = result {
+        state.preview_coordinator.clear_submission();
+        show_error(&mut state, error);
+    }
+    sync_main_preview_pending(&state);
 }
 
 /// Emits a bounded immutable state snapshot after an authoritative UI event.
@@ -22090,8 +22819,10 @@ fn raw_texture_layout(surface: &RasterSurface) -> Result<TextureLayout, String> 
     })
 }
 
+/// Clears workspace-owned preview and source presentation when their authority is replaced.
 fn clear_preview(state: &mut AppState) {
     state.picture.set_paintable(None::<&gtk::gdk::Paintable>);
+    state.presented_texture = None;
     state.preview = None;
     state.source_texture = None;
     state.source_texture_generation = None;
@@ -22105,6 +22836,8 @@ fn update_backdrop(state: &mut AppState) {
     state.viewer.add_css_class(state.model.css_class());
 }
 
+/// Projects existing source diagnostics and undismissed media facts using current document timing.
+/// Media notices are session-only; SVG information and migration diagnostics remain visible.
 fn show_source_diagnostic(state: &mut AppState) {
     let migration_notice = state
         .workspace
@@ -22115,10 +22848,21 @@ fn show_source_diagnostic(state: &mut AppState) {
         .as_ref()
         .and_then(|workspace| workspace.source_presentation.as_ref())
         .and_then(|source| source.identity.svg_text.as_ref());
-    apply_banner_policy(
-        &state.shell,
-        banner_policy(migration_notice, diagnostic, None),
-    );
+    let mut policy = banner_policy(migration_notice, diagnostic, None);
+    if let Some(workspace) = state.workspace.as_mut() {
+        let timing = workspace.document().project_timing().clone();
+        if let Some(source) = workspace.source_presentation.as_mut() {
+            let message = source.notice.message(&timing);
+            source.notice.presented = message.is_some();
+            if let Some(message) = message {
+                policy = BannerPolicy::Message(match policy {
+                    BannerPolicy::Hidden => message,
+                    BannerPolicy::Message(existing) => format!("{existing} {message}"),
+                });
+            }
+        }
+    }
+    apply_banner_policy(&state.shell, policy);
 }
 
 fn set_page(state: &mut AppState, page: Page) {
@@ -22127,6 +22871,13 @@ fn set_page(state: &mut AppState, page: Page) {
 
 /// Presents an operation error on the current workspace or startup screen without discarding work.
 fn show_error(state: &mut AppState, message: String) {
+    if let Some(source) = state
+        .workspace
+        .as_mut()
+        .and_then(|workspace| workspace.source_presentation.as_mut())
+    {
+        source.notice.presented = false;
+    }
     if state.workspace.is_none() {
         state.startup.set_status(&message);
     }
@@ -22143,6 +22894,13 @@ fn show_error(state: &mut AppState, message: String) {
 /// publish fresh progress and preview state normally.
 fn dismiss_main_message(state: &Rc<RefCell<AppState>>) {
     let mut app_state = state.borrow_mut();
+    if let Some(source) = app_state
+        .workspace
+        .as_mut()
+        .and_then(|workspace| workspace.source_presentation.as_mut())
+    {
+        source.notice.dismiss();
+    }
     app_state.shell.set_banner(None);
     app_state.error.set_label("");
     if app_state.stack.visible_child_name().as_deref() == Some(Page::Error.name()) {
@@ -22160,6 +22918,9 @@ fn dismiss_main_message(state: &Rc<RefCell<AppState>>) {
 /// The projection updates enabled state, labels, and presentation only; it
 /// never changes workspace/history/scheduler authority or starts I/O.
 fn sync_ui(state: &mut AppState) {
+    if let Some(workspace) = state.workspace.as_ref() {
+        state.endpoint = state.endpoint.for_document(workspace.document());
+    }
     let policy = ui_policy(
         state.workspace.as_ref(),
         main_document_edits_blocked(state),
@@ -22187,20 +22948,27 @@ fn sync_ui(state: &mut AppState) {
         project_document(state, selected_name, active_pattern);
     state.actions.new.set_enabled(policy.new_enabled);
     state.actions.open.set_enabled(policy.open_enabled);
+    state
+        .actions
+        .import_sequence
+        .set_enabled(!lifecycle_is_busy(state));
     state.actions.close.set_enabled(policy.close_enabled);
     state.actions.exit.set_enabled(!lifecycle_is_busy(state));
     state.actions.save.set_enabled(policy.save_enabled);
     state.actions.save_as.set_enabled(policy.save_as_enabled);
     state.actions.export.set_enabled(policy.export_enabled);
+    state
+        .actions
+        .animation_settings
+        .set_enabled(state.workspace.is_some() && !lifecycle_is_busy(state));
     state.selector.set_sensitive(policy.selector_enabled);
     state.actions.undo.set_enabled(policy.undo_enabled);
     state.actions.redo.set_enabled(policy.redo_enabled);
     let startup_visible = state.workspace.is_none();
-    state.root_stack.set_visible_child_name(if startup_visible {
-        "startup"
-    } else {
-        "workspace"
-    });
+    if !startup_visible && let Some(window) = state.startup_window.take() {
+        window.set_child(gtk::Widget::NONE);
+        window.destroy();
+    }
     state.shell.drawer().set_visible(!startup_visible);
     state
         .startup
@@ -22236,6 +23004,7 @@ fn sync_ui(state: &mut AppState) {
     )));
     apply_main_view_presentation(state);
     document_presets::sync_controls(state);
+    sync_endpoint_controls(state);
 }
 
 #[cfg(test)]
@@ -24079,11 +24848,15 @@ mod tests {
         );
     }
 
-    /// Retains the captured file or close request through every unsaved decision and stale savepoint.
+    /// Retains file, sequence-import and close requests through unsaved decisions and stale savepoints.
+    ///
+    /// # Panics
+    /// Panics if a cancelled or stale save loses the original lifecycle request or replaces unsaved work.
     #[test]
     fn unsaved_decisions_and_save_follow_up_preserve_lifecycle_intent() {
         for action in [
             LifecycleAction::Close,
+            LifecycleAction::ImportSequence,
             LifecycleAction::OpenFile(PathBuf::from("requested.svg")),
         ] {
             assert_eq!(
@@ -24843,11 +25616,11 @@ mod tests {
             };
             assert_eq!((width, height), expected);
             assert_eq!(source.reference_id(), &presentation.id);
-            assert_eq!(source.format(), SourceFormatHint::Png);
+            assert_eq!(source.format(), Some(SourceFormatHint::Png));
             assert_eq!(
-                resolve_source_identity(source.bytes(), source.format())
+                resolve_source_identity(source.bytes().unwrap(), source.format().unwrap())
                     .expect("proxy bytes remain a supported PNG identity"),
-                resolve_source_identity(source.bytes(), SourceFormatHint::Png)
+                resolve_source_identity(source.bytes().unwrap(), SourceFormatHint::Png)
                     .expect("proxy keeps deterministic PNG identity")
             );
             assert_eq!(workspace.document(), &before);
@@ -28762,8 +29535,8 @@ mod tests {
                 gio::ResourceLookupFlags::NONE,
             )
             .expect("neutral wizard source resource is registered");
-            assert_eq!(source.bytes(), resource.as_ref());
-            assert_eq!(source.format(), SourceFormatHint::Svg);
+            assert_eq!(source.bytes(), Some(resource.as_ref()));
+            assert_eq!(source.format(), Some(SourceFormatHint::Svg));
         }
     }
 

@@ -18,9 +18,9 @@ use toniator_io::{
 
 use crate::{AppState, InspectorTarget, PreviewModel, Workspace, app_events::AppEvent};
 
-/// Names native menu items from their existing visible labels when GTK maps the New menu.
+/// Names native menu items from their existing visible labels when GTK maps the supplied menu.
 /// Menu actions retain their native roles and sensitivity; no parallel vocabulary is stored.
-pub(crate) fn label_new_menu(button: &gtk::MenuButton) {
+pub(crate) fn label_menu(button: &gtk::MenuButton) {
     if let Some(popover) = button.popover() {
         popover.connect_map(|popover| {
             let popover = popover.clone();
@@ -29,7 +29,7 @@ pub(crate) fn label_new_menu(button: &gtk::MenuButton) {
     }
 }
 
-/// Walks only the New popover and supplies each native menu item's visible label.
+/// Walks only the supplied popover and supplies each native menu item's visible label.
 fn label_menu_items(widget: &gtk::Widget) {
     if widget.accessible_role() == gtk::AccessibleRole::MenuItem {
         if let Some(label) = first_menu_label(widget) {

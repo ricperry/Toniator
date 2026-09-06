@@ -1,7 +1,12 @@
 # Publishing a GitHub release
 
 A GitHub release attaches downloadable files to a Git tag. Toniator's AppImage
-and Flatpak are two assets of the same release; binaries stay out of Git history.
+and Flatpak are two assets of the same release. At the user's 2026-09-06 request,
+the 0.3.0 acceptance checkpoint also includes both packages in `dist/` through
+Git LFS, with ordinary tracked checksum and build-provenance files. Git stores
+small pointers; Git LFS stores the package bytes. Install Git LFS and run
+`git lfs pull` after cloning to materialize these packages. This supersedes the
+earlier convention of keeping every release binary out of the repository.
 The tag identifies the source used to build them. This does not submit the app
 to Flathub or provide a Flatpak automatic-update repository.
 
@@ -10,17 +15,26 @@ to Flathub or provide a Flatpak automatic-update repository.
 1. Review the intended source, README, icons, packaging metadata, and version.
    Commit only the release's explicit paths. Preserve unrelated local work.
 2. Ensure the Cargo package versions, desktop AppStream release, and versioned
-   output names in the packaging scripts agree. The current recipes target 0.2.0.
+   output names in the packaging scripts agree. The current recipes target the
+   unreleased 0.3.0 development version. Add its release notes and set the
+   AppStream release date when preparing publication.
 3. Run the focused checks for changed behavior, then rebuild the two packages
    from the committed source using [the packaging guide](../packaging/README.md).
    Verify `dist/build-info.json` names that commit and has no packaging Rust diff.
 4. Inspect the packaged icons and exercise the actual bundles. Verify checksums
    with `sha256sum -c SHA256SUMS` from `dist/`. Review release notes and limitations.
+5. For the requested repository package checkpoint, stage the exact two package
+   paths with `git add -f`, plus `dist/SHA256SUMS` and `dist/build-info.json`.
+   Verify `.gitattributes` applies LFS filters before committing. A local commit
+   does not publish a release; the LFS pre-push hook transfers packages when the
+   separately authorized push runs.
 
 ## Publish with GitHub CLI
 
-The following example assumes the source is committed on `main`, the release
-files are verified, and publication is authorized. Authenticate with `gh auth
+The following is the published **0.2.0** procedure as a historical example;
+use the next version and its own notes for a new release. It assumes the source
+is committed on `main`, the release files are verified, and publication is
+authorized. Authenticate with `gh auth
 login` if needed. Never move an existing published tag to a different commit.
 
 ```bash

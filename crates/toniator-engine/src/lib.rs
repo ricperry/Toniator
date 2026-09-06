@@ -19,7 +19,20 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub mod export;
+mod media;
+mod media_import;
 mod scheduler;
+#[cfg(test)]
+mod temporal_tests;
+
+pub use media::{frame_evaluation_request, open_source_media};
+pub use media_import::{
+    ImportedMedia, MediaTimingSelection, import_source_media, parse_media_rate, parse_media_time,
+    select_media_timing,
+};
+pub use toniator_sampling::media::{FrameIdentity, SourceFrame};
+pub use toniator_sampling::media::{FrameSource, MediaTools, SourceError, SourceMediaMetadata};
 
 pub use scheduler::{
     ChannelDiagnosticCompletion, ChannelDiagnosticScheduler, ChannelDiagnosticTicket,
@@ -72,7 +85,7 @@ pub use toniator_render::{
 };
 pub use toniator_sampling::{
     DECODER_CONTRACT_ID, ReducedPreviewSource, SourceField, SourceFormat, SourceFormatHint,
-    SourceIdentity, SvgTextDiagnostic, reduced_preview_png,
+    SourceIdentity, SvgTextDiagnostic, reduced_preview_frame, reduced_preview_png,
 };
 use toniator_sampling::{RegionSamplingLimits, decode_source};
 
@@ -188,11 +201,20 @@ pub fn inspect_circular_marks(
 /// Immutable source bytes resolved outside the domain. The ID and decoding
 /// hint travel with the bytes so the engine can reject authority mismatches
 /// before it decodes or evaluates geometry.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedSource {
     reference_id: SourceReferenceId,
-    bytes: Arc<[u8]>,
-    format: SourceFormatHint,
+    data: ResolvedSourceData,
+}
+
+/// Keeps encoded still bytes and already decoded media frames distinct at the evaluator boundary.
+#[derive(Clone, Debug, PartialEq)]
+enum ResolvedSourceData {
+    Encoded {
+        bytes: Arc<[u8]>,
+        format: SourceFormatHint,
+    },
+    Frame(SourceFrame),
 }
 
 impl ResolvedSource {
@@ -222,19 +244,80 @@ impl ResolvedSource {
         }
         Ok(Self {
             reference_id,
-            bytes,
-            format,
+            data: ResolvedSourceData::Encoded { bytes, format },
         })
     }
 
+    /// Retains a decoded source frame without encoding it as a still image or copying its pixels.
+    ///
+    /// # Errors
+    /// Rejects a frame whose advertised decoded hash disagrees with its immutable field.
+    pub fn from_frame(
+        reference_id: SourceReferenceId,
+        frame: SourceFrame,
+    ) -> Result<Self, EvaluationError> {
+        if frame.identity.decoded_pixel_hash != frame.field.identity().decoded_pixel_hash {
+            return Err(EvaluationError::new(
+                "source.frame.identity",
+                "decoded frame hash disagrees with its field",
+            ));
+        }
+        Ok(Self {
+            reference_id,
+            data: ResolvedSourceData::Frame(frame),
+        })
+    }
+
+    /// Returns the document-owned logical source reference used for authority checks.
     pub fn reference_id(&self) -> &SourceReferenceId {
         &self.reference_id
     }
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+    /// Returns original encoded bytes only when this request owns an encoded still source.
+    pub fn bytes(&self) -> Option<&[u8]> {
+        match &self.data {
+            ResolvedSourceData::Encoded { bytes, .. } => Some(bytes),
+            ResolvedSourceData::Frame(_) => None,
+        }
     }
-    pub fn format(&self) -> SourceFormatHint {
-        self.format
+    /// Returns a still decoder hint only for original encoded bytes.
+    pub fn format(&self) -> Option<SourceFormatHint> {
+        match &self.data {
+            ResolvedSourceData::Encoded { format, .. } => Some(*format),
+            ResolvedSourceData::Frame(_) => None,
+        }
+    }
+
+    /// Derives frame-aware decode identity without confusing raw RGBA with an image container.
+    fn cache_key(&self) -> SourceCacheKey {
+        SourceCacheKey {
+            reference_id: self.reference_id.as_str().to_owned(),
+            content: match &self.data {
+                ResolvedSourceData::Encoded { bytes, format } => SourceCacheContent::Encoded {
+                    bytes: Arc::clone(bytes),
+                    format: *format,
+                    decoder_contract: DECODER_CONTRACT_ID,
+                },
+                ResolvedSourceData::Frame(frame) => SourceCacheContent::Frame {
+                    identity: Box::new(frame.identity.clone()),
+                    field: frame.field.identity().clone(),
+                    index: frame.index,
+                    normalized_time: frame.normalized_time,
+                },
+            },
+        }
+    }
+
+    /// Decodes encoded still input or retains a media provider's authoritative decoded field.
+    ///
+    /// # Errors
+    /// Returns the existing sampling diagnostic for invalid encoded still input.
+    fn decoded_field(&self) -> Result<Arc<SourceField>, EvaluationError> {
+        match &self.data {
+            ResolvedSourceData::Encoded { bytes, format } => decode_source(bytes, *format)
+                .map(Arc::new)
+                .map_err(EvaluationError::from_sampling),
+            ResolvedSourceData::Frame(frame) => Ok(Arc::clone(&frame.field)),
+        }
     }
 }
 
@@ -1041,9 +1124,23 @@ impl ChannelDiagnosticResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SourceCacheKey {
     reference_id: String,
-    bytes: Arc<[u8]>,
-    format: SourceFormatHint,
-    decoder_contract: &'static str,
+    content: SourceCacheContent,
+}
+
+/// Includes timing and decode/color provenance for media; still keys retain exact source bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SourceCacheContent {
+    Encoded {
+        bytes: Arc<[u8]>,
+        format: SourceFormatHint,
+        decoder_contract: &'static str,
+    },
+    Frame {
+        identity: Box<FrameIdentity>,
+        field: SourceIdentity,
+        index: u64,
+        normalized_time: toniator_domain::RationalTime,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1551,8 +1648,9 @@ impl EvaluationStageGate {
     }
 }
 
+/// Distinguishes a cooperative stop from a canonical evaluation failure; neither publishes output.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum EvaluationRunError {
+pub enum EvaluationRunError {
     Cancelled,
     Evaluation(EvaluationError),
 }
@@ -1691,12 +1789,7 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
         maximum_fill: mark_response.maximum_fill,
         rotation_offset_degrees: effective.shape_rotation_degrees,
     };
-    let source_key = SourceCacheKey {
-        reference_id: request.source.reference_id().as_str().to_owned(),
-        bytes: Arc::clone(&request.source.bytes),
-        format: request.source.format(),
-        decoder_contract: DECODER_CONTRACT_ID,
-    };
+    let source_key = request.source.cache_key();
     // Preflight above remains authoritative. Decode deliberately occurs before
     // the family lookup so decoded-pixel identity participates downstream.
     let (source, source_disposition) =
@@ -1705,9 +1798,10 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
                 Some((key, source)) if *key == source_key => {
                     Ok((Arc::clone(source), CacheDisposition::Hit))
                 }
-                _ => decode_source(request.source.bytes(), request.source.format())
-                    .map(|source| (Arc::new(source), CacheDisposition::Miss))
-                    .map_err(EvaluationError::from_sampling),
+                _ => request
+                    .source
+                    .decoded_field()
+                    .map(|source| (source, CacheDisposition::Miss)),
             }
         })?;
     let family_key = FamilyCacheKey {
@@ -2254,7 +2348,19 @@ impl Error for MarksInspectError {}
 pub struct EvaluationRequest {
     snapshot: DocumentEvaluationSnapshot,
     source: ResolvedSource,
-    preview_target: Option<PreviewRasterTarget>,
+    raster_request: RasterRequest,
+}
+
+/// Selects one final raster consumer without adding another document or geometry authority.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RasterRequest {
+    Native,
+    Preview(PreviewRasterTarget),
+    Output {
+        background: RasterBackground,
+        target: Option<OutputRasterTarget>,
+        antialiasing: RasterAntialiasing,
+    },
 }
 
 impl EvaluationRequest {
@@ -2262,7 +2368,7 @@ impl EvaluationRequest {
         Self {
             snapshot,
             source,
-            preview_target: None,
+            raster_request: RasterRequest::Native,
         }
     }
 
@@ -2276,8 +2382,29 @@ impl EvaluationRequest {
         Self {
             snapshot,
             source,
-            preview_target: Some(preview_target),
+            raster_request: RasterRequest::Preview(preview_target),
         }
+    }
+
+    /// Selects a bounded transparent preview while preserving frame materialization and identity.
+    pub fn for_preview(mut self, target: PreviewRasterTarget) -> Self {
+        self.raster_request = RasterRequest::Preview(target);
+        self
+    }
+
+    /// Chooses a final PNG consumer so export rasterizes once with its actual output policy.
+    pub fn for_output(
+        mut self,
+        background: RasterBackground,
+        target: Option<OutputRasterTarget>,
+        antialiasing: RasterAntialiasing,
+    ) -> Self {
+        self.raster_request = RasterRequest::Output {
+            background,
+            target,
+            antialiasing,
+        };
+        self
     }
 }
 
@@ -2888,6 +3015,30 @@ impl EvaluationScheduler {
         Ok(ticket)
     }
 
+    /// Cancels submitted candidates while retaining the last accepted derived cache for reuse.
+    ///
+    /// Callers use this while a new source frame is being decoded outside the evaluator. Ticket
+    /// allocation remains monotonic; a cancelled candidate can never become accepted state.
+    ///
+    /// # Panics
+    /// Panics if the scheduler publication or state mutex is poisoned.
+    pub fn cancel_pending(&self) {
+        let _publication = self
+            .publication
+            .lock()
+            .expect("document scheduler publication lock poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .expect("document scheduler state lock poisoned");
+        if let Some(cancelled) = state.latest_cancellation.take() {
+            cancelled.store(true, Ordering::Release);
+        }
+        state.latest_ticket = None;
+        state.pending = None;
+        self.latest_ticket.store(0, Ordering::Release);
+    }
+
     /// Cancels private work and releases accepted/pending caches while retaining the worker.
     ///
     /// Ticket allocation remains monotonic. A publication gate excludes cancellation-racing
@@ -3119,6 +3270,27 @@ pub fn evaluate_with_limits(
         EvaluationRunError::Evaluation(error) => error,
         EvaluationRunError::Cancelled => unreachable!("synchronous evaluation never cancels"),
     })
+}
+
+/// Evaluates one immutable document with cooperative cancellation and a private derived cache.
+///
+/// This uses the same transactional pipeline as previews and sequence export. It performs no
+/// document mutation, publication, or partial-result delivery.
+///
+/// # Errors
+/// Returns cancellation or the canonical evaluation diagnostic without exposing a partial scene.
+pub fn evaluate_cancellable_with_limits(
+    request: EvaluationRequest,
+    limits: EvaluationLimits,
+    cancelled: &AtomicBool,
+) -> Result<EvaluationResult, EvaluationRunError> {
+    evaluate_cached_document(
+        request,
+        limits,
+        &DocumentDerivedCache::default(),
+        &AtomicCancellation(cancelled),
+    )
+    .map(|value| value.result)
 }
 
 /// Evaluates one complete document while collecting diagnostic-only architectural metrics.
@@ -3602,28 +3774,18 @@ fn evaluate_cached_document_impl(
     }
     cancellation.report_progress(EvaluationProgressStage::Preparing, 50, 1_000);
     cancellation.report_progress(EvaluationProgressStage::DecodingSource, 50, 0);
-    let source_key = SourceCacheKey {
-        reference_id: request.source.reference_id().as_str().to_owned(),
-        bytes: Arc::clone(&request.source.bytes),
-        format: request.source.format(),
-        decoder_contract: DECODER_CONTRACT_ID,
-    };
+    let source_key = request.source.cache_key();
     let decode_started = Instant::now();
     let (source, source_hit) = match &accepted.decoded_source {
         Some((key, value)) if *key == source_key => (Arc::clone(value), CacheDisposition::Hit),
         _ => (
-            Arc::new(evaluate_stage(
-                EvaluationStage::Decode,
-                cancellation,
-                || {
-                    #[cfg(test)]
-                    if let Some(observer) = decode_observer {
-                        observer.fetch_add(1, Ordering::Relaxed);
-                    }
-                    decode_source(request.source.bytes(), request.source.format())
-                        .map_err(EvaluationError::from_sampling)
-                },
-            )?),
+            evaluate_stage(EvaluationStage::Decode, cancellation, || {
+                #[cfg(test)]
+                if let Some(observer) = decode_observer {
+                    observer.fetch_add(1, Ordering::Relaxed);
+                }
+                request.source.decoded_field()
+            })?,
             CacheDisposition::Miss,
         ),
     };
@@ -4150,17 +4312,26 @@ fn evaluate_cached_document_impl(
             }],
         );
     }
-    let raster_key = match request.preview_target {
-        Some(target) => format!(
+    let raster_key = match request.raster_request {
+        RasterRequest::Preview(target) => format!(
             "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:preview-v1:{model:?}:{}x{}:edges={}",
             scene.identity().scene_fingerprint(),
             target.width(),
             target.height(),
             limits.max_flattened_raster_edges()
         ),
-        None => format!(
+        RasterRequest::Native => format!(
             "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:{model:?}:edges={}",
             scene.identity().scene_fingerprint(),
+            limits.max_flattened_raster_edges()
+        ),
+        RasterRequest::Output {
+            background,
+            target,
+            antialiasing,
+        } => format!(
+            "{}:edges={}",
+            raster_output_identity(&scene, background, target, antialiasing),
             limits.max_flattened_raster_edges()
         ),
     };
@@ -4182,24 +4353,26 @@ fn evaluate_cached_document_impl(
                 EvaluationStage::Raster,
                 cancellation,
                 || {
-                    match request.preview_target {
-                        Some(target) => rasterize_preview_cancellable_with_progress(
-                            &scene,
-                            target,
-                            toniator_render::RasterizationLimits::new(
-                                limits.max_flattened_raster_edges(),
+                    match request.raster_request {
+                        RasterRequest::Preview(target) => {
+                            rasterize_preview_cancellable_with_progress(
+                                &scene,
+                                target,
+                                toniator_render::RasterizationLimits::new(
+                                    limits.max_flattened_raster_edges(),
+                                )
+                                .expect("EvaluationLimits validates raster edge bounds"),
+                                &|| cancellation.is_cancelled(),
+                                &|completed, total| {
+                                    cancellation.report_progress(
+                                        EvaluationProgressStage::RasterizingPreview,
+                                        raster_work_progress(completed, total),
+                                        unit_stage_progress(completed, total),
+                                    );
+                                },
                             )
-                            .expect("EvaluationLimits validates raster edge bounds"),
-                            &|| cancellation.is_cancelled(),
-                            &|completed, total| {
-                                cancellation.report_progress(
-                                    EvaluationProgressStage::RasterizingPreview,
-                                    raster_work_progress(completed, total),
-                                    unit_stage_progress(completed, total),
-                                );
-                            },
-                        ),
-                        None => rasterize_cancellable_with_progress(
+                        }
+                        RasterRequest::Native => rasterize_cancellable_with_progress(
                             &scene,
                             RasterBackground::Transparent,
                             toniator_render::RasterizationLimits::new(
@@ -4213,6 +4386,28 @@ fn evaluate_cached_document_impl(
                                     raster_work_progress(completed, total),
                                     unit_stage_progress(completed, total),
                                 );
+                            },
+                        ),
+                        RasterRequest::Output {
+                            background,
+                            target,
+                            antialiasing,
+                        } => toniator_render::rasterize_output_cancellable_with_progress(
+                            &scene,
+                            background,
+                            target,
+                            antialiasing,
+                            toniator_render::RasterizationLimits::new(
+                                limits.max_flattened_raster_edges(),
+                            )
+                            .expect("EvaluationLimits validates raster edge bounds"),
+                            &|| cancellation.is_cancelled(),
+                            &|completed, total| {
+                                cancellation.report_progress(
+                                    EvaluationProgressStage::RasterizingPreview,
+                                    raster_work_progress(completed, total),
+                                    unit_stage_progress(completed, total),
+                                )
                             },
                         ),
                     }
@@ -12776,12 +12971,15 @@ mod cache_key_tests {
     }
 
     #[test]
+    /// Proves logical lookup identity is separate from immutable decoded realization identity.
     fn logical_source_lookup_misses_decode_but_reuses_decoded_realization_identity() {
         let baseline = SourceCacheKey {
             reference_id: "source-a".to_owned(),
-            bytes: Arc::<[u8]>::from(vec![1_u8, 2, 3]),
-            format: SourceFormatHint::Png,
-            decoder_contract: "decoder-a",
+            content: SourceCacheContent::Encoded {
+                bytes: Arc::<[u8]>::from(vec![1_u8, 2, 3]),
+                format: SourceFormatHint::Png,
+                decoder_contract: "decoder-a",
+            },
         };
         let changed_lookup = SourceCacheKey {
             reference_id: "source-b".to_owned(),

@@ -22,11 +22,19 @@ unexpectedly.
 3. Run `scripts/session-start`, then `scripts/app-start [PATH]`. The app script
    defaults to `target/debug/toniator-app`, forces GTK's Wayland and AT-SPI
    backends, enables full Rust backtraces, and creates a fresh evidence run.
-4. Prefer semantic operations:
-   - `scripts/ui-tree --application Toniator`
-   - `scripts/ui-find 'Density across X' --application Toniator --role text --exact`
-   - `scripts/ui-action 'Density across X' --role text --exact --set-text 60 --commit`
-   - `scripts/ui-action Export --application Toniator --activate`
+4. Use the semantic quick path before full-tree diagnostics:
+   - `scripts/ui wait 'Pattern family' --exact --role 'combo box'`
+   - `scripts/ui controls --subtree 'Pattern family' --depth 4 --json`
+   - `scripts/ui inspect 'Pattern family' --exact --role 'combo box'`
+   - `scripts/ui select 'Pattern family' 'Straight Grid Circles' --exact --role 'combo box'`
+   - `scripts/ui inspect 'Pattern family' --exact --role 'combo box'`
+   `controls` is the compact inventory of real interactive/state-bearing nodes;
+   `wait` synchronizes present/absent/native-state changes without arbitrary
+   sleeps. Use `tree` only when a narrow semantic query cannot explain the
+   hierarchy. The helper returns compact role/name/state/value/action/relation
+   JSON and accepts `--ancestor NAME` for semantic disambiguation. **Do not
+   locate ordinary GTK4 widgets by guessing coordinates when AT-SPI can identify
+   or operate them.**
 5. Use VNC primitives when the accessibility interface cannot express an
    interaction. Use grim screenshots to verify the rendered result:
    - `scripts/screenshot 01-launch.png`
@@ -42,6 +50,10 @@ unexpectedly.
    logs before localizing a defect.
 8. Run `scripts/session-stop` at handoff, on failure, or before changing session
    geometry or port.
+
+AT-SPI success is not visual verification. Any change affecting visible UI or
+rendered output must still be visually inspected in a screenshot or native
+review artifact.
 
 ## Preserve evidence integrity
 
