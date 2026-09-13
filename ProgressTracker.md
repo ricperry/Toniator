@@ -1017,7 +1017,7 @@ No protected specification was revised.
 
 ## 0.3 review follow-up — Gate 1
 
-**Accepted (2026-09-12); local checkpoint pending.** The user accepted Gate 1,
+**Complete at source checkpoint `4e59a5d` (accepted 2026-09-12).** The user accepted Gate 1,
 including the review corrections below, after implementation and verification of the
 [three-gate repair plan](docs/REVIEW_0_3_REPAIR_PLAN.md). Gate 1 owns absolute
 ALL editing at the selected endpoint, bias/pending-input propagation, unique
@@ -1055,7 +1055,7 @@ acceptance record follows. Gate 3 remains unstarted.
 
 ## 0.3 review follow-up — Gate 2
 
-**Accepted (2026-09-12); local checkpoint pending.** The user accepts the
+**Complete at source checkpoint `4e59a5d` (accepted 2026-09-12).** The user accepts the
 source-response and control-organization gate. Advanced exposes Black point,
 White point, Gamma, Contrast and Response cutoff through shared domain commands,
 ALL assignment and selected Start/End editing. Minimum fill remains editable;
@@ -1082,7 +1082,7 @@ checkpoint, package rebuild, push or publication is performed. Gate 3 has not be
 
 ## 0.3 review follow-up — Gate 3
 
-**Accepted awaiting checkpoint (2026-09-12).** The user explicitly accepts the
+**Complete at source checkpoint `4e59a5d` (accepted 2026-09-12).** The user explicitly accepts the
 remaining Gate 3 source-consumer and placement work after its verification;
 export timing was already accepted. The user's organizational
 update moves weighting source selection out of recipes and into Advanced as an
@@ -1096,7 +1096,7 @@ handoff, then separately accepted the subsequent placement/source-consumer
 changes with “Accept the remaining Gate 3 work.” Gate 3 is
 authorized for the bounded placement and export-timing repairs in
 [the three-gate repair plan](docs/REVIEW_0_3_REPAIR_PLAN.md). Gates 1 and 2
-remain accepted with local checkpoints pending. The export-timing slice is
+are included in the same source checkpoint. The export-timing slice is
 implemented: Export video exposes exact rate and duration with a derived frame
 count, preserving the existing optional export subset. Starting a valid export
 applies timing as one document-history transition; closing before export discards
@@ -1213,6 +1213,29 @@ retry request, the user confirmed “Okay that work is good now.” The numeric-
 fix is accepted and TON-008 is resolved. The later explicit Gate 3 acceptance
 closes the separate placement/source-consumer review; neither creates a checkpoint.
 See `.codex-work/evidence/review-0.3-cmyk-transform-investigation.md`.
+
+### 0.3.1 release preparation
+
+The user requests preparing main and the release packages. Accepted implementation
+is checkpointed at `4e59a5d7394155869d26fb983c5d1fbe8dcfc7a4`. GNOME SDK50 builds
+locked/offline optimized release binaries with the private media configuration;
+both packages are stripped. Build provenance names that source and has no Rust
+packaging diff. The AppImage is 117729784 bytes (glibc2.39 minimum), and the
+Flatpak is 62528352 bytes. Checksums and exact provenance are in dist/.
+
+Actual package CLIs report0.3.1, render both immutable PNG/SVG sources and current
+source-mapping projects identically, preserve two video frames exactly through
+FFV1, and encode AV1 with host codec tool names masked. Native outputs and package
+icons were inspected. AppImage GTK preview and keyboard edit, plus Flatpak GTK
+preview/channel selection pass. Flatpak numeric focus automation does not verify
+focus and is not passing keyboard evidence; normal permissions and portal behavior
+are unchanged. Private session is stopped. See packaging/README.md for the
+release verification record. Release notes include video improvements.
+
+Only accepted source, documentation, tooling and explicit release artifacts enter
+the checkpoints. User artwork/fonts, stretching screenshots, unrelated deletions
+and research remain excluded. Remote main and v0.3.0 are unchanged during preparation;
+v0.3.1 publication is a separate final action.
 
 ## Earlier startup follow-up
 

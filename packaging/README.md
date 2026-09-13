@@ -1,7 +1,8 @@
 # Toniator desktop packages
 
 Download the AppImage or Flatpak from the
-[v0.2.0 GitHub release](https://github.com/ricperry/Toniator/releases/tag/v0.2.0).
+[v0.3.0 GitHub release](https://github.com/ricperry/Toniator/releases/tag/v0.3.0).
+The 0.3.1 packages are prepared locally; publication remains pending.
 For maintainers, [release instructions](../docs/RELEASING.md) cover publishing
 the two bundles and their checksums together under one version tag.
 
@@ -19,14 +20,14 @@ their hashes; `assets/ToniatorIcon.svg` remains the editable Inkscape source.
 From the repository directory, run the AppImage directly:
 
 ```sh
-chmod +x dist/Toniator-0.2.0-x86_64.AppImage
-./dist/Toniator-0.2.0-x86_64.AppImage
+chmod +x dist/Toniator-0.3.0-x86_64.AppImage
+./dist/Toniator-0.3.0-x86_64.AppImage
 ```
 
 It needs no application installation. If FUSE mounting is unavailable:
 
 ```sh
-APPIMAGE_EXTRACT_AND_RUN=1 ./dist/Toniator-0.2.0-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./dist/Toniator-0.3.0-x86_64.AppImage
 ```
 
 The AppImage bundles GTK, its dependent libraries, image loaders, icons, and
@@ -37,7 +38,7 @@ distribution compatibility is not claimed. `--cli --help` invokes the bundled CL
 Install the Flatpak bundle for your user account:
 
 ```sh
-flatpak install --user ./dist/Toniator-0.2.0-x86_64.flatpak
+flatpak install --user ./dist/Toniator-0.3.0-x86_64.flatpak
 flatpak run com.sbdd.Toniator
 ```
 
@@ -59,9 +60,8 @@ including live changes; native GNOME/GTK settings provide the fallback.
 
 The current development checkout builds **0.3.1 (unreleased)**, producing
 `dist/Toniator-0.3.1-x86_64.AppImage` and `dist/Toniator-0.3.1-x86_64.flatpak`.
-The download/install examples above and verification record below refer to the
-published 0.2.0 release. Substitute 0.3.1 when running your local development
-packages; this version bump does not publish new packages.
+The download/install examples above refer to the published 0.3.0 release.
+Substitute 0.3.1 when running the prepared packages; building does not publish them.
 
 Prerequisites: Python 3, Flatpak, GNOME SDK and Platform 50, Rust/rustup with
 Rust 1.94 or newer, Cargo dependencies cached for Cargo.lock, binutils, tar, and
@@ -103,6 +103,34 @@ build procedure, not a claim of bit-for-bit reproducible archives across SDK upd
 
 ## Development media verification
 
+### Prepared 0.3.1 packages
+
+Both bundles use optimized, stripped release binaries built inside GNOME SDK50
+with locked/offline dependencies and private media tools from source checkpoint
+`4e59a5d7394155869d26fb983c5d1fbe8dcfc7a4`. dist/build-info.json records that source,
+an empty Rust packaging diff, SDK/runtime identities, icon hashes and checksums.
+The AppImage is 117729784 bytes and requires glibc2.39; Flatpak is 62528352 bytes.
+The pinned media recipe verifies bundled executables and corresponding sources.
+
+Current verification under target/validation/release-0.3.1/ exercises the actual
+AppImage and an isolated Flatpak installation. Both CLIs report0.3.1; their
+immutable PNG/SVG outputs and current source-mapping project renders match byte
+for byte. Two supplied video frames survive FFV1 encoding/decoding exactly and
+AV1 export succeeds with host FFmpeg/ffprobe names masked. Native raster output,
+SVG inspection and mapped project output were visually inspected without flattening.
+Extracted AppImage icons match tracked exports; the executable is stripped.
+
+Private GTK runs ui-run-20260912-235710-234531 and
+ui-run-20260912-235807-235509 verify AppImage preview/keyboard Feature size editing
+and Flatpak preview/channel selection. Screenshots were inspected; no GTK critical
+or Rust panic occurred. The AppImage wrapper logs expected termination at restart.
+Flatpak numeric keyboard automation could not verify focus and is not a successful
+edit witness. Temporary private-bus/file permissions apply only to the harness;
+shipping permissions are unchanged. The private session is stopped. Checksums pass.
+These are automated Sway checks, not new GNOME/Mutter or portal acceptance.
+
+### Earlier 0.3.0 media verification
+
 Both locally built 0.3.0 packages pass the media checks recorded in
 `target/validation/stage22-packaged-media/1788671372198098377/`. The actual AppImage
 and an isolated test-installation Flatpak render identical native 1024×1024 PNG
@@ -117,7 +145,7 @@ tools fails without publishing output. Media dependency logs contain only SDK
 system/compression libraries. No host codec extension is copied into the bundles.
 The test Flatpak adds scoped file access for CLI fixtures; production permissions
 are unchanged. Desktop portal-grant persistence and GNOME/Mutter behavior remain
-separate acceptance checks. These local artifacts are unreleased.
+separate acceptance checks. Those 0.3.0 artifacts were subsequently published.
 
 ## Verification for the published 0.2.0 build
 

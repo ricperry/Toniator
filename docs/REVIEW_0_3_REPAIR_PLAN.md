@@ -221,4 +221,6 @@ checks pass. See `.codex-work/evidence/review-0.3-gate3-source-consumers.md` for
 commands, controls, harness corrections and verification limits. The user
 explicitly accepts this remaining Gate 3 work on 2026-09-12. All three gates
 are accepted awaiting checkpoint; the 0.3.1 implementation/version-update goal
-is fulfilled. No checkpoint, package, push or publication is performed.
+is fulfilled. The subsequent release-preparation request creates source checkpoint
+`4e59a5d` and verified optimized AppImage/Flatpak packages. No push or publication
+is performed during preparation; packaging/README.md records the artifact checks.
