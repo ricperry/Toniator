@@ -1,15 +1,15 @@
 use std::collections::HashSet;
 
 use toniator_domain::{
-    ANIMATABLE_SCALAR_FIELD_IDS, ArtworkWeightResponse, CanvasSpec, ChannelId, ChannelPaint,
-    ChannelTopology, ChannelTopologyTemplate, ColorEndMode, ColorValue, CoveragePolicy, Document,
-    DocumentCommand, DocumentConfiguration, DocumentHistory, DocumentSession, Easing, FrameRange,
-    FrameRate, HalftoneChannelModel, InvalidationLevel, PROPERTY_FIELD_IDS, PatternDefinition,
+    ANIMATABLE_SCALAR_FIELD_IDS, CanvasSpec, ChannelId, ChannelPaint, ChannelTopology,
+    ChannelTopologyTemplate, ColorEndMode, ColorValue, CoveragePolicy, Document, DocumentCommand,
+    DocumentConfiguration, DocumentHistory, DocumentSession, Easing, FrameRange, FrameRate,
+    HalftoneChannelModel, InvalidationLevel, PROPERTY_FIELD_IDS, PatternDefinition,
     PatternDefinitionBundle, PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
     PatternOutputSettings, ProjectTiming, PropertyFieldId, PropertyTarget, RandomSiteCharacter,
-    RationalTime, SiteDensityModulation, SiteExclusionPolicy, SourceMapping,
-    SourceMappingComponent, SourceReference, TemporalCapability, TemporalEndOverride,
-    TemporalEndpointEdit, TimeRange, TranslationEditedAxis, temporal_capability,
+    RationalTime, SiteDensityModulation, SiteExclusionPolicy, SourceReference, TemporalCapability,
+    TemporalEndOverride, TemporalEndpointEdit, TimeRange, TranslationEditedAxis,
+    temporal_capability,
 };
 
 /// Builds current mark, guide-path and region documents covering every scalar capability.
@@ -188,6 +188,11 @@ fn every_scalar_field_materializes_all_easings_through_active_descriptors() {
             CurveResponseBias => -0.5,
             ModeledMappingGain => 0.3,
             ModeledMappingBias => -0.2,
+            ModeledMappingBlackPoint => 0.2,
+            ModeledMappingWhitePoint => 0.8,
+            ModeledMappingGamma => 1.8,
+            ModeledMappingContrast => 1.3,
+            ModeledMappingCutoff => 0.25,
             ColorRed | ColorGreen | ColorBlue | ColorAlpha => 0.35,
             Opacity => 0.25,
             _ => panic!("new scalar needs an explicit witness"),
@@ -302,7 +307,7 @@ fn reverse_id_multi_output_document() -> Document {
     with_bundles(&base, vec![bundle])
 }
 
-/// Builds one random-site document where artwork weighting owns placement coordinates.
+/// Builds a weighted recipe whose receiving channels supply canonical independent weighting.
 fn artwork_weighted_document() -> Document {
     let base = document();
     let definition = PatternDefinition::random_sites(
@@ -315,11 +320,7 @@ fn artwork_weighted_document() -> Document {
         PatternOutputLayerId(1),
         RandomSiteCharacter::RawUniform,
         19,
-        SiteDensityModulation::ArtworkWeighted {
-            mapping: SourceMapping::canonical(SourceMappingComponent::Luminance),
-            strength: 0.8,
-            response: ArtworkWeightResponse::Smoothstep,
-        },
+        SiteDensityModulation::ArtworkWeighted,
         SiteExclusionPolicy::None,
         20_000,
         20_000,
@@ -464,14 +465,14 @@ fn descriptors_expose_exact_temporal_inventory_and_positive_aspect() {
             );
         }
     }
-    assert_eq!(ANIMATABLE_SCALAR_FIELD_IDS.len(), 20);
+    assert_eq!(ANIMATABLE_SCALAR_FIELD_IDS.len(), 25);
     assert_eq!(
         ANIMATABLE_SCALAR_FIELD_IDS
             .iter()
             .copied()
             .collect::<HashSet<_>>()
             .len(),
-        20
+        25
     );
     for field in PROPERTY_FIELD_IDS {
         let target = match field {
@@ -483,6 +484,11 @@ fn descriptors_expose_exact_temporal_inventory_and_positive_aspect() {
             | PropertyFieldId::TranslationY
             | PropertyFieldId::ModeledMappingGain
             | PropertyFieldId::ModeledMappingBias
+            | PropertyFieldId::ModeledMappingBlackPoint
+            | PropertyFieldId::ModeledMappingWhitePoint
+            | PropertyFieldId::ModeledMappingGamma
+            | PropertyFieldId::ModeledMappingContrast
+            | PropertyFieldId::ModeledMappingCutoff
             | PropertyFieldId::ColorRed
             | PropertyFieldId::ColorGreen
             | PropertyFieldId::ColorBlue
@@ -810,19 +816,46 @@ fn reversed_multi_output_edits_preserve_structural_delta_order() {
     );
 }
 
-/// Proves artwork-weighted placement rejects channel rotation End authority.
+/// Preserves artwork-weighted rotation through Start/End authority and atomic history.
+///
+/// # Panics
+/// Panics when weighted rotation is hidden, rejected, zeroed, or loses endpoint/history state.
 #[test]
-fn artwork_weighted_channel_rotation_is_temporally_inapplicable() {
-    let document = artwork_weighted_document();
-    let failure = document
+fn gate3_artwork_weighted_rotation_is_temporally_applicable() {
+    let mut history = timed_document_history(artwork_weighted_document(), 3);
+    let command = history
+        .document()
+        .set_channel_pattern_rotation_for_effective(ChannelId(1), 15.0)
+        .unwrap();
+    history.apply(&command).unwrap();
+    let start = history.document().clone();
+    let command = history
+        .document()
         .edit_effective_end_command(&[TemporalEndpointEdit {
             target: PropertyTarget::Channel(ChannelId(1)),
             field: PropertyFieldId::RotationDegrees,
             effective_end: 45.0,
             easing: Easing::Linear,
         }])
-        .expect_err("artwork-weighted channel rotation stays inactive");
-    assert_eq!(failure.path(), "temporal.descriptor");
+        .expect("artwork-weighted rotation is an active endpoint control");
+    history.apply_temporal(&command).unwrap();
+    for (frame, degrees) in [(0, 15.0), (1, 30.0), (2, 45.0)] {
+        assert_eq!(
+            history
+                .document()
+                .materialize_frame(frame)
+                .unwrap()
+                .effective_channel_pattern(ChannelId(1))
+                .unwrap()
+                .pattern_rotation_degrees,
+            degrees
+        );
+    }
+    let end = history.document().clone();
+    history.undo().unwrap();
+    assert_eq!(history.document(), &start);
+    history.redo().unwrap();
+    assert_eq!(history.document(), &end);
 }
 
 /// Proves interpolation remains finite across opposite-sign extreme endpoints.

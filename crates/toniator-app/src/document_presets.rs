@@ -224,7 +224,8 @@ pub(crate) fn sync_controls(state: &mut AppState) {
             &state.actions.close,
             &state.actions.save,
             &state.actions.save_as,
-            &state.actions.export,
+            &state.actions.export_image,
+            &state.actions.export_video,
         ] {
             action.set_enabled(false);
         }
@@ -601,6 +602,7 @@ fn confirm_load(
                 Ok(changed) => {
                     finish(&state, id);
                     if changed {
+                        state.borrow_mut().scatter_memory = crate::scatter_memory::Memory::default();
                         state.borrow_mut().inspector_runtime.reset_for_workspace();
                         state.borrow_mut().inspector_runtime.target = InspectorTarget::DocumentAll;
                         refresh_configuration(&state);

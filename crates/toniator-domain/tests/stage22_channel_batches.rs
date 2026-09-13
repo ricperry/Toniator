@@ -1,5 +1,72 @@
 use toniator_domain::*;
 
+/// Keeps an explicitly assigned equal End alpha independent of Start while hue owns only RGB.
+///
+/// # Panics
+/// Panics if hue ownership swallows Alpha initialization or changes the hue transition.
+#[test]
+fn equal_all_end_alpha_initializes_beside_hue_rotation() {
+    let mut history = history(HalftoneChannelModel::Rgb);
+    let command = history
+        .document()
+        .edit_color_animation_command(&[ColorAnimationEdit {
+            channel_id: ChannelId(1),
+            mode: Some(ColorEndMode::HueRotation { end_degrees: 180.0 }),
+            easing: Easing::SmoothStep,
+        }])
+        .unwrap();
+    history.apply_temporal(&command).unwrap();
+    let command = history
+        .document()
+        .edit_all_channel_end_command(&[(PropertyFieldId::ColorAlpha, 1.0)])
+        .unwrap();
+    history.apply_temporal(&command).unwrap();
+    start_batch(&mut history, &[(PropertyFieldId::ColorAlpha, 0.3)]);
+    assert_eq!(
+        history
+            .document()
+            .materialize_frame(2)
+            .unwrap()
+            .solid_paint(ChannelId(1))
+            .unwrap()
+            .alpha,
+        1.0
+    );
+    assert!(history.document().temporal_end_overrides().iter().any(|entry| matches!(entry, TemporalEndOverride::Color(value) if value.channel_id == ChannelId(1) && value.mode == ColorEndMode::HueRotation { end_degrees: 180.0 } && value.easing == Easing::SmoothStep)));
+}
+
+/// Initializes an equal-valued channel when an explicit ALL End assignment follows a partial reset.
+///
+/// # Panics
+/// Panics if a later Start edit leaks into the explicitly assigned End value.
+#[test]
+fn all_end_assignment_initializes_equal_valued_missing_targets() {
+    let mut history = history(HalftoneChannelModel::Rgb);
+    let command = history.document().initialize_end_command().unwrap();
+    history.apply_temporal(&command).unwrap();
+    let overrides = history.document().temporal_end_overrides().iter().filter(|entry| {
+        !matches!(entry, TemporalEndOverride::Scalar(value) if value.target == PropertyTarget::Channel(ChannelId(1)) && value.field == PropertyFieldId::RotationDegrees)
+    }).cloned().collect();
+    let command = history
+        .document()
+        .replace_temporal_authority_command(history.document().project_timing().clone(), overrides);
+    history.apply_temporal(&command).unwrap();
+    let command = history
+        .document()
+        .edit_all_channel_end_command(&[(PropertyFieldId::RotationDegrees, 0.0)])
+        .unwrap();
+    history.apply_temporal(&command).unwrap();
+    start_batch(&mut history, &[(PropertyFieldId::RotationDegrees, 20.0)]);
+    let end = history.document().materialize_frame(2).unwrap();
+    assert!(
+        end.channel_scalar_batch(PropertyFieldId::RotationDegrees)
+            .unwrap()
+            .values
+            .iter()
+            .all(|value| value.value == 0.0)
+    );
+}
+
 /// Creates a three-frame RGB or CMYK history with canonical channels and no media dependency.
 ///
 /// # Panics
@@ -60,12 +127,12 @@ fn near(left: f64, right: f64) {
     assert!((left - right).abs() < 1e-12, "{left} != {right}");
 }
 
-/// Verifies coupled Start batches preserve channel offsets, End values and one exact undo boundary.
+/// Verifies absolute coupled Start batches preserve End values and one exact undo boundary.
 ///
 /// # Panics
 /// Panics if a partial range publishes, a compatible channel is lost or history loses exact state.
 #[test]
-fn coupled_start_batches_keep_individual_values_and_initialized_end() {
+fn coupled_start_batches_equalize_values_and_keep_initialized_end() {
     let mut history = history(HalftoneChannelModel::Rgb);
     for channel in [ChannelId(1), ChannelId(2), ChannelId(3)] {
         let command = history
@@ -103,15 +170,14 @@ fn coupled_start_batches_keep_individual_values_and_initialized_end() {
             (PropertyFieldId::MarkMaximumFill, 1.7),
         ],
     );
-    for (index, value) in history
+    for value in history
         .document()
         .channel_scalar_batch(PropertyFieldId::MarkMinimumFill)
         .unwrap()
         .values
         .iter()
-        .enumerate()
     {
-        near(value.value, 1.1 + index as f64 / 10.0);
+        near(value.value, 1.2);
     }
     assert_eq!(
         history.document().pattern_definition_bundles(),
@@ -193,8 +259,8 @@ fn end_batches_skip_incompatible_outputs_and_preserve_interpolation() {
     let values = after
         .channel_scalar_batch(PropertyFieldId::MarkMaximumFill)
         .unwrap();
-    near(values.values[0].value, 0.7);
-    near(values.values[1].value, 0.9);
+    near(values.values[0].value, 0.8);
+    near(values.values[1].value, 0.8);
     assert_eq!(
         after.effective_channel_pattern(ChannelId(1)).unwrap(),
         before
@@ -290,7 +356,7 @@ fn cmyk_alpha_batch_keeps_colors_hue_and_easing() {
             (old.red, old.green, old.blue),
             (new.red, new.green, new.blue)
         );
-        near(new.alpha, old.alpha + 0.1);
+        near(new.alpha, old_alpha.average + 0.1);
     }
     for old in before.temporal_end_overrides() {
         if let TemporalEndOverride::Color(old) = old {
@@ -314,7 +380,7 @@ fn cmyk_alpha_batch_keeps_colors_hue_and_easing() {
     let unchanged = history.document().clone();
     assert!(
         unchanged
-            .edit_all_channel_end_command(&[(PropertyFieldId::ColorAlpha, 1.0)])
+            .edit_all_channel_end_command(&[(PropertyFieldId::ColorAlpha, 1.1)])
             .is_err()
     );
     assert_eq!(history.document(), &unchanged);
@@ -332,7 +398,9 @@ fn cmyk_alpha_batch_keeps_colors_hue_and_easing() {
 /// Panics if an invalid batch is accepted, identity-preserving edits normalize state, or timing changes.
 #[test]
 fn batch_validation_and_noop_preserve_exact_authority() {
-    let history = history(HalftoneChannelModel::Rgb);
+    let mut history = history(HalftoneChannelModel::Rgb);
+    let command = history.document().initialize_end_command().unwrap();
+    history.apply_temporal(&command).unwrap();
     let document = history.document();
     for edits in [
         vec![],
@@ -367,4 +435,120 @@ fn batch_validation_and_noop_preserve_exact_authority() {
             .replacement(),
         &document.temporal_authority()
     );
+}
+
+/// Equalizes mixed RGB/CMYK tone offsets even when the entered value equals their old average.
+/// Start/End isolation and exact Undo/Redo hold through repeated individual and ALL edits.
+///
+/// # Panics
+/// Panics if a batch misses a channel, changes an initialized endpoint or loses history state.
+#[test]
+fn repeated_named_and_all_bias_edits_equalize_each_selected_endpoint() {
+    for model in [HalftoneChannelModel::Rgb, HalftoneChannelModel::Cmyk] {
+        let mut history = history(model);
+        let ids = history
+            .document()
+            .channel_topology()
+            .unwrap()
+            .channels()
+            .iter()
+            .map(|channel| channel.id)
+            .collect::<Vec<_>>();
+        let command = history.document().initialize_end_command().unwrap();
+        history.apply_temporal(&command).unwrap();
+        for round in 0..12 {
+            let id = ids[round % ids.len()];
+            history
+                .apply(&DocumentCommand::SetModeledMappingField {
+                    channel_id: id,
+                    edit: ModeledMappingFieldEdit::Bias(0.1 + round as f64 * 0.01),
+                })
+                .unwrap();
+            let before = history.document().clone();
+            let old_end = before.materialize_frame(2).unwrap();
+            let field = PropertyFieldId::ModeledMappingBias;
+            let desired = before.channel_scalar_batch(field).unwrap().average;
+            start_batch(&mut history, &[(field, desired)]);
+            for value in history
+                .document()
+                .channel_scalar_batch(field)
+                .unwrap()
+                .values
+            {
+                near(value.value, desired);
+            }
+            assert_eq!(history.document().materialize_frame(2).unwrap(), old_end);
+            let after = history.document().clone();
+            history.undo().unwrap().unwrap();
+            assert_eq!(history.document(), &before);
+            history.redo().unwrap().unwrap();
+            assert_eq!(history.document(), &after);
+            let command = history
+                .document()
+                .edit_effective_end_command(&[TemporalEndpointEdit {
+                    target: PropertyTarget::Channel(id),
+                    field,
+                    effective_end: -0.2,
+                    easing: Easing::SmoothStep,
+                }])
+                .unwrap();
+            history.apply_temporal(&command).unwrap();
+            let before_start = history.document().materialize_frame(0).unwrap();
+            let desired_end = history
+                .document()
+                .materialize_frame(2)
+                .unwrap()
+                .channel_scalar_batch(field)
+                .unwrap()
+                .average;
+            let command = history
+                .document()
+                .edit_all_channel_end_command(&[(field, desired_end)])
+                .unwrap();
+            history.apply_temporal(&command).unwrap();
+            for value in history
+                .document()
+                .materialize_frame(2)
+                .unwrap()
+                .channel_scalar_batch(field)
+                .unwrap()
+                .values
+            {
+                near(value.value, desired_end);
+            }
+            assert_eq!(
+                history.document().materialize_frame(0).unwrap(),
+                before_start
+            );
+        }
+    }
+}
+
+/// Assigns effective layout values without confusing persisted channel deltas with absolutes.
+///
+/// # Panics
+/// Panics if the ALL assignment changes initialized End values or leaves unequal Start values.
+#[test]
+fn all_layout_assignments_equalize_effective_values_and_keep_end() {
+    let mut history = history(HalftoneChannelModel::Rgb);
+    for channel_id in [ChannelId(1), ChannelId(2), ChannelId(3)] {
+        let command = history
+            .document()
+            .set_channel_pattern_rotation_for_effective(channel_id, channel_id.0 as f64 * 10.0)
+            .unwrap();
+        history.apply(&command).unwrap();
+    }
+    let command = history.document().initialize_end_command().unwrap();
+    history.apply_temporal(&command).unwrap();
+    let old_end = history.document().materialize_frame(2).unwrap();
+    start_batch(&mut history, &[(PropertyFieldId::RotationDegrees, 20.0)]);
+    for value in history
+        .document()
+        .channel_scalar_batch(PropertyFieldId::RotationDegrees)
+        .unwrap()
+        .values
+    {
+        near(value.value, 20.0);
+    }
+    assert_eq!(history.document().materialize_frame(2).unwrap(), old_end);
 }

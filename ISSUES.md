@@ -74,6 +74,30 @@ an entry does not authorize a later stage or change an accepted contract.
   each dismiss after one Discard changes confirmation. Semantic absence, screenshots
   and logs are in the 140256 and 141335 private GTK runs listed above.
 
+## TON-008 — CMYK channel rotation plus offset can hang
+
+- Status: Resolved; user confirmed the rebuilt numeric-edit fix works on 2026-09-12.
+- Report (2026-09-12): Applying rotation and an offset to one CMYK channel
+  repeatedly reports `gtk_widget_get_parent: assertion 'GTK_IS_WIDGET (widget)' failed`
+  and hangs; the shell subsequently reports the process killed. Source is
+  `assets/vector-sample.svg`, default pattern, Feature size 0.25. Prior RGB:
+  R rotation30/X4.5, G rotation60/Y4.5, B neutral. CMYK: C X4.25/rotation22.5,
+  M Y4.25, Y X3.18/Y3.18, K neutral. Intended M45/Y67.5 rotations were never
+  entered because of the stall. A later CMYK-first/RGB-second attempt worked.
+- Current evidence: The release completes grid transforms in CMYK for raster
+  Cyan (23 degrees, X 7.25) and SVG Black (23 degrees, X 7.25, Y -4.5).
+  Private GTK screenshots/readbacks show updated previews. A separate focus
+  automation attempt emitted a different `gtk_root_get_focus` warning; no
+  matching hang or stack trace is established. No matching OOM journal entry.
+- Fix: Accepted numeric/reset/End edits defer inspector hierarchy replacement
+  to the existing idle queue. A native GTK regression proves the old code
+  detached selector children during entry activation; the fix preserves them
+  until the callback unwinds while publishing history immediately. The original
+  intermittent hang is not established as solely caused by this defect.
+- Acceptance: After being asked to retry the rebuilt release with RGB first,
+  then CMYK, the user confirmed: “Okay that work is good now.” See
+  `.codex-work/evidence/review-0.3-cmyk-transform-investigation.md`.
+
 ## TON-001 — Intermittent RGB edit to CMYK crash
 
 - Status: Open; deferred pending a reliable reproducer and separate authorization.

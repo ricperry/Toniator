@@ -62,7 +62,7 @@ def main():
     if hashlib.sha256(tool.read_bytes()).hexdigest() != TOOL_SHA256:
         raise SystemExit('appimagetool checksum mismatch.')
     tool.chmod(0o755)
-    destination = DIST / 'Toniator-0.3.0-x86_64.AppImage'
+    destination = DIST / 'Toniator-0.3.1-x86_64.AppImage'
     temporary = DIST / ('.Toniator-' + str(time.time_ns()) + '.AppImage')
     environment = dict(os.environ, ARCH='x86_64', APPIMAGE_EXTRACT_AND_RUN='1')
     run(tool, '--no-appstream', appdir, temporary, env=environment)

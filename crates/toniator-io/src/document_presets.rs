@@ -18,7 +18,7 @@ use toniator_domain::{Document, DocumentConfiguration};
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 use super::{
-    DOCUMENT_PRESET_FORMAT_VERSION, DOCUMENT_SCHEMA_VERSION, DocumentConfigurationDtoV8, LoadError,
+    DOCUMENT_PRESET_FORMAT_VERSION, DOCUMENT_SCHEMA_VERSION, DocumentConfigurationDtoV9, LoadError,
     MAX_ARCHIVE_BYTES, MAX_DOCUMENT_BYTES, SaveError, declared_zip_entry_count,
     ensure_supported_file_compression, load_opened, read_limited, safe_archive_name,
 };
@@ -133,7 +133,7 @@ struct DocumentPresetEnvelopeDto {
     kind: String,
     document_preset_format_version: u32,
     document_schema_version: u32,
-    configuration: DocumentConfigurationDtoV8,
+    configuration: DocumentConfigurationDtoV9,
 }
 
 /// Minimal dispatch metadata parsed before the configuration schema is decoded.
@@ -230,7 +230,7 @@ pub fn save_document_preset(
         kind: "document_preset".into(),
         document_preset_format_version: DOCUMENT_PRESET_FORMAT_VERSION,
         document_schema_version: DOCUMENT_SCHEMA_VERSION,
-        configuration: DocumentConfigurationDtoV8::from_configuration(configuration)
+        configuration: DocumentConfigurationDtoV9::from_configuration(configuration)
             .map_err(map_save_error)?,
     };
     let mut json = serde_json::to_vec(&envelope).map_err(|error| DocumentPresetError::Json {

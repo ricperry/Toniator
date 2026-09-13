@@ -11,7 +11,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+mod channel_defaults;
 mod color_authoring;
+mod pattern_batches;
+pub use pattern_batches::PatternRecipeEdit;
 mod temporal;
 
 pub use color_authoring::*;
@@ -44,6 +47,290 @@ pub struct AuthoredStructureId(pub u64);
 pub struct AuthoredPoint2 {
     pub x: f64,
     pub y: f64,
+}
+
+#[cfg(test)]
+mod source_weighting_default_tests {
+    use super::*;
+
+    /// Builds a valid RGB document whose recipe consumes channel-owned source weighting.
+    fn weighted_document() -> Document {
+        let mut document = Document::new_default_document(
+            CanvasSpec {
+                width: 64.0,
+                height: 64.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .unwrap();
+        let definition = PatternDefinition::random_sites(
+            PatternDefinitionId(20),
+            "weighted",
+            PatternMechanismId(21),
+            PatternMechanismId(22),
+            PatternMechanismId(23),
+            PatternMechanismId(24),
+            PatternOutputLayerId(25),
+            RandomSiteCharacter::RawUniform,
+            7,
+            SiteDensityModulation::ArtworkWeighted,
+            SiteExclusionPolicy::None,
+            10_000,
+            10_000,
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        document.pattern_definition_bundles = vec![PatternDefinitionBundle {
+            definition,
+            output_settings: vec![PatternOutputSettings {
+                output_layer_id: PatternOutputLayerId(25),
+                response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                    minimum_fill: 0.0,
+                    maximum_fill: 1.0,
+                }),
+            }],
+        }];
+        document.pattern_settings.definition_id = PatternDefinitionId(20);
+        document.validate().unwrap();
+        document
+    }
+
+    /// Proves canonical weighting selects the source component paired with every modeled role.
+    #[test]
+    fn default_source_matches_each_channel_role() {
+        for (_role, component) in [
+            (HalftoneChannelRole::Red, SourceMappingComponent::Red),
+            (HalftoneChannelRole::Green, SourceMappingComponent::Green),
+            (HalftoneChannelRole::Blue, SourceMappingComponent::Blue),
+            (HalftoneChannelRole::Cyan, SourceMappingComponent::Cyan),
+            (
+                HalftoneChannelRole::Magenta,
+                SourceMappingComponent::Magenta,
+            ),
+            (HalftoneChannelRole::Yellow, SourceMappingComponent::Yellow),
+            (HalftoneChannelRole::Black, SourceMappingComponent::Black),
+            (
+                HalftoneChannelRole::SourceColor,
+                SourceMappingComponent::Alpha,
+            ),
+        ] {
+            assert_eq!(
+                SourceWeighting::canonical(component).mapping.component,
+                component
+            );
+        }
+    }
+
+    /// Proves channel-owned weighting retains its independent source transform.
+    #[test]
+    fn explicit_source_preserves_component_and_transform() {
+        let weighting = SourceWeighting {
+            mapping: SourceMapping {
+                component: SourceMappingComponent::Magenta,
+                placement: SourcePlacement::StretchToCanvas,
+                inverted: true,
+                gain: 0.45,
+                bias: -0.2,
+                tone: SourceTone::identity(),
+            },
+            strength: 0.8,
+            response: ArtworkWeightResponse::Linear,
+        };
+        assert_eq!(
+            weighting.mapping,
+            SourceMapping {
+                component: SourceMappingComponent::Magenta,
+                placement: SourcePlacement::StretchToCanvas,
+                inverted: true,
+                gain: 0.45,
+                bias: -0.2,
+                tone: SourceTone::identity(),
+            }
+        );
+    }
+
+    /// Proves weighting and fill mappings remain separate consumers with exact invalidation.
+    #[test]
+    fn weighting_and_fill_commands_are_independent_consumers() {
+        let document = weighted_document();
+        let fill_before = document.modeled_channel(ChannelId(3)).unwrap().mapping;
+        let (weighted, weight_result) = document
+            .apply_command(&DocumentCommand::SetSourceWeightingField {
+                channel_id: ChannelId(3),
+                edit: SourceWeightingFieldEdit::Component(SourceMappingComponent::Green),
+            })
+            .unwrap();
+        assert_eq!(weight_result.invalidation, Some(InvalidationLevel::Family));
+        assert_eq!(
+            weighted.modeled_channel(ChannelId(3)).unwrap().mapping,
+            fill_before
+        );
+        let weighting_before = weighted.channel_weighting(ChannelId(3)).unwrap();
+        let (filled, fill_result) = weighted
+            .apply_command(&DocumentCommand::SetModeledMappingField {
+                channel_id: ChannelId(3),
+                edit: ModeledMappingFieldEdit::Component(SourceMappingComponent::Red),
+            })
+            .unwrap();
+        assert_eq!(
+            fill_result.invalidation,
+            Some(InvalidationLevel::Realization)
+        );
+        assert_eq!(
+            filled.channel_weighting(ChannelId(3)),
+            Some(weighting_before)
+        );
+        assert_eq!(
+            filled
+                .modeled_channel(ChannelId(3))
+                .unwrap()
+                .mapping
+                .component,
+            SourceMappingComponent::Red
+        );
+    }
+
+    /// Proves inactive weighting edits are retained without scheduling family work.
+    #[test]
+    fn inactive_weighting_is_stored_without_family_invalidation() {
+        let document = Document::new_default_document(
+            CanvasSpec {
+                width: 64.0,
+                height: 64.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .unwrap();
+        let (edited, result) = document
+            .apply_command(&DocumentCommand::SetSourceWeightingField {
+                channel_id: ChannelId(2),
+                edit: SourceWeightingFieldEdit::Component(SourceMappingComponent::Red),
+            })
+            .unwrap();
+        assert_eq!(result.invalidation, None);
+        assert_eq!(
+            edited
+                .channel_weighting(ChannelId(2))
+                .unwrap()
+                .mapping
+                .component,
+            SourceMappingComponent::Red
+        );
+    }
+
+    /// Proves source levels, gamma, centered contrast, and identity controls follow the Gate 2 order.
+    #[test]
+    fn source_tone_transform_obeys_staged_order_and_identity() {
+        let identity = SourceTone::identity();
+        assert_eq!(identity.transform(0.37), 0.37);
+        let tone = SourceTone {
+            black_point: 0.25,
+            white_point: 0.75,
+            gamma: 2.0,
+            contrast: 2.0,
+            cutoff: 0.2,
+        };
+        let gamma_value = 0.5_f64.sqrt();
+        let expected = (0.5 + (gamma_value - 0.5) * 2.0).clamp(0.0, 1.0);
+        assert!((tone.transform(0.5) - expected).abs() < 1.0e-12);
+        assert!(tone.suppresses(0.199_999));
+        assert!(!tone.suppresses(0.2));
+        assert!(!SourceTone::identity().suppresses(0.0));
+    }
+
+    /// Proves unordered levels are rejected before a concrete source transform can publish.
+    #[test]
+    fn source_tone_validation_requires_strict_level_order() {
+        let error = SourceTone {
+            black_point: 0.6,
+            white_point: 0.6,
+            ..SourceTone::identity()
+        }
+        .validate()
+        .expect_err("equal levels violate the strict source-response contract");
+        assert_eq!(error.path(), "source_mapping.tone.levels");
+    }
+
+    /// Accepts differently eased ordered levels and rejects genuine crossings between endpoints.
+    ///
+    /// # Panics
+    /// Panics if a valid easing pair is rejected or an interior crossing can publish.
+    #[test]
+    fn temporal_levels_validate_differing_easing_without_sampling() {
+        let document = Document::new_default_document(
+            CanvasSpec {
+                width: 10.0,
+                height: 10.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .expect("default modeled document validates");
+        let (document, _) = document
+            .apply_command(&DocumentCommand::SetModeledMappingField {
+                channel_id: ChannelId(1),
+                edit: ModeledMappingFieldEdit::BlackPoint(0.2),
+            })
+            .expect("black Start level applies");
+        let (document, _) = document
+            .apply_command(&DocumentCommand::SetModeledMappingField {
+                channel_id: ChannelId(1),
+                edit: ModeledMappingFieldEdit::WhitePoint(0.4),
+            })
+            .expect("white Start level applies");
+        let valid = document
+            .edit_effective_end_command(&[
+                TemporalEndpointEdit {
+                    target: PropertyTarget::Channel(ChannelId(1)),
+                    field: PropertyFieldId::ModeledMappingBlackPoint,
+                    effective_end: 0.3,
+                    easing: Easing::QuadraticIn,
+                },
+                TemporalEndpointEdit {
+                    target: PropertyTarget::Channel(ChannelId(1)),
+                    field: PropertyFieldId::ModeledMappingWhitePoint,
+                    effective_end: 0.8,
+                    easing: Easing::QuadraticOut,
+                },
+            ])
+            .expect("disjoint differently eased level ranges remain ordered");
+        assert_eq!(valid.replacement().end_overrides.len(), 2);
+
+        document
+            .edit_effective_end_command(&[
+                TemporalEndpointEdit {
+                    target: PropertyTarget::Channel(ChannelId(1)),
+                    field: PropertyFieldId::ModeledMappingBlackPoint,
+                    effective_end: 0.45,
+                    easing: Easing::QuadraticIn,
+                },
+                TemporalEndpointEdit {
+                    target: PropertyTarget::Channel(ChannelId(1)),
+                    field: PropertyFieldId::ModeledMappingWhitePoint,
+                    effective_end: 0.5,
+                    easing: Easing::QuadraticOut,
+                },
+            ])
+            .expect("overlapping ranges remain valid when their actual curves are ordered");
+        let error = document
+            .edit_effective_end_command(&[
+                TemporalEndpointEdit {
+                    target: PropertyTarget::Channel(ChannelId(1)),
+                    field: PropertyFieldId::ModeledMappingBlackPoint,
+                    effective_end: 0.8,
+                    easing: Easing::QuadraticOut,
+                },
+                TemporalEndpointEdit {
+                    target: PropertyTarget::Channel(ChannelId(1)),
+                    field: PropertyFieldId::ModeledMappingWhitePoint,
+                    effective_end: 0.9,
+                    easing: Easing::QuadraticIn,
+                },
+            ])
+            .expect_err("ordered endpoints do not permit crossing interior levels");
+        assert_eq!(error.path(), "temporal.mapping.levels");
+    }
 }
 
 /// One explicit construction segment in an authored open path or closed shape.
@@ -3741,6 +4028,88 @@ pub enum SourceMappingComponent {
     Luminance,
 }
 
+/// Source-response controls applied to one concrete sampled source component.
+///
+/// Levels, gamma, centered contrast, and cutoff belong to concrete source
+/// mapping state. The identity values preserve the historical mapping
+/// response, while `gain` and `bias` remain the separate normative transform
+/// owned by [`SourceMapping`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SourceTone {
+    pub black_point: f64,
+    pub white_point: f64,
+    pub gamma: f64,
+    pub contrast: f64,
+    pub cutoff: f64,
+}
+
+impl SourceTone {
+    /// Returns the identity source-response controls required by the current schema.
+    pub const fn identity() -> Self {
+        Self {
+            black_point: 0.0,
+            white_point: 1.0,
+            gamma: 1.0,
+            contrast: 1.0,
+            cutoff: 0.0,
+        }
+    }
+
+    /// Validates levels, response scalars, and the disabled-or-normalized cutoff contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable validation diagnostic when a level or cutoff is outside
+    /// `[0, 1]`, black is not strictly below white, or gamma/contrast is invalid.
+    pub fn validate(self) -> Result<(), ValidationError> {
+        validate_unit_component(self.black_point, "source_mapping.tone.black_point")?;
+        validate_unit_component(self.white_point, "source_mapping.tone.white_point")?;
+        if self.black_point >= self.white_point {
+            return Err(ValidationError::new(
+                "source_mapping.tone.levels",
+                "black point must be strictly below white point",
+            ));
+        }
+        if !self.gamma.is_finite() || self.gamma <= 0.0 {
+            return Err(ValidationError::new(
+                "source_mapping.tone.gamma",
+                "gamma must be finite and positive",
+            ));
+        }
+        if !self.contrast.is_finite() || self.contrast < 0.0 {
+            return Err(ValidationError::new(
+                "source_mapping.tone.contrast",
+                "contrast must be finite and nonnegative",
+            ));
+        }
+        validate_unit_component(self.cutoff, "source_mapping.tone.cutoff")
+    }
+
+    /// Applies level normalization, gamma, and centered contrast before the
+    /// existing mapping gain and bias are applied by [`SourceMapping`].
+    pub fn transform(self, value: f64) -> f64 {
+        let normalized =
+            ((value - self.black_point) / (self.white_point - self.black_point)).clamp(0.0, 1.0);
+        let gamma = normalized.powf(1.0 / self.gamma);
+        (0.5 + (gamma - 0.5) * self.contrast).clamp(0.0, 1.0)
+    }
+
+    /// Reports whether a final sampled response is below the enabled cutoff.
+    ///
+    /// Cutoff is intentionally evaluated after sampling and the complete
+    /// source response transform. A zero cutoff is the explicit disabled state.
+    pub fn suppresses(self, response: f64) -> bool {
+        self.cutoff > 0.0 && response < self.cutoff
+    }
+}
+
+impl Default for SourceTone {
+    /// Supplies the identity source-response controls.
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
 /// Complete source-mapping state used by a modeled topology.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SourceMapping {
@@ -3749,7 +4118,9 @@ pub struct SourceMapping {
     pub inverted: bool,
     pub gain: f64,
     pub bias: f64,
+    pub tone: SourceTone,
 }
+/// One editable modeled source-mapping field.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ModeledMappingFieldEdit {
     Component(SourceMappingComponent),
@@ -3757,6 +4128,11 @@ pub enum ModeledMappingFieldEdit {
     Inverted(bool),
     Gain(f64),
     Bias(f64),
+    BlackPoint(f64),
+    WhitePoint(f64),
+    Gamma(f64),
+    Contrast(f64),
+    Cutoff(f64),
 }
 
 impl SourceMapping {
@@ -3768,15 +4144,57 @@ impl SourceMapping {
             inverted: false,
             gain: 1.0,
             bias: 0.0,
+            tone: SourceTone::identity(),
         }
     }
 
-    /// Applies the authoritative Stage 9 transform. Source-field evaluation is
-    /// intentionally not part of this domain-only slice.
+    /// Applies inversion, source-response controls, and the normative gain/bias transform.
     pub fn transform(self, value: f64) -> f64 {
         let value = if self.inverted { 1.0 - value } else { value };
+        let value = self.tone.transform(value);
         (self.gain * value + self.bias).clamp(0.0, 1.0)
     }
+
+    /// Reports whether a fully transformed sampled response is suppressed by this mapping.
+    pub fn suppresses(self, response: f64) -> bool {
+        self.tone.suppresses(response)
+    }
+}
+
+/// Independent channel-owned source response consumed by artwork-weighted site placement.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SourceWeighting {
+    pub mapping: SourceMapping,
+    pub strength: f64,
+    pub response: ArtworkWeightResponse,
+}
+
+impl SourceWeighting {
+    /// Builds matching-component identity weighting for one concrete channel component.
+    pub const fn canonical(component: SourceMappingComponent) -> Self {
+        Self {
+            mapping: SourceMapping::canonical(component),
+            strength: 1.0,
+            response: ArtworkWeightResponse::Linear,
+        }
+    }
+}
+
+/// One editable field of the channel-owned weighting source and response.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SourceWeightingFieldEdit {
+    Component(SourceMappingComponent),
+    Placement(SourcePlacement),
+    Inverted(bool),
+    Gain(f64),
+    Bias(f64),
+    BlackPoint(f64),
+    WhitePoint(f64),
+    Gamma(f64),
+    Contrast(f64),
+    Cutoff(f64),
+    Strength(f64),
+    Response(ArtworkWeightResponse),
 }
 
 /// Presentation paint for a modeled channel. Sampled source paint is a
@@ -3794,6 +4212,26 @@ pub struct ChannelTopologyTemplate {
     pub pattern_instance: ChannelPatternInstance,
 }
 
+impl ChannelTopologyTemplate {
+    /// Creates new channels that inherit the document's pattern, layout and output response.
+    /// No existing channel override, transform or response delta seeds the new topology.
+    pub fn document_base() -> Self {
+        Self {
+            pattern_instance: ChannelPatternInstance {
+                definition_override: None,
+                layout_delta: ChannelPatternLayoutDelta {
+                    density: None,
+                    rotation_degrees: None,
+                    translation_x: 0.0,
+                    translation_y: 0.0,
+                },
+                shape_rotation_delta_degrees: None,
+                output_response_deltas: Vec::new(),
+            },
+        }
+    }
+}
+
 /// One complete modeled channel in its authoritative ordered topology.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModeledChannelState {
@@ -3801,6 +4239,7 @@ pub struct ModeledChannelState {
     pub id: ChannelId,
     pub pattern_instance: ChannelPatternInstance,
     pub mapping: SourceMapping,
+    pub weighting: SourceWeighting,
     pub paint: ChannelPaint,
     pub visible: bool,
     pub opacity: f64,
@@ -3894,6 +4333,7 @@ impl ModeledChannelState {
             id,
             pattern_instance: template.pattern_instance.clone(),
             mapping,
+            weighting: SourceWeighting::canonical(component),
             paint,
             visible: true,
             opacity: 1.0,
@@ -4007,11 +4447,7 @@ pub enum RandomSiteCharacter {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SiteDensityModulation {
     Uniform,
-    ArtworkWeighted {
-        mapping: SourceMapping,
-        strength: f64,
-        response: ArtworkWeightResponse,
-    },
+    ArtworkWeighted,
 }
 
 /// Typed response applied at the decoder-owned artwork density field boundary.
@@ -4663,6 +5099,7 @@ pub struct ChannelState {
     pub pattern_instance: ChannelPatternInstance,
     pub appearance: ChannelAppearance,
     pub source_mapping: ChannelSourceMapping,
+    pub weighting: SourceWeighting,
 }
 
 /// The sole document model. Its collections are read-only outside this crate.
@@ -5084,26 +5521,11 @@ impl Document {
 
     /// Removes channel-relative deltas that cannot apply to the channel's selected definition.
     ///
-    /// Output-response pruning preserves compatible keyed response intent. Artwork-weighted site
-    /// placement additionally removes a channel rotation delta because its source-coordinate
-    /// authority makes that layout transform incompatible; shared document-base rotation remains
-    /// stored for other channels and later compatible definitions.
+    /// Output-response pruning preserves compatible keyed response intent. All current
+    /// families accept layout transforms, including artwork-weighted placement, so recipe
+    /// changes retain rotation and translation intent.
     fn prune_incompatible_channel_pattern_deltas(&mut self, channel_id: ChannelId) {
-        let definition_id = self
-            .channel_pattern_instance(channel_id)
-            .expect("validated channel exists")
-            .definition_override
-            .unwrap_or(self.pattern_settings.definition_id);
-        let rotation_is_incompatible = self
-            .definition(definition_id)
-            .is_some_and(definition_uses_artwork_weighted_density);
         self.prune_incompatible_output_response_deltas(channel_id);
-        if rotation_is_incompatible {
-            self.channel_pattern_instance_mut(channel_id)
-                .expect("validated channel exists")
-                .layout_delta
-                .rotation_degrees = None;
-        }
     }
 
     /// Removes only deltas made foreign or type-incompatible by a document
@@ -5189,9 +5611,8 @@ impl Document {
     ///
     /// Returns a stable validation error for a missing channel/definition,
     /// non-finite addition, invalid density, incompatible response, or mark
-    /// response bounds; it never mutates the document. Artwork-weighted site
-    /// placement resolves layout rotation to zero while retaining dormant
-    /// stored base/channel rotation intent for later non-weighted recipes.
+    /// response bounds; it never mutates the document. Every family receives the
+    /// authored effective rotation, including artwork-weighted site placement.
     pub fn effective_channel_pattern(
         &self,
         channel_id: ChannelId,
@@ -5224,13 +5645,8 @@ impl Document {
                 + density_delta.map_or(0.0, |value| value.aspect_delta),
         };
         let resolved_density = density.resolve(&self.canvas)?;
-        let stored_pattern_rotation_degrees = self.pattern_settings.pattern_rotation_degrees
+        let pattern_rotation_degrees = self.pattern_settings.pattern_rotation_degrees
             + instance.layout_delta.rotation_degrees.unwrap_or(0.0);
-        let pattern_rotation_degrees = if definition_uses_artwork_weighted_density(definition) {
-            0.0
-        } else {
-            stored_pattern_rotation_degrees
-        };
         let shape_rotation_degrees = self.pattern_settings.shape_rotation_degrees
             + instance.shape_rotation_delta_degrees.unwrap_or(0.0);
         let output_settings =
@@ -5310,13 +5726,8 @@ impl Document {
                     | PatternOutputRealization::MarkPrototype { .. }
             )
         });
-        projection.active_controls = capability_active_controls(
-            self,
-            scope,
-            definition_id,
-            !definition_uses_artwork_weighted_density(&bundle.definition),
-            supports_shape_rotation,
-        );
+        projection.active_controls =
+            capability_active_controls(self, scope, definition_id, true, supports_shape_rotation);
         Ok(projection)
     }
 
@@ -5361,8 +5772,8 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// Returns a stable channel-rotation error when artwork-weighted placement owns site
-    /// coordinates, or a stable finite/channel diagnostic without mutating document authority.
+    /// Returns a stable finite/channel diagnostic without mutating document authority.
+    /// Artwork-weighted families accept the same authored rotations as other families.
     pub fn set_channel_pattern_rotation_for_effective(
         &self,
         channel_id: ChannelId,
@@ -5372,16 +5783,7 @@ impl Document {
             desired_rotation_degrees,
             "channel.pattern.desired_rotation_degrees",
         )?;
-        let definition_id = self.effective_channel_pattern(channel_id)?.definition_id;
-        if self
-            .definition(definition_id)
-            .is_some_and(definition_uses_artwork_weighted_density)
-        {
-            return Err(ValidationError::new(
-                "channel.pattern.rotation",
-                "artwork-weighted placement does not support pattern rotation",
-            ));
-        }
+        self.effective_channel_pattern(channel_id)?;
         Ok(DocumentCommand::SetChannelPatternRotationDelta {
             base: self.pattern_settings.clone(),
             channel_id,
@@ -5917,6 +6319,21 @@ impl Document {
             .find(|channel| channel.id == channel_id)
     }
 
+    /// Returns the channel-owned weighting response without resolving recipe activity.
+    pub fn channel_weighting(&self, channel_id: ChannelId) -> Option<SourceWeighting> {
+        match &self.channel_configuration {
+            ChannelConfiguration::Legacy(channels) => channels
+                .iter()
+                .find(|channel| channel.id == channel_id)
+                .map(|channel| channel.weighting),
+            ChannelConfiguration::Topology { topology, .. } => topology
+                .channels
+                .iter()
+                .find(|channel| channel.id == channel_id)
+                .map(|channel| channel.weighting),
+        }
+    }
+
     /// Returns deterministic schema-derived descriptors from the exhaustive
     /// field contract. Only the three state-dependent capability predicates
     /// supply runtime context; no static metadata is repeated here.
@@ -5946,6 +6363,18 @@ impl Document {
                 PropertyFieldId::Opacity,
                 PropertyFieldId::Visibility,
                 PropertyFieldId::DefinitionSelection,
+                PropertyFieldId::ArtworkWeightMappingComponent,
+                PropertyFieldId::ArtworkWeightMappingPlacement,
+                PropertyFieldId::ArtworkWeightMappingInverted,
+                PropertyFieldId::ArtworkWeightMappingGain,
+                PropertyFieldId::ArtworkWeightMappingBias,
+                PropertyFieldId::ArtworkWeightMappingBlackPoint,
+                PropertyFieldId::ArtworkWeightMappingWhitePoint,
+                PropertyFieldId::ArtworkWeightMappingGamma,
+                PropertyFieldId::ArtworkWeightMappingContrast,
+                PropertyFieldId::ArtworkWeightMappingCutoff,
+                PropertyFieldId::ArtworkWeightStrength,
+                PropertyFieldId::ArtworkWeightResponse,
             ] {
                 descriptors.push(descriptor_from_contract(field, target));
             }
@@ -6001,6 +6430,11 @@ impl Document {
                     PropertyFieldId::ModeledMappingInverted,
                     PropertyFieldId::ModeledMappingGain,
                     PropertyFieldId::ModeledMappingBias,
+                    PropertyFieldId::ModeledMappingBlackPoint,
+                    PropertyFieldId::ModeledMappingWhitePoint,
+                    PropertyFieldId::ModeledMappingGamma,
+                    PropertyFieldId::ModeledMappingContrast,
+                    PropertyFieldId::ModeledMappingCutoff,
                 ] {
                     descriptors.push(descriptor_from_contract(field, target));
                 }
@@ -6199,7 +6633,7 @@ impl Document {
                             DescriptorRuntimeContext::DensityModulation {
                                 dependency: if matches!(
                                     modulation,
-                                    SiteDensityModulation::ArtworkWeighted { .. }
+                                    SiteDensityModulation::ArtworkWeighted
                                 ) {
                                     PropertyDependency::ArtworkWeightedDensity
                                 } else {
@@ -6207,19 +6641,6 @@ impl Document {
                                 },
                             },
                         ));
-                        if matches!(modulation, SiteDensityModulation::ArtworkWeighted { .. }) {
-                            for field in [
-                                PropertyFieldId::ArtworkWeightMappingComponent,
-                                PropertyFieldId::ArtworkWeightMappingPlacement,
-                                PropertyFieldId::ArtworkWeightMappingInverted,
-                                PropertyFieldId::ArtworkWeightMappingGain,
-                                PropertyFieldId::ArtworkWeightMappingBias,
-                                PropertyFieldId::ArtworkWeightStrength,
-                                PropertyFieldId::ArtworkWeightResponse,
-                            ] {
-                                descriptors.push(descriptor_from_contract(field, target));
-                            }
-                        }
                     }
                     PatternMechanism::SiteExclusion { policy, .. } => {
                         let visible =
@@ -6890,6 +7311,81 @@ impl Document {
                     ),
                     PropertyFieldId::ModeledMappingBias => PropertyCurrentValueKind::FiniteF64(
                         channel.mapping().expect("modeled descriptor").bias,
+                    ),
+                    PropertyFieldId::ModeledMappingBlackPoint => {
+                        PropertyCurrentValueKind::FiniteF64(
+                            channel
+                                .mapping()
+                                .expect("modeled descriptor")
+                                .tone
+                                .black_point,
+                        )
+                    }
+                    PropertyFieldId::ModeledMappingWhitePoint => {
+                        PropertyCurrentValueKind::FiniteF64(
+                            channel
+                                .mapping()
+                                .expect("modeled descriptor")
+                                .tone
+                                .white_point,
+                        )
+                    }
+                    PropertyFieldId::ModeledMappingGamma => PropertyCurrentValueKind::FiniteF64(
+                        channel.mapping().expect("modeled descriptor").tone.gamma,
+                    ),
+                    PropertyFieldId::ModeledMappingContrast => PropertyCurrentValueKind::FiniteF64(
+                        channel.mapping().expect("modeled descriptor").tone.contrast,
+                    ),
+                    PropertyFieldId::ModeledMappingCutoff => PropertyCurrentValueKind::FiniteF64(
+                        channel.mapping().expect("modeled descriptor").tone.cutoff,
+                    ),
+                    PropertyFieldId::ArtworkWeightMappingComponent => {
+                        PropertyCurrentValueKind::EnumChoice(
+                            PropertyEnumChoice::SourceMappingComponent(
+                                channel.weighting().mapping.component,
+                            ),
+                        )
+                    }
+                    PropertyFieldId::ArtworkWeightMappingPlacement => {
+                        PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SourcePlacement(
+                            channel.weighting().mapping.placement,
+                        ))
+                    }
+                    PropertyFieldId::ArtworkWeightMappingInverted => {
+                        PropertyCurrentValueKind::Boolean(channel.weighting().mapping.inverted)
+                    }
+                    PropertyFieldId::ArtworkWeightMappingGain => {
+                        PropertyCurrentValueKind::FiniteF64(channel.weighting().mapping.gain)
+                    }
+                    PropertyFieldId::ArtworkWeightMappingBias => {
+                        PropertyCurrentValueKind::FiniteF64(channel.weighting().mapping.bias)
+                    }
+                    PropertyFieldId::ArtworkWeightMappingBlackPoint => {
+                        PropertyCurrentValueKind::FiniteF64(
+                            channel.weighting().mapping.tone.black_point,
+                        )
+                    }
+                    PropertyFieldId::ArtworkWeightMappingWhitePoint => {
+                        PropertyCurrentValueKind::FiniteF64(
+                            channel.weighting().mapping.tone.white_point,
+                        )
+                    }
+                    PropertyFieldId::ArtworkWeightMappingGamma => {
+                        PropertyCurrentValueKind::FiniteF64(channel.weighting().mapping.tone.gamma)
+                    }
+                    PropertyFieldId::ArtworkWeightMappingContrast => {
+                        PropertyCurrentValueKind::FiniteF64(
+                            channel.weighting().mapping.tone.contrast,
+                        )
+                    }
+                    PropertyFieldId::ArtworkWeightMappingCutoff => {
+                        PropertyCurrentValueKind::FiniteF64(channel.weighting().mapping.tone.cutoff)
+                    }
+                    PropertyFieldId::ArtworkWeightStrength => {
+                        PropertyCurrentValueKind::FiniteF64(channel.weighting().strength)
+                    }
+                    PropertyFieldId::ArtworkWeightResponse => PropertyCurrentValueKind::EnumChoice(
+                        PropertyEnumChoice::ArtworkWeightResponse(channel.weighting().response),
                     ),
                     PropertyFieldId::Paint => {
                         PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::Paint(
@@ -7707,6 +8203,19 @@ impl Document {
         &self,
         definition_id: PatternDefinitionId,
     ) -> Result<PatternDefinitionRecipe, ValidationError> {
+        self.reconstruct_pattern_recipe_with_resources(definition_id)
+            .map(|value| value.0)
+    }
+
+    /// Reconstructs a recipe and its ordered authored-resource identities for partial structural edits.
+    /// Distinct resources remain distinct even when their geometry is equal.
+    ///
+    /// # Errors
+    /// Returns missing-reference or unrepresentable-topology diagnostics without mutation.
+    fn reconstruct_pattern_recipe_with_resources(
+        &self,
+        definition_id: PatternDefinitionId,
+    ) -> Result<(PatternDefinitionRecipe, Vec<AuthoredStructureId>), ValidationError> {
         let bundle = self.bundle(definition_id).ok_or_else(|| {
             ValidationError::new(
                 "pattern_definitions.recipe.reconstruct.definition",
@@ -7862,17 +8371,22 @@ impl Document {
                     .collect::<Result<Vec<_>, ValidationError>>()?,
             }
         };
-        Ok(PatternDefinitionRecipe {
-            structure: if authored_resources.is_empty() {
-                structure
-            } else {
-                PatternStructureRecipe::AuthoredResources {
-                    resources: authored_resources,
-                    definition: Box::new(structure),
-                }
+        let mut resource_ids = resource_indices.into_iter().collect::<Vec<_>>();
+        resource_ids.sort_by_key(|(_, index)| *index);
+        Ok((
+            PatternDefinitionRecipe {
+                structure: if authored_resources.is_empty() {
+                    structure
+                } else {
+                    PatternStructureRecipe::AuthoredResources {
+                        resources: authored_resources,
+                        definition: Box::new(structure),
+                    }
+                },
+                output_settings: settings,
             },
-            output_settings: settings,
-        })
+            resource_ids.into_iter().map(|(id, _)| id).collect(),
+        ))
     }
 
     /// Returns the channels targeting one definition in authoritative document
@@ -8122,6 +8636,8 @@ impl Document {
     }
 
     /// Materializes a recipe with root-table IDs already allocated in its private candidate.
+    /// Prunes foreign output deltas after retargeting the temporary neutral definition so
+    /// descriptor-based variant construction always observes a valid effective channel pattern.
     ///
     /// # Errors
     ///
@@ -8268,8 +8784,10 @@ impl Document {
             .push(bundle_from_definition(neutral.clone()));
         if let Some(channel_id) = channel_id {
             candidate.retarget_channel(channel_id, neutral.id);
+            candidate.prune_incompatible_output_response_deltas(channel_id);
         } else {
             candidate.pattern_settings.definition_id = neutral.id;
+            candidate.prune_document_base_output_response_deltas();
         }
         candidate.apply_recipe_controls(neutral.id, definition_recipe, true)?;
         if let Some((program, style)) = connection {
@@ -8508,6 +9026,8 @@ impl Document {
     }
 
     /// Materializes one family recipe plus ordered ID-free heterogeneous output recipes.
+    /// Temporary neutral retargeting prunes foreign response deltas before projecting descriptors;
+    /// the published command retains ownership of final channel reset/remapping semantics.
     ///
     /// # Errors
     ///
@@ -8535,8 +9055,10 @@ impl Document {
             .push(bundle_from_definition(neutral.clone()));
         if let Some(channel_id) = channel_id {
             candidate.retarget_channel(channel_id, neutral.id);
+            candidate.prune_incompatible_output_response_deltas(channel_id);
         } else {
             candidate.pattern_settings.definition_id = neutral.id;
+            candidate.prune_document_base_output_response_deltas();
         }
         let family_orientation_is_used = outputs
             .iter()
@@ -10465,8 +10987,7 @@ fn recipe_random_transition(
     }
 }
 
-/// Projects one density-modulation recipe payload onto the explicit Stage 17A
-/// transition-field updates required to finalize that alternative.
+/// Projects the recipe-owned density selector without channel source-response payloads.
 fn recipe_modulation_transition(
     modulation: &SiteDensityModulation,
 ) -> (
@@ -10475,49 +10996,9 @@ fn recipe_modulation_transition(
 ) {
     match modulation {
         SiteDensityModulation::Uniform => (DensityModulationKind::Uniform, Vec::new()),
-        SiteDensityModulation::ArtworkWeighted {
-            mapping,
-            strength,
-            response,
-        } => (
-            DensityModulationKind::ArtworkWeighted,
-            vec![
-                (
-                    PropertyFieldId::ArtworkWeightMappingComponent,
-                    VariantTransitionValue::EnumChoice(PropertyEnumChoice::SourceMappingComponent(
-                        mapping.component,
-                    )),
-                ),
-                (
-                    PropertyFieldId::ArtworkWeightMappingPlacement,
-                    VariantTransitionValue::EnumChoice(PropertyEnumChoice::SourcePlacement(
-                        mapping.placement,
-                    )),
-                ),
-                (
-                    PropertyFieldId::ArtworkWeightMappingInverted,
-                    VariantTransitionValue::Boolean(mapping.inverted),
-                ),
-                (
-                    PropertyFieldId::ArtworkWeightMappingGain,
-                    VariantTransitionValue::FiniteF64(mapping.gain),
-                ),
-                (
-                    PropertyFieldId::ArtworkWeightMappingBias,
-                    VariantTransitionValue::FiniteF64(mapping.bias),
-                ),
-                (
-                    PropertyFieldId::ArtworkWeightStrength,
-                    VariantTransitionValue::FiniteF64(*strength),
-                ),
-                (
-                    PropertyFieldId::ArtworkWeightResponse,
-                    VariantTransitionValue::EnumChoice(PropertyEnumChoice::ArtworkWeightResponse(
-                        *response,
-                    )),
-                ),
-            ],
-        ),
+        SiteDensityModulation::ArtworkWeighted => {
+            (DensityModulationKind::ArtworkWeighted, Vec::new())
+        }
     }
 }
 
@@ -11078,126 +11559,6 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                 *current = modulation.clone();
             }
         }
-        PatternDefinitionEdit::SetArtworkWeightMappingComponent {
-            mechanism_id,
-            component,
-        } => {
-            if let Some(PatternMechanism::SiteDensityModulation {
-                modulation:
-                    SiteDensityModulation::ArtworkWeighted {
-                        mapping: current, ..
-                    },
-                ..
-            }) = definition
-                .mechanisms
-                .iter_mut()
-                .find(|mechanism| mechanism.id() == *mechanism_id)
-            {
-                current.component = *component;
-            }
-        }
-        PatternDefinitionEdit::SetArtworkWeightMappingPlacement {
-            mechanism_id,
-            placement,
-        } => {
-            if let Some(PatternMechanism::SiteDensityModulation {
-                modulation:
-                    SiteDensityModulation::ArtworkWeighted {
-                        mapping: current, ..
-                    },
-                ..
-            }) = definition
-                .mechanisms
-                .iter_mut()
-                .find(|mechanism| mechanism.id() == *mechanism_id)
-            {
-                current.placement = *placement;
-            }
-        }
-        PatternDefinitionEdit::SetArtworkWeightMappingInverted {
-            mechanism_id,
-            inverted,
-        } => {
-            if let Some(PatternMechanism::SiteDensityModulation {
-                modulation:
-                    SiteDensityModulation::ArtworkWeighted {
-                        mapping: current, ..
-                    },
-                ..
-            }) = definition
-                .mechanisms
-                .iter_mut()
-                .find(|mechanism| mechanism.id() == *mechanism_id)
-            {
-                current.inverted = *inverted;
-            }
-        }
-        PatternDefinitionEdit::SetArtworkWeightMappingGain { mechanism_id, gain } => {
-            if let Some(PatternMechanism::SiteDensityModulation {
-                modulation:
-                    SiteDensityModulation::ArtworkWeighted {
-                        mapping: current, ..
-                    },
-                ..
-            }) = definition
-                .mechanisms
-                .iter_mut()
-                .find(|mechanism| mechanism.id() == *mechanism_id)
-            {
-                current.gain = *gain;
-            }
-        }
-        PatternDefinitionEdit::SetArtworkWeightMappingBias { mechanism_id, bias } => {
-            if let Some(PatternMechanism::SiteDensityModulation {
-                modulation:
-                    SiteDensityModulation::ArtworkWeighted {
-                        mapping: current, ..
-                    },
-                ..
-            }) = definition
-                .mechanisms
-                .iter_mut()
-                .find(|mechanism| mechanism.id() == *mechanism_id)
-            {
-                current.bias = *bias;
-            }
-        }
-        PatternDefinitionEdit::SetArtworkWeightStrength {
-            mechanism_id,
-            strength,
-        } => {
-            if let Some(PatternMechanism::SiteDensityModulation {
-                modulation:
-                    SiteDensityModulation::ArtworkWeighted {
-                        strength: current, ..
-                    },
-                ..
-            }) = definition
-                .mechanisms
-                .iter_mut()
-                .find(|mechanism| mechanism.id() == *mechanism_id)
-            {
-                *current = *strength;
-            }
-        }
-        PatternDefinitionEdit::SetArtworkWeightResponse {
-            mechanism_id,
-            response,
-        } => {
-            if let Some(PatternMechanism::SiteDensityModulation {
-                modulation:
-                    SiteDensityModulation::ArtworkWeighted {
-                        response: current, ..
-                    },
-                ..
-            }) = definition
-                .mechanisms
-                .iter_mut()
-                .find(|mechanism| mechanism.id() == *mechanism_id)
-            {
-                *current = *response;
-            }
-        }
         PatternDefinitionEdit::SetExclusionVariant {
             mechanism_id,
             policy,
@@ -11686,8 +12047,22 @@ fn remap_definition_edit_for_duplicate(
     duplicate: &PatternDefinition,
     edit: &PatternDefinitionEdit,
 ) -> PatternDefinitionEdit {
-    let mechanism = |id| remap_mechanism_id(source, duplicate, id);
-    let dimension = |id| remap_dimension_id(source, duplicate, id);
+    remap_definition_edit_with(
+        edit,
+        &|id| remap_mechanism_id(source, duplicate, id),
+        &|id| remap_dimension_id(source, duplicate, id),
+        &|id| remap_output_layer_id(source, duplicate, id),
+    )
+}
+
+/// Rebinds the existing exhaustive typed edit using caller-validated semantic ID correspondence.
+/// External authored-resource IDs remain shared; all definition-local references use these maps.
+fn remap_definition_edit_with(
+    edit: &PatternDefinitionEdit,
+    mechanism: &impl Fn(PatternMechanismId) -> PatternMechanismId,
+    dimension: &impl Fn(GuideDimensionId) -> GuideDimensionId,
+    output: &impl Fn(PatternOutputLayerId) -> PatternOutputLayerId,
+) -> PatternDefinitionEdit {
     match edit {
         PatternDefinitionEdit::SetParametricShape {
             mechanism_id,
@@ -11832,7 +12207,7 @@ fn remap_definition_edit_for_duplicate(
             output_layer_id,
             structure_id,
         } => PatternDefinitionEdit::SetCurveMotifAuthoredStructure {
-            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            output_layer_id: output(*output_layer_id),
             structure_id: *structure_id,
         },
         PatternDefinitionEdit::SetGuideArcCenterX {
@@ -12008,53 +12383,6 @@ fn remap_definition_edit_for_duplicate(
             mechanism_id: mechanism(*mechanism_id),
             modulation: modulation.clone(),
         },
-        PatternDefinitionEdit::SetArtworkWeightMappingComponent {
-            mechanism_id,
-            component,
-        } => PatternDefinitionEdit::SetArtworkWeightMappingComponent {
-            mechanism_id: mechanism(*mechanism_id),
-            component: *component,
-        },
-        PatternDefinitionEdit::SetArtworkWeightMappingPlacement {
-            mechanism_id,
-            placement,
-        } => PatternDefinitionEdit::SetArtworkWeightMappingPlacement {
-            mechanism_id: mechanism(*mechanism_id),
-            placement: *placement,
-        },
-        PatternDefinitionEdit::SetArtworkWeightMappingInverted {
-            mechanism_id,
-            inverted,
-        } => PatternDefinitionEdit::SetArtworkWeightMappingInverted {
-            mechanism_id: mechanism(*mechanism_id),
-            inverted: *inverted,
-        },
-        PatternDefinitionEdit::SetArtworkWeightMappingGain { mechanism_id, gain } => {
-            PatternDefinitionEdit::SetArtworkWeightMappingGain {
-                mechanism_id: mechanism(*mechanism_id),
-                gain: *gain,
-            }
-        }
-        PatternDefinitionEdit::SetArtworkWeightMappingBias { mechanism_id, bias } => {
-            PatternDefinitionEdit::SetArtworkWeightMappingBias {
-                mechanism_id: mechanism(*mechanism_id),
-                bias: *bias,
-            }
-        }
-        PatternDefinitionEdit::SetArtworkWeightStrength {
-            mechanism_id,
-            strength,
-        } => PatternDefinitionEdit::SetArtworkWeightStrength {
-            mechanism_id: mechanism(*mechanism_id),
-            strength: *strength,
-        },
-        PatternDefinitionEdit::SetArtworkWeightResponse {
-            mechanism_id,
-            response,
-        } => PatternDefinitionEdit::SetArtworkWeightResponse {
-            mechanism_id: mechanism(*mechanism_id),
-            response: *response,
-        },
         PatternDefinitionEdit::SetExclusionVariant {
             mechanism_id,
             policy,
@@ -12094,101 +12422,101 @@ fn remap_definition_edit_for_duplicate(
             output_layer_id,
             site_mechanism_id,
         } => PatternDefinitionEdit::SetOutputSiteProduct {
-            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            output_layer_id: output(*output_layer_id),
             site_mechanism_id: mechanism(*site_mechanism_id),
         },
         PatternDefinitionEdit::SetOutputMarkPrototype {
             output_layer_id,
             prototype,
         } => PatternDefinitionEdit::SetOutputMarkPrototype {
-            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            output_layer_id: output(*output_layer_id),
             prototype: prototype.clone(),
         },
         PatternDefinitionEdit::SetOutputAuthoredClosedShape {
             output_layer_id,
             structure_id,
         } => PatternDefinitionEdit::SetOutputAuthoredClosedShape {
-            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            output_layer_id: output(*output_layer_id),
             structure_id: *structure_id,
         },
         PatternDefinitionEdit::SetOutputOrientation {
             output_layer_id,
             orientation,
         } => PatternDefinitionEdit::SetOutputOrientation {
-            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
-            orientation: remap_orientation(source, duplicate, orientation),
+            output_layer_id: output(*output_layer_id),
+            orientation: remap_orientation(dimension, orientation),
         },
         PatternDefinitionEdit::SetOutputOrientationDimension {
             output_layer_id,
             dimension_id,
         } => PatternDefinitionEdit::SetOutputOrientationDimension {
-            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            output_layer_id: output(*output_layer_id),
             dimension_id: dimension(*dimension_id),
         },
         PatternDefinitionEdit::SetConnectionProgram {
             output_layer_id,
             program,
         } => PatternDefinitionEdit::SetConnectionProgram {
-            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            output_layer_id: output(*output_layer_id),
             program: program.clone(),
         },
         PatternDefinitionEdit::SetConnectionMaximumDegree {
             output_layer_id,
             maximum_degree,
         } => PatternDefinitionEdit::SetConnectionMaximumDegree {
-            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            output_layer_id: output(*output_layer_id),
             maximum_degree: *maximum_degree,
         },
         PatternDefinitionEdit::SetConnectionMaximumDistance {
             output_layer_id,
             maximum_distance,
         } => PatternDefinitionEdit::SetConnectionMaximumDistance {
-            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            output_layer_id: output(*output_layer_id),
             maximum_distance: *maximum_distance,
         },
         PatternDefinitionEdit::SetConnectionMinimumDegree {
             output_layer_id,
             minimum_degree,
         } => PatternDefinitionEdit::SetConnectionMinimumDegree {
-            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            output_layer_id: output(*output_layer_id),
             minimum_degree: *minimum_degree,
         },
         PatternDefinitionEdit::SetConnectionSeed {
             output_layer_id,
             seed,
         } => PatternDefinitionEdit::SetConnectionSeed {
-            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            output_layer_id: output(*output_layer_id),
             seed: *seed,
         },
         PatternDefinitionEdit::SetMazeSeed {
             output_layer_id,
             seed,
         } => PatternDefinitionEdit::SetMazeSeed {
-            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            output_layer_id: output(*output_layer_id),
             seed: *seed,
         },
         PatternDefinitionEdit::SetCurveMotifMirrorAlternateRows {
             output_layer_id,
             mirror_alternate_rows,
         } => PatternDefinitionEdit::SetCurveMotifMirrorAlternateRows {
-            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            output_layer_id: output(*output_layer_id),
             mirror_alternate_rows: *mirror_alternate_rows,
         },
         PatternDefinitionEdit::SetCurveMotifAlternateRowPhase {
             output_layer_id,
             alternate_row_phase,
         } => PatternDefinitionEdit::SetCurveMotifAlternateRowPhase {
-            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            output_layer_id: output(*output_layer_id),
             alternate_row_phase: *alternate_row_phase,
         },
         PatternDefinitionEdit::SetGuideFaceDimensions {
             output_layer_id,
             dimensions,
         } => PatternDefinitionEdit::SetGuideFaceDimensions {
-            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            output_layer_id: output(*output_layer_id),
             dimensions: dimensions
                 .iter()
-                .map(|dimension_id| remap_dimension_id(source, duplicate, *dimension_id))
+                .map(|dimension_id| dimension(*dimension_id))
                 .collect(),
         },
     }
@@ -12278,18 +12606,18 @@ fn remap_output_layer_id(
     duplicate.output_layers[index].id()
 }
 
+/// Rebinds a guided orientation through the caller's validated dimension correspondence.
 fn remap_orientation(
-    source: &PatternDefinition,
-    duplicate: &PatternDefinition,
+    dimension: &impl Fn(GuideDimensionId) -> GuideDimensionId,
     orientation: &MarkOrientation,
 ) -> MarkOrientation {
     match orientation {
         MarkOrientation::Fixed => MarkOrientation::Fixed,
         MarkOrientation::GuideTangent { dimension_id } => MarkOrientation::GuideTangent {
-            dimension_id: remap_dimension_id(source, duplicate, *dimension_id),
+            dimension_id: dimension(*dimension_id),
         },
         MarkOrientation::GuideNormal { dimension_id } => MarkOrientation::GuideNormal {
-            dimension_id: remap_dimension_id(source, duplicate, *dimension_id),
+            dimension_id: dimension(*dimension_id),
         },
     }
 }
@@ -12720,38 +13048,6 @@ fn validate_definition_edit(
         } => {
             validate_density_modulation_target(definition, *mechanism_id)?;
             validate_site_density_modulation(modulation)
-        }
-        PatternDefinitionEdit::SetArtworkWeightMappingComponent { mechanism_id, .. }
-        | PatternDefinitionEdit::SetArtworkWeightMappingPlacement { mechanism_id, .. }
-        | PatternDefinitionEdit::SetArtworkWeightMappingInverted { mechanism_id, .. } => {
-            validate_artwork_weighted_target(definition, *mechanism_id).map(|_| ())
-        }
-        PatternDefinitionEdit::SetArtworkWeightMappingGain { mechanism_id, gain } => {
-            validate_artwork_weighted_target(definition, *mechanism_id)?;
-            validate_nonnegative_finite(
-                *gain,
-                "pattern_definitions.mechanisms.site_density.mapping.gain",
-            )
-        }
-        PatternDefinitionEdit::SetArtworkWeightMappingBias { mechanism_id, bias } => {
-            validate_artwork_weighted_target(definition, *mechanism_id)?;
-            validate_finite(
-                *bias,
-                "pattern_definitions.mechanisms.site_density.mapping.bias",
-            )
-        }
-        PatternDefinitionEdit::SetArtworkWeightStrength {
-            mechanism_id,
-            strength,
-        } => {
-            validate_artwork_weighted_target(definition, *mechanism_id)?;
-            validate_unit_component(
-                *strength,
-                "pattern_definitions.mechanisms.site_density.strength",
-            )
-        }
-        PatternDefinitionEdit::SetArtworkWeightResponse { mechanism_id, .. } => {
-            validate_artwork_weighted_target(definition, *mechanism_id).map(|_| ())
         }
         PatternDefinitionEdit::SetExclusionVariant {
             mechanism_id,
@@ -13388,19 +13684,6 @@ fn validate_density_modulation_target(
     }
 }
 
-fn validate_artwork_weighted_target(
-    definition: &PatternDefinition,
-    mechanism_id: PatternMechanismId,
-) -> Result<&SourceMapping, ValidationError> {
-    match validate_density_modulation_target(definition, mechanism_id)? {
-        SiteDensityModulation::ArtworkWeighted { mapping, .. } => Ok(mapping),
-        SiteDensityModulation::Uniform => Err(ValidationError::new(
-            "pattern_definitions.mechanisms.site_density",
-            "field is inactive for uniform density modulation",
-        )),
-    }
-}
-
 fn validate_exclusion_target(
     definition: &PatternDefinition,
     mechanism_id: PatternMechanismId,
@@ -13614,6 +13897,7 @@ fn validate_channel(
         "channel.appearance.color.alpha",
     )?;
     validate_unit_component(channel.appearance.opacity, "channel.appearance.opacity")?;
+    validate_source_weighting(channel.weighting)?;
     Ok(())
 }
 
@@ -14639,15 +14923,15 @@ fn capability_active_controls(
 
 /// Reports whether a definition's site placement depends on source-document density weighting.
 ///
-/// This read-only classification is shared by capability projection, effective evaluator
-/// resolution, command validation, and incompatible-delta pruning. It never mutates persisted
-/// intent, geometry, or cache identity itself; those authorities consume its result.
-fn definition_uses_artwork_weighted_density(definition: &PatternDefinition) -> bool {
+/// Frontends use this recipe classification for source-alignment guidance, never to block
+/// transforms. It does not resolve a channel's effective recipe or mutate authored state,
+/// geometry, or cache identity; callers supply the authoritative selected definition.
+pub fn definition_uses_artwork_weighted_density(definition: &PatternDefinition) -> bool {
     definition.mechanisms.iter().any(|mechanism| {
         matches!(
             mechanism,
             PatternMechanism::SiteDensityModulation {
-                modulation: SiteDensityModulation::ArtworkWeighted { .. },
+                modulation: SiteDensityModulation::ArtworkWeighted,
                 ..
             }
         )
@@ -14814,7 +15098,7 @@ fn random_character_kind(character: &RandomSiteCharacter) -> RandomCharacterKind
 fn density_modulation_kind(modulation: &SiteDensityModulation) -> DensityModulationKind {
     match modulation {
         SiteDensityModulation::Uniform => DensityModulationKind::Uniform,
-        SiteDensityModulation::ArtworkWeighted { .. } => DensityModulationKind::ArtworkWeighted,
+        SiteDensityModulation::ArtworkWeighted => DensityModulationKind::ArtworkWeighted,
     }
 }
 
@@ -14996,26 +15280,32 @@ fn validate_random_character(character: &RandomSiteCharacter) -> Result<(), Vali
     }
 }
 
+/// Validates the recipe-owned choice between uniform and artwork-weighted site construction.
+///
+/// Source selection and response shaping are channel authority and never enter this recipe check.
+///
+/// # Errors
+///
+/// This exhaustive selector currently has no invalid payload and therefore always succeeds.
 fn validate_site_density_modulation(
     modulation: &SiteDensityModulation,
 ) -> Result<(), ValidationError> {
     match modulation {
-        SiteDensityModulation::Uniform => Ok(()),
-        SiteDensityModulation::ArtworkWeighted {
-            mapping,
-            strength,
-            response,
-        } => {
-            validate_source_mapping(*mapping)?;
-            validate_unit_component(
-                *strength,
-                "pattern_definitions.mechanisms.site_density.strength",
-            )?;
-            match response {
-                ArtworkWeightResponse::Linear | ArtworkWeightResponse::Smoothstep => Ok(()),
-            }
-        }
+        SiteDensityModulation::Uniform | SiteDensityModulation::ArtworkWeighted => Ok(()),
     }
+}
+
+/// Reports whether one definition consumes channel weighting during family construction.
+pub fn definition_uses_source_weighting(definition: &PatternDefinition) -> bool {
+    definition.mechanisms.iter().any(|mechanism| {
+        matches!(
+            mechanism,
+            PatternMechanism::SiteDensityModulation {
+                modulation: SiteDensityModulation::ArtworkWeighted,
+                ..
+            }
+        )
+    })
 }
 
 fn validate_site_exclusion(policy: &SiteExclusionPolicy) -> Result<(), ValidationError> {
@@ -15911,6 +16201,7 @@ fn validate_topology(
         validate_channel_pattern_instance(&channel.pattern_instance)?;
         validate_unit_component(channel.opacity, "channel.appearance.opacity")?;
         validate_source_mapping(channel.mapping)?;
+        validate_source_weighting(channel.weighting)?;
         validate_paint(model, channel.role, &channel.paint)?;
     }
     Ok(())
@@ -15918,7 +16209,79 @@ fn validate_topology(
 
 fn validate_source_mapping(mapping: SourceMapping) -> Result<(), ValidationError> {
     validate_nonnegative_finite(mapping.gain, "channel.source_mapping.gain")?;
-    validate_finite(mapping.bias, "channel.source_mapping.bias")
+    validate_finite(mapping.bias, "channel.source_mapping.bias")?;
+    mapping.tone.validate().map_err(|error| {
+        ValidationError::new(
+            match error.path() {
+                "source_mapping.tone.black_point" => "channel.source_mapping.tone.black_point",
+                "source_mapping.tone.white_point" => "channel.source_mapping.tone.white_point",
+                "source_mapping.tone.levels" => "channel.source_mapping.tone.levels",
+                "source_mapping.tone.gamma" => "channel.source_mapping.tone.gamma",
+                "source_mapping.tone.contrast" => "channel.source_mapping.tone.contrast",
+                "source_mapping.tone.cutoff" => "channel.source_mapping.tone.cutoff",
+                _ => "channel.source_mapping.tone",
+            },
+            error.message(),
+        )
+    })
+}
+
+/// Validates one channel's independent weighting mapping, strength, and response curve.
+///
+/// # Errors
+///
+/// Returns weighting-scoped mapping, tone, strength, or response diagnostics.
+fn validate_source_weighting(weighting: SourceWeighting) -> Result<(), ValidationError> {
+    validate_source_mapping(weighting.mapping).map_err(|error| {
+        ValidationError::new(
+            match error.path() {
+                "channel.source_mapping.gain" => "channel.source_weighting.mapping.gain",
+                "channel.source_mapping.bias" => "channel.source_weighting.mapping.bias",
+                "channel.source_mapping.tone.black_point" => {
+                    "channel.source_weighting.mapping.tone.black_point"
+                }
+                "channel.source_mapping.tone.white_point" => {
+                    "channel.source_weighting.mapping.tone.white_point"
+                }
+                "channel.source_mapping.tone.levels" => {
+                    "channel.source_weighting.mapping.tone.levels"
+                }
+                "channel.source_mapping.tone.gamma" => {
+                    "channel.source_weighting.mapping.tone.gamma"
+                }
+                "channel.source_mapping.tone.contrast" => {
+                    "channel.source_weighting.mapping.tone.contrast"
+                }
+                "channel.source_mapping.tone.cutoff" => {
+                    "channel.source_weighting.mapping.tone.cutoff"
+                }
+                _ => "channel.source_weighting.mapping",
+            },
+            error.message(),
+        )
+    })?;
+    validate_unit_component(weighting.strength, "channel.source_weighting.strength")?;
+    match weighting.response {
+        ArtworkWeightResponse::Linear | ArtworkWeightResponse::Smoothstep => Ok(()),
+    }
+}
+
+/// Applies one typed edit to an unpublished weighting copy for validation or mutation.
+fn apply_source_weighting_edit(weighting: &mut SourceWeighting, edit: SourceWeightingFieldEdit) {
+    match edit {
+        SourceWeightingFieldEdit::Component(value) => weighting.mapping.component = value,
+        SourceWeightingFieldEdit::Placement(value) => weighting.mapping.placement = value,
+        SourceWeightingFieldEdit::Inverted(value) => weighting.mapping.inverted = value,
+        SourceWeightingFieldEdit::Gain(value) => weighting.mapping.gain = value,
+        SourceWeightingFieldEdit::Bias(value) => weighting.mapping.bias = value,
+        SourceWeightingFieldEdit::BlackPoint(value) => weighting.mapping.tone.black_point = value,
+        SourceWeightingFieldEdit::WhitePoint(value) => weighting.mapping.tone.white_point = value,
+        SourceWeightingFieldEdit::Gamma(value) => weighting.mapping.tone.gamma = value,
+        SourceWeightingFieldEdit::Contrast(value) => weighting.mapping.tone.contrast = value,
+        SourceWeightingFieldEdit::Cutoff(value) => weighting.mapping.tone.cutoff = value,
+        SourceWeightingFieldEdit::Strength(value) => weighting.strength = value,
+        SourceWeightingFieldEdit::Response(value) => weighting.response = value,
+    }
 }
 
 fn validate_paint(
@@ -16097,6 +16460,11 @@ pub enum PropertyFieldId {
     ModeledMappingInverted,
     ModeledMappingGain,
     ModeledMappingBias,
+    ModeledMappingBlackPoint,
+    ModeledMappingWhitePoint,
+    ModeledMappingGamma,
+    ModeledMappingContrast,
+    ModeledMappingCutoff,
     Paint,
     ColorRed,
     ColorGreen,
@@ -16139,6 +16507,11 @@ pub enum PropertyFieldId {
     ArtworkWeightMappingInverted,
     ArtworkWeightMappingGain,
     ArtworkWeightMappingBias,
+    ArtworkWeightMappingBlackPoint,
+    ArtworkWeightMappingWhitePoint,
+    ArtworkWeightMappingGamma,
+    ArtworkWeightMappingContrast,
+    ArtworkWeightMappingCutoff,
     ArtworkWeightStrength,
     ArtworkWeightResponse,
     RandomExclusion,
@@ -16202,6 +16575,11 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::ModeledMappingInverted,
     PropertyFieldId::ModeledMappingGain,
     PropertyFieldId::ModeledMappingBias,
+    PropertyFieldId::ModeledMappingBlackPoint,
+    PropertyFieldId::ModeledMappingWhitePoint,
+    PropertyFieldId::ModeledMappingGamma,
+    PropertyFieldId::ModeledMappingContrast,
+    PropertyFieldId::ModeledMappingCutoff,
     PropertyFieldId::Paint,
     PropertyFieldId::ColorRed,
     PropertyFieldId::ColorGreen,
@@ -16244,6 +16622,11 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::ArtworkWeightMappingInverted,
     PropertyFieldId::ArtworkWeightMappingGain,
     PropertyFieldId::ArtworkWeightMappingBias,
+    PropertyFieldId::ArtworkWeightMappingBlackPoint,
+    PropertyFieldId::ArtworkWeightMappingWhitePoint,
+    PropertyFieldId::ArtworkWeightMappingGamma,
+    PropertyFieldId::ArtworkWeightMappingContrast,
+    PropertyFieldId::ArtworkWeightMappingCutoff,
     PropertyFieldId::ArtworkWeightStrength,
     PropertyFieldId::ArtworkWeightResponse,
     PropertyFieldId::RandomExclusion,
@@ -16537,13 +16920,7 @@ pub enum PropertyCommandKind {
     SetRandomClusterSpread,
     SetRandomClusterStrength,
     SetDensityModulationVariant,
-    SetArtworkWeightMappingComponent,
-    SetArtworkWeightMappingPlacement,
-    SetArtworkWeightMappingInverted,
-    SetArtworkWeightMappingGain,
-    SetArtworkWeightMappingBias,
-    SetArtworkWeightStrength,
-    SetArtworkWeightResponse,
+    SetSourceWeightingField,
     SetExclusionVariant,
     SetExclusionMinimumCenterDistance,
     SetVisibleMarkMargin,
@@ -16802,6 +17179,13 @@ impl ChannelPropertyState<'_> {
             Self::Modeled(channel) => Some(channel.mapping),
         }
     }
+    /// Returns the independent channel-owned weighting response for either channel model.
+    fn weighting(&self) -> SourceWeighting {
+        match self {
+            Self::Legacy(channel) => channel.weighting,
+            Self::Modeled(channel) => channel.weighting,
+        }
+    }
     fn paint(&self) -> Option<&ChannelPaint> {
         match self {
             Self::Legacy(_) => None,
@@ -16994,65 +17378,8 @@ fn property_value_for_mechanism(
         ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::DensityModulation(
             match modulation {
                 SiteDensityModulation::Uniform => DensityModulationKind::Uniform,
-                SiteDensityModulation::ArtworkWeighted { .. } => {
-                    DensityModulationKind::ArtworkWeighted
-                }
+                SiteDensityModulation::ArtworkWeighted => DensityModulationKind::ArtworkWeighted,
             },
-        )),
-        (
-            PropertyFieldId::ArtworkWeightMappingComponent,
-            PatternMechanism::SiteDensityModulation {
-                modulation: SiteDensityModulation::ArtworkWeighted { mapping, .. },
-                ..
-            },
-        ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SourceMappingComponent(
-            mapping.component,
-        )),
-        (
-            PropertyFieldId::ArtworkWeightMappingPlacement,
-            PatternMechanism::SiteDensityModulation {
-                modulation: SiteDensityModulation::ArtworkWeighted { mapping, .. },
-                ..
-            },
-        ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SourcePlacement(
-            mapping.placement,
-        )),
-        (
-            PropertyFieldId::ArtworkWeightMappingInverted,
-            PatternMechanism::SiteDensityModulation {
-                modulation: SiteDensityModulation::ArtworkWeighted { mapping, .. },
-                ..
-            },
-        ) => PropertyCurrentValueKind::Boolean(mapping.inverted),
-        (
-            PropertyFieldId::ArtworkWeightMappingGain,
-            PatternMechanism::SiteDensityModulation {
-                modulation: SiteDensityModulation::ArtworkWeighted { mapping, .. },
-                ..
-            },
-        ) => PropertyCurrentValueKind::FiniteF64(mapping.gain),
-        (
-            PropertyFieldId::ArtworkWeightMappingBias,
-            PatternMechanism::SiteDensityModulation {
-                modulation: SiteDensityModulation::ArtworkWeighted { mapping, .. },
-                ..
-            },
-        ) => PropertyCurrentValueKind::FiniteF64(mapping.bias),
-        (
-            PropertyFieldId::ArtworkWeightStrength,
-            PatternMechanism::SiteDensityModulation {
-                modulation: SiteDensityModulation::ArtworkWeighted { strength, .. },
-                ..
-            },
-        ) => PropertyCurrentValueKind::FiniteF64(*strength),
-        (
-            PropertyFieldId::ArtworkWeightResponse,
-            PatternMechanism::SiteDensityModulation {
-                modulation: SiteDensityModulation::ArtworkWeighted { response, .. },
-                ..
-            },
-        ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::ArtworkWeightResponse(
-            *response,
         )),
         (PropertyFieldId::RandomExclusion, PatternMechanism::SiteExclusion { policy, .. }) => {
             PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::Exclusion(match policy {
@@ -17315,84 +17642,17 @@ fn modulation_transition_fields(
     document: &Document,
     definition_id: PatternDefinitionId,
     mechanism_id: PatternMechanismId,
-    base: DensityModulationKind,
-    choice: DensityModulationKind,
+    _base: DensityModulationKind,
+    _choice: DensityModulationKind,
 ) -> Result<Vec<VariantTransitionField>, ValidationError> {
     let mechanism = transition_mechanism(document, definition_id, mechanism_id)?;
-    let PatternMechanism::SiteDensityModulation { modulation, .. } = mechanism else {
+    let PatternMechanism::SiteDensityModulation { .. } = mechanism else {
         return Err(ValidationError::new(
             "transition_draft.target",
             "selector is not density modulation",
         ));
     };
-    if choice == DensityModulationKind::Uniform {
-        return Ok(Vec::new());
-    }
-    let target = PropertyTarget::Mechanism(definition_id, mechanism_id);
-    let (mapping, strength, response) = if base == choice {
-        match modulation {
-            SiteDensityModulation::ArtworkWeighted {
-                mapping,
-                strength,
-                response,
-            } => (*mapping, *strength, *response),
-            _ => unreachable!("base selector is current"),
-        }
-    } else {
-        (
-            SourceMapping::canonical(SourceMappingComponent::Luminance),
-            1.0,
-            ArtworkWeightResponse::Linear,
-        )
-    };
-    Ok(vec![
-        transition_field(
-            PropertyFieldId::ArtworkWeightMappingComponent,
-            target,
-            VariantTransitionValue::EnumChoice(PropertyEnumChoice::SourceMappingComponent(
-                mapping.component,
-            )),
-            Vec::new(),
-        ),
-        transition_field(
-            PropertyFieldId::ArtworkWeightMappingPlacement,
-            target,
-            VariantTransitionValue::EnumChoice(PropertyEnumChoice::SourcePlacement(
-                mapping.placement,
-            )),
-            Vec::new(),
-        ),
-        transition_field(
-            PropertyFieldId::ArtworkWeightMappingInverted,
-            target,
-            VariantTransitionValue::Boolean(mapping.inverted),
-            Vec::new(),
-        ),
-        transition_field(
-            PropertyFieldId::ArtworkWeightMappingGain,
-            target,
-            VariantTransitionValue::FiniteF64(mapping.gain),
-            Vec::new(),
-        ),
-        transition_field(
-            PropertyFieldId::ArtworkWeightMappingBias,
-            target,
-            VariantTransitionValue::FiniteF64(mapping.bias),
-            Vec::new(),
-        ),
-        transition_field(
-            PropertyFieldId::ArtworkWeightStrength,
-            target,
-            VariantTransitionValue::FiniteF64(strength),
-            Vec::new(),
-        ),
-        transition_field(
-            PropertyFieldId::ArtworkWeightResponse,
-            target,
-            VariantTransitionValue::EnumChoice(PropertyEnumChoice::ArtworkWeightResponse(response)),
-            Vec::new(),
-        ),
-    ])
+    Ok(Vec::new())
 }
 
 fn exclusion_transition_fields(
@@ -18189,65 +18449,7 @@ fn transition_draft_edit(
         ) => {
             let modulation = match choice {
                 DensityModulationKind::Uniform => SiteDensityModulation::Uniform,
-                DensityModulationKind::ArtworkWeighted => {
-                    let component = match transition_choice(
-                        draft,
-                        PropertyFieldId::ArtworkWeightMappingComponent,
-                    )? {
-                        PropertyEnumChoice::SourceMappingComponent(value) => value,
-                        _ => {
-                            return Err(ValidationError::new(
-                                "transition_draft.value",
-                                "mapping component choice is invalid",
-                            ));
-                        }
-                    };
-                    let placement = match transition_choice(
-                        draft,
-                        PropertyFieldId::ArtworkWeightMappingPlacement,
-                    )? {
-                        PropertyEnumChoice::SourcePlacement(value) => value,
-                        _ => {
-                            return Err(ValidationError::new(
-                                "transition_draft.value",
-                                "mapping placement choice is invalid",
-                            ));
-                        }
-                    };
-                    let inverted = match transition_value(
-                        draft,
-                        PropertyFieldId::ArtworkWeightMappingInverted,
-                    )? {
-                        VariantTransitionValue::Boolean(value) => *value,
-                        _ => {
-                            return Err(ValidationError::new(
-                                "transition_draft.value",
-                                "mapping inverted value is invalid",
-                            ));
-                        }
-                    };
-                    let response =
-                        match transition_choice(draft, PropertyFieldId::ArtworkWeightResponse)? {
-                            PropertyEnumChoice::ArtworkWeightResponse(value) => value,
-                            _ => {
-                                return Err(ValidationError::new(
-                                    "transition_draft.value",
-                                    "artwork response choice is invalid",
-                                ));
-                            }
-                        };
-                    SiteDensityModulation::ArtworkWeighted {
-                        mapping: SourceMapping {
-                            component,
-                            placement,
-                            inverted,
-                            gain: transition_f64(draft, PropertyFieldId::ArtworkWeightMappingGain)?,
-                            bias: transition_f64(draft, PropertyFieldId::ArtworkWeightMappingBias)?,
-                        },
-                        strength: transition_f64(draft, PropertyFieldId::ArtworkWeightStrength)?,
-                        response,
-                    }
-                }
+                DensityModulationKind::ArtworkWeighted => SiteDensityModulation::ArtworkWeighted,
             };
             Ok(PatternDefinitionEdit::SetDensityModulationVariant {
                 mechanism_id,
@@ -18541,7 +18743,12 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ModeledMappingPlacement
             | PropertyFieldId::ModeledMappingInverted
             | PropertyFieldId::ModeledMappingGain
-            | PropertyFieldId::ModeledMappingBias => PropertyCommandKind::SetModeledMappingField,
+            | PropertyFieldId::ModeledMappingBias
+            | PropertyFieldId::ModeledMappingBlackPoint
+            | PropertyFieldId::ModeledMappingWhitePoint
+            | PropertyFieldId::ModeledMappingGamma
+            | PropertyFieldId::ModeledMappingContrast
+            | PropertyFieldId::ModeledMappingCutoff => PropertyCommandKind::SetModeledMappingField,
             PropertyFieldId::Paint => PropertyCommandKind::SetPaint,
             PropertyFieldId::ColorRed
             | PropertyFieldId::ColorGreen
@@ -18595,23 +18802,20 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::RandomDensityModulation => {
                 PropertyCommandKind::SetDensityModulationVariant
             }
-            PropertyFieldId::ArtworkWeightMappingComponent => {
-                PropertyCommandKind::SetArtworkWeightMappingComponent
+            PropertyFieldId::ArtworkWeightMappingComponent
+            | PropertyFieldId::ArtworkWeightMappingPlacement
+            | PropertyFieldId::ArtworkWeightMappingInverted
+            | PropertyFieldId::ArtworkWeightMappingGain
+            | PropertyFieldId::ArtworkWeightMappingBias
+            | PropertyFieldId::ArtworkWeightMappingBlackPoint
+            | PropertyFieldId::ArtworkWeightMappingWhitePoint
+            | PropertyFieldId::ArtworkWeightMappingGamma
+            | PropertyFieldId::ArtworkWeightMappingContrast
+            | PropertyFieldId::ArtworkWeightMappingCutoff
+            | PropertyFieldId::ArtworkWeightStrength
+            | PropertyFieldId::ArtworkWeightResponse => {
+                PropertyCommandKind::SetSourceWeightingField
             }
-            PropertyFieldId::ArtworkWeightMappingPlacement => {
-                PropertyCommandKind::SetArtworkWeightMappingPlacement
-            }
-            PropertyFieldId::ArtworkWeightMappingInverted => {
-                PropertyCommandKind::SetArtworkWeightMappingInverted
-            }
-            PropertyFieldId::ArtworkWeightMappingGain => {
-                PropertyCommandKind::SetArtworkWeightMappingGain
-            }
-            PropertyFieldId::ArtworkWeightMappingBias => {
-                PropertyCommandKind::SetArtworkWeightMappingBias
-            }
-            PropertyFieldId::ArtworkWeightStrength => PropertyCommandKind::SetArtworkWeightStrength,
-            PropertyFieldId::ArtworkWeightResponse => PropertyCommandKind::SetArtworkWeightResponse,
             PropertyFieldId::RandomExclusion => PropertyCommandKind::SetExclusionVariant,
             PropertyFieldId::ExclusionMinimumCenterDistance => {
                 PropertyCommandKind::SetExclusionMinimumCenterDistance
@@ -18712,8 +18916,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::LegacyMappingPlacement
             | PropertyFieldId::ModeledMappingPlacement
             | PropertyFieldId::ArtworkWeightMappingPlacement => SOURCE_PLACEMENT_CHOICES,
-            PropertyFieldId::ModeledMappingComponent
-            | PropertyFieldId::ArtworkWeightMappingComponent => SOURCE_MAPPING_CHOICES,
+            PropertyFieldId::ModeledMappingComponent => SOURCE_MAPPING_CHOICES,
+            PropertyFieldId::ArtworkWeightMappingComponent => SOURCE_MAPPING_CHOICES,
             PropertyFieldId::RandomCharacter => RANDOM_CHARACTER_CHOICES,
             PropertyFieldId::RandomDensityModulation => DENSITY_MODULATION_CHOICES,
             PropertyFieldId::ArtworkWeightResponse => ARTWORK_RESPONSE_CHOICES,
@@ -18746,7 +18950,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::RandomClusterSpread
             | PropertyFieldId::ExclusionMinimumCenterDistance
             | PropertyFieldId::RandomMaximumAttempts
-            | PropertyFieldId::RandomMaximumNeighborChecks => positive_bounds(),
+            | PropertyFieldId::RandomMaximumNeighborChecks
+            | PropertyFieldId::ModeledMappingGamma
+            | PropertyFieldId::ArtworkWeightMappingGamma => positive_bounds(),
             PropertyFieldId::ConnectionMaximumDegree => Some(PropertyBounds {
                 minimum: Some(1.0),
                 minimum_inclusive: true,
@@ -18784,6 +18990,14 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ModeledMappingGain
             | PropertyFieldId::ArtworkWeightMappingGain
             | PropertyFieldId::IntersectionMergeEpsilon => nonnegative_bounds(),
+            PropertyFieldId::ModeledMappingContrast
+            | PropertyFieldId::ArtworkWeightMappingContrast => nonnegative_bounds(),
+            PropertyFieldId::ModeledMappingBlackPoint
+            | PropertyFieldId::ModeledMappingWhitePoint
+            | PropertyFieldId::ModeledMappingCutoff
+            | PropertyFieldId::ArtworkWeightMappingBlackPoint
+            | PropertyFieldId::ArtworkWeightMappingWhitePoint
+            | PropertyFieldId::ArtworkWeightMappingCutoff => unit_bounds(),
             PropertyFieldId::ColorRed
             | PropertyFieldId::ColorGreen
             | PropertyFieldId::ColorBlue
@@ -18828,10 +19042,16 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::Opacity
             | PropertyFieldId::ModeledMappingGain
             | PropertyFieldId::ModeledMappingBias
+            | PropertyFieldId::ModeledMappingBlackPoint
+            | PropertyFieldId::ModeledMappingWhitePoint
+            | PropertyFieldId::ModeledMappingCutoff
             | PropertyFieldId::CurveResponseBias
             | PropertyFieldId::RandomClusterStrength
             | PropertyFieldId::ArtworkWeightMappingGain
             | PropertyFieldId::ArtworkWeightMappingBias
+            | PropertyFieldId::ArtworkWeightMappingBlackPoint
+            | PropertyFieldId::ArtworkWeightMappingWhitePoint
+            | PropertyFieldId::ArtworkWeightMappingCutoff
             | PropertyFieldId::ArtworkWeightStrength => PropertyUnit::NormalizedComponent,
             PropertyFieldId::CoverageGuardSteps
             | PropertyFieldId::RandomSeed
@@ -18848,7 +19068,12 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ModeledMappingPlacement
             | PropertyFieldId::ModeledMappingInverted
             | PropertyFieldId::ModeledMappingGain
-            | PropertyFieldId::ModeledMappingBias => PropertyApplicability::ModeledChannel,
+            | PropertyFieldId::ModeledMappingBias
+            | PropertyFieldId::ModeledMappingBlackPoint
+            | PropertyFieldId::ModeledMappingWhitePoint
+            | PropertyFieldId::ModeledMappingGamma
+            | PropertyFieldId::ModeledMappingContrast
+            | PropertyFieldId::ModeledMappingCutoff => PropertyApplicability::ModeledChannel,
             PropertyFieldId::Paint => PropertyApplicability::CurrentPaint,
             PropertyFieldId::ColorRed
             | PropertyFieldId::ColorGreen
@@ -18893,15 +19118,6 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             }
             PropertyFieldId::RandomDensityModulation => {
                 PropertyApplicability::CurrentDensityModulation
-            }
-            PropertyFieldId::ArtworkWeightMappingComponent
-            | PropertyFieldId::ArtworkWeightMappingPlacement
-            | PropertyFieldId::ArtworkWeightMappingInverted
-            | PropertyFieldId::ArtworkWeightMappingGain
-            | PropertyFieldId::ArtworkWeightMappingBias
-            | PropertyFieldId::ArtworkWeightStrength
-            | PropertyFieldId::ArtworkWeightResponse => {
-                PropertyApplicability::ArtworkWeightedDensity
             }
             PropertyFieldId::RandomExclusion => PropertyApplicability::CurrentExclusion,
             PropertyFieldId::ExclusionMinimumCenterDistance => {
@@ -18950,6 +19166,11 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ModeledMappingInverted
             | PropertyFieldId::ModeledMappingGain
             | PropertyFieldId::ModeledMappingBias
+            | PropertyFieldId::ModeledMappingBlackPoint
+            | PropertyFieldId::ModeledMappingWhitePoint
+            | PropertyFieldId::ModeledMappingGamma
+            | PropertyFieldId::ModeledMappingContrast
+            | PropertyFieldId::ModeledMappingCutoff
             | PropertyFieldId::OutputSiteProduct
             | PropertyFieldId::OutputPrototype
             | PropertyFieldId::OutputAuthoredClosedShape
@@ -18957,6 +19178,18 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::OutputOrientationDimension
             | PropertyFieldId::OutputSiteUseFilterKind
             | PropertyFieldId::OutputSiteUseFilterReference => InvalidationLevel::Realization,
+            PropertyFieldId::ArtworkWeightMappingComponent
+            | PropertyFieldId::ArtworkWeightMappingPlacement
+            | PropertyFieldId::ArtworkWeightMappingInverted
+            | PropertyFieldId::ArtworkWeightMappingGain
+            | PropertyFieldId::ArtworkWeightMappingBias
+            | PropertyFieldId::ArtworkWeightMappingBlackPoint
+            | PropertyFieldId::ArtworkWeightMappingWhitePoint
+            | PropertyFieldId::ArtworkWeightMappingGamma
+            | PropertyFieldId::ArtworkWeightMappingContrast
+            | PropertyFieldId::ArtworkWeightMappingCutoff
+            | PropertyFieldId::ArtworkWeightStrength
+            | PropertyFieldId::ArtworkWeightResponse => InvalidationLevel::Family,
             PropertyFieldId::RegionResizeAlgorithm | PropertyFieldId::RegionSampling => {
                 InvalidationLevel::Family
             }
@@ -19003,13 +19236,6 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
                 | PropertyFieldId::RandomClusterStrength
                 | PropertyFieldId::RandomSeed
                 | PropertyFieldId::RandomDensityModulation
-                | PropertyFieldId::ArtworkWeightMappingComponent
-                | PropertyFieldId::ArtworkWeightMappingPlacement
-                | PropertyFieldId::ArtworkWeightMappingInverted
-                | PropertyFieldId::ArtworkWeightMappingGain
-                | PropertyFieldId::ArtworkWeightMappingBias
-                | PropertyFieldId::ArtworkWeightStrength
-                | PropertyFieldId::ArtworkWeightResponse
                 | PropertyFieldId::RandomExclusion
                 | PropertyFieldId::ExclusionMinimumCenterDistance
                 | PropertyFieldId::VisibleMarkMargin
@@ -19359,7 +19585,24 @@ const fn property_authority(field: PropertyFieldId, target: PropertyTarget) -> P
             | PropertyFieldId::ModeledMappingPlacement
             | PropertyFieldId::ModeledMappingInverted
             | PropertyFieldId::ModeledMappingGain
-            | PropertyFieldId::ModeledMappingBias => PropertyAuthority::ChannelSpecific,
+            | PropertyFieldId::ModeledMappingBias
+            | PropertyFieldId::ModeledMappingBlackPoint
+            | PropertyFieldId::ModeledMappingWhitePoint
+            | PropertyFieldId::ModeledMappingGamma
+            | PropertyFieldId::ModeledMappingContrast
+            | PropertyFieldId::ModeledMappingCutoff
+            | PropertyFieldId::ArtworkWeightMappingComponent
+            | PropertyFieldId::ArtworkWeightMappingPlacement
+            | PropertyFieldId::ArtworkWeightMappingInverted
+            | PropertyFieldId::ArtworkWeightMappingGain
+            | PropertyFieldId::ArtworkWeightMappingBias
+            | PropertyFieldId::ArtworkWeightMappingBlackPoint
+            | PropertyFieldId::ArtworkWeightMappingWhitePoint
+            | PropertyFieldId::ArtworkWeightMappingGamma
+            | PropertyFieldId::ArtworkWeightMappingContrast
+            | PropertyFieldId::ArtworkWeightMappingCutoff
+            | PropertyFieldId::ArtworkWeightStrength
+            | PropertyFieldId::ArtworkWeightResponse => PropertyAuthority::ChannelSpecific,
             _ => PropertyAuthority::StructuralDefinition,
         },
     }
@@ -21986,14 +22229,7 @@ fn validate_pattern_structure_recipe_with_resources(
                     )?;
                 }
             }
-            if let SiteDensityModulation::ArtworkWeighted {
-                mapping, strength, ..
-            } = density_modulation
-            {
-                validate_nonnegative_finite(mapping.gain, "preset.recipe.modulation.mapping.gain")?;
-                validate_finite(mapping.bias, "preset.recipe.modulation.mapping.bias")?;
-                validate_unit_component(*strength, "preset.recipe.modulation.strength")?;
-            }
+            validate_site_density_modulation(density_modulation)?;
             match exclusion {
                 SiteExclusionPolicy::None => {}
                 SiteExclusionPolicy::MinimumCenterDistance { minimum } => {
@@ -22832,34 +23068,6 @@ pub enum PatternDefinitionEdit {
         mechanism_id: PatternMechanismId,
         modulation: SiteDensityModulation,
     },
-    SetArtworkWeightMappingComponent {
-        mechanism_id: PatternMechanismId,
-        component: SourceMappingComponent,
-    },
-    SetArtworkWeightMappingPlacement {
-        mechanism_id: PatternMechanismId,
-        placement: SourcePlacement,
-    },
-    SetArtworkWeightMappingInverted {
-        mechanism_id: PatternMechanismId,
-        inverted: bool,
-    },
-    SetArtworkWeightMappingGain {
-        mechanism_id: PatternMechanismId,
-        gain: f64,
-    },
-    SetArtworkWeightMappingBias {
-        mechanism_id: PatternMechanismId,
-        bias: f64,
-    },
-    SetArtworkWeightStrength {
-        mechanism_id: PatternMechanismId,
-        strength: f64,
-    },
-    SetArtworkWeightResponse {
-        mechanism_id: PatternMechanismId,
-        response: ArtworkWeightResponse,
-    },
     SetExclusionVariant {
         mechanism_id: PatternMechanismId,
         policy: SiteExclusionPolicy,
@@ -23156,6 +23364,11 @@ pub enum DocumentCommand {
         channel_id: ChannelId,
         edit: ModeledMappingFieldEdit,
     },
+    /// Replaces one independent weighting-source field for either current channel representation.
+    SetSourceWeightingField {
+        channel_id: ChannelId,
+        edit: SourceWeightingFieldEdit,
+    },
     /// Replaces ordinary solid paint for a modeled channel.
     SetChannelPaint {
         channel_id: ChannelId,
@@ -23435,42 +23648,10 @@ impl PatternDefinitionEdit {
                 PropertyFieldValue::EnumChoice(PropertyEnumChoice::DensityModulation(
                     match modulation {
                         SiteDensityModulation::Uniform => DensityModulationKind::Uniform,
-                        SiteDensityModulation::ArtworkWeighted { .. } => {
+                        SiteDensityModulation::ArtworkWeighted => {
                             DensityModulationKind::ArtworkWeighted
                         }
                     },
-                )),
-            ),
-            Edit::SetArtworkWeightMappingComponent { component, .. } => (
-                PropertyFieldId::ArtworkWeightMappingComponent,
-                PropertyFieldValue::EnumChoice(PropertyEnumChoice::SourceMappingComponent(
-                    *component,
-                )),
-            ),
-            Edit::SetArtworkWeightMappingPlacement { placement, .. } => (
-                PropertyFieldId::ArtworkWeightMappingPlacement,
-                PropertyFieldValue::EnumChoice(PropertyEnumChoice::SourcePlacement(*placement)),
-            ),
-            Edit::SetArtworkWeightMappingInverted { inverted, .. } => (
-                PropertyFieldId::ArtworkWeightMappingInverted,
-                PropertyFieldValue::Boolean(*inverted),
-            ),
-            Edit::SetArtworkWeightMappingGain { gain, .. } => (
-                PropertyFieldId::ArtworkWeightMappingGain,
-                PropertyFieldValue::FiniteF64(*gain),
-            ),
-            Edit::SetArtworkWeightMappingBias { bias, .. } => (
-                PropertyFieldId::ArtworkWeightMappingBias,
-                PropertyFieldValue::FiniteF64(*bias),
-            ),
-            Edit::SetArtworkWeightStrength { strength, .. } => (
-                PropertyFieldId::ArtworkWeightStrength,
-                PropertyFieldValue::FiniteF64(*strength),
-            ),
-            Edit::SetArtworkWeightResponse { response, .. } => (
-                PropertyFieldId::ArtworkWeightResponse,
-                PropertyFieldValue::EnumChoice(PropertyEnumChoice::ArtworkWeightResponse(
-                    *response,
                 )),
             ),
             Edit::SetExclusionVariant { policy, .. } => (
@@ -23763,6 +23944,15 @@ impl DocumentCommand {
                     ModeledMappingFieldEdit::Inverted(_) => PropertyFieldId::ModeledMappingInverted,
                     ModeledMappingFieldEdit::Gain(_) => PropertyFieldId::ModeledMappingGain,
                     ModeledMappingFieldEdit::Bias(_) => PropertyFieldId::ModeledMappingBias,
+                    ModeledMappingFieldEdit::BlackPoint(_) => {
+                        PropertyFieldId::ModeledMappingBlackPoint
+                    }
+                    ModeledMappingFieldEdit::WhitePoint(_) => {
+                        PropertyFieldId::ModeledMappingWhitePoint
+                    }
+                    ModeledMappingFieldEdit::Gamma(_) => PropertyFieldId::ModeledMappingGamma,
+                    ModeledMappingFieldEdit::Contrast(_) => PropertyFieldId::ModeledMappingContrast,
+                    ModeledMappingFieldEdit::Cutoff(_) => PropertyFieldId::ModeledMappingCutoff,
                 },
                 match edit {
                     ModeledMappingFieldEdit::Component(value) => PropertyFieldValue::EnumChoice(
@@ -23773,6 +23963,69 @@ impl DocumentCommand {
                     }
                     ModeledMappingFieldEdit::Inverted(value) => PropertyFieldValue::Boolean(*value),
                     ModeledMappingFieldEdit::Gain(value) | ModeledMappingFieldEdit::Bias(value) => {
+                        PropertyFieldValue::FiniteF64(*value)
+                    }
+                    ModeledMappingFieldEdit::BlackPoint(value)
+                    | ModeledMappingFieldEdit::WhitePoint(value)
+                    | ModeledMappingFieldEdit::Gamma(value)
+                    | ModeledMappingFieldEdit::Contrast(value)
+                    | ModeledMappingFieldEdit::Cutoff(value) => {
+                        PropertyFieldValue::FiniteF64(*value)
+                    }
+                },
+            ),
+            Command::SetSourceWeightingField { edit, .. } => one(
+                match edit {
+                    SourceWeightingFieldEdit::Component(_) => {
+                        PropertyFieldId::ArtworkWeightMappingComponent
+                    }
+                    SourceWeightingFieldEdit::Placement(_) => {
+                        PropertyFieldId::ArtworkWeightMappingPlacement
+                    }
+                    SourceWeightingFieldEdit::Inverted(_) => {
+                        PropertyFieldId::ArtworkWeightMappingInverted
+                    }
+                    SourceWeightingFieldEdit::Gain(_) => PropertyFieldId::ArtworkWeightMappingGain,
+                    SourceWeightingFieldEdit::Bias(_) => PropertyFieldId::ArtworkWeightMappingBias,
+                    SourceWeightingFieldEdit::BlackPoint(_) => {
+                        PropertyFieldId::ArtworkWeightMappingBlackPoint
+                    }
+                    SourceWeightingFieldEdit::WhitePoint(_) => {
+                        PropertyFieldId::ArtworkWeightMappingWhitePoint
+                    }
+                    SourceWeightingFieldEdit::Gamma(_) => {
+                        PropertyFieldId::ArtworkWeightMappingGamma
+                    }
+                    SourceWeightingFieldEdit::Contrast(_) => {
+                        PropertyFieldId::ArtworkWeightMappingContrast
+                    }
+                    SourceWeightingFieldEdit::Cutoff(_) => {
+                        PropertyFieldId::ArtworkWeightMappingCutoff
+                    }
+                    SourceWeightingFieldEdit::Strength(_) => PropertyFieldId::ArtworkWeightStrength,
+                    SourceWeightingFieldEdit::Response(_) => PropertyFieldId::ArtworkWeightResponse,
+                },
+                match edit {
+                    SourceWeightingFieldEdit::Component(value) => PropertyFieldValue::EnumChoice(
+                        PropertyEnumChoice::SourceMappingComponent(*value),
+                    ),
+                    SourceWeightingFieldEdit::Placement(value) => {
+                        PropertyFieldValue::EnumChoice(PropertyEnumChoice::SourcePlacement(*value))
+                    }
+                    SourceWeightingFieldEdit::Inverted(value) => {
+                        PropertyFieldValue::Boolean(*value)
+                    }
+                    SourceWeightingFieldEdit::Response(value) => PropertyFieldValue::EnumChoice(
+                        PropertyEnumChoice::ArtworkWeightResponse(*value),
+                    ),
+                    SourceWeightingFieldEdit::Gain(value)
+                    | SourceWeightingFieldEdit::Bias(value)
+                    | SourceWeightingFieldEdit::BlackPoint(value)
+                    | SourceWeightingFieldEdit::WhitePoint(value)
+                    | SourceWeightingFieldEdit::Gamma(value)
+                    | SourceWeightingFieldEdit::Contrast(value)
+                    | SourceWeightingFieldEdit::Cutoff(value)
+                    | SourceWeightingFieldEdit::Strength(value) => {
                         PropertyFieldValue::FiniteF64(*value)
                     }
                 },
@@ -23874,6 +24127,7 @@ impl DocumentCommand {
             | Self::SetVisibility { channel_id, .. }
             | Self::SetLegacyMappingField { channel_id, .. }
             | Self::SetModeledMappingField { channel_id, .. }
+            | Self::SetSourceWeightingField { channel_id, .. }
             | Self::SetChannelPaint { channel_id, .. }
             | Self::EditSelectedChannelPatternDefinition { channel_id, .. }
             | Self::EditSelectedChannelPatternDefinitionBundle { channel_id, .. } => *channel_id,
@@ -24055,18 +24309,7 @@ impl DocumentCommand {
                     ));
                 }
                 validate_finite(*rotation_degrees, "channel.pattern.rotation_delta")?;
-                let definition_id = document
-                    .effective_channel_pattern(*channel_id)?
-                    .definition_id;
-                if document
-                    .definition(definition_id)
-                    .is_some_and(definition_uses_artwork_weighted_density)
-                {
-                    return Err(ValidationError::new(
-                        "channel.pattern.rotation",
-                        "artwork-weighted placement does not support pattern rotation",
-                    ));
-                }
+                document.effective_channel_pattern(*channel_id)?;
                 Ok(())
             }
             Self::SetChannelShapeRotationDelta {
@@ -24486,8 +24729,24 @@ impl DocumentCommand {
                     ModeledMappingFieldEdit::Inverted(value) => mapping.inverted = *value,
                     ModeledMappingFieldEdit::Gain(value) => mapping.gain = *value,
                     ModeledMappingFieldEdit::Bias(value) => mapping.bias = *value,
+                    ModeledMappingFieldEdit::BlackPoint(value) => mapping.tone.black_point = *value,
+                    ModeledMappingFieldEdit::WhitePoint(value) => mapping.tone.white_point = *value,
+                    ModeledMappingFieldEdit::Gamma(value) => mapping.tone.gamma = *value,
+                    ModeledMappingFieldEdit::Contrast(value) => mapping.tone.contrast = *value,
+                    ModeledMappingFieldEdit::Cutoff(value) => mapping.tone.cutoff = *value,
                 }
                 validate_source_mapping(mapping)
+            }
+            Self::SetSourceWeightingField { channel_id, edit } => {
+                let mut weighting =
+                    document
+                        .channel_weighting(*channel_id)
+                        .ok_or(ValidationError::new(
+                            "command.channel_id",
+                            "weighting command targets a missing channel",
+                        ))?;
+                apply_source_weighting_edit(&mut weighting, *edit);
+                validate_source_weighting(weighting)
             }
             Self::SetChannelPaint { channel_id, paint } => {
                 let model = document.channel_model().ok_or(ValidationError::new(
@@ -24945,6 +25204,9 @@ impl DocumentCommand {
                             channel.source_mapping.placement = *value
                         }
                     },
+                    Self::SetSourceWeightingField { edit, .. } => {
+                        apply_source_weighting_edit(&mut channel.weighting, *edit)
+                    }
                     _ => unreachable!("modeled-only command was validated against legacy state"),
                 }
             }
@@ -24977,7 +25239,25 @@ impl DocumentCommand {
                         }
                         ModeledMappingFieldEdit::Gain(value) => channel.mapping.gain = *value,
                         ModeledMappingFieldEdit::Bias(value) => channel.mapping.bias = *value,
+                        ModeledMappingFieldEdit::BlackPoint(value) => {
+                            channel.mapping.tone.black_point = *value
+                        }
+                        ModeledMappingFieldEdit::WhitePoint(value) => {
+                            channel.mapping.tone.white_point = *value
+                        }
+                        ModeledMappingFieldEdit::Gamma(value) => {
+                            channel.mapping.tone.gamma = *value
+                        }
+                        ModeledMappingFieldEdit::Contrast(value) => {
+                            channel.mapping.tone.contrast = *value
+                        }
+                        ModeledMappingFieldEdit::Cutoff(value) => {
+                            channel.mapping.tone.cutoff = *value
+                        }
                     },
+                    Self::SetSourceWeightingField { edit, .. } => {
+                        apply_source_weighting_edit(&mut channel.weighting, *edit)
+                    }
                     Self::SetChannelPaint { paint, .. } => channel.paint = paint.clone(),
                     Self::SetLegacyMappingField { .. } => {
                         unreachable!("legacy mapping is rejected for modeled state")
@@ -25026,6 +25306,18 @@ impl DocumentCommand {
                 };
             }
             _ => {}
+        }
+        if let Self::SetSourceWeightingField { channel_id, .. } = self {
+            let active = after
+                .effective_channel_pattern(*channel_id)
+                .ok()
+                .and_then(|effective| after.definition(effective.definition_id))
+                .is_some_and(definition_uses_source_weighting);
+            return CommandResult {
+                affected_channels: vec![*channel_id],
+                invalidation: active.then_some(InvalidationLevel::Family),
+                created_authored_structure_id: None,
+            };
         }
         if matches!(
             self,
@@ -26421,8 +26713,7 @@ fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
 
 /// Classifies one channel's net Pattern change from effective and structural authority.
 ///
-/// Layout and family inputs invalidate family construction; artwork-weighted
-/// source interpretation invalidates decoded source fields; region algorithm
+/// Layout and family inputs invalidate family construction; region algorithm
 /// or sampling changes invalidate family geometry; response, output, filter,
 /// and shape changes invalidate realization; painter-only reordering invalidates
 /// presentation. Name-only and inherited-versus-explicit changes that resolve
@@ -26438,9 +26729,6 @@ fn channel_pattern_change_invalidation(
     };
     let old_bundle = before.bundle(old.definition_id)?;
     let new_bundle = after.bundle(new.definition_id)?;
-    if definition_artwork_mapping_changed(&old_bundle.definition, &new_bundle.definition) {
-        return Some(InvalidationLevel::Source);
-    }
     if old.definition_id != new.definition_id
         || old.density != new.density
         || old.pattern_rotation_degrees != new.pattern_rotation_degrees
@@ -26471,43 +26759,6 @@ fn channel_pattern_change_invalidation(
         .into_iter()
         .flatten()
         .fold(None, strongest_invalidation)
-}
-
-/// Detects changes only to nested artwork-weighted source interpretation.
-fn definition_artwork_mapping_changed(
-    before: &PatternDefinition,
-    after: &PatternDefinition,
-) -> bool {
-    before.mechanisms.iter().any(|old| {
-        let PatternMechanism::SiteDensityModulation {
-            id,
-            modulation: old_modulation,
-            ..
-        } = old
-        else {
-            return false;
-        };
-        after.mechanisms.iter().any(|new| {
-            let PatternMechanism::SiteDensityModulation {
-                id: new_id,
-                modulation: new_modulation,
-                ..
-            } = new
-            else {
-                return false;
-            };
-            new_id == id
-                && artwork_weight_mapping(old_modulation) != artwork_weight_mapping(new_modulation)
-        })
-    })
-}
-
-/// Returns only the source interpretation nested in an artwork-weighted site mechanism.
-fn artwork_weight_mapping(modulation: &SiteDensityModulation) -> Option<SourceMapping> {
-    match modulation {
-        SiteDensityModulation::Uniform => None,
-        SiteDensityModulation::ArtworkWeighted { mapping, .. } => Some(*mapping),
-    }
 }
 
 /// Classifies structural output changes while distinguishing painter order from realization input.
@@ -26774,6 +27025,7 @@ mod history_tests {
                     component: SourceComponent::Luminance,
                     placement: SourcePlacement::StretchToCanvas,
                 },
+                weighting: SourceWeighting::canonical(SourceMappingComponent::Luminance),
             }],
         )
         .unwrap();

@@ -1170,6 +1170,8 @@ struct FamilyDefinitionKey {
     definition_id: u64,
     family: toniator_domain::PatternFamily,
     mechanisms: Vec<PatternMechanism>,
+    /// Complete artwork-weight source response after receiving-channel binding.
+    resolved_source_weighting: Option<toniator_domain::SourceWeighting>,
     resolved_guide_content: Option<String>,
     path_offset_algorithm: Option<PathOffsetAlgorithmKey>,
 }
@@ -1766,8 +1768,16 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
     // Capability resolution is authoritative and happens before decoding or
     // cache lookup, so an unsupported composition cannot publish a partial
     // artifact into a last-successful cache.
-    let plan = toniator_patterns::resolve_document_pattern_pipeline(document, definition)
-        .map_err(EvaluationError::from_pipeline)?;
+    let weighting = document
+        .channel_weighting(channel_id)
+        .ok_or(EvaluationError::new(
+            "evaluation.channel_weighting",
+            "channel is missing its independent source weighting response",
+        ))?;
+    let plan = toniator_patterns::resolve_document_pattern_pipeline_for_channel(
+        document, definition, weighting,
+    )
+    .map_err(EvaluationError::from_pipeline)?;
     let outputs = ordered_output_bindings(&effective, &plan)?;
     let [(capability, setting)] = outputs.as_slice() else {
         return Err(EvaluationError::new(
@@ -1804,6 +1814,8 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
                     .map(|source| (source, CacheDisposition::Miss)),
             }
         })?;
+    let mut definition_key = family_definition_key(definition);
+    definition_key.resolved_source_weighting = resolved_source_weighting(&plan.family);
     let family_key = FamilyCacheKey {
         canvas: canvas_key(document.canvas()),
         density: (
@@ -1822,7 +1834,7 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
                 .generic_guides
                 .as_ref()
                 .map(resolved_guide_identity),
-            ..family_definition_key(definition)
+            ..definition_key
         },
         required_support_radius: required_support_radius_legacy(
             document.canvas(),
@@ -2023,9 +2035,32 @@ fn family_definition_key(value: &PatternDefinition) -> FamilyDefinitionKey {
         definition_id: value.id.0,
         family: value.family.clone(),
         mechanisms: value.mechanisms.clone(),
+        resolved_source_weighting: None,
         resolved_guide_content: None,
         path_offset_algorithm: path_offset_algorithm_key(value),
     }
+}
+
+/// Extracts the complete receiving-channel weighting response for family cache identity.
+fn resolved_source_weighting(
+    family: &FamilyCapability,
+) -> Option<toniator_domain::SourceWeighting> {
+    family
+        .random
+        .as_ref()
+        .and_then(|random| match &random.density_modulation {
+            toniator_patterns::ResolvedSiteDensityModulation::Uniform => None,
+            toniator_patterns::ResolvedSiteDensityModulation::ArtworkWeightedUnbound => None,
+            toniator_patterns::ResolvedSiteDensityModulation::ArtworkWeighted {
+                mapping,
+                strength,
+                response,
+            } => Some(toniator_domain::SourceWeighting {
+                mapping: *mapping,
+                strength: *strength,
+                response: *response,
+            }),
+        })
 }
 
 /// Captures the versioned geometry algorithm and fixed limits when a definition uses normal offsets.
@@ -3724,8 +3759,12 @@ fn evaluate_cached_document_impl(
                     "evaluation.pattern_definition",
                     "channel resolves a missing pattern definition",
                 ))?;
-            let plan = toniator_patterns::resolve_document_pattern_pipeline(document, definition)
-                .map_err(EvaluationError::from_pipeline)?;
+            let plan = toniator_patterns::resolve_document_pattern_pipeline_for_channel(
+                document,
+                definition,
+                channel.weighting,
+            )
+            .map_err(EvaluationError::from_pipeline)?;
             Ok::<_, EvaluationRunError>((channel, effective, definition, plan))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -6058,6 +6097,8 @@ fn document_family_cache_key(
     outputs: &[toniator_patterns::OutputCapability],
     source: &SourceField,
 ) -> Result<DocumentFamilyCacheKey, EvaluationError> {
+    let mut definition_key = family_definition_key(definition);
+    definition_key.resolved_source_weighting = resolved_source_weighting(family);
     Ok(DocumentFamilyCacheKey {
         content: DocumentFamilyContentKey {
             canvas: (canvas.width.to_bits(), canvas.height.to_bits()),
@@ -6077,7 +6118,7 @@ fn document_family_cache_key(
             .to_bits(),
             definition: FamilyDefinitionKey {
                 resolved_guide_content: family.generic_guides.as_ref().map(resolved_guide_identity),
-                ..family_definition_key(definition)
+                ..definition_key
             },
             structural_source: family_requires_decoded_source(family)
                 .then(|| realization_source_identity(source.identity())),
@@ -6396,12 +6437,17 @@ fn document_realization_cache_key(
         source_identity: sampling_required.then(|| realization_source_identity(source.identity())),
         mapping: sampling_required.then(|| {
             format!(
-                "{:?}:{:?}:{}:{}:{}",
+                "{:?}:{:?}:{}:{}:{}:{}:{}:{}:{}:{}",
                 channel.mapping.component,
                 channel.mapping.placement,
                 channel.mapping.inverted,
                 channel.mapping.gain.to_bits(),
-                channel.mapping.bias.to_bits()
+                channel.mapping.bias.to_bits(),
+                channel.mapping.tone.black_point.to_bits(),
+                channel.mapping.tone.white_point.to_bits(),
+                channel.mapping.tone.gamma.to_bits(),
+                channel.mapping.tone.contrast.to_bits(),
+                channel.mapping.tone.cutoff.to_bits()
             )
         }),
         response: match &output_setting.response {
@@ -6733,6 +6779,55 @@ pub(crate) mod test_support {
     const GUARD: Duration = Duration::from_secs(15);
     const CHANNEL_ID: ChannelId = ChannelId(1);
 
+    /// Reuses source and family caches while rebuilding realization for each authored tonal edit.
+    ///
+    /// # Panics
+    /// Panics if a tonal change reuses stale geometry, discards reusable upstream work,
+    /// or fails to publish a complete scheduler result.
+    #[test]
+    fn gate2_tone_edits_invalidate_realization_and_preserve_upstream_cache() {
+        use toniator_domain::ModeledMappingFieldEdit;
+        let scheduler = EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
+        let mut session = modeled_document_session();
+        let bytes = valid_document_bytes();
+        scheduler
+            .submit(document_request(&session, Arc::clone(&bytes)))
+            .unwrap();
+        let initial = wait_for_document_completion(&scheduler);
+        assert!(scheduler.accept_completion(&initial, &session).unwrap());
+        for edit in [
+            ModeledMappingFieldEdit::BlackPoint(0.15),
+            ModeledMappingFieldEdit::WhitePoint(0.85),
+            ModeledMappingFieldEdit::Gamma(1.7),
+            ModeledMappingFieldEdit::Contrast(1.2),
+            ModeledMappingFieldEdit::Cutoff(0.4),
+        ] {
+            session
+                .apply(&DocumentCommand::SetModeledMappingField {
+                    channel_id: CHANNEL_ID,
+                    edit,
+                })
+                .unwrap();
+            scheduler
+                .submit(document_request(&session, Arc::clone(&bytes)))
+                .unwrap();
+            let completion = wait_for_document_completion(&scheduler);
+            assert!(completion.result().is_some(), "{:?}", completion.error());
+            let cache = completion.cache_diagnostics().unwrap().aggregate;
+            assert_eq!(cache.decoded_source, CacheDisposition::Hit);
+            assert_eq!(cache.family, CacheDisposition::Hit);
+            assert_eq!(cache.realization, CacheDisposition::Miss);
+            assert!(scheduler.accept_completion(&completion, &session).unwrap());
+        }
+        scheduler.submit(document_request(&session, bytes)).unwrap();
+        let repeated = wait_for_document_completion(&scheduler);
+        assert_eq!(
+            repeated.cache_diagnostics().unwrap().aggregate.realization,
+            CacheDisposition::Hit
+        );
+        scheduler.shutdown().unwrap();
+    }
+
     /// Converts evaluator-facing across-axis frequencies into current density/aspect authority.
     fn authored_density(canvas: &CanvasSpec, across_x: f64, across_y: f64) -> DensityMetric2D {
         DensityMetric2D::from_resolved(canvas, &ResolvedDensityMetric2D { across_x, across_y })
@@ -6860,6 +6955,9 @@ pub(crate) mod test_support {
                     component: SourceComponent::Luminance,
                     placement: SourcePlacement::StretchToCanvas,
                 },
+                weighting: toniator_domain::SourceWeighting::canonical(
+                    toniator_domain::SourceMappingComponent::Luminance,
+                ),
             }],
         )
         .unwrap();
@@ -12611,6 +12709,7 @@ mod cache_key_tests {
                     site_mechanism_id: toniator_domain::PatternMechanismId(2),
                 },
                 mechanisms: vec![],
+                resolved_source_weighting: None,
                 resolved_guide_content: None,
                 path_offset_algorithm: None,
             },
@@ -12998,5 +13097,57 @@ mod cache_key_tests {
             realization(family(1.0), "content", "pixels", contract(1)),
             realization(family(1.0), "content", "pixels", contract(2)),
         );
+    }
+
+    /// Proves complete channel weighting separates shared random families in the cache.
+    #[test]
+    fn role_resolved_default_source_changes_family_key() {
+        let definition = toniator_domain::PatternDefinition::random_sites(
+            toniator_domain::PatternDefinitionId(901),
+            "default cache identity",
+            toniator_domain::PatternMechanismId(902),
+            toniator_domain::PatternMechanismId(903),
+            toniator_domain::PatternMechanismId(904),
+            toniator_domain::PatternMechanismId(905),
+            toniator_domain::PatternOutputLayerId(906),
+            toniator_domain::RandomSiteCharacter::RawUniform,
+            907,
+            toniator_domain::SiteDensityModulation::ArtworkWeighted,
+            toniator_domain::SiteExclusionPolicy::None,
+            10_000,
+            10_000,
+            toniator_domain::CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        let red = toniator_patterns::resolve_pattern_pipeline_for_channel(
+            &definition,
+            toniator_domain::SourceWeighting::canonical(
+                toniator_domain::SourceMappingComponent::Green,
+            ),
+        )
+        .expect("red default resolves");
+        let mut shaped_weighting = toniator_domain::SourceWeighting::canonical(
+            toniator_domain::SourceMappingComponent::Green,
+        );
+        shaped_weighting.mapping.tone.gamma = 1.4;
+        shaped_weighting.strength = 0.6;
+        shaped_weighting.response = toniator_domain::ArtworkWeightResponse::Smoothstep;
+        let shaped =
+            toniator_patterns::resolve_pattern_pipeline_for_channel(&definition, shaped_weighting)
+                .expect("shaped weighting resolves");
+        let mut red_key = family_definition_key(&definition);
+        red_key.resolved_source_weighting = resolved_source_weighting(&red.family);
+        let mut shaped_key = family_definition_key(&definition);
+        shaped_key.resolved_source_weighting = resolved_source_weighting(&shaped.family);
+        assert_eq!(
+            red_key.resolved_source_weighting,
+            Some(toniator_domain::SourceWeighting::canonical(
+                toniator_domain::SourceMappingComponent::Green,
+            ))
+        );
+        assert_eq!(shaped_key.resolved_source_weighting, Some(shaped_weighting));
+        assert_ne!(red_key, shaped_key);
     }
 }

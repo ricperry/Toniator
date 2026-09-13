@@ -13,7 +13,7 @@ Built with Rust and GTK4, Toniator includes a visual Pattern Wizard, a personal
 Pattern library, and a headless command-line renderer. It is free software under
 the [GPL-3.0-only license](LICENSE).
 
-**Development version: 0.3.0 (unreleased). Latest published pre-release: 0.2.0.**
+**Development version: 0.3.1 (unreleased).**
 [Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.2.0)
 or [browse known issues](ISSUES.md).
 
@@ -82,7 +82,7 @@ scrolls within its own bounded area.
 2. Choose a color mode and edit **All** channels together or select one channel.
 3. Use **Change…** to choose a Pattern. Use it as supplied or edit its layout,
    placement, and styling in the Pattern Wizard.
-4. Adjust Pattern size, rotation, and appearance. Use **Preview / Source** to
+4. Adjust Feature size, rotation, and appearance. Use **Preview / Source** to
    compare the result with your original artwork, and zoom or Fit to inspect it.
 5. Save a `.toniator` project to keep the source image and editable settings.
    Export **PNG** for a raster image or **SVG** for editable vector geometry.
@@ -201,7 +201,39 @@ migrated. Document-level **Presets** are implemented and user-accepted in the
 development build, separately from the personal **Pattern** library. See the
 [Gate 21B-5 record](docs/STAGE_21B_GATE5_IMPLEMENTATION.md) for the format and checks.
 
-Known limitations include slow previews at very fine Pattern sizes, first-use
+The 0.3.1 development build adds independent **Fill response** and **Source
+weighting** groups in Advanced Settings. Each has its own source component,
+inversion, gain, offset, black/white points, gamma, contrast and cutoff. Weighting
+also has its own strength and curve. The Pattern Editor defines whether weighting
+is used and the geometric min/max bounds; it carries no source mapping or tone
+settings. Changing a Pattern preserves both channel source configurations. These
+controls edit the selected Start or End frame; ALL assigns each changed value
+to every compatible channel. Source interpretation remains separate from paint
+color. Black must stay below white throughout the selected interpolation. A
+zero cutoff disables suppression. Fill responses below cutoff produce no
+output, including where minimum fill or thickness is positive. Weighting cutoff
+suppresses the mapped sample before curve and strength blending. Built-in Pattern
+response ranges default to 0–1, with editable minima. X/Y offset is beside
+Rotation, and multi-output channels have separate Coverage controls.
+
+Artwork-weighted Patterns support Rotation and X/Y offsets. Weighting is
+recalculated at transformed positions; a notice explains how to restore the
+original alignment with neutral controls. Both source consumers initially use the
+channel's matching color component, and Advanced can change them independently.
+Explicit Luminance remains available for monochrome artwork.
+
+**Export video** also exposes frame rate and duration, with a live frame count.
+Video projects initialize these values from their source. Export applies timing
+changes to the document as one undoable edit; closing the sheet before exporting
+discards them. Optional first/last frames select an export subset. PNG sequences,
+lossless FFV1/Matroska and optional AV1/WebM remain available.
+
+Current development persistence uses document schema **10**, document-Preset
+format **3**, media container **2**, and Pattern format **5**. Earlier
+document schemas are rejected; existing project files are not migrated or
+overwritten automatically.
+
+Known limitations include slow previews at very fine feature sizes, first-use
 personal thumbnail latency, and an intermittent reported RGB-to-CMYK crash.
 Second-launch forwarding, stale Preset actions, wizard dismissal and progress
 reporting are fixed; dense circular-mark previews also avoid a quadratic lookup.

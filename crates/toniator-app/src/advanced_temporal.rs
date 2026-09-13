@@ -129,10 +129,218 @@ pub(super) struct Binding {
     animation: Option<(gtk::Button, gtk::DropDown, gtk::Label)>,
 }
 
+/// Applies a current effective Advanced property through the selected endpoint's history authority.
+///
+/// # Errors
+/// Rejects stale locators, invalid values and coupled bounds without changing the draft.
+pub(super) fn apply_input(
+    history: &mut DocumentHistory,
+    endpoint: temporal_preview::Endpoint,
+    target: InspectorTarget,
+    locator: AdvancedDescriptorLocator,
+    input: InspectorInput,
+) -> Result<bool, String> {
+    let display = display_document(history.document(), endpoint)?;
+    let current = resolve_current_advanced_value(&display, target, locator)?;
+    let unchanged = match (&current.value, &input) {
+        (PropertyCurrentValueKind::FiniteF64(a), InspectorInput::FiniteF64(b)) => a == b,
+        (PropertyCurrentValueKind::U32(a), InspectorInput::U32(b)) => a == b,
+        (PropertyCurrentValueKind::Boolean(a), InspectorInput::Boolean(b)) => a == b,
+        (PropertyCurrentValueKind::EnumChoice(a), InspectorInput::EnumChoice(b)) => a == b,
+        _ => false,
+    };
+    if unchanged {
+        return Ok(false);
+    }
+    if endpoint == temporal_preview::Endpoint::End && temporal_edit::eligible(&current.descriptor) {
+        let InspectorInput::FiniteF64(value) = input else {
+            return Err("This setting is shared by all frames; edit it at Start frame.".into());
+        };
+        let command =
+            temporal_edit::scalar_command(history.document(), &current.descriptor, value)?;
+        history
+            .apply_temporal(&command)
+            .map_err(|error| error.to_string())?;
+    } else {
+        let command = command_for_inspector_input(
+            history.document(),
+            target.channel_id(),
+            DefinitionEditScope::SelectedCopy,
+            &current.descriptor,
+            input,
+        )?;
+        history.apply(&command).map_err(|error| error.to_string())?;
+    }
+    Ok(true)
+}
+
+/// Flushes pending numeric text before Apply, including keyboard/default and AT-SPI activation.
+/// Captures all pending values before refresh can overwrite a sibling entry. Main history is untouched.
+///
+/// # Errors
+/// Returns an artist-facing input/domain diagnostic and leaves the dialog open for correction.
+pub(super) fn commit_pending(state: &Rc<RefCell<AppState>>, epoch: u64) -> Result<(), String> {
+    let (draft, endpoint, batches, edits) = {
+        let app = state.borrow();
+        let surface = app
+            .advanced_settings
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+            .ok_or("These Advanced Settings are no longer open.")?;
+        let document = display_document(surface.draft.borrow().document(), surface.endpoint)?;
+        let batches = surface
+            .batch_editors
+            .iter()
+            .map(advanced_batches::Controls::pending)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let mut edits = Vec::new();
+        for binding in &surface.bindings {
+            let Some(entry) = binding.input.downcast_ref::<gtk::Entry>() else {
+                continue;
+            };
+            let current =
+                resolve_current_advanced_value(&document, binding.target, binding.locator)?;
+            let error = || {
+                format!(
+                    "{}: enter a valid number.",
+                    inspector_field_label(current.descriptor.field)
+                )
+            };
+            let input = match current.value {
+                PropertyCurrentValueKind::FiniteF64(current) => {
+                    let value = entry
+                        .text()
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|value| value.is_finite())
+                        .ok_or_else(error)?;
+                    if value == current {
+                        continue;
+                    }
+                    InspectorInput::FiniteF64(value)
+                }
+                PropertyCurrentValueKind::U32(current) => {
+                    let value = entry.text().parse::<u32>().map_err(|_| error())?;
+                    if value == current {
+                        continue;
+                    }
+                    InspectorInput::U32(value)
+                }
+                _ => continue,
+            };
+            edits.push((binding.target, binding.locator, input));
+        }
+        (surface.draft.clone(), surface.endpoint, batches, edits)
+    };
+    let mut draft = draft.borrow_mut();
+    let mut pending = DocumentHistory::new_draft(&draft);
+    advanced_batches::apply_fields(&mut pending, endpoint, &batches)?;
+    apply_pending_inputs(&mut pending, endpoint, &edits)?;
+    {
+        let app = state.borrow();
+        let surface = app
+            .advanced_settings
+            .as_ref()
+            .ok_or("Advanced Settings closed during Apply.")?;
+        for editor in &surface.paint_editors {
+            editor.commit_pending(&mut pending, endpoint)?;
+        }
+    }
+    draft
+        .squash_draft(&pending)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Commits pending effective scalar pairs together before remaining discrete inputs.
+/// Locators resolve against the current draft; the domain validates all coupled scalar bounds at once.
+///
+/// # Errors
+/// Returns inactive-descriptor, bounds, or history diagnostics; the caller discards the private draft.
+pub(super) fn apply_pending_inputs(
+    history: &mut DocumentHistory,
+    endpoint: temporal_preview::Endpoint,
+    edits: &[(InspectorTarget, AdvancedDescriptorLocator, InspectorInput)],
+) -> Result<(), String> {
+    let display = display_document(history.document(), endpoint)?;
+    let mut scalars = Vec::new();
+    let mut other = Vec::new();
+    for (target, locator, input) in edits {
+        let current = resolve_current_advanced_value(&display, *target, *locator)?;
+        if let InspectorInput::FiniteF64(value) = input
+            && display
+                .channel_scalar_batch(current.descriptor.field)
+                .is_ok_and(|batch| {
+                    batch
+                        .values
+                        .iter()
+                        .any(|entry| entry.target == current.descriptor.target)
+                })
+        {
+            scalars.push((current.descriptor.target, current.descriptor.field, *value));
+        } else {
+            other.push((*target, *locator, input.clone()));
+        }
+    }
+    if !scalars.is_empty() {
+        match endpoint {
+            temporal_preview::Endpoint::Start => {
+                let base = history.document().clone();
+                let configuration = base
+                    .edit_channel_start_configuration(&scalars)
+                    .map_err(|error| error.to_string())?;
+                history
+                    .apply_document_configuration(&base, history.revision(), &configuration)
+                    .map_err(|error| error.to_string())?;
+            }
+            temporal_preview::Endpoint::End => {
+                let edits = scalars
+                    .into_iter()
+                    .map(|(target, field, effective_end)| {
+                        let easing = history
+                            .document()
+                            .temporal_end_overrides()
+                            .iter()
+                            .find_map(|entry| match entry {
+                                toniator_domain::TemporalEndOverride::Scalar(value)
+                                    if value.target == target && value.field == field =>
+                                {
+                                    Some(value.easing)
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(toniator_domain::Easing::Linear);
+                        toniator_domain::TemporalEndpointEdit {
+                            target,
+                            field,
+                            effective_end,
+                            easing,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let command = history
+                    .document()
+                    .edit_effective_end_command(&edits)
+                    .map_err(|error| error.to_string())?;
+                history
+                    .apply_temporal(&command)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    for (target, locator, input) in other {
+        apply_input(history, endpoint, target, locator, input)?;
+    }
+    Ok(())
+}
+
 /// Rebuilds capability-dependent groups when the dialog opens or a discrete setting changes.
 ///
-/// All exposes domain batch averages and progressively disclosed named-channel details,
-/// preserving differing values and painter-ordered outputs. Apply remains one draft publication.
+/// All exposes shared/mixed values and progressively disclosed named-channel details.
+/// Each effective output setting appears once. Apply remains one draft publication.
 pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
     let (draft, target, endpoint, fields, guard) = {
         let mut app = state.borrow_mut();
@@ -215,6 +423,25 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
             ));
         }
         let values = advanced_settings_values(&document, target);
+        let fill_content = source_group(&content, "Fill response", None);
+        let weighting_used = document
+            .effective_channel_pattern(channel)
+            .ok()
+            .and_then(|effective| {
+                document
+                    .pattern_definition_bundles()
+                    .iter()
+                    .find(|bundle| bundle.definition.id == effective.definition_id)
+                    .map(|bundle| &bundle.definition)
+            })
+            .is_some_and(toniator_domain::definition_uses_source_weighting);
+        let weighting_content = source_group(
+            &content,
+            "Source weighting",
+            (!weighting_used).then_some(
+                "These settings are stored for this channel. The current pattern does not use source weighting.",
+            ),
+        );
         for value in values.iter().filter(|value| {
             !matches!(value.descriptor.target, PropertyTarget::ChannelOutput(_, _))
                 && paint_editor::component(value.descriptor.field).is_none()
@@ -226,7 +453,11 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
                 epoch,
                 target,
                 endpoint,
-                &content,
+                match source_consumer_group(value.descriptor.field) {
+                    Some("Fill response") => &fill_content,
+                    Some("Source weighting") => &weighting_content,
+                    _ => &content,
+                },
                 value.clone(),
                 &guard,
             ) {
@@ -236,6 +467,7 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
         if let Ok(capabilities) =
             document.pattern_capabilities(PatternCapabilityScope::Channel(channel))
         {
+            let multiple_outputs = capabilities.outputs.len() > 1;
             for output in capabilities.outputs {
                 let output_values = values
                     .iter()
@@ -247,12 +479,17 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
                 if output_values.is_empty() {
                     continue;
                 }
-                let output_name = format!("Output {}", output.painter_index + 1);
-                let output_group = gtk::Frame::new(Some(&output_name));
-                output_group.update_property(&[gtk::accessible::Property::Label(&output_name)]);
-                let output_content = gtk::Box::new(gtk::Orientation::Vertical, 8);
-                output_group.set_child(Some(&output_content));
-                content.append(&output_group);
+                let output_content = if multiple_outputs {
+                    let output_name = format!("Output {}", output.painter_index + 1);
+                    let output_group = gtk::Frame::new(Some(&output_name));
+                    output_group.update_property(&[gtk::accessible::Property::Label(&output_name)]);
+                    let output_content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+                    output_group.set_child(Some(&output_content));
+                    content.append(&output_group);
+                    output_content
+                } else {
+                    content.clone()
+                };
                 for value in output_values {
                     if let Some(binding) = append_binding(
                         state,
@@ -283,6 +520,29 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
     }
     guard.set(false);
     refresh(state, epoch);
+}
+
+/// Groups independently mapped source consumers using visible, accessible product names.
+/// Optional guidance explains retained inactive state without disabling valid channel edits.
+fn source_group(parent: &gtk::Box, name: &str, explanation: Option<&str>) -> gtk::Box {
+    let group = gtk::Frame::new(Some(name));
+    group.update_property(&[gtk::accessible::Property::Label(name)]);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    content.set_margin_top(8);
+    content.set_margin_bottom(8);
+    content.set_margin_start(8);
+    content.set_margin_end(8);
+    if let Some(text) = explanation {
+        let label = gtk::Label::new(Some(text));
+        label.set_wrap(true);
+        label.set_max_width_chars(48);
+        label.set_xalign(0.0);
+        label.add_css_class("dim-label");
+        content.append(&label);
+    }
+    group.set_child(Some(&content));
+    parent.append(&group);
+    content
 }
 
 /// Appends one typed row and its optional End reset/easing disclosure.
@@ -384,8 +644,22 @@ fn append_binding(
     })
 }
 
-/// Refreshes retained private values after a scalar edit or reset without replacing focused widgets.
+/// Refreshes retained private values after scalar/source edits or resets without replacing widgets.
+/// Descriptor choice ordering remains authoritative; the refresh guard suppresses reentrant commits.
+/// Keeping native controls preserves channel expansion, focus and scroll position.
 pub(super) fn refresh(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    refresh_values(state, epoch, false);
+}
+
+/// Reprojects the complete reset scope, discarding pending entry text even if native focus remains.
+/// The usual refresh guard suppresses signals; main history and preview publication remain separate.
+pub(super) fn refresh_after_reset(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    refresh_values(state, epoch, true);
+}
+
+/// Projects authoritative private values in place; explicit reset may replace focused/error text.
+/// Normal edits preserve pending focused numeric input and all refreshes guard recursive callbacks.
+fn refresh_values(state: &Rc<RefCell<AppState>>, epoch: u64, discard_pending: bool) {
     let app = state.borrow();
     let Some(surface) = app
         .advanced_settings
@@ -400,7 +674,7 @@ pub(super) fn refresh(state: &Rc<RefCell<AppState>>, epoch: u64) {
     };
     surface.refreshing.set(true);
     for editor in &surface.batch_editors {
-        editor.refresh(&document);
+        editor.refresh(&document, discard_pending);
     }
     for editor in &surface.paint_editors {
         if let Err(error) = editor.refresh(draft.document(), surface.endpoint) {
@@ -414,7 +688,7 @@ pub(super) fn refresh(state: &Rc<RefCell<AppState>>, epoch: u64) {
             continue;
         };
         if let Some(entry) = binding.input.downcast_ref::<gtk::Entry>()
-            && !entry.has_focus()
+            && (discard_pending || !entry.has_focus())
         {
             let text = match current.value {
                 PropertyCurrentValueKind::FiniteF64(value) => value.to_string(),
@@ -424,6 +698,23 @@ pub(super) fn refresh(state: &Rc<RefCell<AppState>>, epoch: u64) {
             if entry.text() != text {
                 entry.set_text(&text);
             }
+        }
+        if let Some(dropdown) = binding.input.downcast_ref::<gtk::DropDown>()
+            && let PropertyCurrentValueKind::EnumChoice(value) = current.value
+            && let Some(selected) = current
+                .descriptor
+                .choices
+                .iter()
+                .position(|choice| *choice == value)
+            && dropdown.selected() != selected as u32
+        {
+            dropdown.set_selected(selected as u32);
+        }
+        if let Some(toggle) = binding.input.downcast_ref::<gtk::Switch>()
+            && let PropertyCurrentValueKind::Boolean(value) = current.value
+            && toggle.is_active() != value
+        {
+            toggle.set_active(value);
         }
         if let Some(reset) = &binding.reset_start {
             reset.set_sensitive(current.inheritance == PropertyInheritance::Explicit);
@@ -473,6 +764,176 @@ pub(super) fn schedule_rebuild(state: &Rc<RefCell<AppState>>, epoch: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Commits weighting levels and ALL gamma at either endpoint without altering fill interpretation.
+    ///
+    /// # Panics
+    /// Panics if channel-owned weighting bypasses endpoint validation or leaks into fill state.
+    #[test]
+    fn source_consumers_weighting_levels_preserve_fill_at_both_endpoints() {
+        for endpoint in [
+            temporal_preview::Endpoint::Start,
+            temporal_preview::Endpoint::End,
+        ] {
+            let document = Document::new_default_document(
+                CanvasSpec {
+                    width: 100.0,
+                    height: 100.0,
+                },
+                SourceReference::Unassigned,
+            )
+            .unwrap()
+            .with_temporal_authority(
+                toniator_domain::ProjectTiming::new(
+                    toniator_domain::FrameRate::new(30, 1).unwrap(),
+                    toniator_domain::FrameRange::new(0, 3).unwrap(),
+                ),
+                vec![],
+            )
+            .unwrap();
+            let mut history = DocumentHistory::new(DocumentSession::new(document).unwrap());
+            history
+                .apply(&DocumentCommand::SetSourceWeightingField {
+                    channel_id: ChannelId(1),
+                    edit: toniator_domain::SourceWeightingFieldEdit::WhitePoint(0.4),
+                })
+                .unwrap();
+            history
+                .apply_temporal(&history.document().initialize_end_command().unwrap())
+                .unwrap();
+            let target = InspectorTarget::Channel(ChannelId(1));
+            let display = display_document(history.document(), endpoint).unwrap();
+            let values = advanced_settings_values(&display, target);
+            let edits = [
+                (PropertyFieldId::ArtworkWeightMappingBlackPoint, 0.6),
+                (PropertyFieldId::ArtworkWeightMappingWhitePoint, 0.9),
+            ]
+            .into_iter()
+            .map(|(field, value)| {
+                let current = values
+                    .iter()
+                    .find(|value| value.descriptor.field == field)
+                    .unwrap();
+                (
+                    target,
+                    advanced_descriptor_locator(&display, target, &current.descriptor).unwrap(),
+                    InspectorInput::FiniteF64(value),
+                )
+            })
+            .collect::<Vec<_>>();
+            apply_pending_inputs(&mut history, endpoint, &edits).unwrap();
+            let result = display_document(history.document(), endpoint).unwrap();
+            let tone = result.channel_weighting(ChannelId(1)).unwrap().mapping.tone;
+            assert_eq!((tone.black_point, tone.white_point), (0.6, 0.9));
+            assert_eq!(
+                result.modeled_channel(ChannelId(1)).unwrap().mapping.tone,
+                toniator_domain::SourceTone::identity()
+            );
+            if endpoint == temporal_preview::Endpoint::End {
+                assert_eq!(
+                    history
+                        .document()
+                        .channel_weighting(ChannelId(1))
+                        .unwrap()
+                        .mapping
+                        .tone
+                        .white_point,
+                    0.4
+                );
+            }
+            assert!(
+                advanced_batches::apply(
+                    &mut history,
+                    endpoint,
+                    PropertyFieldId::ArtworkWeightMappingGamma,
+                    1.7
+                )
+                .unwrap()
+            );
+            let all = display_document(history.document(), endpoint).unwrap();
+            for channel in authoritative_channel_ids(&all) {
+                assert_eq!(
+                    all.channel_weighting(channel).unwrap().mapping.tone.gamma,
+                    1.7
+                );
+                assert_eq!(
+                    all.modeled_channel(channel).unwrap().mapping.tone,
+                    toniator_domain::SourceTone::identity()
+                );
+            }
+        }
+    }
+
+    /// Applies a valid named-channel black/white pair independent of its old sibling bounds.
+    ///
+    /// # Panics
+    /// Panics if pending Apply publishes order-dependent scalar edits or changes another channel.
+    #[test]
+    fn pending_named_bounds_validate_as_one_pair_at_either_endpoint() {
+        for endpoint in [
+            temporal_preview::Endpoint::Start,
+            temporal_preview::Endpoint::End,
+        ] {
+            let document = Document::new_default_document(
+                CanvasSpec {
+                    width: 100.0,
+                    height: 100.0,
+                },
+                SourceReference::Unassigned,
+            )
+            .unwrap()
+            .with_temporal_authority(
+                toniator_domain::ProjectTiming::new(
+                    toniator_domain::FrameRate::new(30, 1).unwrap(),
+                    toniator_domain::FrameRange::new(0, 3).unwrap(),
+                ),
+                vec![],
+            )
+            .unwrap();
+            let mut history = DocumentHistory::new(DocumentSession::new(document).unwrap());
+            history
+                .apply(&DocumentCommand::SetModeledMappingField {
+                    channel_id: ChannelId(1),
+                    edit: ModeledMappingFieldEdit::WhitePoint(0.4),
+                })
+                .unwrap();
+            let command = history.document().initialize_end_command().unwrap();
+            history.apply_temporal(&command).unwrap();
+            let target = InspectorTarget::Channel(ChannelId(1));
+            let display = display_document(history.document(), endpoint).unwrap();
+            let values = advanced_settings_values(&display, target);
+            let edits = [
+                (PropertyFieldId::ModeledMappingBlackPoint, 0.6),
+                (PropertyFieldId::ModeledMappingWhitePoint, 0.9),
+            ]
+            .into_iter()
+            .map(|(field, value)| {
+                let descriptor = &values
+                    .iter()
+                    .find(|value| value.descriptor.field == field)
+                    .unwrap()
+                    .descriptor;
+                (
+                    target,
+                    advanced_descriptor_locator(&display, target, descriptor).unwrap(),
+                    InspectorInput::FiniteF64(value),
+                )
+            })
+            .collect::<Vec<_>>();
+            apply_pending_inputs(&mut history, endpoint, &edits).unwrap();
+            let display = display_document(history.document(), endpoint).unwrap();
+            for (field, expected) in [
+                (PropertyFieldId::ModeledMappingBlackPoint, 0.6),
+                (PropertyFieldId::ModeledMappingWhitePoint, 0.9),
+            ] {
+                let value = advanced_settings_values(&display, target)
+                    .into_iter()
+                    .find(|value| value.descriptor.field == field)
+                    .unwrap();
+                assert_eq!(value.value, PropertyCurrentValueKind::FiniteF64(expected));
+            }
+        }
+    }
 
     /// Proves still and moving private previews retain their endpoint and bounded decoded source.
     ///
@@ -535,7 +996,7 @@ mod tests {
     /// Proves Advanced End response edits stay private and publish as one undoable transaction.
     ///
     /// # Panics
-    /// Panics if grouped private channel edits alter Start, another output, or the main draft boundary.
+    /// Panics if private tonal edits alter Start, another channel, or the main draft boundary.
     #[test]
     fn private_end_response_edits_squash_without_changing_start() {
         let document = Document::new_default_document(
@@ -561,7 +1022,7 @@ mod tests {
                 display_document(draft.document(), temporal_preview::Endpoint::End).unwrap();
             let current = advanced_settings_values(&display, InspectorTarget::Channel(channel))
                 .into_iter()
-                .find(|value| value.descriptor.field == PropertyFieldId::MarkMaximumFill)
+                .find(|value| value.descriptor.field == PropertyFieldId::ModeledMappingGamma)
                 .unwrap();
             let command =
                 temporal_edit::scalar_command(draft.document(), &current.descriptor, end).unwrap();

@@ -17,6 +17,19 @@ pub const ANIMATABLE_SCALAR_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::ShapeRotationDegrees,
     PropertyFieldId::ModeledMappingGain,
     PropertyFieldId::ModeledMappingBias,
+    PropertyFieldId::ModeledMappingBlackPoint,
+    PropertyFieldId::ModeledMappingWhitePoint,
+    PropertyFieldId::ModeledMappingGamma,
+    PropertyFieldId::ModeledMappingContrast,
+    PropertyFieldId::ModeledMappingCutoff,
+    PropertyFieldId::ArtworkWeightMappingGain,
+    PropertyFieldId::ArtworkWeightMappingBias,
+    PropertyFieldId::ArtworkWeightMappingBlackPoint,
+    PropertyFieldId::ArtworkWeightMappingWhitePoint,
+    PropertyFieldId::ArtworkWeightMappingGamma,
+    PropertyFieldId::ArtworkWeightMappingContrast,
+    PropertyFieldId::ArtworkWeightMappingCutoff,
+    PropertyFieldId::ArtworkWeightStrength,
     PropertyFieldId::ColorRed,
     PropertyFieldId::ColorGreen,
     PropertyFieldId::ColorBlue,
@@ -78,6 +91,19 @@ pub const fn temporal_capability(
         | PropertyFieldId::TranslationY
         | PropertyFieldId::ModeledMappingGain
         | PropertyFieldId::ModeledMappingBias
+        | PropertyFieldId::ModeledMappingBlackPoint
+        | PropertyFieldId::ModeledMappingWhitePoint
+        | PropertyFieldId::ModeledMappingGamma
+        | PropertyFieldId::ModeledMappingContrast
+        | PropertyFieldId::ModeledMappingCutoff
+        | PropertyFieldId::ArtworkWeightMappingGain
+        | PropertyFieldId::ArtworkWeightMappingBias
+        | PropertyFieldId::ArtworkWeightMappingBlackPoint
+        | PropertyFieldId::ArtworkWeightMappingWhitePoint
+        | PropertyFieldId::ArtworkWeightMappingGamma
+        | PropertyFieldId::ArtworkWeightMappingContrast
+        | PropertyFieldId::ArtworkWeightMappingCutoff
+        | PropertyFieldId::ArtworkWeightStrength
         | PropertyFieldId::ColorRed
         | PropertyFieldId::ColorGreen
         | PropertyFieldId::ColorBlue
@@ -116,7 +142,7 @@ pub const fn temporal_capability(
     }
 }
 
-/// Reports membership in the exact 20-field scalar transition inventory.
+/// Reports membership in the exact scalar transition inventory.
 pub const fn is_animatable_scalar_field(field: PropertyFieldId) -> bool {
     matches!(
         field,
@@ -133,6 +159,19 @@ pub const fn is_animatable_scalar_field(field: PropertyFieldId) -> bool {
             | PropertyFieldId::ShapeRotationDegrees
             | PropertyFieldId::ModeledMappingGain
             | PropertyFieldId::ModeledMappingBias
+            | PropertyFieldId::ModeledMappingBlackPoint
+            | PropertyFieldId::ModeledMappingWhitePoint
+            | PropertyFieldId::ModeledMappingGamma
+            | PropertyFieldId::ModeledMappingContrast
+            | PropertyFieldId::ModeledMappingCutoff
+            | PropertyFieldId::ArtworkWeightMappingGain
+            | PropertyFieldId::ArtworkWeightMappingBias
+            | PropertyFieldId::ArtworkWeightMappingBlackPoint
+            | PropertyFieldId::ArtworkWeightMappingWhitePoint
+            | PropertyFieldId::ArtworkWeightMappingGamma
+            | PropertyFieldId::ArtworkWeightMappingContrast
+            | PropertyFieldId::ArtworkWeightMappingCutoff
+            | PropertyFieldId::ArtworkWeightStrength
             | PropertyFieldId::ColorRed
             | PropertyFieldId::ColorGreen
             | PropertyFieldId::ColorBlue
@@ -140,6 +179,21 @@ pub const fn is_animatable_scalar_field(field: PropertyFieldId) -> bool {
             | PropertyFieldId::Opacity
             | PropertyFieldId::RegionMinimumFill
             | PropertyFieldId::RegionMaximumFill
+    )
+}
+
+/// Reports whether one numeric field belongs to the independent weighting response.
+const fn is_weighting_scalar_field(field: PropertyFieldId) -> bool {
+    matches!(
+        field,
+        PropertyFieldId::ArtworkWeightMappingGain
+            | PropertyFieldId::ArtworkWeightMappingBias
+            | PropertyFieldId::ArtworkWeightMappingBlackPoint
+            | PropertyFieldId::ArtworkWeightMappingWhitePoint
+            | PropertyFieldId::ArtworkWeightMappingGamma
+            | PropertyFieldId::ArtworkWeightMappingContrast
+            | PropertyFieldId::ArtworkWeightMappingCutoff
+            | PropertyFieldId::ArtworkWeightStrength
     )
 }
 
@@ -608,7 +662,7 @@ pub struct ChannelScalarBatchValue {
 }
 
 /// Projects an All-channel control without presenting differing values as one shared value.
-/// The average is a derived editing reference; the individual values remain authoritative.
+/// The average is descriptive only; assignments set each authoritative effective value directly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelScalarBatch {
     pub field: PropertyFieldId,
@@ -709,9 +763,9 @@ impl Document {
         })
     }
 
-    /// Moves compatible Start values to requested field averages while preserving their differences.
+    /// Assigns each requested effective Start value to every compatible channel/output.
     ///
-    /// Each tuple supplies a field and desired effective average. Coupled minimum/maximum fields
+    /// Each tuple supplies a field and desired effective value. Coupled minimum/maximum fields
     /// may be supplied together and validate only after the complete unpublished batch exists.
     /// Other fields, source mappings, output definitions, End values and easing remain intact.
     /// The returned configuration publishes through the existing stale-aware history boundary.
@@ -724,26 +778,64 @@ impl Document {
         edits: &[(PropertyFieldId, f64)],
     ) -> Result<DocumentConfiguration, ValidationError> {
         validate_channel_batch_fields(edits)?;
-        let mut candidate = self.clone();
-        for &(field, desired_average) in edits {
+        let mut assignments = Vec::new();
+        for &(field, desired_value) in edits {
             let batch = self.channel_scalar_batch(field)?;
-            let adjustment = desired_average - batch.average;
-            validate_finite(adjustment, "channel_batch.adjustment")?;
-            if adjustment == 0.0 {
+            for value in batch.values {
+                assignments.push((value.target, field, desired_value));
+            }
+        }
+        self.edit_channel_start_configuration(&assignments)
+    }
+
+    /// Assigns effective channel/output Start scalars as one unpublished configuration.
+    /// Coupled bounds validate after all assignments; unrelated fields and End authority remain intact.
+    ///
+    /// # Errors
+    /// Rejects duplicate/inactive targets, nonfinite values and invalid complete configurations.
+    pub fn edit_channel_start_configuration(
+        &self,
+        edits: &[(PropertyTarget, PropertyFieldId, f64)],
+    ) -> Result<DocumentConfiguration, ValidationError> {
+        let mut candidate = self.clone();
+        let mut keys = std::collections::HashSet::new();
+        for &(target, field, desired_value) in edits {
+            if !keys.insert((target, field)) {
+                return Err(ValidationError::new(
+                    "channel_batch.duplicate",
+                    "each channel field may be assigned only once",
+                ));
+            }
+            validate_finite(desired_value, "channel_batch.value")?;
+            let current = self
+                .channel_scalar_batch(field)?
+                .values
+                .into_iter()
+                .find(|value| value.target == target)
+                .ok_or_else(|| {
+                    ValidationError::new(
+                        "channel_batch.target",
+                        "target is not a compatible channel field",
+                    )
+                })?;
+            if current.value == desired_value {
                 continue;
             }
-            for value in batch.values {
-                let authored = scalar_start(self, value.target, field)?;
-                apply_scalar(&mut candidate, value.target, field, authored + adjustment)?;
-            }
+            let authored = scalar_start(self, target, field)?;
+            apply_scalar(
+                &mut candidate,
+                target,
+                field,
+                authored + (desired_value - current.value),
+            )?;
         }
         candidate.validate()?;
         Ok(DocumentConfiguration::capture(&candidate))
     }
 
-    /// Moves compatible End values to requested field averages in one original-root command.
+    /// Assigns each requested effective End value to every compatible channel/output atomically.
     ///
-    /// Each channel/output retains its own offset and interpolation choice. Grouped color
+    /// Each channel/output retains its interpolation choice. Grouped color
     /// components delegate to color authoring, so alpha edits preserve each channel's distinct
     /// RGB or hue endpoint. Regular coupled fields are assembled before complete validation.
     /// Start, static output definitions and project timing remain unchanged.
@@ -759,15 +851,31 @@ impl Document {
         let end = materialize_progress(self, 1.0)?;
         let mut overrides = self.temporal_end_overrides.clone();
         let mut colors = Vec::new();
-        for &(field, desired_average) in edits {
+        for &(field, desired_value) in edits {
             let batch = end.channel_scalar_batch(field)?;
-            let adjustment = desired_average - batch.average;
-            validate_finite(adjustment, "channel_batch.adjustment")?;
-            if adjustment == 0.0 {
-                continue;
-            }
             for value in batch.values {
-                let effective_end = value.value + adjustment;
+                if value.value == desired_value
+                    && self.temporal_end_overrides.iter().any(|entry| match entry {
+                        TemporalEndOverride::Scalar(current) => {
+                            current.target == value.target && current.field == field
+                        }
+                        TemporalEndOverride::Color(current) => {
+                            value.target == PropertyTarget::Channel(current.channel_id)
+                                && matches!(
+                                    field,
+                                    PropertyFieldId::ColorRed
+                                        | PropertyFieldId::ColorGreen
+                                        | PropertyFieldId::ColorBlue
+                                )
+                                || (value.target == PropertyTarget::Channel(current.channel_id)
+                                    && field == PropertyFieldId::ColorAlpha
+                                    && matches!(current.mode, ColorEndMode::LinearColor { .. }))
+                        }
+                    })
+                {
+                    continue;
+                }
+                let effective_end = desired_value;
                 let component = match field {
                     PropertyFieldId::ColorRed => Some(ColorComponent::Red),
                     PropertyFieldId::ColorGreen => Some(ColorComponent::Green),
@@ -1213,7 +1321,238 @@ pub(crate) fn validate_temporal_authority(document: &Document) -> Result<(), Val
         return Ok(());
     }
     let _ = materialize_progress(document, 1.0)?;
+    validate_mapping_level_transitions(document)
+}
+
+/// Validates that animated fill and weighting source levels remain strictly ordered.
+///
+/// Each existing easing is a polynomial of degree at most three on either
+/// side of the midpoint. Endpoint and derivative-root checks prove ordering
+/// over both intervals, including Hold's left limit before the final frame.
+///
+/// # Errors
+///
+/// Returns `temporal.mapping.levels` when the animated black point meets or
+/// exceeds white at an endpoint, interior extremum, or Hold discontinuity.
+fn validate_mapping_level_transitions(document: &Document) -> Result<(), ValidationError> {
+    for channel_id in document.channel_ids() {
+        if let Some(channel) = document.modeled_channel(channel_id) {
+            validate_level_pair_transition(
+                document,
+                channel_id,
+                PropertyFieldId::ModeledMappingBlackPoint,
+                PropertyFieldId::ModeledMappingWhitePoint,
+                channel.mapping.tone.black_point,
+                channel.mapping.tone.white_point,
+            )?;
+        }
+        let weighting = document
+            .channel_weighting(channel_id)
+            .expect("validated channel IDs retain weighting state");
+        validate_level_pair_transition(
+            document,
+            channel_id,
+            PropertyFieldId::ArtworkWeightMappingBlackPoint,
+            PropertyFieldId::ArtworkWeightMappingWhitePoint,
+            weighting.mapping.tone.black_point,
+            weighting.mapping.tone.white_point,
+        )?;
+    }
     Ok(())
+}
+
+/// Proves one black/white pair remains strictly ordered through its easing polynomials.
+///
+/// # Errors
+///
+/// Returns `temporal.mapping.levels` when either endpoint or an interior point closes the gap.
+fn validate_level_pair_transition(
+    document: &Document,
+    channel_id: ChannelId,
+    black_field: PropertyFieldId,
+    white_field: PropertyFieldId,
+    black_start: f64,
+    white_start: f64,
+) -> Result<(), ValidationError> {
+    let black = mapping_level_track(document, channel_id, black_field, black_start);
+    let white = mapping_level_track(document, channel_id, white_field, white_start);
+    if black.start >= white.start || black.end >= white.end {
+        return Err(ValidationError::new(
+            "temporal.mapping.levels",
+            "black point must remain strictly below white point at both endpoints",
+        ));
+    }
+    if black.start == black.end || white.start == white.end || black.easing == white.easing {
+        return Ok(());
+    }
+    for (left, right) in [(0.0, 0.5), (0.5, 1.0)] {
+        let black_curve = level_easing_coefficients(black.easing, left >= 0.5);
+        let white_curve = level_easing_coefficients(white.easing, left >= 0.5);
+        let mut gap = [0.0; 4];
+        for index in 0..4 {
+            gap[index] = (white.end - white.start) * white_curve[index]
+                - (black.end - black.start) * black_curve[index];
+        }
+        gap[0] += white.start - black.start;
+        if !positive_level_gap(gap, left, right) {
+            return Err(ValidationError::new(
+                "temporal.mapping.levels",
+                "black point must remain below white point throughout the selected interpolation",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Expresses an existing easing as cubic coefficients on one side of its midpoint.
+/// Hold stays zero on the open transition; its actual final value is checked separately.
+fn level_easing_coefficients(easing: Easing, second_half: bool) -> [f64; 4] {
+    match easing {
+        Easing::Hold => [0.0, 0.0, 0.0, 0.0],
+        Easing::Linear => [0.0, 1.0, 0.0, 0.0],
+        Easing::QuadraticIn => [0.0, 0.0, 1.0, 0.0],
+        Easing::QuadraticOut => [0.0, 2.0, -1.0, 0.0],
+        Easing::SmoothStep => [0.0, 0.0, 3.0, -2.0],
+        Easing::SmoothInOut if second_half => [-1.0, 4.0, -2.0, 0.0],
+        Easing::SmoothInOut => [0.0, 0.0, 2.0, 0.0],
+    }
+}
+
+/// Proves a bounded cubic level gap is positive at both boundaries and all interior extrema.
+/// Validated normalized endpoints bound coefficients, so quadratic discriminants remain finite.
+fn positive_level_gap(coefficients: [f64; 4], left: f64, right: f64) -> bool {
+    let [d, c, b, a] = coefficients;
+    let positive = |t: f64| ((a * t + b) * t + c) * t + d > 0.0;
+    if !positive(left) || !positive(right) {
+        return false;
+    }
+    let derivative_a = 3.0 * a;
+    let derivative_b = 2.0 * b;
+    let root_valid = |root: f64| root <= left || root >= right || positive(root);
+    if derivative_a == 0.0 {
+        return derivative_b == 0.0 || root_valid(-c / derivative_b);
+    }
+    let discriminant = derivative_b * derivative_b - 4.0 * derivative_a * c;
+    if discriminant < 0.0 {
+        return true;
+    }
+    let q = -0.5 * (derivative_b + discriminant.sqrt().copysign(derivative_b));
+    if q == 0.0 {
+        return root_valid(-derivative_b / (2.0 * derivative_a));
+    }
+    root_valid(q / derivative_a) && root_valid(c / q)
+}
+
+#[cfg(test)]
+mod level_transition_tests {
+    use super::*;
+
+    /// Rejects an exact cubic tangency and distinguishes either side without coarse frame sampling.
+    ///
+    /// # Panics
+    /// Panics if a zero or negative interior gap is accepted, or a positive nearby gap is rejected.
+    #[test]
+    fn gate2_cubic_level_tangency_is_strict() {
+        // (t - 1/4)^2 * (t + 1) touches zero at an interior extremum.
+        assert!(!positive_level_gap([0.0625, -0.4375, 0.5, 1.0], 0.0, 0.5));
+        assert!(positive_level_gap(
+            [0.0625 + 1e-12, -0.4375, 0.5, 1.0],
+            0.0,
+            0.5
+        ));
+        assert!(!positive_level_gap(
+            [0.0625 - 1e-12, -0.4375, 0.5, 1.0],
+            0.0,
+            0.5
+        ));
+    }
+
+    /// Checks both Hold orientations on increasing and decreasing level transitions.
+    ///
+    /// # Panics
+    /// Panics if a held level can cross the moving level before an otherwise valid final jump.
+    #[test]
+    fn gate2_hold_level_jumps_validate_both_orientations() {
+        for (start, end, black_easing, white_easing, valid) in [
+            ([0.2, 0.4], [0.8, 0.9], Easing::Hold, Easing::Linear, true),
+            ([0.2, 0.4], [0.8, 0.9], Easing::Linear, Easing::Hold, false),
+            ([0.7, 0.9], [0.2, 0.4], Easing::Linear, Easing::Hold, true),
+            ([0.7, 0.9], [0.2, 0.4], Easing::Hold, Easing::Linear, false),
+        ] {
+            let mut document = Document::new_default_document(
+                crate::CanvasSpec {
+                    width: 10.0,
+                    height: 10.0,
+                },
+                crate::SourceReference::Unassigned,
+            )
+            .unwrap();
+            for edit in [
+                crate::ModeledMappingFieldEdit::BlackPoint(start[0]),
+                crate::ModeledMappingFieldEdit::WhitePoint(start[1]),
+            ] {
+                document = document
+                    .apply_command(&crate::DocumentCommand::SetModeledMappingField {
+                        channel_id: ChannelId(1),
+                        edit,
+                    })
+                    .unwrap()
+                    .0;
+            }
+            let result = document.edit_effective_end_command(&[
+                TemporalEndpointEdit {
+                    target: PropertyTarget::Channel(ChannelId(1)),
+                    field: PropertyFieldId::ModeledMappingBlackPoint,
+                    effective_end: end[0],
+                    easing: black_easing,
+                },
+                TemporalEndpointEdit {
+                    target: PropertyTarget::Channel(ChannelId(1)),
+                    field: PropertyFieldId::ModeledMappingWhitePoint,
+                    effective_end: end[1],
+                    easing: white_easing,
+                },
+            ]);
+            assert_eq!(result.is_ok(), valid, "{black_easing:?}/{white_easing:?}");
+        }
+    }
+}
+
+/// Resolves one direct modeled mapping level's Start and End interpolation track.
+fn mapping_level_track(
+    document: &Document,
+    channel_id: ChannelId,
+    field: PropertyFieldId,
+    start: f64,
+) -> MappingLevelTrack {
+    document
+        .temporal_end_overrides
+        .iter()
+        .find_map(|entry| match entry {
+            TemporalEndOverride::Scalar(value)
+                if value.target == PropertyTarget::Channel(channel_id) && value.field == field =>
+            {
+                Some(MappingLevelTrack {
+                    start,
+                    end: value.end,
+                    easing: value.easing,
+                })
+            }
+            _ => None,
+        })
+        .unwrap_or(MappingLevelTrack {
+            start,
+            end: start,
+            easing: Easing::Linear,
+        })
+}
+
+/// Holds the direct endpoint values and interpolation mode for one source level.
+#[derive(Clone, Copy)]
+struct MappingLevelTrack {
+    start: f64,
+    end: f64,
+    easing: Easing,
 }
 
 /// Resolves one active descriptor by stable field and target.
@@ -1466,6 +1805,53 @@ fn channel_scalar_start(
         PropertyFieldId::ModeledMappingBias => {
             modeled_channel(document, channel_id).map(|channel| channel.mapping.bias)
         }
+        PropertyFieldId::ModeledMappingBlackPoint => {
+            modeled_channel(document, channel_id).map(|channel| channel.mapping.tone.black_point)
+        }
+        PropertyFieldId::ModeledMappingWhitePoint => {
+            modeled_channel(document, channel_id).map(|channel| channel.mapping.tone.white_point)
+        }
+        PropertyFieldId::ModeledMappingGamma => {
+            modeled_channel(document, channel_id).map(|channel| channel.mapping.tone.gamma)
+        }
+        PropertyFieldId::ModeledMappingContrast => {
+            modeled_channel(document, channel_id).map(|channel| channel.mapping.tone.contrast)
+        }
+        PropertyFieldId::ModeledMappingCutoff => {
+            modeled_channel(document, channel_id).map(|channel| channel.mapping.tone.cutoff)
+        }
+        PropertyFieldId::ArtworkWeightMappingGain => document
+            .channel_weighting(channel_id)
+            .map(|weighting| weighting.mapping.gain)
+            .ok_or_else(|| ValidationError::new("temporal.channel", "temporal channel is missing")),
+        PropertyFieldId::ArtworkWeightMappingBias => document
+            .channel_weighting(channel_id)
+            .map(|weighting| weighting.mapping.bias)
+            .ok_or_else(|| ValidationError::new("temporal.channel", "temporal channel is missing")),
+        PropertyFieldId::ArtworkWeightMappingBlackPoint => document
+            .channel_weighting(channel_id)
+            .map(|weighting| weighting.mapping.tone.black_point)
+            .ok_or_else(|| ValidationError::new("temporal.channel", "temporal channel is missing")),
+        PropertyFieldId::ArtworkWeightMappingWhitePoint => document
+            .channel_weighting(channel_id)
+            .map(|weighting| weighting.mapping.tone.white_point)
+            .ok_or_else(|| ValidationError::new("temporal.channel", "temporal channel is missing")),
+        PropertyFieldId::ArtworkWeightMappingGamma => document
+            .channel_weighting(channel_id)
+            .map(|weighting| weighting.mapping.tone.gamma)
+            .ok_or_else(|| ValidationError::new("temporal.channel", "temporal channel is missing")),
+        PropertyFieldId::ArtworkWeightMappingContrast => document
+            .channel_weighting(channel_id)
+            .map(|weighting| weighting.mapping.tone.contrast)
+            .ok_or_else(|| ValidationError::new("temporal.channel", "temporal channel is missing")),
+        PropertyFieldId::ArtworkWeightMappingCutoff => document
+            .channel_weighting(channel_id)
+            .map(|weighting| weighting.mapping.tone.cutoff)
+            .ok_or_else(|| ValidationError::new("temporal.channel", "temporal channel is missing")),
+        PropertyFieldId::ArtworkWeightStrength => document
+            .channel_weighting(channel_id)
+            .map(|weighting| weighting.strength)
+            .ok_or_else(|| ValidationError::new("temporal.channel", "temporal channel is missing")),
         PropertyFieldId::ColorRed => {
             solid_channel_color(document, channel_id).map(|value| value.red)
         }
@@ -1611,6 +1997,31 @@ pub(crate) fn reconcile_end_after_start(
             _ => Vec::new(),
         }
     };
+    reconcile_end_values(before, after, Some(command), all, &reset_channels)
+}
+
+/// Preserves compatible End intent after a partial recipe edit retains surviving output identities.
+///
+/// # Errors
+/// Returns response-rebasing diagnostics without publishing the candidate.
+pub(crate) fn reconcile_end_after_pattern_structure(
+    before: &Document,
+    after: &mut Document,
+) -> Result<(), ValidationError> {
+    reconcile_end_values(before, after, None, false, &[])
+}
+
+/// Rebases End values through optional copy-on-edit identity changes and explicit reset scope.
+///
+/// # Errors
+/// Returns unavailable output-response authority diagnostics before candidate publication.
+fn reconcile_end_values(
+    before: &Document,
+    after: &mut Document,
+    command: Option<&DocumentCommand>,
+    all: bool,
+    reset_channels: &[ChannelId],
+) -> Result<(), ValidationError> {
     let mut retained = Vec::new();
     for entry in &after.temporal_end_overrides {
         match entry {
@@ -1642,8 +2053,8 @@ pub(crate) fn reconcile_end_after_start(
                 let mut value = value.clone();
                 if let PropertyTarget::ChannelOutput(channel, output) = value.target {
                     let selected_copy = matches!(command,
-                        DocumentCommand::EditSelectedChannelPatternDefinitionBundle { channel_id, .. }
-                        | DocumentCommand::EditSelectedChannelPatternDefinition { channel_id, .. }
+                        Some(DocumentCommand::EditSelectedChannelPatternDefinitionBundle { channel_id, .. }
+                        | DocumentCommand::EditSelectedChannelPatternDefinition { channel_id, .. })
                         if *channel_id == channel);
                     let mut next_output = output;
                     if selected_copy {
@@ -1664,14 +2075,16 @@ pub(crate) fn reconcile_end_after_start(
                                 continue;
                             };
                             let mut order: Vec<_> = (0..old.output_layers.len()).collect();
-                            if let DocumentCommand::EditSelectedChannelPatternDefinitionBundle {
-                                edit:
-                                    PatternDefinitionBundleEdit::MoveOutputLayer {
-                                        output_layer_id,
-                                        painter_index,
-                                    },
-                                ..
-                            } = command
+                            if let Some(
+                                DocumentCommand::EditSelectedChannelPatternDefinitionBundle {
+                                    edit:
+                                        PatternDefinitionBundleEdit::MoveOutputLayer {
+                                            output_layer_id,
+                                            painter_index,
+                                        },
+                                    ..
+                                },
+                            ) = command
                                 && let Some(from) = old
                                     .output_layers
                                     .iter()
@@ -1844,12 +2257,78 @@ fn apply_channel_scalar(
                 .layout_delta
                 .translation_y = value;
         }
-        PropertyFieldId::ModeledMappingGain | PropertyFieldId::ModeledMappingBias => {
+        PropertyFieldId::ModeledMappingGain
+        | PropertyFieldId::ModeledMappingBias
+        | PropertyFieldId::ModeledMappingBlackPoint
+        | PropertyFieldId::ModeledMappingWhitePoint
+        | PropertyFieldId::ModeledMappingGamma
+        | PropertyFieldId::ModeledMappingContrast
+        | PropertyFieldId::ModeledMappingCutoff => {
             let channel = modeled_channel_mut(document, channel_id)?;
             match field {
                 PropertyFieldId::ModeledMappingGain => channel.mapping.gain = value,
                 PropertyFieldId::ModeledMappingBias => channel.mapping.bias = value,
+                PropertyFieldId::ModeledMappingBlackPoint => {
+                    channel.mapping.tone.black_point = value
+                }
+                PropertyFieldId::ModeledMappingWhitePoint => {
+                    channel.mapping.tone.white_point = value
+                }
+                PropertyFieldId::ModeledMappingGamma => channel.mapping.tone.gamma = value,
+                PropertyFieldId::ModeledMappingContrast => channel.mapping.tone.contrast = value,
+                PropertyFieldId::ModeledMappingCutoff => channel.mapping.tone.cutoff = value,
                 _ => unreachable!(),
+            }
+        }
+        PropertyFieldId::ArtworkWeightMappingGain
+        | PropertyFieldId::ArtworkWeightMappingBias
+        | PropertyFieldId::ArtworkWeightMappingBlackPoint
+        | PropertyFieldId::ArtworkWeightMappingWhitePoint
+        | PropertyFieldId::ArtworkWeightMappingGamma
+        | PropertyFieldId::ArtworkWeightMappingContrast
+        | PropertyFieldId::ArtworkWeightMappingCutoff
+        | PropertyFieldId::ArtworkWeightStrength => {
+            let edit = match field {
+                PropertyFieldId::ArtworkWeightMappingGain => SourceWeightingFieldEdit::Gain(value),
+                PropertyFieldId::ArtworkWeightMappingBias => SourceWeightingFieldEdit::Bias(value),
+                PropertyFieldId::ArtworkWeightMappingBlackPoint => {
+                    SourceWeightingFieldEdit::BlackPoint(value)
+                }
+                PropertyFieldId::ArtworkWeightMappingWhitePoint => {
+                    SourceWeightingFieldEdit::WhitePoint(value)
+                }
+                PropertyFieldId::ArtworkWeightMappingGamma => {
+                    SourceWeightingFieldEdit::Gamma(value)
+                }
+                PropertyFieldId::ArtworkWeightMappingContrast => {
+                    SourceWeightingFieldEdit::Contrast(value)
+                }
+                PropertyFieldId::ArtworkWeightMappingCutoff => {
+                    SourceWeightingFieldEdit::Cutoff(value)
+                }
+                PropertyFieldId::ArtworkWeightStrength => SourceWeightingFieldEdit::Strength(value),
+                _ => unreachable!(),
+            };
+            match &mut document.channel_configuration {
+                ChannelConfiguration::Legacy(channels) => {
+                    let channel = channels
+                        .iter_mut()
+                        .find(|channel| channel.id == channel_id)
+                        .ok_or_else(|| {
+                            ValidationError::new("temporal.channel", "temporal channel is missing")
+                        })?;
+                    apply_source_weighting_edit(&mut channel.weighting, edit);
+                }
+                ChannelConfiguration::Topology { topology, .. } => {
+                    let channel = topology
+                        .channels
+                        .iter_mut()
+                        .find(|channel| channel.id == channel_id)
+                        .ok_or_else(|| {
+                            ValidationError::new("temporal.channel", "temporal channel is missing")
+                        })?;
+                    apply_source_weighting_edit(&mut channel.weighting, edit);
+                }
             }
         }
         PropertyFieldId::ColorRed
@@ -2242,10 +2721,26 @@ pub(crate) fn temporal_command_result(before: &Document, after: &Document) -> Co
     {
         match entry {
             TemporalEndOverride::Scalar(value) => {
-                invalidation = strongest_invalidation(
-                    invalidation,
-                    property_field_contract(value.field).invalidation,
-                );
+                let weighting_is_consumed = match value.target {
+                    PropertyTarget::Channel(channel_id)
+                        if is_weighting_scalar_field(value.field) =>
+                    {
+                        [before, after].into_iter().any(|document| {
+                            document
+                                .effective_channel_pattern(channel_id)
+                                .ok()
+                                .and_then(|effective| document.definition(effective.definition_id))
+                                .is_some_and(definition_uses_source_weighting)
+                        })
+                    }
+                    _ => true,
+                };
+                if weighting_is_consumed {
+                    invalidation = strongest_invalidation(
+                        invalidation,
+                        property_field_contract(value.field).invalidation,
+                    );
+                }
                 match value.target {
                     PropertyTarget::Document => {
                         for channel_id in before.channel_ids() {

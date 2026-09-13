@@ -68,6 +68,26 @@ package hashes and sizes; the following artifact checkpoint includes them.
 The entries below retain historical milestone state and superseded review
 artifacts. Current completion and acceptance-package hashes are recorded above.
 
+### Post-acceptance export-menu follow-up, 2026-09-06
+
+Requested after the acceptance/artifact checkpoint `681959b`; implemented in the
+worktree and not part of the accepted packages. The main menu separates
+`Export image...` (Ctrl+E, selected-endpoint PNG/SVG chooser) from `Export video`
+(existing animation/video/PNG-sequence sheet). Both use the existing source and
+lifecycle applicability policy and are disabled during document-Preset I/O.
+No exporter, format or document authority changes. The image chooser is titled
+Export image; cancelling either route preserves the document.
+
+Release build, focused lifecycle-label/filter test, strict app Clippy, formatting
+and diff checks pass. `ui-run-20260906-115650-329101` verifies native menu item
+names, enabled actions, both distinct dialogs, cancellation and Ctrl+E. Menu and
+dialog screenshots are inspected under private Sway at 200% scale. Existing
+native rendering/export evidence is reused because those consumers are unchanged.
+`ui-run-20260906-115851-400416` confirms both menu entries are disabled without
+source artwork. Both runs are collected and the private session is stopped.
+
+### Earlier verification milestones
+
 - Final contract audit (2026-09-06): all 20 animatable scalar field types
   materialize through active mark, connected-curve and region descriptors under
   all six easing modes at five frame positions (600 value comparisons). The

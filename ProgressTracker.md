@@ -1015,6 +1015,207 @@ pass. Automated Sway/GTK portal evidence does not claim human GNOME/Mutter
 acceptance. Both stages are user-accepted and complete at source checkpoint `0f862512a86b7bb0eb25b915a496a7b68018b333`.
 No protected specification was revised.
 
+## 0.3 review follow-up — Gate 1
+
+**Accepted (2026-09-12); local checkpoint pending.** The user accepted Gate 1,
+including the review corrections below, after implementation and verification of the
+[three-gate repair plan](docs/REVIEW_0_3_REPAIR_PLAN.md). Gate 1 owns absolute
+ALL editing at the selected endpoint, bias/pending-input propagation, unique
+effective Advanced controls, native construction admission before Apply, and
+Scatter parameter restoration with Random terminology. Gate 2 (source response)
+and Gate 3 (transforms and export timing) remain behind their review boundaries.
+Existing post-acceptance export-menu edits and unrelated user work are preserved.
+Focused domain/app regressions, build, scoped strict Clippy, architecture and
+format checks pass. Private GTK semantic, keyboard and screenshot checks cover
+the editing and correction workflows; native PNG/SVG/video-frame artifacts
+were inspected. Evidence: `.codex-work/evidence/review-0.3-gate1.md`.
+Acceptance is recorded; no Gate 1 checkpoint commit has been created.
+
+Review exposed structural ALL edits skipping channel-owned Pattern copies and
+construction-success text hiding other Apply blockers. The user clarified that
+every explicitly changed compatible Pattern setting under ALL replaces that
+setting's overrides/deltas, while untouched settings remain channel-specific.
+The user also requests Default artwork spacing mapped to each channel's matching
+source component. These corrections are implemented and reverified. Shared
+structural and nested authored edits now reach compatible channel-owned copies,
+including when the document base is unlinked, while retaining untouched settings
+and compatible End-frame values. Default source resolution participates in the
+engine cache key and preserves explicit component choices. Untouched wizard text
+does not publish rounded values; Review status and Apply use the same admission.
+Focused regressions, final app/CLI builds and strict Clippy pass. Live private GTK
+checks on the user CMYK fixture confirm all four Scatter assignments with their
+original source choices intact, Default selection/publication, truthful disabled
+and enabled Review states, and single-action Apply/Cancel closure. Current evidence:
+`.codex-work/evidence/review-0.3-gate1-corrections.md`. This is automated Sway
+evidence, not a substitute for human GNOME/Mutter testing. The user's gate
+acceptance is separate from that evidence boundary. Documentation-only closeout
+reuses the unchanged verification; no product code changed or tests were rerun.
+Gate 2 subsequently completed under the active implementation goal; its separate
+acceptance record follows. Gate 3 remains unstarted.
+
+## 0.3 review follow-up — Gate 2
+
+**Accepted (2026-09-12); local checkpoint pending.** The user accepts the
+source-response and control-organization gate. Advanced exposes Black point,
+White point, Gamma, Contrast and Response cutoff through shared domain commands,
+ALL assignment and selected Start/End editing. Minimum fill remains editable;
+cutoff suppresses small responses before positive geometry minima can restore
+them. Built-in response ranges default to 0–1. Feature size, Coverage, X/Y and
+named multi-output grouping live in the normal inspector.
+
+The five new numeric fields persist and animate, bringing the scalar inventory
+to 25. Level ordering is validated throughout each easing interval. Document
+schema 9 and document-Preset envelope 2 are current-only; obsolete documents are
+rejected without migration. Cache identity includes all tonal values.
+
+Focused domain, temporal, sampling, pattern, engine, IO and app tests pass, as do
+app/CLI builds, scoped strict Clippy and architecture checks. Native raster and
+vector input PNG/SVG outputs were inspected. Private GTK checks cover numeric
+editing, ALL mixed values, endpoint preservation, atomic Apply, invalid levels,
+output grouping and Undo/Redo. Easing selection has a recorded private-harness
+focus limitation; it is not counted as a successful UI check. Automated Sway
+evidence is distinct from human GNOME/Mutter testing. Both private sessions are
+stopped. Evidence: `.codex-work/evidence/review-0.3-gate2.md`.
+
+Acceptance closeout reconciles documentation and test formatting only. No
+checkpoint, package rebuild, push or publication is performed. Gate 3 has not begun.
+
+## 0.3 review follow-up — Gate 3
+
+**Accepted awaiting checkpoint (2026-09-12).** The user explicitly accepts the
+remaining Gate 3 source-consumer and placement work after its verification;
+export timing was already accepted. The user's organizational
+update moves weighting source selection out of recipes and into Advanced as an
+independent document/channel response beside fill-response settings. The user's
+further clarification also moves weighting response strength/curve and source
+shaping to Advanced; recipe construction and min/max geometry bounds remain in
+the wizard. Current verification is recorded in
+`.codex-work/evidence/review-0.3-gate3-source-consumers.md`; earlier placement checks
+remain transform evidence. The user accepted the gate after the export-timing
+handoff, then separately accepted the subsequent placement/source-consumer
+changes with “Accept the remaining Gate 3 work.” Gate 3 is
+authorized for the bounded placement and export-timing repairs in
+[the three-gate repair plan](docs/REVIEW_0_3_REPAIR_PLAN.md). Gates 1 and 2
+remain accepted with local checkpoints pending. The export-timing slice is
+implemented: Export video exposes exact rate and duration with a derived frame
+count, preserving the existing optional export subset. Starting a valid export
+applies timing as one document-history transition; closing before export discards
+pending edits. Invalid timing, static consumer choices and an existing output
+are rejected before history changes. Source metadata, unchanged absolute frame
+ranges, End overrides, cancellation and recovery retain their existing authority.
+
+Two focused app tests pass, covering rational timing, longer still durations,
+source bounds, static rejection, Undo/Redo, save/reopen, both immutable inputs,
+PNG sequences and a four-frame FFV1 video. App/CLI build, strict Clippy and
+architecture checks pass. Private GTK checks verify live count, keyboard editing,
+Close/X discard, video defaults, actual FFV1 export, timing Undo/Redo and active
+cancellation without final publication. Native outputs and screenshots were
+inspected; automated Sway evidence is not human GNOME/Mutter testing.
+
+Placement audit found no transform omission for non-artwork-weighted families.
+A focused grid regression now verifies rotated/translated site positions and
+canonical radii sampled at those positions with both immutable sources; it and
+library strict Clippy pass. This test does not certify all Pattern families.
+The user subsequently permits artwork-weighted transforms with a warning that
+they change source channel weighting alignment; neutral Rotation/X/Y restores it.
+Candidate positions transform first and weighting is recalculated there. The
+subsequent source-consumer correction supersedes the recipe-owned Default choice:
+both channel consumers initialize to matching color components and have independent
+Advanced mappings and tone; explicit Luminance remains available for monochrome artwork.
+The protected Addendum records these explicit decisions. Rotation is now exposed,
+accepted and evaluated for weighted recipes; recipe changes preserve rotation
+intent. A selected-frame/target notice persists through preview completion and
+clears at neutral transforms. Focused tests cover transformed weighting, separate
+channel placement, neutral determinism, active controls, recipe retention,
+Start/End interpolation, Undo/Redo and persistence. Native PNG/SVG outputs from
+both immutable inputs and final private GTK screenshots were inspected; strict
+Clippy, architecture checks and app/CLI builds pass. Evidence:
+`.codex-work/evidence/review-0.3-gate3-placement.md` and the timing report.
+All implementation slices are verified and user-accepted. Acceptance of the
+later placement changes is explicit, separate from the earlier timing acceptance.
+No checkpoint, package, push or publication is performed.
+
+The source-consumer correction stores complete independent weighting and fill
+configuration on channels. Recipes persist only the weighted/unweighted choice
+and geometric intent. Pattern changes preserve both source consumers. Active
+weighting changes invalidate Family; inactive settings remain stored without
+geometry invalidation. Fill changes retain Realization authority. ALL scalar and
+Start/End edits include weighting tone/strength with exact animated level ordering.
+Current formats are document 10, document-Preset 3, standalone Pattern 5, container 2;
+obsolete formats are rejected without migration. Focused headless/app tests,
+current document-Preset tests, app/CLI builds, production strict Clippy, architecture
+validation, both native PNG/SVG inputs, and private GTK action/readback pass.
+The GTK harness now reads native dropdown labels and scrolls without invalid focus
+commit attempts. Both private sessions are stopped. Broad app test-target Clippy
+still reports two unrelated existing lints in startup/temporal-preview tests;
+no broad historical test acceptance is claimed. New source ownership and placement
+are now user-accepted; prior export-timing acceptance is unchanged.
+
+### Export folder chooser crash follow-up
+
+The reported `temporal_export.rs:664` RefCell panic is fixed by releasing
+AppState before setting the selected directory entry, allowing synchronous GTK
+validation to borrow state normally. The old debug binary reproduces the exact
+crash; the rebuilt release passes native chooser selection, destination readback,
+export enablement and reopen/cancel preservation in private GTK. Release build,
+production strict Clippy and diff checks pass; fixed app stderr is empty and the
+private session is stopped. This is native GTK/Sway evidence, not GNOME portal
+acceptance. Evidence: `.codex-work/evidence/review-0.3-export-folder-borrow.md`.
+Existing gate acceptance and the independently paused goal are unchanged.
+
+### Advanced settings and model-switch follow-up
+
+Advanced follow-up: source-consumer dropdowns now refresh in place, preserving
+channel expansion and scroll while updating the private preview. One top-level
+Reset to defaults restores all Advanced settings, including paint, for the
+captured ALL or named-channel target; Apply/Cancel retain private-history scope.
+Color-model replacement now inherits the document base rather than the first
+channel's pattern override. Focused defaults/model-switch tests, rebuilt release,
+strict app/domain Clippy, architecture and private GTK action/readback/screenshots
+pass. Evidence: `.codex-work/evidence/review-0.3-advanced-continuity.md`. No gate
+acceptance, checkpoint, package or publication is inferred.
+
+### 0.3.1 development version
+
+The active goal separately requests version **0.3.1 (unreleased)**. All nine
+first-party Cargo manifests and lockfile entries now agree, as do AppStream,
+packaging filenames/provenance and current development instructions. Offline
+app/CLI compilation, locked Cargo metadata and AppStream validation pass;
+the rebuilt CLI reports `toniator 0.3.1`.
+The version change is separate from gate acceptance; the existing
+0.3.0 release files and provenance remain untouched.
+
+### 0.3.1 completion audit
+
+The implementation and version-update requirements are fulfilled and all three
+gates are accepted. Requirement mapping and verification are recorded in
+`.codex-work/evidence/review-0.3-completion-audit.md`. Additional focused endpoint,
+weighting-level and Advanced region-reset checks pass; the latter preserves
+inline fill bounds, other channels and Undo. A historical Advanced locator test
+expects controls deliberately moved inline in Gate 2 and is not passing evidence.
+The repair plan now consistently reflects the superseding channel-owned source
+mapping/response boundary. The user explicitly accepted the remaining
+placement/source-consumer work on 2026-09-12. No checkpoint, package or
+publication is inferred; the implementation goal is complete.
+
+The added current Gate 3 runtime matrix verifies rotation and independent X/Y
+for all non-random family dispatch branches; all three Gate 3 patterns tests and
+strict library Clippy pass. User report TON-008 adds a CMYK transform hang under
+investigation. Raster Cyan and SVG Black grid cases complete in the private
+release. The user subsequently supplied the SVG/default-pattern RGB-to-CMYK
+sequence at Feature size0.25; reversing model order later worked. Accepted
+numeric/reset/End edits now defer inspector replacement to idle. A native GTK
+regression fails before this fix and passes afterward, proving immediate history
+publication with deferred child replacement. Release build and production strict
+Clippy pass. The original intermittent GNOME hang and warning stack have not
+been reproduced in the private harness. On 2026-09-12, after the rebuilt-release
+retry request, the user confirmed “Okay that work is good now.” The numeric-edit
+fix is accepted and TON-008 is resolved. The later explicit Gate 3 acceptance
+closes the separate placement/source-consumer review; neither creates a checkpoint.
+See `.codex-work/evidence/review-0.3-cmyk-transform-investigation.md`.
+
+## Earlier startup follow-up
+
 On 2026-09-04 the user separately authorized a startup-screen follow-up, now
 **Complete at commit `4ed29d4`**: `assets/Stage21D_Mockup/SplashMockup.png`, persistent
 Recent Files for source images/projects, Close returning to startup after the

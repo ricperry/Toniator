@@ -20,6 +20,8 @@ enum Edit {
     Reset,
 }
 
+type ParseEdit = fn(&str) -> Result<Edit, String>;
+
 /// Carries a validated configuration or temporal command through the existing history boundaries.
 enum Change {
     Start(toniator_domain::DocumentConfiguration),
@@ -314,6 +316,49 @@ fn labeled(parent: &gtk::Box, name: &str, widget: &impl IsA<gtk::Widget>) {
 }
 
 impl Controls {
+    /// Flushes explicitly changed color text into an unpublished Apply draft without refreshing widgets.
+    /// Untouched formatted HEX never rewrites color precision; a later error discards the whole draft.
+    ///
+    /// # Errors
+    /// Returns parsing, color ownership, bounds, or history errors without publishing main history.
+    pub(super) fn commit_pending(
+        &self,
+        history: &mut DocumentHistory,
+        endpoint: temporal_preview::Endpoint,
+    ) -> Result<(), String> {
+        let at_start = endpoint == temporal_preview::Endpoint::Start;
+        let fields: [(&Entry, ParseEdit); 3] = [
+            (&self.color, if at_start { start_hex } else { end_hex }),
+            (&self.alpha, if at_start { start_alpha } else { end_alpha }),
+            (&self.hue, hue),
+        ];
+        for (entry, parse) in fields {
+            if !entry.widget.is_sensitive()
+                || entry.widget.text().as_str() == entry.displayed.borrow().as_str()
+            {
+                continue;
+            }
+            match prepare(
+                history.document(),
+                &[self.channel],
+                parse(entry.widget.text().as_str())?,
+            )? {
+                Change::Start(configuration) => {
+                    let base = history.document().clone();
+                    history
+                        .apply_document_configuration(&base, history.revision(), &configuration)
+                        .map_err(|error| error.to_string())?;
+                }
+                Change::End(command) => {
+                    history
+                        .apply_temporal(&command)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Builds the ordinary Color editor inside the selected channel's Advanced settings.
     /// The surrounding endpoint toggle selects the edit destination; controls never duplicate it.
     pub(super) fn new(

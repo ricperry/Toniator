@@ -18,7 +18,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use toniator_domain::CanvasSpec;
 pub use toniator_domain::{
-    SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
+    SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement, SourceTone,
 };
 use toniator_geometry::{CurvePath, CurveSegment, Point2};
 
@@ -2182,15 +2182,18 @@ pub fn mapping_component_value(pixel: SourcePixel, component: SourceMappingCompo
     }
 }
 
+/// Applies one concrete source mapping to a decoded pixel, associating color
+/// responses with alpha exactly once after the complete source transform.
 fn mapped_response(pixel: SourcePixel, mapping: SourceMapping) -> f64 {
     let value = mapping_component_value(pixel, mapping.component);
-    let transformed = transform_mapping(value, mapping);
+    let transformed = mapping.transform(value);
     match mapping.component {
         SourceMappingComponent::Alpha => transformed,
         _ => (transformed * pixel.alpha).clamp(0.0, 1.0),
     }
 }
 
+/// Validates concrete mapping scalars before any source sampling is performed.
 fn validate_mapping(mapping: SourceMapping) -> Result<(), SamplingError> {
     if !mapping.gain.is_finite() || mapping.gain < 0.0 {
         return Err(SamplingError::new(
@@ -2204,12 +2207,10 @@ fn validate_mapping(mapping: SourceMapping) -> Result<(), SamplingError> {
             "mapping bias must be finite",
         ));
     }
-    Ok(())
-}
-
-fn transform_mapping(value: f64, mapping: SourceMapping) -> f64 {
-    let value = if mapping.inverted { 1.0 - value } else { value };
-    (mapping.gain * value + mapping.bias).clamp(0.0, 1.0)
+    mapping
+        .tone
+        .validate()
+        .map_err(|error| SamplingError::new(error.path(), error.message()))
 }
 
 fn linear_rgb(pixel: SourcePixel) -> (f64, f64, f64) {
@@ -3075,6 +3076,7 @@ mod tests {
             inverted: false,
             gain: 1.0,
             bias: 0.0,
+            tone: SourceTone::identity(),
         };
         let partial_red = SourcePixel {
             red: 1.0,
@@ -3100,6 +3102,7 @@ mod tests {
         assert_eq!(mapped_response(hidden_red, mapping), 0.0);
     }
 
+    /// Proves the legacy gain/bias transform still associates color once and leaves alpha independent.
     #[test]
     fn stage9_mapping_transform_associates_color_once_but_not_alpha() {
         let field = synthetic_field(vec![
@@ -3126,6 +3129,7 @@ mod tests {
             inverted: true,
             gain: 2.0,
             bias: -0.5,
+            tone: SourceTone::identity(),
         };
         // red is 1 -> inverted 0 -> transformed/clamped 0, then alpha once.
         assert_eq!(
@@ -3189,6 +3193,72 @@ mod tests {
                 .path(),
             "sampling.mapping.gain"
         );
+    }
+
+    /// Proves SourceTone runs before alpha association and rejects unordered levels at sampling.
+    ///
+    /// # Panics
+    /// Panics if mapped alpha is associated twice or if color tones transform after association.
+    #[test]
+    fn source_tone_transform_precedes_alpha_association_and_validates_levels() {
+        let field = synthetic_field(vec![SourcePixel {
+            red: 0.0,
+            green: 0.0,
+            blue: 0.0,
+            alpha: 0.5,
+        }]);
+        let canvas = CanvasSpec {
+            width: 1.0,
+            height: 1.0,
+        };
+        let tone = SourceTone {
+            black_point: 0.25,
+            white_point: 0.75,
+            gamma: 2.0,
+            contrast: 2.0,
+            cutoff: 0.0,
+        };
+        let mapping = SourceMapping {
+            component: SourceMappingComponent::Alpha,
+            tone,
+            ..SourceMapping::canonical(SourceMappingComponent::Alpha)
+        };
+        let gamma_value = 0.5_f64.sqrt();
+        let expected = (0.5 + (gamma_value - 0.5) * 2.0).clamp(0.0, 1.0);
+        let sampled = field
+            .sample_mapping_response(Point2::new(0.0, 0.0), &canvas, mapping)
+            .expect("valid source tone samples");
+        assert!((sampled - expected).abs() < 1.0e-12);
+        assert_eq!(
+            mapped_response(
+                SourcePixel {
+                    red: 1.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 0.5
+                },
+                SourceMapping {
+                    component: SourceMappingComponent::Red,
+                    gain: 0.8,
+                    bias: 0.1,
+                    ..mapping
+                }
+            ),
+            0.45
+        );
+
+        let invalid = SourceMapping {
+            tone: SourceTone {
+                black_point: 0.8,
+                white_point: 0.2,
+                ..SourceTone::identity()
+            },
+            ..mapping
+        };
+        let error = field
+            .sample_mapping_response(Point2::new(0.0, 0.0), &canvas, invalid)
+            .expect_err("unordered source levels fail before sampling");
+        assert_eq!(error.path(), "source_mapping.tone.levels");
     }
 
     #[test]

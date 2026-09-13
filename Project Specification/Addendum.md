@@ -411,18 +411,26 @@ silently resets, guesses, or migrates settings. Missing, duplicate,
 out-of-order, unsupported, or extraneous roles are invalid; channel IDs must
 be unique and stable. This transition reports `ChannelTopology` invalidation.
 
-Source mapping and layer paint are separate authoritative concepts. Source
-mapping selects a scalar field from Red, Green, Blue, Cyan, Magenta, Yellow,
-Black, Alpha, or Luminance and applies:
+Source mapping and layer paint are separate authoritative concepts. Each
+channel owns independent fill-response and weighting source configurations;
+neither belongs to its pattern recipe. Each mapping selects a scalar field
+from Red, Green, Blue, Cyan, Magenta, Yellow, Black, Alpha, or Luminance and
+applies its own source-tone interpretation, inversion, gain and bias:
 
 ```text
-clamp(gain * (inverted ? 1 - value : value) + bias)
+oriented = inverted ? 1 - value : value
+tone = levels, gamma, then centered contrast applied to oriented
+clamp(gain * tone + bias)
 ```
 
 Layer paint supplies either a solid presentation color or, for the
 SourceColorAlpha topology, evaluated per-mark source color. Ordinary solid
-color, visibility, and opacity changes are presentation invalidations. Source
-mapping and mark-response changes are realization invalidations.
+color, visibility, and opacity changes are presentation invalidations.
+Fill mapping and mark-response changes are realization invalidations. Weighting
+source/response changes rebuild Family when consumed by the effective pattern;
+unused weighting settings remain stored without geometry invalidation. Weighting
+also owns its independent strength and response curve. The completed mapped
+sample is subject to that consumer's cutoff before downstream response evaluation.
 
 RGB scalar fields are decoded sRGB converted to linear-light `R`, `G`, and
 `B`. CMYK scalar fields use deterministic profile-independent normalized
@@ -772,10 +780,7 @@ Intentional islands and open spaces with explicit cluster scale, spread, and str
 pub enum DensityModulation {
     Uniform,
 
-    ArtworkWeighted {
-        strength: f64,
-        response: ResponseCurve,
-    },
+    ArtworkWeighted,
 
     CorrelatedField {
         field: CorrelatedField,
@@ -784,6 +789,11 @@ pub enum DensityModulation {
     },
 }
 ```
+
+`ArtworkWeighted` declares source dependence only. The receiving channel
+supplies its independent weighting mapping, tonal response, strength, and curve
+from document/channel configuration. A reusable recipe carries none of those
+values; changing a recipe preserves both fill and weighting source settings.
 
 ```rust
 pub enum CorrelatedField {
@@ -1021,16 +1031,35 @@ Family guides/sites
 
 Grid translation must update the pattern coordinate frame and regenerate sufficient off-canvas structure. It must not move already clipped geometry.
 
-Pattern rotation is available for every current pattern except a definition
-whose site placement uses `ArtworkWeighted` source-document density. That
-placement owns its source-coordinate relationship: capability projection omits
-Rotation, channel-rotation command construction and validation reject it, and
-the evaluator receives an effective rotation of zero. A document-base rotation
-may remain stored and dormant for later compatible base definitions. A named
-channel replacement or structural edit that selects artwork-weighted placement
-prunes only that channel's incompatible rotation delta together with any
-already-incompatible output-response deltas; translation, appearance/source,
-and unrelated channel intent remain unchanged.
+Pattern rotation and X/Y translation are available for every current pattern,
+including `ArtworkWeighted` source-document density. Artwork-weighted placement
+is a special alignment case: the interface warns that transforming the pattern
+offsets its relationship to the source channel weighting. The warning explains
+that neutral Rotation, X and Y values (all `0.0`) restore source-weight-map
+alignment. It informs the artist without blocking the transformation.
+Candidate positions are transformed first, then artwork weighting is recalculated
+at those document positions; the application does not merely move an already
+weighted site arrangement. Weighting and fill-response source components are
+independent document/channel configuration. Both default to the receiving
+channel's matching component; Advanced Settings owns their source selection,
+including explicit Luminance for monochrome artwork. Changing either mapping
+does not edit the recipe, and applying a Pattern does not overwrite those choices.
+
+The Pattern Editor/Wizard defines construction, whether source weighting is
+used, and geometric bounds such as minimum/maximum fill or thickness. Source
+mapping and source-response shaping belong to document/channel state and are
+edited in main-window Advanced Settings. This includes weighting strength,
+response curve, inversion, gain, bias and tonal interpretation. A recipe must
+not store or edit these source settings. Weighting consumes its independently
+configured source response; fill/geometry consumes its own. Do not implicitly
+couple their source components or tonal adjustments. Additional source consumers
+must use distinct channel configuration when they can legitimately differ.
+Geometric controls such as stroke-normal alignment and region resize algorithms
+remain construction/geometry intent, not source-response shaping.
+Capability projection, command validation and effective evaluation must not
+omit, reject or silently zero rotation solely because placement is artwork
+weighted. Selecting artwork-weighted placement must not prune a rotation delta
+for that reason; unrelated channel intent remains unchanged.
 
 ### 10.2 Realization rebuild
 
@@ -1041,7 +1070,9 @@ These should reuse family sites/guides where possible:
 - Curve/network thickness.
 - Region/cell inset.
 - Geometry response curve or polarity.
-- Source mapping, including component, inversion, gain, bias, and placement.
+- Fill/geometry source mapping, including component, inversion, gain, bias, and placement.
+  Weighting source changes regenerate Family when an active recipe consumes them;
+  an unused weighting binding is retained as document intent without rebuilding geometry.
 
 ### 10.3 Presentation only
 
@@ -1169,8 +1200,8 @@ The CLI must not depend on GTK or libadwaita.
 - Final clipping is clean.
 - Rotation and translation leave no edge gaps.
 - Every current definition accepts nonzero pattern rotation through complete
-  realization and rasterization except artwork-weighted site placement, which
-  omits and rejects Rotation and evaluates at zero degrees.
+  realization and rasterization. Artwork-weighted placement exposes the
+  source-weight alignment warning and neutral-transform recovery described above.
 - Rotated thin-stroke raster coverage retains exact nonzero-winding parity at
   disjoint, nested, coincident/opposite, antialiasing-off, and clipped-boundary
   cases while traversing only row-active edges and nonzero spans.
@@ -1505,8 +1536,12 @@ changes.
 The main inspector has a runtime-only **ALL** target and real named-channel
 targets. ALL is never represented by a fabricated channel ID. New and Open
 select ALL by default; channel-model and topology changes preserve it.
-Ordinary ALL edits change document-base settings while retaining channel
-deltas. A preset applied to ALL atomically replaces the base recipe and clears
+Ordinary ALL scalar edits assign the entered effective value to every compatible
+channel/output at the selected Start or End frame as one atomic, undoable edit.
+Mixed values are displayed explicitly, not as a shared average. Only the edited
+property is equalized: unrelated channel intent, the other initialized endpoint,
+and interpolation choices remain intact. Inapplicable outputs are omitted and
+invalid coupled bounds reject the entire edit. A preset applied to ALL atomically replaces the base recipe and clears
 every channel's pattern replacement plus density, density-aspect,
 pattern-rotation, shape-rotation, and output-response deltas. The operation
 first discloses affected channels, is one undoable command, and Undo restores

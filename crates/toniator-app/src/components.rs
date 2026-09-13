@@ -693,6 +693,8 @@ mod advanced_settings_shell {
     #[template(resource = "/com/silentbutdigital/Toniator/advanced-settings.ui")]
     pub struct ToniatorAdvancedSettingsShell {
         #[template_child]
+        pub advanced_reset: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
         pub advanced_status: gtk::TemplateChild<gtk::Label>,
         #[template_child]
         pub advanced_preview: gtk::TemplateChild<gtk::Picture>,
@@ -735,6 +737,11 @@ impl ToniatorAdvancedSettingsShell {
     /// Creates the resource-owned modal shell before private controls attach.
     pub fn new() -> Self {
         glib::Object::builder().build()
+    }
+
+    /// Returns the scoped defaults action; document commands retain reset authority.
+    pub fn reset(&self) -> gtk::Button {
+        self.imp().advanced_reset.get()
     }
 
     /// Returns the private draft status presentation.

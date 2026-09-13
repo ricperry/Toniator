@@ -16,7 +16,7 @@ to Flathub or provide a Flatpak automatic-update repository.
    Commit only the release's explicit paths. Preserve unrelated local work.
 2. Ensure the Cargo package versions, desktop AppStream release, and versioned
    output names in the packaging scripts agree. The current recipes target the
-   unreleased 0.3.0 development version. Add its release notes and set the
+   unreleased 0.3.1 development version. Add its release notes and set the
    AppStream release date when preparing publication.
 3. Run the focused checks for changed behavior, then rebuild the two packages
    from the committed source using [the packaging guide](../packaging/README.md).

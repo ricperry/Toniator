@@ -6,6 +6,13 @@ use toniator_engine::{EvaluationCompletion, EvaluationProgress};
 /// Carries worker results without granting workers GTK or document authority.
 #[allow(clippy::large_enum_variant)] // Save events deliberately own one authoritative document snapshot.
 pub(crate) enum AppEvent {
+    /// Reports full-document construction validity for one private wizard revision.
+    WizardValidation {
+        epoch: u64,
+        revision: u64,
+        generation: u64,
+        result: Result<(), String>,
+    },
     /// Carries phase progress and terminal recovery ownership for one desktop export sheet.
     TemporalExport(crate::temporal_export::Event),
     /// Supplies the current decoded endpoint before immutable preview evaluation.

@@ -3,7 +3,7 @@
 use super::*;
 use toniator_domain::{ANIMATABLE_SCALAR_FIELD_IDS, ChannelScalarBatch};
 
-/// Retains one average input and its exact displayed-text guard across private draft refreshes.
+/// Retains one shared/mixed input and its displayed-text guard across private draft refreshes.
 pub(super) struct Controls {
     field: PropertyFieldId,
     input: gtk::Entry,
@@ -12,18 +12,21 @@ pub(super) struct Controls {
 }
 
 /// Projects only Advanced batch fields; layout-base controls and artist color pickers keep their homes.
-/// Eligibility, target enumeration, averages and bounds remain domain responsibilities.
+/// Eligibility, target enumeration and bounds remain domain responsibilities.
 fn shown_in_advanced(field: PropertyFieldId) -> bool {
-    !matches!(
-        field,
-        PropertyFieldId::Density
-            | PropertyFieldId::DensityAspect
-            | PropertyFieldId::RotationDegrees
-            | PropertyFieldId::ShapeRotationDegrees
-            | PropertyFieldId::ColorRed
-            | PropertyFieldId::ColorGreen
-            | PropertyFieldId::ColorBlue
-    )
+    !inline_response_field(field)
+        && !matches!(
+            field,
+            PropertyFieldId::TranslationX
+                | PropertyFieldId::TranslationY
+                | PropertyFieldId::Density
+                | PropertyFieldId::DensityAspect
+                | PropertyFieldId::RotationDegrees
+                | PropertyFieldId::ShapeRotationDegrees
+                | PropertyFieldId::ColorRed
+                | PropertyFieldId::ColorGreen
+                | PropertyFieldId::ColorBlue
+        )
 }
 
 /// Builds the All group from active scalar capabilities, retaining separate named-channel details.
@@ -42,7 +45,7 @@ pub(super) fn append(
     content.set_margin_start(8);
     content.set_margin_end(8);
     let explanation = gtk::Label::new(Some(
-        "Values are averages. Edits move all compatible values equally, preserving their differences and interpolation. Individual settings are below.",
+        "Edits set every compatible channel to the entered value. Mixed means the channels differ. Individual settings are below.",
     ));
     explanation.set_wrap(true);
     explanation.set_xalign(0.0);
@@ -140,7 +143,7 @@ pub(super) fn append(
             detail,
             displayed,
         };
-        control.project(&batch);
+        control.project(&batch, false);
         controls.push(control);
     }
     if !controls.is_empty() {
@@ -150,30 +153,69 @@ pub(super) fn append(
 }
 
 impl Controls {
-    /// Updates derived average/range text without turning display rounding into an authored edit.
-    fn project(&self, batch: &ChannelScalarBatch) {
+    /// Discards an invalid pending edit when the dialog explicitly resets its complete target scope.
+    pub(super) fn clear_pending_error(&self) {
+        self.input.remove_css_class("error");
+        self.input.update_state(&[gtk::accessible::State::Invalid(
+            gtk::AccessibleInvalidState::False,
+        )]);
+    }
+
+    /// Parses only unpublished text; an untouched Mixed placeholder is not an edit.
+    ///
+    /// # Errors
+    /// Rejects nonnumeric/nonfinite pending text before the Advanced draft is published.
+    pub(super) fn pending(&self) -> Result<Option<(PropertyFieldId, f64)>, String> {
+        if self.input.text().as_str() == self.displayed.borrow().as_str() {
+            return Ok(None);
+        }
+        let value = self
+            .input
+            .text()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| {
+                format!(
+                    "{}: enter a finite number.",
+                    inspector_field_label(self.field)
+                )
+            })?;
+        Ok(Some((self.field, value)))
+    }
+
+    /// Displays common/mixed values without authoring display rounding; reset replaces pending text.
+    fn project(&self, batch: &ChannelScalarBatch, discard_pending: bool) {
         self.input.set_sensitive(true);
         self.detail.set_label(&if batch.minimum == batch.maximum {
             format!("{} matching values", batch.values.len())
         } else {
             format!(
-                "Average of {} values · Range {:.4}–{:.4}",
+                "Mixed · {} values · Range {}–{}",
                 batch.values.len(),
                 batch.minimum,
                 batch.maximum
             )
         });
-        if !self.input.has_focus() && !self.input.has_css_class("error") {
-            let text = current_display(&PropertyCurrentValueKind::FiniteF64(batch.average));
+        if discard_pending || (!self.input.has_focus() && !self.input.has_css_class("error")) {
+            let text = if batch.minimum == batch.maximum {
+                batch.minimum.to_string()
+            } else {
+                String::new()
+            };
+            self.input.set_placeholder_text(Some("Mixed"));
             *self.displayed.borrow_mut() = text.clone();
             self.input.set_text(&text);
         }
     }
 
-    /// Refreshes this capability-bound batch from the displayed document without a second effective model.
-    pub(super) fn refresh(&self, document: &Document) {
+    /// Refreshes capability-bound values; explicit reset clears errors and overwrites pending input.
+    pub(super) fn refresh(&self, document: &Document, discard_pending: bool) {
+        if discard_pending {
+            self.clear_pending_error();
+        }
         match document.channel_scalar_batch(self.field) {
-            Ok(batch) => self.project(&batch),
+            Ok(batch) => self.project(&batch, discard_pending),
             Err(_) => {
                 self.input.set_sensitive(false);
                 self.detail.set_label("No compatible values in this frame.");
@@ -186,17 +228,32 @@ impl Controls {
 ///
 /// # Errors
 /// Reports invalid values, incompatible targets, coupled bounds or stale history without partial edits.
-fn apply(
+pub(super) fn apply(
     history: &mut DocumentHistory,
     endpoint: temporal_preview::Endpoint,
     field: PropertyFieldId,
     value: f64,
 ) -> Result<bool, String> {
+    apply_fields(history, endpoint, &[(field, value)])
+}
+
+/// Publishes a complete pending ALL scalar batch, validating coupled bounds atomically.
+///
+/// # Errors
+/// Returns the domain/history diagnostic without publishing a partial batch.
+pub(super) fn apply_fields(
+    history: &mut DocumentHistory,
+    endpoint: temporal_preview::Endpoint,
+    edits: &[(PropertyFieldId, f64)],
+) -> Result<bool, String> {
+    if edits.is_empty() {
+        return Ok(false);
+    }
     let base = history.document().clone();
     match endpoint {
         temporal_preview::Endpoint::Start => {
             let configuration = base
-                .edit_all_channel_start_configuration(&[(field, value)])
+                .edit_all_channel_start_configuration(edits)
                 .map_err(|error| error.to_string())?;
             history
                 .apply_document_configuration(&base, history.revision(), &configuration)
@@ -205,7 +262,7 @@ fn apply(
         }
         temporal_preview::Endpoint::End => {
             let command = base
-                .edit_all_channel_end_command(&[(field, value)])
+                .edit_all_channel_end_command(edits)
                 .map_err(|error| error.to_string())?;
             if command.replacement() == &base.temporal_authority() {
                 return Ok(false);
@@ -230,7 +287,7 @@ mod tests {
     fn private_all_batches_preserve_frames_and_publish_one_change() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let directory = root
-            .join("target/validation/stage22-channel-batches")
+            .join("target/validation/review-gate1-channel-batches")
             .join(format!(
                 "run-{}-{}",
                 std::process::id(),
@@ -243,7 +300,7 @@ mod tests {
         for (input, name, format) in [
             ("raster-sample.png", "raster", ExportFormat::Png),
             ("vector-sample.svg", "vector", ExportFormat::Svg),
-            ("video-sample0001-0010.mp4", "video", ExportFormat::Png),
+            ("video-sample0001-0010.mkv", "video", ExportFormat::Png),
         ] {
             let mut workspace = load_workspace(&root.join("assets").join(input)).unwrap();
             for (channel_id, gain) in [(ChannelId(1), 0.75), (ChannelId(3), 1.25)] {
@@ -315,7 +372,7 @@ mod tests {
                     .iter()
                     .map(|value| value.value)
                     .collect::<Vec<_>>(),
-                [1.25, 1.5, 1.75]
+                [1.5, 1.5, 1.5]
             );
             assert_eq!(workspace.snapshot(), before);
             assert_eq!(

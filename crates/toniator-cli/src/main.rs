@@ -580,6 +580,9 @@ fn build_document(
             shape_rotation_degrees: 0.0,
         },
         vec![ChannelState {
+            weighting: toniator_domain::SourceWeighting::canonical(
+                toniator_domain::SourceMappingComponent::Luminance,
+            ),
             id: ChannelId(1),
             pattern_instance: ChannelPatternInstance {
                 definition_override: None,
@@ -1195,6 +1198,11 @@ fn inspect_grid(arguments: GridArgs) -> Result<(), CliError> {
 ///
 /// Returns a stable CLI diagnostic for conflicting arguments, obsolete or invalid
 /// persistence, invalid authored values, or document validation failure.
+/// Validates a current project or explicitly constructed diagnostic document without migration.
+/// Legacy diagnostic construction supplies independent canonical luminance source consumers.
+///
+/// # Errors
+/// Returns document, argument, source, or persistence diagnostics without changing the input.
 fn validate(arguments: ValidateArgs) -> Result<(), CliError> {
     if let Some(input) = arguments.input {
         if arguments.canvas.is_some()
@@ -1271,6 +1279,9 @@ fn validate(arguments: ValidateArgs) -> Result<(), CliError> {
             shape_rotation_degrees: 0.0,
         },
         vec![ChannelState {
+            weighting: toniator_domain::SourceWeighting::canonical(
+                toniator_domain::SourceMappingComponent::Luminance,
+            ),
             id: ChannelId(1),
             pattern_instance: ChannelPatternInstance {
                 definition_override: None,

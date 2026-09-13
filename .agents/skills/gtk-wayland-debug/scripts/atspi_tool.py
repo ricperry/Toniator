@@ -148,11 +148,31 @@ def safe_relations(node) -> dict[str, list[str]]:
 
 
 def safe_selected_item(node) -> str | None:
-    """Return the selected option name when a live widget exposes Selection."""
+    """Read native Selection or the collapsed GTK dropdown's single displayed label."""
     try:
         selection = node.querySelection()
         if selection.nSelectedChildren:
             return safe_text(lambda: selection.getSelectedChild(0).name)
+    except Exception:
+        pass
+    # GTK DropDown exposes its selected label under the toggle, without Selection.
+    # Inspect only that button, never popup options or an arbitrary descendant list.
+    try:
+        if node.getRoleName() == "combo box" and node.childCount:
+            button = node.getChildAtIndex(0)
+            if button.getRoleName() == "toggle button":
+                labels = []
+                pending = [(button, 0)]
+                while pending:
+                    child, depth = pending.pop()
+                    role = child.getRoleName()
+                    if role == "label" and child.name:
+                        labels.append(child.name)
+                    elif depth < 10 and role not in {"list", "menu", "list item"}:
+                        pending.extend((child.getChildAtIndex(i), depth + 1)
+                                       for i in range(child.childCount))
+                if len(labels) == 1:
+                    return labels[0]
     except Exception:
         pass
     return None
@@ -777,7 +797,10 @@ def run_action(arguments) -> int:
         if not before.minimum <= arguments.set_value <= before.maximum:
             raise SystemExit(f"value {arguments.set_value:g} is outside {before.minimum:g}..{before.maximum:g}")
         node.queryValue().currentValue = arguments.set_value
-        commit_value_after_verified_focus(arguments, node, before)
+        # Native scrollbars apply Value changes immediately and cannot take keyboard focus.
+        # Tab traversal here moves the viewport again and corrupts the requested readback.
+        if before.role != "scroll bar":
+            commit_value_after_verified_focus(arguments, node, before)
         node, _after = choose_match(arguments)
     elif arguments.set_text is not None:
         if not node.queryEditableText().setTextContents(arguments.set_text):

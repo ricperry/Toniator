@@ -1,14 +1,14 @@
 //! Desktop export projects immutable shared jobs and retains their cancellation/recovery ownership.
 
 use super::*;
-use toniator_domain::{FrameRange, ProjectTiming, TimeRange};
+use toniator_domain::{FrameRange, ProjectTiming, RationalTime, TemporalCommand, TimeRange};
 use toniator_engine::export::video::{
     VideoCodec, VideoExportJob, VideoExportOptions, VideoPhase, VideoProgress, VideoRecovery,
 };
 use toniator_engine::export::{
     ExportPhase, ExportProgress, SequenceExportJob, SequenceExportOptions,
 };
-use toniator_engine::{FrameSource, MediaTools};
+use toniator_engine::{FrameSource, MediaTools, SourceMediaMetadata};
 use toniator_io::{export_defaults::ExportDefaults, sequence::SequenceFormat};
 
 /// Identifies the three artist-facing temporal output choices without duplicating codec policy.
@@ -65,7 +65,7 @@ pub(super) struct Progress {
 
 /// Returns either metadata, a finalized output, or owned recovery after one worker operation.
 pub(super) enum Outcome {
-    Metadata(Result<String, String>),
+    Metadata(Result<SourceMediaMetadata, String>),
     Complete {
         path: Option<PathBuf>,
         message: String,
@@ -101,9 +101,13 @@ impl Drop for Worker {
 /// Holds a modal projection and immutable snapshot, never a second editable document.
 pub(super) struct Surface {
     epoch: u64,
+    workspace_generation: u64,
     window: gtk::Window,
     snapshot: SavedContent,
     format: gtk::DropDown,
+    rate: gtk::Entry,
+    duration: gtk::Entry,
+    frame_count: gtk::Label,
     directory: gtk::Entry,
     name: gtk::Entry,
     first: gtk::Entry,
@@ -118,6 +122,7 @@ pub(super) struct Surface {
     destination_widgets: Vec<gtk::Widget>,
     status: gtk::Label,
     audio: gtk::Label,
+    metadata: Option<SourceMediaMetadata>,
     progress: gtk::ProgressBar,
     export: gtk::Button,
     cancel: gtk::Button,
@@ -137,9 +142,11 @@ pub(super) struct Surface {
 fn row(parent: &gtk::Box, title: &str, widget: &impl IsA<gtk::Widget>) {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     let label = gtk::Label::new(Some(title));
+    label.set_use_underline(title.contains('_'));
     label.set_xalign(0.0);
     label.set_hexpand(true);
     label.set_mnemonic_widget(Some(widget));
+    relate_descriptor_label(widget.upcast_ref(), &label);
     row.append(&label);
     row.append(widget);
     parent.append(&row);
@@ -153,6 +160,152 @@ fn entry(value: &str) -> gtk::Entry {
     field
 }
 
+/// Formats one already-reduced rational value without introducing display rounding.
+fn exact_rational(value: RationalTime) -> String {
+    if value.denominator() == 1 {
+        value.numerator().to_string()
+    } else {
+        format!("{}/{}", value.numerator(), value.denominator())
+    }
+}
+
+/// Returns the exact source duration represented by one project timing authority.
+///
+/// # Errors
+/// Rejects timing whose derived frame duration cannot be represented by the shared rational
+/// arithmetic boundary.
+fn timing_duration(timing: &ProjectTiming) -> Result<RationalTime, String> {
+    if let Some(range) = timing.source_time_range() {
+        return range.duration().map_err(|error| error.to_string());
+    }
+    timing
+        .frame_rate()
+        .time_for_frame(timing.frame_range().frame_count())
+        .map_err(|error| error.to_string())
+}
+
+/// Returns the source-time origin retained when a Video Export duration is edited.
+///
+/// # Errors
+/// Rejects an absolute frame range whose source origin overflows exact timing arithmetic.
+fn timing_source_start(timing: &ProjectTiming) -> Result<RationalTime, String> {
+    if let Some(range) = timing.source_time_range() {
+        return Ok(range.start());
+    }
+    timing
+        .frame_rate()
+        .time_for_frame(timing.frame_range().start())
+        .map_err(|error| error.to_string())
+}
+
+/// Projects exact rate, duration, and derived count values for the Video Export sheet.
+///
+/// # Errors
+/// Returns exact-time arithmetic diagnostics from the shared project timing authority.
+fn timing_values(timing: &ProjectTiming) -> Result<[String; 3], String> {
+    let duration = timing_duration(timing)?;
+    Ok([
+        format!(
+            "{}/{}",
+            timing.frame_rate().numerator(),
+            timing.frame_rate().denominator()
+        ),
+        exact_rational(duration),
+        timing.frame_range().frame_count().to_string(),
+    ])
+}
+
+/// Builds one source-validated project timing from exact Video Export rate and duration text.
+///
+/// The selected source start remains fixed, and the output count is the domain-owned ceiling of
+/// duration times rate. Changed time/rate edits use the shared media authority's zero-based output
+/// range with an explicit source interval; unchanged text preserves absolute frame numbering.
+/// No document or history state is changed by this projection.
+///
+/// # Errors
+/// Rejects malformed rate/duration text, nonpositive duration, out-of-source ranges, frame limits,
+/// and exact arithmetic overflow through the shared media timing authority.
+fn timing_from_fields(
+    base: &Document,
+    metadata: &SourceMediaMetadata,
+    rate_text: &str,
+    duration_text: &str,
+) -> Result<ProjectTiming, String> {
+    let rate = toniator_engine::parse_media_rate(rate_text.trim())?;
+    let duration = toniator_engine::parse_media_time(duration_text.trim())?;
+    if duration.numerator() == 0 {
+        return Err("Duration must be greater than zero.".into());
+    }
+    if rate == base.project_timing().frame_rate()
+        && duration == timing_duration(base.project_timing())?
+    {
+        return toniator_engine::select_media_timing(
+            metadata,
+            Some(base.project_timing()),
+            &toniator_engine::MediaTimingSelection::default(),
+        )
+        .map_err(|error| error.message().to_owned());
+    }
+    let start = timing_source_start(base.project_timing())?;
+    let end = start
+        .checked_add(duration)
+        .map_err(|error| error.to_string())?;
+    toniator_engine::select_media_timing(
+        metadata,
+        Some(base.project_timing()),
+        &toniator_engine::MediaTimingSelection {
+            frame_rate: Some(rate),
+            start_time: Some(start),
+            end_time: Some(end),
+            ..Default::default()
+        },
+    )
+    .map_err(|error| error.message().to_owned())
+}
+
+/// Resolves optional inclusive export subset fields against the accepted project frame range.
+///
+/// Empty fields mean the corresponding edge of the full timing, so a changed duration or rate
+/// cannot be constrained by an old default. Explicit values retain the existing subset export
+/// behavior and are checked before any history mutation.
+///
+/// # Errors
+/// Rejects malformed, reversed, or out-of-range frame selections.
+fn export_frame_range(
+    timing: &ProjectTiming,
+    first_text: &str,
+    last_text: &str,
+) -> Result<(u64, u64), String> {
+    let range = timing.frame_range();
+    let first = if first_text.trim().is_empty() {
+        range.start()
+    } else {
+        first_text
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "First export frame must be an unsigned integer.".to_owned())?
+    };
+    let last = if last_text.trim().is_empty() {
+        range
+            .end_exclusive()
+            .checked_sub(1)
+            .ok_or("The accepted timing has no export frame.")?
+    } else {
+        last_text
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "Last export frame must be an unsigned integer.".to_owned())?
+    };
+    if first > last {
+        return Err("Export frame range must include at least one frame.".into());
+    }
+    range
+        .local_offset(first)
+        .and_then(|_| range.local_offset(last))
+        .map_err(|error| error.to_string())?;
+    Ok((first, last))
+}
+
 /// Returns the personal settings location; no path is persisted into artwork or a Preset.
 fn defaults_path() -> PathBuf {
     glib::user_config_dir().join("Toniator/export-defaults.json")
@@ -164,7 +317,7 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
         surface.window.present();
         return;
     }
-    let (snapshot, name, parent) = {
+    let (snapshot, name, parent, workspace_generation) = {
         let app = state.borrow();
         if lifecycle_is_busy(&app) {
             return;
@@ -184,6 +337,7 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
                 .to_string_lossy()
                 .into_owned(),
             app.window.clone(),
+            app.workspace_generation,
         )
     };
     let (defaults, notice) = match ExportDefaults::load(&defaults_path()) {
@@ -194,14 +348,14 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
         ),
     };
     let window = gtk::Window::builder()
-        .title("Export animation")
+        .title("Export video")
         .modal(true)
         .transient_for(&parent)
         .default_width(610)
         .default_height(850)
         .build();
     let header = gtk::HeaderBar::new();
-    header.set_title_widget(Some(&gtk::Label::new(Some("Export animation"))));
+    header.set_title_widget(Some(&gtk::Label::new(Some("Export video"))));
     window.set_titlebar(Some(&header));
     let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
     root.set_margin_top(16);
@@ -222,19 +376,54 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
     ]);
     row(&configuration, "Format", &format);
     let timing = snapshot.document.project_timing();
-    let fps = timing.frame_rate();
-    let info = gtk::Label::new(Some(&format!(
-        "{} / {} frames per second · {} frames available",
-        fps.numerator(),
-        fps.denominator(),
-        timing.frame_range().frame_count()
+    let [rate_text, duration_text, frame_count_text] = match timing_values(timing) {
+        Ok(values) => values,
+        Err(error) => {
+            set_inspector_status(&mut state.borrow_mut(), error);
+            return;
+        }
+    };
+    let rate = entry(&rate_text);
+    rate.set_input_purpose(gtk::InputPurpose::Number);
+    rate.set_tooltip_text(Some(
+        "Exact frames per second. Enter an integer, decimal, or fraction such as 30000/1001.",
+    ));
+    row(&configuration, "_Frame rate (fps)", &rate);
+    let duration = entry(&duration_text);
+    duration.set_input_purpose(gtk::InputPurpose::Number);
+    duration.set_tooltip_text(Some(
+        "Exact source duration in seconds. Frames are rounded up to include the full duration.",
+    ));
+    row(&configuration, "_Duration (seconds)", &duration);
+    let frame_count = gtk::Label::new(Some(&format!("{frame_count_text} frames")));
+    frame_count.set_xalign(0.0);
+    frame_count.set_selectable(true);
+    frame_count.update_property(&[
+        gtk::accessible::Property::Label("Frame count"),
+        gtk::accessible::Property::Description(
+            "Read-only frame count derived exactly from duration and frame rate",
+        ),
+    ]);
+    row(&configuration, "Frame count", &frame_count);
+    let source_start = timing_source_start(timing)
+        .map(exact_rational)
+        .unwrap_or_else(|_| "unknown".to_owned());
+    let timing_hint = gtk::Label::new(Some(&format!(
+        "Export applies these timing settings to the document. Close before exporting to discard edits. Source starts at {source_start} seconds."
     )));
-    info.set_xalign(0.0);
-    configuration.append(&info);
-    let first = entry(&timing.frame_range().start().to_string());
-    let last = entry(&(timing.frame_range().end_exclusive() - 1).to_string());
-    row(&configuration, "First frame", &first);
-    row(&configuration, "Last frame (included)", &last);
+    timing_hint.set_xalign(0.0);
+    timing_hint.set_wrap(true);
+    configuration.append(&timing_hint);
+    let first = entry("");
+    first.set_placeholder_text(Some("Full timing start"));
+    let last = entry("");
+    last.set_placeholder_text(Some("Full timing end"));
+    row(&configuration, "First export frame (optional)", &first);
+    row(
+        &configuration,
+        "Last export frame (included, optional)",
+        &last,
+    );
     let dimensions = entry("");
     dimensions.set_placeholder_text(Some("Original size"));
     dimensions.set_tooltip_text(Some(
@@ -329,7 +518,7 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
     buttons.append(&close);
     let cancel = gtk::Button::with_label("Cancel export");
     buttons.append(&cancel);
-    let export = gtk::Button::with_label("Export animation");
+    let export = gtk::Button::with_label("Export video");
     export.add_css_class("suggested-action");
     buttons.append(&export);
     root.append(&buttons);
@@ -341,10 +530,14 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
     };
     state.borrow_mut().temporal_export = Some(Surface {
         epoch,
+        workspace_generation,
         window: window.clone(),
         snapshot: snapshot.clone(),
         configuration_widgets: vec![
             format.clone().upcast(),
+            rate.clone().upcast(),
+            duration.clone().upcast(),
+            frame_count.clone().upcast(),
             first.clone().upcast(),
             last.clone().upcast(),
             dimensions.clone().upcast(),
@@ -360,19 +553,23 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
             name.clone().upcast(),
             browse.clone().upcast(),
         ],
-        format,
-        directory,
-        name,
-        first,
-        last,
-        dimensions,
-        background,
-        antialiasing,
-        temporary,
+        format: format.clone(),
+        rate: rate.clone(),
+        duration: duration.clone(),
+        frame_count: frame_count.clone(),
+        directory: directory.clone(),
+        name: name.clone(),
+        first: first.clone(),
+        last: last.clone(),
+        dimensions: dimensions.clone(),
+        background: background.clone(),
+        antialiasing: antialiasing.clone(),
+        temporary: temporary.clone(),
         configuration,
         destination_controls,
         status,
         audio,
+        metadata: None,
         progress,
         export: export.clone(),
         cancel: cancel.clone(),
@@ -429,6 +626,23 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
             choose_still_export(&app);
         }
     });
+    for field in [rate.clone(), duration.clone(), first.clone(), last.clone()] {
+        let app = state.clone();
+        field.connect_changed(move |_| refresh_export_surface(&app, epoch, true));
+    }
+    for field in [
+        dimensions.clone(),
+        directory.clone(),
+        name.clone(),
+        temporary.clone(),
+    ] {
+        let app = state.clone();
+        field.connect_changed(move |_| refresh_export_surface(&app, epoch, false));
+    }
+    for control in [format.clone(), background.clone(), antialiasing.clone()] {
+        let app = state.clone();
+        control.connect_selected_notify(move |_| refresh_export_surface(&app, epoch, false));
+    }
     sync_ui(&mut state.borrow_mut());
     window.present();
     launch(state, epoch, move |cancelled, _| {
@@ -436,16 +650,29 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
             toniator_engine::open_source_media(&snapshot.sources, MediaTools::default(), &|| {
                 cancelled.load(Ordering::Acquire)
             })
-            .map(|media| {
-                if media.metadata().has_audio {
-                    "Source contains audio. This export is silent.".to_owned()
-                } else {
-                    "Source has no audio. Output is silent.".to_owned()
-                }
-            })
+            .map(|media| media.metadata().clone())
             .map_err(|error| error.to_string());
         Outcome::Metadata(result)
     });
+}
+
+/// Revalidates one live export sheet after an editable choice changes.
+///
+/// Timing fields also refresh the exact derived frame count; all choices update the truthful
+/// Export video enabled state without touching document history.
+fn refresh_export_surface(state: &Rc<RefCell<AppState>>, epoch: u64, timing_changed: bool) {
+    let mut app = state.borrow_mut();
+    if let Some(surface) = app
+        .temporal_export
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        if timing_changed {
+            refresh_timing(surface);
+        }
+        refresh_input_status(surface);
+        refresh(surface);
+    }
 }
 
 /// Validates an absolute existing directory while retaining Unicode path input.
@@ -453,8 +680,12 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
 /// # Errors
 /// Rejects missing, relative or unavailable required folders before a worker starts.
 fn directory(text: &str, optional: bool) -> Result<Option<PathBuf>, String> {
-    if text.trim().is_empty() && optional {
-        return Ok(None);
+    if text.trim().is_empty() {
+        return if optional {
+            Ok(None)
+        } else {
+            Err("Choose an output folder.".into())
+        };
     }
     let path = PathBuf::from(text);
     if !path.is_absolute() || !path.is_dir() {
@@ -466,14 +697,21 @@ fn directory(text: &str, optional: bool) -> Result<Option<PathBuf>, String> {
 /// Resolves a single child name without allowing traversal or implicit destination replacement.
 ///
 /// # Errors
-/// Rejects unavailable destination folders, empty names and child-path traversal.
+/// Rejects unavailable destination folders, existing output, empty names and child-path traversal.
 fn destination(folder: &str, name: &str, suffix: &str) -> Result<PathBuf, String> {
     let folder = directory(folder, false)?.ok_or("Choose a destination folder.")?;
     let name = name.trim();
     if name.is_empty() || matches!(name, "." | "..") || name.contains('/') || name.contains('\0') {
         return Err("Use a job name without folder separators.".into());
     }
-    Ok(folder.join(format!("{name}{suffix}")))
+    let path = folder.join(format!("{name}{suffix}"));
+    if path
+        .try_exists()
+        .map_err(|error| format!("Couldn’t check the output path: {error}"))?
+    {
+        return Err("Output already exists. Choose a different job name.".into());
+    }
+    Ok(path)
 }
 
 /// Converts an inclusive requested interval once while preserving the source's original speed.
@@ -513,6 +751,235 @@ fn interval(document: &Document, first: u64, last: u64) -> Result<Document, Stri
         .clone()
         .with_temporal_authority(timing, document.temporal_end_overrides().to_vec())
         .map_err(|error| error.to_string())
+}
+
+/// Parses all current Video Export choices into one exact timing and immutable worker options.
+///
+/// A `None` suffix uses the selected format's native destination suffix. Recovery can supply an
+/// empty suffix when saving retained PNGs. This helper performs no document or history mutation.
+///
+/// # Errors
+/// Rejects unavailable metadata, malformed timing, invalid destination/temporary folders, invalid
+/// dimensions, and malformed optional export frame subsets.
+fn options_from_surface(
+    surface: &Surface,
+    destination_suffix: Option<&str>,
+) -> Result<(ProjectTiming, Options), String> {
+    let metadata = surface
+        .metadata
+        .as_ref()
+        .ok_or("Source timing is still being read. Please wait.")?;
+    let timing = timing_from_fields(
+        &surface.snapshot.document,
+        metadata,
+        surface.rate.text().as_str(),
+        surface.duration.text().as_str(),
+    )?;
+    let format = Format::selected(surface.format.selected())?;
+    let (first, last) = export_frame_range(
+        &timing,
+        surface.first.text().as_str(),
+        surface.last.text().as_str(),
+    )?;
+    let destination = destination(
+        surface.directory.text().as_str(),
+        surface.name.text().as_str(),
+        destination_suffix.unwrap_or_else(|| format.suffix()),
+    )?;
+    Ok((
+        timing,
+        Options {
+            format,
+            destination,
+            temporary: directory(surface.temporary.text().as_str(), true)?,
+            background: png_background_for_dropdown_position(surface.background.selected()),
+            target: parse_output_target(surface.dimensions.text().as_str())?,
+            antialiasing: if surface.antialiasing.selected() == 1 {
+                RasterAntialiasing::Off
+            } else {
+                RasterAntialiasing::On
+            },
+            first,
+            last,
+        },
+    ))
+}
+
+/// Builds the export-specific document projection while preserving full timing for a full-range job.
+///
+/// Explicit first/last values retain the existing inclusive subset behavior. A full-range export
+/// receives the accepted document unchanged, including whether its source interval is explicit.
+///
+/// # Errors
+/// Rejects a subset outside the accepted project frame range or exact interval arithmetic errors.
+fn document_for_export(document: &Document, first: u64, last: u64) -> Result<Document, String> {
+    let range = document.project_timing().frame_range();
+    if first == range.start() && last.checked_add(1) == Some(range.end_exclusive()) {
+        return Ok(document.clone());
+    }
+    interval(document, first, last)
+}
+
+/// Runs the shared static exporter validation before timing history can be changed.
+///
+/// The engine remains the authority for AV1 matte requirements, source identity, frame limits, and
+/// output dimensions. This function only selects the existing consumer job and reports its error.
+///
+/// # Errors
+/// Rejects any static engine export diagnostic without reserving a destination or starting a worker.
+fn validate_static_export(
+    snapshot: &SavedContent,
+    document: &Document,
+    options: &Options,
+) -> Result<(), String> {
+    let document = document_for_export(document, options.first, options.last)?;
+    match options.format {
+        Format::Pngs => SequenceExportJob::new(
+            document,
+            snapshot.sources.clone(),
+            SequenceExportOptions {
+                destination: options.destination.clone(),
+                format: SequenceFormat::Png,
+                background: Some(options.background),
+                target: options.target,
+                antialiasing: options.antialiasing,
+                limits: EvaluationLimits::default(),
+            },
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string()),
+        Format::Lossless | Format::Sharing => VideoExportJob::new(
+            document,
+            snapshot.sources.clone(),
+            VideoExportOptions {
+                destination: options.destination.clone(),
+                codec: if options.format == Format::Lossless {
+                    VideoCodec::Ffv1Matroska
+                } else {
+                    VideoCodec::Av1Webm
+                },
+                temporary_directory: options.temporary.clone(),
+                background: Some(options.background),
+                target: options.target,
+                antialiasing: options.antialiasing,
+                limits: EvaluationLimits::default(),
+            },
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string()),
+    }
+}
+
+/// Prepares one accepted Video Export timing command after checking the captured workspace guard.
+///
+/// Static consumer validation happens before the caller applies the command to `DocumentHistory`.
+/// The command retains every existing End override through the domain temporal authority.
+///
+/// # Errors
+/// Rejects a stale workspace, malformed or out-of-source timing, invalid export choices, or any
+/// static engine validation error without mutating history.
+fn prepare_render(app: &AppState, epoch: u64) -> Result<(TemporalCommand, Options), String> {
+    let surface = app
+        .temporal_export
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+        .ok_or("Export video is no longer open.")?;
+    if surface.worker.is_some() {
+        return Err("Export video is already running.".into());
+    }
+    if surface.recovery.is_some() {
+        return Err("Choose a recovery action before starting another export.".into());
+    }
+    let workspace = app.workspace.as_ref().ok_or("No document is open.")?;
+    if app.workspace_generation != surface.workspace_generation
+        || workspace.snapshot() != surface.snapshot
+    {
+        return Err(
+            "The document changed while Export video was open. Close it and reopen the export sheet."
+                .into(),
+        );
+    }
+    let (timing, options) = options_from_surface(surface, None)?;
+    let document = surface
+        .snapshot
+        .document
+        .clone()
+        .with_temporal_authority(
+            timing.clone(),
+            surface.snapshot.document.temporal_end_overrides().to_vec(),
+        )
+        .map_err(|error| error.to_string())?;
+    validate_static_export(&surface.snapshot, &document, &options)?;
+    Ok((
+        surface
+            .snapshot
+            .document
+            .replace_temporal_authority_command(
+                timing,
+                surface.snapshot.document.temporal_end_overrides().to_vec(),
+            ),
+        options,
+    ))
+}
+
+/// Updates the exact derived frame-count readback and timing error for one live sheet.
+fn refresh_timing(surface: &mut Surface) {
+    let Some(metadata) = surface.metadata.as_ref() else {
+        surface.frame_count.set_label("Reading source timing…");
+        return;
+    };
+    match timing_from_fields(
+        &surface.snapshot.document,
+        metadata,
+        surface.rate.text().as_str(),
+        surface.duration.text().as_str(),
+    ) {
+        Ok(timing) => {
+            surface
+                .frame_count
+                .set_label(&format!("{} frames", timing.frame_range().frame_count()));
+        }
+        Err(error) => {
+            surface.frame_count.set_label("Invalid timing");
+            if surface.worker.is_none() && surface.recovery.is_none() {
+                surface.status.set_label(&format!("Check timing: {error}"));
+            }
+        }
+    }
+}
+
+/// Returns the actionable static validation result for all current export choices.
+///
+/// The same engine constructors used here run again in the acceptance path; this projection only
+/// keeps the button state and visible reason aligned with that authoritative preflight.
+///
+/// # Errors
+/// Reports malformed timing, destination, subset, dimensions, source, or codec/matte choices.
+fn export_input_error(surface: &Surface) -> Result<(), String> {
+    let (timing, options) = options_from_surface(surface, None)?;
+    let document = surface
+        .snapshot
+        .document
+        .clone()
+        .with_temporal_authority(
+            timing,
+            surface.snapshot.document.temporal_end_overrides().to_vec(),
+        )
+        .map_err(|error| error.to_string())?;
+    validate_static_export(&surface.snapshot, &document, &options)
+}
+
+/// Reports the first actionable export-input error while the sheet is idle.
+fn refresh_input_status(surface: &mut Surface) {
+    if surface.worker.is_some() || surface.recovery.is_some() {
+        return;
+    }
+    match export_input_error(surface) {
+        Ok(()) => surface.status.set_label("Ready to export video."),
+        Err(error) => surface
+            .status
+            .set_label(&format!("Check export settings: {error}")),
+    }
 }
 
 /// Projects real sequence frame work into one phase-local progress value.
@@ -563,14 +1030,43 @@ fn render(
     cancelled: &AtomicBool,
     report: &(dyn Fn(Progress) + Sync),
 ) -> Outcome {
-    let result = interval(&snapshot.document, options.first, options.last).and_then(|document| {
-        if options.format == Format::Pngs {
-            let job = SequenceExportJob::new(
+    let result =
+        document_for_export(&snapshot.document, options.first, options.last).and_then(|document| {
+            if options.format == Format::Pngs {
+                let job = SequenceExportJob::new(
+                    document,
+                    snapshot.sources,
+                    SequenceExportOptions {
+                        destination: options.destination,
+                        format: SequenceFormat::Png,
+                        background: Some(options.background),
+                        target: options.target,
+                        antialiasing: options.antialiasing,
+                        limits: EvaluationLimits::default(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                return job
+                    .run(MediaTools::default(), cancelled, &|progress| {
+                        report(sequence_progress(progress))
+                    })
+                    .map(|result| Outcome::Complete {
+                        path: Some(result.directory),
+                        message: format!("Exported {} PNG frames.", result.frame_count),
+                    })
+                    .map_err(|error| error.to_string());
+            }
+            let job = VideoExportJob::new(
                 document,
                 snapshot.sources,
-                SequenceExportOptions {
+                VideoExportOptions {
                     destination: options.destination,
-                    format: SequenceFormat::Png,
+                    codec: if options.format == Format::Lossless {
+                        VideoCodec::Ffv1Matroska
+                    } else {
+                        VideoCodec::Av1Webm
+                    },
+                    temporary_directory: options.temporary,
                     background: Some(options.background),
                     target: options.target,
                     antialiasing: options.antialiasing,
@@ -578,51 +1074,23 @@ fn render(
                 },
             )
             .map_err(|error| error.to_string())?;
-            return job
-                .run(MediaTools::default(), cancelled, &|progress| {
-                    report(sequence_progress(progress))
-                })
-                .map(|result| Outcome::Complete {
-                    path: Some(result.directory),
-                    message: format!("Exported {} PNG frames.", result.frame_count),
-                })
-                .map_err(|error| error.to_string());
-        }
-        let job = VideoExportJob::new(
-            document,
-            snapshot.sources,
-            VideoExportOptions {
-                destination: options.destination,
-                codec: if options.format == Format::Lossless {
-                    VideoCodec::Ffv1Matroska
-                } else {
-                    VideoCodec::Av1Webm
+            Ok(
+                match job.run(MediaTools::default(), cancelled, &|progress| {
+                    report(video_progress(progress))
+                }) {
+                    Ok(result) => Outcome::Complete {
+                        path: Some(result.file),
+                        message: result.cleanup_warning.unwrap_or_else(|| {
+                            format!("Exported {} video frames.", result.frame_count)
+                        }),
+                    },
+                    Err(error) => Outcome::Failed {
+                        error: error.to_string(),
+                        recovery: error.recovery,
+                    },
                 },
-                temporary_directory: options.temporary,
-                background: Some(options.background),
-                target: options.target,
-                antialiasing: options.antialiasing,
-                limits: EvaluationLimits::default(),
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        Ok(
-            match job.run(MediaTools::default(), cancelled, &|progress| {
-                report(video_progress(progress))
-            }) {
-                Ok(result) => Outcome::Complete {
-                    path: Some(result.file),
-                    message: result.cleanup_warning.unwrap_or_else(|| {
-                        format!("Exported {} video frames.", result.frame_count)
-                    }),
-                },
-                Err(error) => Outcome::Failed {
-                    error: error.to_string(),
-                    recovery: error.recovery,
-                },
-            },
-        )
-    });
+            )
+        });
     result.unwrap_or_else(|error| Outcome::Failed {
         error,
         recovery: None,
@@ -638,10 +1106,106 @@ enum Action {
     Discard,
 }
 
+/// Applies one accepted timing command and hands the exact updated snapshot to the export worker.
+///
+/// All parsing and static engine checks finish before `DocumentHistory` is touched. A second
+/// captured-workspace comparison protects the command from a replacement or external edit that
+/// happened between preparation and acceptance.
+fn submit_render(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let prepared = {
+        let app = state.borrow();
+        prepare_render(&app, epoch)
+    };
+    let (command, options) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            report_not_started(state, epoch, &error);
+            return;
+        }
+    };
+    let accepted = (|| -> Result<(SavedContent, bool), String> {
+        let mut app = state.borrow_mut();
+        let stale = app
+            .temporal_export
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+            .is_none_or(|surface| {
+                app.workspace_generation != surface.workspace_generation
+                    || app
+                        .workspace
+                        .as_ref()
+                        .is_none_or(|workspace| workspace.snapshot() != surface.snapshot)
+            });
+        if stale {
+            Err("The document changed while Export video was open. Close it and reopen the export sheet.".to_owned())
+        } else {
+            let changed = {
+                let workspace = app.workspace.as_ref().ok_or("No document is open.")?;
+                command.replacement() != &workspace.document().temporal_authority()
+            };
+            if changed {
+                let workspace = app.workspace.as_mut().ok_or("No document is open.")?;
+                workspace
+                    .history
+                    .apply_temporal(&command)
+                    .map_err(|error| error.to_string())?;
+            }
+            let snapshot = app
+                .workspace
+                .as_ref()
+                .ok_or("No document is open.")?
+                .snapshot();
+            if let Some(surface) = app
+                .temporal_export
+                .as_mut()
+                .filter(|surface| surface.epoch == epoch)
+            {
+                surface.snapshot = snapshot.clone();
+            }
+            if changed {
+                set_preview_pending(&mut app);
+                set_inspector_status(&mut app, "Timing accepted. Rendering preview…");
+            }
+            sync_ui(&mut app);
+            Ok((snapshot, changed))
+        }
+    })();
+    let (snapshot, changed) = match accepted {
+        Ok(accepted) => accepted,
+        Err(error) => {
+            report_not_started(state, epoch, &error);
+            return;
+        }
+    };
+    if changed {
+        rebuild_inspector(state);
+        schedule_main_preview_submission(state);
+    }
+    let _ = launch(state, epoch, move |cancelled, report| {
+        render(snapshot, options, cancelled, report)
+    });
+}
+
+/// Reports a rejected Video Export acceptance without changing history or progress ownership.
+fn report_not_started(state: &Rc<RefCell<AppState>>, epoch: u64, error: &str) {
+    let mut app = state.borrow_mut();
+    if let Some(surface) = app.temporal_export.as_mut().filter(|surface| {
+        surface.epoch == epoch && surface.worker.is_none() && surface.recovery.is_none()
+    }) {
+        surface.status.set_label(error);
+        surface.progress.set_fraction(0.0);
+        surface.progress.set_text(Some("Not started"));
+    }
+}
+
 /// Prepares one operation without moving recovery ownership until input validates.
 /// Invalid input reports that the attempted operation has not started and clears
 /// any preceding operation's completed progress; retained frames remain owned.
 fn submit(state: &Rc<RefCell<AppState>>, epoch: u64, action: Action) {
+    if matches!(action, Action::Render) {
+        submit_render(state, epoch);
+        return;
+    }
     let prepared = {
         let mut app = state.borrow_mut();
         let Some(surface) = app
@@ -667,37 +1231,8 @@ fn submit(state: &Rc<RefCell<AppState>>, epoch: u64, action: Action) {
                     last: 0,
                 });
             }
-            let format = Format::selected(surface.format.selected())?;
-            Ok::<_, String>(Options {
-                format,
-                destination: destination(
-                    surface.directory.text().as_str(),
-                    surface.name.text().as_str(),
-                    if matches!(action, Action::SavePng) {
-                        ""
-                    } else {
-                        format.suffix()
-                    },
-                )?,
-                temporary: directory(surface.temporary.text().as_str(), true)?,
-                background: png_background_for_dropdown_position(surface.background.selected()),
-                target: parse_output_target(surface.dimensions.text().as_str())?,
-                antialiasing: if surface.antialiasing.selected() == 1 {
-                    RasterAntialiasing::Off
-                } else {
-                    RasterAntialiasing::On
-                },
-                first: surface
-                    .first
-                    .text()
-                    .parse()
-                    .map_err(|_| "First frame must be an unsigned integer.")?,
-                last: surface
-                    .last
-                    .text()
-                    .parse()
-                    .map_err(|_| "Last frame must be an unsigned integer.")?,
-            })
+            options_from_surface(surface, matches!(action, Action::SavePng).then_some(""))
+                .map(|(_, options)| options)
         })();
         match options {
             Ok(options) => Some((surface.snapshot.clone(), options, surface.recovery.take())),
@@ -844,7 +1379,9 @@ fn refresh(surface: &Surface) {
     for control in &surface.destination_widgets {
         control.set_sensitive(!running);
     }
-    surface.export.set_sensitive(!running && !recovery);
+    surface
+        .export
+        .set_sensitive(!running && !recovery && export_input_error(surface).is_ok());
     surface.cancel.set_visible(running);
     surface.cancel.set_sensitive(
         surface
@@ -895,13 +1432,21 @@ pub(super) fn event(state: &Rc<RefCell<AppState>>, event: Event) {
         Outcome::Metadata(result) => {
             surface.progress.set_text(Some("Ready"));
             match result {
-                Ok(text) => {
-                    surface.audio.set_label(&text);
+                Ok(metadata) => {
+                    surface.metadata = Some(metadata.clone());
+                    surface.audio.set_label(if metadata.has_audio {
+                        "Source contains audio. This export is silent."
+                    } else {
+                        "Source has no audio. Output is silent."
+                    });
+                    refresh_timing(surface);
                     surface
                         .status
                         .set_label("Choose the output and destination, then export.");
+                    refresh_input_status(surface);
                 }
                 Err(error) => {
+                    surface.metadata = None;
                     surface
                         .audio
                         .set_label("Audio information unavailable. Output remains silent.");
@@ -1007,6 +1552,8 @@ fn dismiss(state: &Rc<RefCell<AppState>>) {
 }
 
 /// Keeps portal folder selection scoped to its live sheet and clears chooser ownership on return.
+/// Releases application state before changing entry text because GTK synchronously emits
+/// `changed`, whose export validation handler borrows the same state. Stale sheets stay untouched.
 fn browse_directory(state: &Rc<RefCell<AppState>>, epoch: u64) {
     let parent = {
         let app = state.borrow();
@@ -1038,6 +1585,7 @@ fn browse_directory(state: &Rc<RefCell<AppState>>, epoch: u64) {
         let mut state = app.borrow_mut();
         state.pending_file_chooser = false;
         let mut close = false;
+        let mut directory_update = None;
         if let Some(surface) = state
             .temporal_export
             .as_mut()
@@ -1048,11 +1596,14 @@ fn browse_directory(state: &Rc<RefCell<AppState>>, epoch: u64) {
             if let Ok(file) = result
                 && let Some(path) = file.path()
             {
-                surface.directory.set_text(&path.to_string_lossy());
+                directory_update = Some((surface.directory.clone(), path));
             }
         }
         sync_ui(&mut state);
         drop(state);
+        if let Some((entry, path)) = directory_update {
+            entry.set_text(&path.to_string_lossy());
+        }
         if close {
             dismiss(&app);
         }
@@ -1322,5 +1873,334 @@ mod tests {
         ));
         assert!(!cancelled.destination.exists());
         println!("Desktop export artifacts: {}", directory.display());
+    }
+
+    /// Proves exact Video Export timing, cancellation/no-op behavior, atomic history, and persistence.
+    ///
+    /// # Panics
+    /// Panics if the source timing loses rational precision, invalid choices mutate history, End
+    /// overrides are dropped, or the accepted timing fails save/reopen and Undo/Redo.
+    #[test]
+    fn gate3_video_timing_is_exact_cancel_safe_and_atomic() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source_path = root.join("assets/video-sample0001-0010.mp4");
+        let mut workspace = load_workspace(&source_path).expect("video fixture opens");
+        let metadata =
+            toniator_engine::open_source_media(&workspace.sources, MediaTools::default(), &|| {
+                false
+            })
+            .expect("video metadata opens")
+            .metadata()
+            .clone();
+        let initial_command = workspace
+            .document()
+            .edit_effective_end_command(&[TemporalEndpointEdit {
+                target: PropertyTarget::Document,
+                field: PropertyFieldId::RotationDegrees,
+                effective_end: 45.0,
+                easing: Easing::Linear,
+            }])
+            .expect("End override is valid");
+        workspace
+            .history
+            .apply_temporal(&initial_command)
+            .expect("End override applies");
+        let before = workspace.snapshot();
+        let before_revision = workspace.history.revision();
+        assert_eq!(
+            timing_values(before.document.project_timing()).expect("initial timing formats"),
+            ["6/1", "5/3", "10"]
+        );
+
+        let accepted_timing = timing_from_fields(&before.document, &metadata, "12", "1/3")
+            .expect("exact timing is valid");
+        assert_eq!(accepted_timing.frame_rate().numerator(), 12);
+        assert_eq!(accepted_timing.frame_rate().denominator(), 1);
+        assert_eq!(accepted_timing.frame_range().frame_count(), 4);
+        assert_eq!(
+            accepted_timing
+                .source_time_range()
+                .expect("explicit source interval")
+                .duration()
+                .expect("exact duration"),
+            RationalTime::new(1, 3).unwrap()
+        );
+        assert_eq!(
+            accepted_timing.source_time_for_frame(3).unwrap(),
+            RationalTime::new(1, 4).unwrap()
+        );
+        let fractional = timing_from_fields(&before.document, &metadata, "6", "1/10")
+            .expect("fractional final frame timing is valid");
+        assert_eq!(fractional.frame_range().frame_count(), 1);
+        let fractional_rate =
+            timing_from_fields(&before.document, &metadata, "30000/1001", "1001/30000").unwrap();
+        assert_eq!(
+            fractional_rate.frame_rate(),
+            FrameRate::new(30000, 1001).unwrap()
+        );
+        assert_eq!(fractional_rate.frame_range().frame_count(), 1);
+        assert_eq!(
+            fractional
+                .source_time_range()
+                .expect("fractional source interval")
+                .duration()
+                .unwrap(),
+            RationalTime::new(1, 10).unwrap()
+        );
+
+        // Cancel means no command is built into history, even after valid pending values exist.
+        assert_eq!(workspace.snapshot(), before);
+        assert_eq!(workspace.history.revision(), before_revision);
+
+        // Equivalent text preserves absolute frame numbering and has no authority replacement.
+        let absolute = before
+            .document
+            .clone()
+            .with_temporal_authority(
+                ProjectTiming::new(
+                    FrameRate::new(6, 1).unwrap(),
+                    FrameRange::new(2, 8).unwrap(),
+                ),
+                before.document.temporal_end_overrides().to_vec(),
+            )
+            .unwrap();
+        assert_eq!(
+            timing_from_fields(&absolute, &metadata, "6.0", "1.000").unwrap(),
+            *absolute.project_timing()
+        );
+        assert_eq!(
+            export_frame_range(absolute.project_timing(), "", "").unwrap(),
+            (2, 7)
+        );
+        assert_eq!(document_for_export(&absolute, 2, 7).unwrap(), absolute);
+        let retimed = timing_from_fields(&absolute, &metadata, "12", "1").unwrap();
+        assert_eq!(retimed.frame_range(), FrameRange::new(0, 12).unwrap());
+        assert_eq!(
+            retimed.source_time_for_frame(0).unwrap(),
+            RationalTime::new(1, 3).unwrap()
+        );
+        assert_eq!(
+            retimed.source_time_for_frame(11).unwrap(),
+            RationalTime::new(5, 4).unwrap()
+        );
+        assert!(export_frame_range(absolute.project_timing(), "1", "7").is_err());
+        assert!(export_frame_range(absolute.project_timing(), "7", "6").is_err());
+
+        // Invalid source timing and invalid AV1 matte are rejected before history mutation.
+        assert!(timing_from_fields(&before.document, &metadata, "12", "2").is_err());
+        let invalid_document = before
+            .document
+            .clone()
+            .with_temporal_authority(
+                accepted_timing.clone(),
+                before.document.temporal_end_overrides().to_vec(),
+            )
+            .expect("accepted document remains valid");
+        let invalid_options = Options {
+            format: Format::Sharing,
+            destination: root.join("target/validation/review-gate3-timing/invalid.webm"),
+            temporary: Some(root.join("target/validation/review-gate3-timing")),
+            background: RasterBackground::Transparent,
+            target: Some(OutputRasterTarget::new(32, 32).unwrap()),
+            antialiasing: RasterAntialiasing::On,
+            first: 0,
+            last: 3,
+        };
+        let invalid_error = validate_static_export(&before, &invalid_document, &invalid_options)
+            .expect_err("transparent AV1 is rejected before acceptance");
+        assert!(invalid_error.contains("black or white matte"));
+        assert_eq!(workspace.snapshot(), before);
+
+        let accepted_command = before.document.replace_temporal_authority_command(
+            accepted_timing,
+            before.document.temporal_end_overrides().to_vec(),
+        );
+        workspace
+            .history
+            .apply_temporal(&accepted_command)
+            .expect("accepted timing enters one history transition");
+        let after = workspace.snapshot();
+        assert_eq!(
+            after.document.temporal_end_overrides(),
+            before.document.temporal_end_overrides()
+        );
+        assert_eq!(
+            after.document.project_timing().frame_range().frame_count(),
+            4
+        );
+        assert!(workspace.history.undo().unwrap().is_some());
+        assert_eq!(workspace.snapshot(), before);
+        assert!(workspace.history.redo().unwrap().is_some());
+        assert_eq!(workspace.snapshot(), after);
+
+        let directory = root
+            .join("target/validation/review-gate3-timing")
+            .join(format!(
+                "timing-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        fs::create_dir_all(&directory).unwrap();
+        let saved = directory.join("video-after.toniator");
+        save_container(&saved, &after.document, &after.sources).expect("accepted timing saves");
+        assert_eq!(load_workspace(&saved).unwrap().snapshot(), after);
+        assert!(destination(directory.to_str().unwrap(), "video-after", ".toniator").is_err());
+        assert_eq!(workspace.snapshot(), after);
+        println!("Gate3 timing persistence artifact: {}", saved.display());
+    }
+
+    /// Exports both immutable project baselines and the moving fixture from one accepted timing snapshot.
+    ///
+    /// # Panics
+    /// Panics if a baseline cannot apply exact timing, reopen, render a small native output, or
+    /// cancel without publishing a partial video.
+    #[test]
+    fn gate3_timing_snapshot_exports_project_baselines_and_video() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let directory = root
+            .join("target/validation/review-gate3-timing")
+            .join(format!(
+                "exports-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        fs::create_dir_all(&directory).unwrap();
+        for input in ["raster-sample.png", "vector-sample.svg"] {
+            let mut workspace = load_workspace(&root.join("assets").join(input))
+                .expect("immutable project baseline opens");
+            let before = workspace.snapshot();
+            let metadata =
+                toniator_engine::open_source_media(&before.sources, MediaTools::default(), &|| {
+                    false
+                })
+                .expect("baseline metadata opens")
+                .metadata()
+                .clone();
+            let longer = timing_from_fields(&before.document, &metadata, "12", "10").unwrap();
+            assert_eq!(longer.frame_range().frame_count(), 120);
+            assert_eq!(export_frame_range(&longer, "", "").unwrap(), (0, 119));
+            let timing = timing_from_fields(&before.document, &metadata, "12", "1/3")
+                .expect("baseline timing is valid");
+            let command = before.document.replace_temporal_authority_command(
+                timing,
+                before.document.temporal_end_overrides().to_vec(),
+            );
+            workspace
+                .history
+                .apply_temporal(&command)
+                .expect("baseline timing applies");
+            let accepted = workspace.snapshot();
+            let saved = directory.join(format!("{input}.toniator"));
+            save_container(&saved, &accepted.document, &accepted.sources)
+                .expect("baseline timing saves");
+            assert_eq!(load_workspace(&saved).unwrap().snapshot(), accepted);
+            let name = input
+                .strip_suffix(".png")
+                .or_else(|| input.strip_suffix(".svg"))
+                .unwrap();
+            let options = Options {
+                format: Format::Pngs,
+                destination: directory.join(format!("{name}-png")),
+                temporary: None,
+                background: RasterBackground::Transparent,
+                target: Some(OutputRasterTarget::new(32, 32).unwrap()),
+                antialiasing: RasterAntialiasing::On,
+                first: accepted.document.project_timing().frame_range().start(),
+                last: accepted
+                    .document
+                    .project_timing()
+                    .frame_range()
+                    .end_exclusive()
+                    - 1,
+            };
+            let output = completed(render(
+                accepted.clone(),
+                options,
+                &AtomicBool::new(false),
+                &|_| {},
+            ));
+            let frame_count = fs::read_dir(&output)
+                .expect("PNG sequence exists")
+                .map(Result::unwrap)
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "png")
+                })
+                .count();
+            assert_eq!(frame_count, 4);
+            assert_eq!(workspace.snapshot(), accepted);
+        }
+
+        let mut workspace = load_workspace(&root.join("assets/video-sample0001-0010.mp4"))
+            .expect("immutable video baseline opens");
+        let before = workspace.snapshot();
+        let metadata =
+            toniator_engine::open_source_media(&before.sources, MediaTools::default(), &|| false)
+                .expect("video metadata opens")
+                .metadata()
+                .clone();
+        let timing = timing_from_fields(&before.document, &metadata, "12", "1/3")
+            .expect("video timing is valid");
+        let command = before.document.replace_temporal_authority_command(
+            timing,
+            before.document.temporal_end_overrides().to_vec(),
+        );
+        workspace
+            .history
+            .apply_temporal(&command)
+            .expect("video timing applies");
+        let accepted = workspace.snapshot();
+        let destination = directory.join("video.mkv");
+        let options = Options {
+            format: Format::Lossless,
+            destination: destination.clone(),
+            temporary: Some(directory.clone()),
+            background: RasterBackground::Transparent,
+            target: Some(OutputRasterTarget::new(64, 64).unwrap()),
+            antialiasing: RasterAntialiasing::On,
+            first: 0,
+            last: 3,
+        };
+        completed(render(
+            accepted.clone(),
+            options.clone(),
+            &AtomicBool::new(false),
+            &|_| {},
+        ));
+        assert!(destination.is_file());
+        let reopened = load_workspace(&destination).expect("native video output reopens");
+        assert_eq!(
+            reopened
+                .document()
+                .project_timing()
+                .frame_range()
+                .frame_count(),
+            4
+        );
+        assert_eq!(workspace.snapshot(), accepted);
+        let cancelled = Options {
+            destination: directory.join("cancelled.mkv"),
+            ..options
+        };
+        assert!(matches!(
+            render(
+                accepted.clone(),
+                cancelled.clone(),
+                &AtomicBool::new(true),
+                &|_| {}
+            ),
+            Outcome::Failed { recovery: None, .. }
+        ));
+        assert!(!cancelled.destination.exists());
+        assert_eq!(workspace.snapshot(), accepted);
+        println!("Gate3 timing export artifacts: {}", directory.display());
     }
 }

@@ -9,6 +9,12 @@ template $ToniatorAdvancedSettingsShell : Gtk.Box {
   margin-start: 12;
   margin-end: 12;
 
+  Gtk.Button advanced_reset {
+    label: "_Reset to defaults";
+    use-underline: true;
+    halign: start;
+  }
+
   Gtk.Label advanced_status {
     label: "Changes do not affect your artwork until Apply.";
     xalign: 0;

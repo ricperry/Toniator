@@ -2,6 +2,9 @@
 
 //! Deterministic straight-guide family evaluation.
 
+#[cfg(test)]
+mod transform_regressions;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     error::Error,
@@ -27,8 +30,8 @@ use toniator_domain::{
     PatternModulation, PatternOutputLayerId, PatternOutputRealization, PatternStructureRecipe,
     PresetMetadata, PresetRecord, RandomSiteCharacter, RegionResizeAlgorithm, RegionSourceIntent,
     ResolvedDensityMetric2D, SiteDensityModulation, SiteExclusionPolicy, SiteUseFilter,
-    SourceMapping, SourceReference, SpiralCurve, SpiralShape, StraightGuideDimension,
-    pattern_output_evaluation_order,
+    SourceMapping, SourceReference, SourceWeighting, SpiralCurve, SpiralShape,
+    StraightGuideDimension, pattern_output_evaluation_order,
 };
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID,
@@ -91,24 +94,24 @@ pub struct PresetRegistry {
     catalog_entries: Vec<PresetCatalogEntry>,
 }
 
-/// Builds one catalog mark recipe with the approved normalized response range.
+/// Builds one catalog mark recipe with the identity normalized response range.
 fn mark_recipe(structure: PatternStructureRecipe) -> PatternDefinitionRecipe {
     let mut recipe = PatternDefinitionRecipe::marks(structure);
     recipe.output_settings[0].response =
         PatternGeometryResponse::Marks(toniator_domain::MarkGeometryResponse {
-            minimum_fill: 0.25,
-            maximum_fill: 0.85,
+            minimum_fill: 0.0,
+            maximum_fill: 1.0,
         });
     recipe
 }
 
-/// Builds one catalog connected recipe with the approved normalized response range.
+/// Builds one catalog connected recipe with the identity normalized response range.
 fn path_recipe(structure: PatternStructureRecipe) -> PatternDefinitionRecipe {
     let mut recipe = PatternDefinitionRecipe::connected(structure);
     recipe.output_settings[0].response =
         PatternGeometryResponse::Connected(toniator_domain::ConnectedGeometryResponse {
-            minimum_thickness: 0.15,
-            maximum_thickness: 0.65,
+            minimum_thickness: 0.0,
+            maximum_thickness: 1.0,
             bias: 0.0,
         });
     recipe
@@ -223,6 +226,228 @@ impl LayeredPresetCatalogError {
     /// Returns the stable combined-catalog validation message.
     pub fn message(&self) -> &str {
         &self.message
+    }
+}
+
+#[cfg(test)]
+mod artwork_weight_default_tests {
+    use super::*;
+    use toniator_domain::{
+        CoveragePolicy, PatternDefinitionId, PatternMechanismId, PatternOutputLayerId,
+        SourceMappingComponent, SourceWeighting,
+    };
+
+    /// Builds a minimal random-site definition with contextual artwork spacing.
+    fn default_definition() -> PatternDefinition {
+        PatternDefinition::random_sites(
+            PatternDefinitionId(901),
+            "default artwork spacing",
+            PatternMechanismId(902),
+            PatternMechanismId(903),
+            PatternMechanismId(904),
+            PatternMechanismId(905),
+            PatternOutputLayerId(906),
+            RandomSiteCharacter::RawUniform,
+            907,
+            SiteDensityModulation::ArtworkWeighted,
+            SiteExclusionPolicy::None,
+            10_000,
+            10_000,
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        )
+    }
+
+    /// Proves resolution binds the complete independent weighting response from each channel.
+    #[test]
+    fn contextual_default_resolves_before_random_family_evaluation() {
+        let definition = default_definition();
+        let mut green_weighting = SourceWeighting::canonical(SourceMappingComponent::Green);
+        green_weighting.mapping.inverted = true;
+        green_weighting.mapping.gain = 0.7;
+        green_weighting.mapping.bias = -0.15;
+        green_weighting.strength = 0.8;
+        green_weighting.response = ArtworkWeightResponse::Smoothstep;
+        let green = resolve_pattern_pipeline_for_channel(&definition, green_weighting)
+            .expect("green weighting resolves");
+        let red = resolve_pattern_pipeline_for_channel(
+            &definition,
+            SourceWeighting::canonical(SourceMappingComponent::Red),
+        )
+        .expect("red weighting resolves");
+        let mapping = |plan: &PatternPipelinePlan| {
+            let Some(RandomSiteCapability {
+                density_modulation: ResolvedSiteDensityModulation::ArtworkWeighted { mapping, .. },
+                ..
+            }) = plan.family.random.as_ref()
+            else {
+                panic!("default definition resolves an artwork-weighted random family")
+            };
+            *mapping
+        };
+        let green_mapping = mapping(&green);
+        assert_eq!(green_mapping.component, SourceMappingComponent::Green);
+        assert!(green_mapping.inverted);
+        assert_eq!(green_mapping.gain, 0.7);
+        assert_eq!(green_mapping.bias, -0.15);
+        assert_eq!(mapping(&red).component, SourceMappingComponent::Red);
+    }
+
+    /// Proves context-free capability discovery retains weighted intent without inventing a source.
+    #[test]
+    fn explicit_mapping_resolves_without_role_context() {
+        let definition = default_definition();
+        let plan = resolve_pattern_pipeline(&definition).expect("weighted capability resolves");
+        let Some(RandomSiteCapability {
+            density_modulation: ResolvedSiteDensityModulation::ArtworkWeightedUnbound,
+            ..
+        }) = plan.family.random
+        else {
+            panic!("capability discovery must retain unbound weighting intent")
+        };
+    }
+
+    /// Verifies weighting is recalculated after rotation/translation and Default separates channels.
+    ///
+    /// A two-color field provides zero-weight regions that cannot admit visible sites. Sites
+    /// admitted where their inverse-transformed positions have zero weight distinguish this
+    /// contract from moving an already-weighted arrangement. Explicit Luminance retains a
+    /// shared placement choice, and resetting transforms reproduces the neutral arrangement.
+    ///
+    /// # Panics
+    /// Panics if fixture encoding, family evaluation, transformed weighting or determinism fails.
+    #[test]
+    fn gate3_weighted_sites_recalculate_after_transform_and_match_channels() {
+        let pixels = image::RgbaImage::from_fn(32, 32, |x, _| {
+            if x < 16 {
+                image::Rgba([255, 0, 0, 255])
+            } else {
+                image::Rgba([0, 255, 0, 255])
+            }
+        });
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(pixels)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let source =
+            toniator_sampling::decode_source(&bytes, toniator_sampling::SourceFormatHint::Png)
+                .unwrap();
+        let definition = default_definition();
+        let mut request = GridInspectRequest {
+            canvas: CanvasSpec {
+                width: 64.0,
+                height: 64.0,
+            },
+            density: ResolvedDensityMetric2D {
+                across_x: 10.0,
+                across_y: 10.0,
+            },
+            rotation_degrees: 0.0,
+            translation_x: 0.0,
+            translation_y: 0.0,
+            guard_steps: 1,
+            support_radius: 1.0,
+            max_family_candidates: 20_000,
+        };
+        let red = resolve_pattern_pipeline_for_channel(
+            &definition,
+            SourceWeighting::canonical(SourceMappingComponent::Red),
+        )
+        .unwrap();
+        let green = resolve_pattern_pipeline_for_channel(
+            &definition,
+            SourceWeighting::canonical(SourceMappingComponent::Green),
+        )
+        .unwrap();
+        let evaluate = |plan: &PatternPipelinePlan, request: &GridInspectRequest| {
+            evaluate_typed_family_product_with_source_cancellable(
+                &plan.family,
+                request,
+                Some(&source),
+                &|| false,
+            )
+            .unwrap()
+        };
+        let neutral = evaluate(&red, &request);
+        for (angle, dx, dy) in [(45.0_f64, 0.0, 0.0), (0.0, 16.0, -8.0), (45.0, 16.0, -8.0)] {
+            request.rotation_degrees = angle;
+            request.translation_x = dx;
+            request.translation_y = dy;
+            let red_sites = evaluate(&red, &request);
+            let green_sites = evaluate(&green, &request);
+            assert_ne!(red_sites.site_set().sites(), green_sites.site_set().sites());
+            let (sin, cos) = angle.to_radians().sin_cos();
+            let mut recalculated = 0;
+            for (sites, component) in [
+                (&red_sites, SourceMappingComponent::Red),
+                (&green_sites, SourceMappingComponent::Green),
+            ] {
+                let mapping = SourceMapping::canonical(component);
+                let mut visible = 0;
+                for site in sites.site_set().sites() {
+                    let point = site.position;
+                    if point.x <= 0.0 || point.x >= 64.0 || point.y <= 0.0 || point.y >= 64.0 {
+                        continue;
+                    }
+                    assert!(
+                        source
+                            .sample_density_weight(point, &request.canvas, mapping)
+                            .unwrap()
+                            > 0.0
+                    );
+                    let x = point.x - 32.0 - dx;
+                    let y = point.y - 32.0 - dy;
+                    let before = Point2::new(32.0 + x * cos + y * sin, 32.0 - x * sin + y * cos);
+                    recalculated += usize::from(
+                        source
+                            .sample_density_weight(before, &request.canvas, mapping)
+                            .unwrap()
+                            == 0.0,
+                    );
+                    visible += 1;
+                }
+                assert!(visible > 5);
+            }
+            assert!(
+                recalculated > 0,
+                "{angle}/{dx}/{dy}: transformed positions are reweighted"
+            );
+        }
+        request.rotation_degrees = 0.0;
+        request.translation_x = 0.0;
+        request.translation_y = 0.0;
+        assert_eq!(neutral, evaluate(&red, &request));
+        let red = resolve_pattern_pipeline_for_channel(
+            &definition,
+            SourceWeighting::canonical(SourceMappingComponent::Luminance),
+        )
+        .unwrap();
+        let green = resolve_pattern_pipeline_for_channel(
+            &definition,
+            SourceWeighting::canonical(SourceMappingComponent::Luminance),
+        )
+        .unwrap();
+        assert_eq!(evaluate(&red, &request), evaluate(&green, &request));
+    }
+
+    /// Proves weighting cutoff precedes the response curve and strength blend.
+    #[test]
+    fn weighting_cutoff_zeroes_below_boundary_before_strength_floor() {
+        let mut mapping = SourceMapping::canonical(SourceMappingComponent::Green);
+        mapping.tone.cutoff = 0.4;
+        assert_eq!(
+            completed_density_weight(0.399, mapping, 0.75, &ArtworkWeightResponse::Linear),
+            0.25
+        );
+        assert_eq!(
+            completed_density_weight(0.4, mapping, 0.75, &ArtworkWeightResponse::Linear),
+            0.55
+        );
     }
 }
 
@@ -899,13 +1124,7 @@ impl PresetRegistry {
                             coverage: coverage(),
                             character: RandomSiteCharacter::RawUniform,
                             seed: 23,
-                            density_modulation: SiteDensityModulation::ArtworkWeighted {
-                                mapping: toniator_domain::SourceMapping::canonical(
-                                    toniator_domain::SourceMappingComponent::Luminance,
-                                ),
-                                strength: 0.75,
-                                response: ArtworkWeightResponse::Linear,
-                            },
+                            density_modulation: SiteDensityModulation::ArtworkWeighted,
                             exclusion: SiteExclusionPolicy::None,
                             maximum_attempts: 16_000_000,
                             maximum_neighbor_checks: 16_000_000,
@@ -965,8 +1184,8 @@ impl PresetRegistry {
                         toniator_domain::RegionGeometryResponse {
                             algorithm: RegionResizeAlgorithm::Scale,
                             sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
-                            minimum_fill: 0.65,
-                            maximum_fill: 0.90,
+                            minimum_fill: 0.0,
+                            maximum_fill: 1.0,
                         },
                     ),
                 },
@@ -1288,6 +1507,35 @@ impl PresetRegistry {
     }
 }
 
+#[cfg(test)]
+mod gate2_registry_tests {
+    use super::*;
+
+    /// Proves every bundled response starts at the identity normalized range required by Gate 2.
+    #[test]
+    fn bundled_response_defaults_are_identity_normalized() {
+        let registry = PresetRegistry::bundled();
+        for preset in registry.entries() {
+            for output in &preset.recipe.output_settings {
+                match &output.response {
+                    PatternGeometryResponse::Marks(response) => {
+                        assert_eq!(response.minimum_fill, 0.0, "{}", preset.metadata.id);
+                        assert_eq!(response.maximum_fill, 1.0, "{}", preset.metadata.id);
+                    }
+                    PatternGeometryResponse::Connected(response) => {
+                        assert_eq!(response.minimum_thickness, 0.0, "{}", preset.metadata.id);
+                        assert_eq!(response.maximum_thickness, 1.0, "{}", preset.metadata.id);
+                    }
+                    PatternGeometryResponse::Regions(response) => {
+                        assert_eq!(response.minimum_fill, 0.0, "{}", preset.metadata.id);
+                        assert_eq!(response.maximum_fill, 1.0, "{}", preset.metadata.id);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Builds the approved connection-plus-residual-marks painter-order composite.
 fn composite_connection_marks(
     definition: PatternStructureRecipe,
@@ -1310,8 +1558,8 @@ fn composite_connection_marks(
                 source_filter: toniator_domain::SiteUseFilterRecipe::All,
                 response: PatternGeometryResponse::Connected(
                     toniator_domain::ConnectedGeometryResponse {
-                        minimum_thickness: 0.15,
-                        maximum_thickness: 0.65,
+                        minimum_thickness: 0.0,
+                        maximum_thickness: 1.0,
                         bias: 0.0,
                     },
                 ),
@@ -1323,8 +1571,8 @@ fn composite_connection_marks(
                     toniator_domain::SiteUseFilterRecipe::SitesUsedBy { output_index: 0 }
                 },
                 response: PatternGeometryResponse::Marks(toniator_domain::MarkGeometryResponse {
-                    minimum_fill: 0.25,
-                    maximum_fill: 0.85,
+                    minimum_fill: 0.0,
+                    maximum_fill: 1.0,
                 }),
             },
         ],
@@ -1392,13 +1640,29 @@ pub struct GenericGuideCapability {
     pub single_nominal_spacing: Option<f64>,
 }
 
+/// Concrete density modulation emitted after contextual artwork source intent is resolved.
+///
+/// Evaluators and cache identities consume this type so unresolved `Default` choices never reach
+/// sampling. The authored `SiteDensityModulation` remains the persistence and editor authority.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResolvedSiteDensityModulation {
+    Uniform,
+    /// Source weighting is structurally declared but has not been bound to a receiving channel.
+    ArtworkWeightedUnbound,
+    ArtworkWeighted {
+        mapping: SourceMapping,
+        strength: f64,
+        response: ArtworkWeightResponse,
+    },
+}
+
 /// Resolved Stage 16B structural chain.  The source-dependent modulation is
 /// explicit, keeping independent random/even/clustered families source-free.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RandomSiteCapability {
     pub character: RandomSiteCharacter,
     pub seed: u32,
-    pub density_modulation: SiteDensityModulation,
+    pub density_modulation: ResolvedSiteDensityModulation,
     pub exclusion: SiteExclusionPolicy,
     pub maximum_attempts: u32,
     /// Explicit, persisted bound for deterministic spatial-index neighbor
@@ -1414,7 +1678,10 @@ pub fn family_requires_decoded_source(family: &FamilyCapability) -> bool {
             .random
             .as_ref()
             .map(|random| &random.density_modulation),
-        Some(SiteDensityModulation::ArtworkWeighted { .. })
+        Some(
+            ResolvedSiteDensityModulation::ArtworkWeightedUnbound
+                | ResolvedSiteDensityModulation::ArtworkWeighted { .. }
+        )
     )
 }
 
@@ -2696,7 +2963,8 @@ pub fn realize_region_output_with_evidence_cancellable(
 /// Implements the sole Region output realization and optionally records test-only evidence.
 ///
 /// The optional sink is feature-gated from production builds and is filled only after all source
-/// sampling, treatment, paint alignment, and fingerprint construction complete successfully.
+/// sampling, post-sample cutoff treatment, paint alignment, and fingerprint construction complete
+/// successfully.
 ///
 /// # Errors
 ///
@@ -2768,7 +3036,9 @@ fn realize_region_output_cancellable_impl(
         })?;
     for (region, sample) in untreated.regions().iter().zip(&samples) {
         poll_region_realizer(cancelled)?;
-        let treatment = if matches!(paint, ChannelPaint::SampledSource) && sample.paint.is_none() {
+        let treatment = if mapping.suppresses(sample.response)
+            || (matches!(paint, ChannelPaint::SampledSource) && sample.paint.is_none())
+        {
             None
         } else {
             Some(interpolated_region_treatment(response, sample.response)?)
@@ -2806,6 +3076,7 @@ fn realize_region_output_cancellable_impl(
         &references_by_id,
         &samples,
         &treated,
+        mapping,
         paints.as_deref(),
     );
     let diagnostics = RegionOutputRealizationDiagnostics {
@@ -3057,10 +3328,12 @@ fn region_realization_fingerprint(
     references: &BTreeMap<toniator_geometry::CanonicalRegionId, Point2>,
     samples: &[RegionSourceSample],
     treated: &RegionTreatmentResult,
+    mapping: SourceMapping,
     paints: Option<&[SampledSourcePaint]>,
 ) -> String {
     let mut fingerprint = Fnv1a64State::new();
     append_region_realizer_text(&mut fingerprint, REGION_REALIZER_FINGERPRINT_CONTRACT_ID);
+    append_source_mapping_identity_to_region_fingerprint(&mut fingerprint, mapping);
     append_region_realizer_text(&mut fingerprint, untreated.fingerprint());
     fingerprint.write(
         u64::try_from(untreated.regions().len())
@@ -3095,6 +3368,25 @@ fn region_realization_fingerprint(
         fingerprint.write([0]);
     }
     fingerprint.finish()
+}
+
+/// Appends every concrete source mapping bit to the bounded region digest.
+fn append_source_mapping_identity_to_region_fingerprint(
+    fingerprint: &mut Fnv1a64State,
+    mapping: SourceMapping,
+) {
+    fingerprint.write([mapping_component_code(mapping.component)]);
+    fingerprint.write([match mapping.placement {
+        SourcePlacement::StretchToCanvas => 1,
+    }]);
+    fingerprint.write([u8::from(mapping.inverted)]);
+    fingerprint.write(mapping.gain.to_bits().to_le_bytes());
+    fingerprint.write(mapping.bias.to_bits().to_le_bytes());
+    fingerprint.write(mapping.tone.black_point.to_bits().to_le_bytes());
+    fingerprint.write(mapping.tone.white_point.to_bits().to_le_bytes());
+    fingerprint.write(mapping.tone.gamma.to_bits().to_le_bytes());
+    fingerprint.write(mapping.tone.contrast.to_bits().to_le_bytes());
+    fingerprint.write(mapping.tone.cutoff.to_bits().to_le_bytes());
 }
 
 /// Appends one length-delimited textual sub-identity to the typed region-realizer digest.
@@ -3201,6 +3493,72 @@ fn region_realization_error(
 #[cfg(test)]
 mod stage20q_region_realizer_tests {
     use super::*;
+
+    /// Applies cutoff after either region sampling strategy and before positive minimum treatment.
+    ///
+    /// # Panics
+    /// Panics if a suppressed region or its paint survives, a threshold-equal region vanishes,
+    /// or a mapping-only edit fails to change the region realization identity.
+    #[test]
+    fn gate2_region_cutoff_precedes_positive_minimum_treatment() {
+        let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 255, 0, 128]));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let source =
+            toniator_sampling::decode_source(&bytes, toniator_sampling::SourceFormatHint::Png)
+                .unwrap();
+        let capability = stage20q_capability();
+        let (untreated, references) = stage20q_untreated();
+        for sampling in [
+            toniator_domain::RegionSamplingStrategy::ReferencePoint,
+            toniator_domain::RegionSamplingStrategy::AreaAverage,
+        ] {
+            let mut setting = stage20q_full_setting(capability.layer_id);
+            let PatternGeometryResponse::Regions(response) = &mut setting.response else {
+                unreachable!()
+            };
+            response.sampling = sampling;
+            let realize = |cutoff| {
+                realize_region_output_cancellable(
+                    &capability,
+                    &setting,
+                    &untreated,
+                    &references,
+                    Some(&source),
+                    &CanvasSpec {
+                        width: 2.0,
+                        height: 2.0,
+                    },
+                    SourceMapping {
+                        tone: toniator_domain::SourceTone {
+                            cutoff,
+                            ..Default::default()
+                        },
+                        ..SourceMapping::canonical(SourceMappingComponent::Alpha)
+                    },
+                    &ChannelPaint::SampledSource,
+                    RegionSamplingLimits::default(),
+                    RegionTreatmentLimits::default(),
+                    &|| false,
+                )
+                .unwrap()
+            };
+            let disabled = realize(0.0);
+            assert_eq!(disabled.regions.regions().len(), 1);
+            let threshold = realize(128.0 / 255.0);
+            assert_eq!(threshold.regions, disabled.regions);
+            assert_eq!(threshold.paints.as_ref().unwrap().len(), 1);
+            assert_ne!(threshold.fingerprint, disabled.fingerprint);
+            let suppressed = realize(0.6);
+            assert!(suppressed.regions.regions().is_empty());
+            assert!(suppressed.paints.unwrap().is_empty());
+        }
+    }
 
     /// Builds a single typed Region capability for direct realizer authority tests.
     fn stage20q_capability() -> OutputCapability {
@@ -3336,16 +3694,30 @@ mod stage20q_region_realizer_tests {
     #[test]
     fn stage21a_region_realizer_fingerprint_is_fixed_width_and_order_sensitive() {
         let (untreated, references, samples, treated) = stage21a_fingerprint_inputs();
-        let first =
-            region_realization_fingerprint(&untreated, &references, &samples, &treated, None);
-        let repeated =
-            region_realization_fingerprint(&untreated, &references, &samples, &treated, None);
+        let mapping = SourceMapping::canonical(SourceMappingComponent::Luminance);
+        let first = region_realization_fingerprint(
+            &untreated,
+            &references,
+            &samples,
+            &treated,
+            mapping,
+            None,
+        );
+        let repeated = region_realization_fingerprint(
+            &untreated,
+            &references,
+            &samples,
+            &treated,
+            mapping,
+            None,
+        );
         let reversed_samples = samples.iter().copied().rev().collect::<Vec<_>>();
         let reordered = region_realization_fingerprint(
             &untreated,
             &references,
             &reversed_samples,
             &treated,
+            mapping,
             None,
         );
         assert_eq!(first, repeated);
@@ -3619,6 +3991,27 @@ impl From<GridError> for PatternPipelineError {
 pub fn resolve_pattern_pipeline(
     definition: &PatternDefinition,
 ) -> Result<PatternPipelinePlan, PatternPipelineError> {
+    resolve_pattern_pipeline_with_weighting(definition, None)
+}
+
+/// Resolves a definition after binding artwork weighting from its receiving channel.
+///
+/// # Errors
+///
+/// Returns the same family, mechanism, output, and capability diagnostics as the context-free
+/// resolver, plus a source-context diagnostic when a Default mapping lacks a channel role.
+pub fn resolve_pattern_pipeline_for_channel(
+    definition: &PatternDefinition,
+    weighting: SourceWeighting,
+) -> Result<PatternPipelinePlan, PatternPipelineError> {
+    resolve_pattern_pipeline_with_weighting(definition, Some(weighting))
+}
+
+/// Resolves a typed pipeline with optional channel-owned source weighting.
+fn resolve_pattern_pipeline_with_weighting(
+    definition: &PatternDefinition,
+    weighting: Option<SourceWeighting>,
+) -> Result<PatternPipelinePlan, PatternPipelineError> {
     if definition
         .mechanisms
         .iter()
@@ -3630,7 +4023,7 @@ pub fn resolve_pattern_pipeline(
         ));
     }
     if matches!(definition.family, PatternFamily::RandomSites { .. }) {
-        return resolve_random_site_pipeline(definition);
+        return resolve_random_site_pipeline(definition, weighting);
     }
     if matches!(definition.family, PatternFamily::ParametricCurve { .. }) {
         return resolve_parametric_curve_pipeline(definition);
@@ -4090,6 +4483,28 @@ pub fn resolve_document_pattern_pipeline(
     document: &Document,
     definition: &PatternDefinition,
 ) -> Result<PatternPipelinePlan, PatternPipelineError> {
+    resolve_document_pattern_pipeline_with_weighting(document, definition, None)
+}
+
+/// Resolves a document-owned pipeline with source weighting from its receiving channel.
+///
+/// # Errors
+///
+/// Returns document-resource, source-context, family, output, or capability diagnostics.
+pub fn resolve_document_pattern_pipeline_for_channel(
+    document: &Document,
+    definition: &PatternDefinition,
+    weighting: SourceWeighting,
+) -> Result<PatternPipelinePlan, PatternPipelineError> {
+    resolve_document_pattern_pipeline_with_weighting(document, definition, Some(weighting))
+}
+
+/// Resolves document-owned resources and optional channel-owned source weighting.
+fn resolve_document_pattern_pipeline_with_weighting(
+    document: &Document,
+    definition: &PatternDefinition,
+    weighting: Option<SourceWeighting>,
+) -> Result<PatternPipelinePlan, PatternPipelineError> {
     let Some((guide_id, dimensions)) =
         definition
             .mechanisms
@@ -4099,7 +4514,7 @@ pub fn resolve_document_pattern_pipeline(
                 _ => None,
             })
     else {
-        return resolve_pattern_pipeline(definition);
+        return resolve_pattern_pipeline_with_weighting(definition, weighting);
     };
     let mut surrogate = definition.clone();
     let generic_dimensions = dimensions.to_vec();
@@ -4150,7 +4565,7 @@ pub fn resolve_document_pattern_pipeline(
         .find(|mechanism| mechanism.id() == guide_id)
         .expect("generic root was found in cloned definition");
     *target = replacement;
-    let mut plan = resolve_pattern_pipeline(&surrogate)?;
+    let mut plan = resolve_pattern_pipeline_with_weighting(&surrogate, weighting)?;
     let mut resolved_paths = Vec::with_capacity(generic_dimensions.len());
     for dimension in &generic_dimensions {
         let structure = match dimension.prototype {
@@ -4181,6 +4596,28 @@ pub fn resolve_document_pattern_pipeline(
     Ok(plan)
 }
 
+/// Binds recipe-level weighting intent to the receiving channel's independent source response.
+///
+/// # Errors
+///
+/// Returns a stable source-context diagnostic when a Default choice has no modeled role.
+fn resolve_density_modulation(
+    modulation: &SiteDensityModulation,
+    weighting: Option<SourceWeighting>,
+) -> Result<ResolvedSiteDensityModulation, PatternPipelineError> {
+    match modulation {
+        SiteDensityModulation::Uniform => Ok(ResolvedSiteDensityModulation::Uniform),
+        SiteDensityModulation::ArtworkWeighted => Ok(weighting.map_or(
+            ResolvedSiteDensityModulation::ArtworkWeightedUnbound,
+            |weighting| ResolvedSiteDensityModulation::ArtworkWeighted {
+                mapping: weighting.mapping,
+                strength: weighting.strength,
+                response: weighting.response,
+            },
+        )),
+    }
+}
+
 /// Resolves the fixed random mechanism chain and its typed mark or connection output capability.
 ///
 /// # Errors
@@ -4188,6 +4625,7 @@ pub fn resolve_document_pattern_pipeline(
 /// Returns stable family-reference, ordering, or output compatibility diagnostics.
 fn resolve_random_site_pipeline(
     definition: &PatternDefinition,
+    weighting: Option<SourceWeighting>,
 ) -> Result<PatternPipelinePlan, PatternPipelineError> {
     let PatternFamily::RandomSites {
         base_site_process_id,
@@ -4240,6 +4678,7 @@ fn resolve_random_site_pipeline(
             "random-site mechanism references do not match the family root",
         ));
     }
+    let resolved_modulation = resolve_density_modulation(modulation, weighting)?;
     let ordered_outputs = definition
         .output_layers
         .iter()
@@ -4313,7 +4752,7 @@ fn resolve_random_site_pipeline(
             random: Some(RandomSiteCapability {
                 character: character.clone(),
                 seed: *seed,
-                density_modulation: modulation.clone(),
+                density_modulation: resolved_modulation,
                 exclusion: policy.clone(),
                 maximum_attempts: *maximum_attempts,
                 maximum_neighbor_checks: *maximum_neighbor_checks,
@@ -8030,8 +8469,14 @@ fn evaluate_random_sites_with_progress_cancellable(
         "random-site capability requires a declared random mechanism chain",
     ))?;
     let weighted_source = match &random.density_modulation {
-        SiteDensityModulation::Uniform => None,
-        SiteDensityModulation::ArtworkWeighted { .. } => {
+        ResolvedSiteDensityModulation::Uniform => None,
+        ResolvedSiteDensityModulation::ArtworkWeightedUnbound => {
+            return Err(PatternPipelineError::new(
+                "pattern.family.random_sites.source_weighting",
+                "artwork-weighted site placement requires receiving-channel source weighting",
+            ));
+        }
+        ResolvedSiteDensityModulation::ArtworkWeighted { .. } => {
             Some(source.ok_or(PatternPipelineError::new(
                 "pattern.family.random_sites.source",
                 "artwork-weighted site placement requires decoded source pixels",
@@ -8170,9 +8615,9 @@ fn evaluate_random_sites_with_progress_cancellable(
             1.0
         } else {
             match (&random.density_modulation, weighted_source) {
-                (SiteDensityModulation::Uniform, _) => 1.0,
+                (ResolvedSiteDensityModulation::Uniform, _) => 1.0,
                 (
-                    SiteDensityModulation::ArtworkWeighted {
+                    ResolvedSiteDensityModulation::ArtworkWeighted {
                         mapping,
                         strength,
                         response,
@@ -8184,8 +8629,7 @@ fn evaluate_random_sites_with_progress_cancellable(
                         .map_err(|error| {
                             PatternPipelineError::new(error.path(), error.message())
                         })?;
-                    let shaped = artwork_weight_response(sampled, response);
-                    (1.0 - strength) + strength * shaped
+                    completed_density_weight(sampled, *mapping, *strength, response)
                 }
                 _ => unreachable!("weighted source requirement is checked above"),
             }
@@ -8477,6 +8921,22 @@ fn artwork_weight_response(sampled: f64, response: &ArtworkWeightResponse) -> f6
     }
 }
 
+/// Completes cutoff, curve, and strength for one authoritative density sample.
+fn completed_density_weight(
+    sampled: f64,
+    mapping: SourceMapping,
+    strength: f64,
+    response: &ArtworkWeightResponse,
+) -> f64 {
+    let completed = if mapping.suppresses(sampled) {
+        0.0
+    } else {
+        sampled
+    };
+    let shaped = artwork_weight_response(completed, response);
+    (1.0 - strength) + strength * shaped
+}
+
 fn point_distance(first: Point2, second: Point2) -> f64 {
     let dx = first.x - second.x;
     let dy = first.y - second.y;
@@ -8518,18 +8978,18 @@ fn random_family_fingerprint(
         }
     }
     match &random.density_modulation {
-        SiteDensityModulation::Uniform => bytes.push(1),
-        SiteDensityModulation::ArtworkWeighted {
+        ResolvedSiteDensityModulation::Uniform => bytes.push(1),
+        ResolvedSiteDensityModulation::ArtworkWeightedUnbound => {
+            unreachable!("unbound source weighting is rejected before family fingerprinting")
+        }
+        ResolvedSiteDensityModulation::ArtworkWeighted {
             mapping,
             strength,
             response,
         } => {
             bytes.push(2);
             bytes.extend(strength.to_bits().to_le_bytes());
-            bytes.push(mapping_component_code(mapping.component));
-            bytes.push(u8::from(mapping.inverted));
-            bytes.extend(mapping.gain.to_bits().to_le_bytes());
-            bytes.extend(mapping.bias.to_bits().to_le_bytes());
+            append_source_mapping_identity(&mut bytes, *mapping);
             match response {
                 ArtworkWeightResponse::Linear => bytes.push(1),
                 ArtworkWeightResponse::Smoothstep => bytes.push(2),
@@ -8901,6 +9361,9 @@ pub fn realize_typed_canonical_marks(
 
 /// Realizes generalized canonical marks while polling the caller-owned cancellation probe.
 ///
+/// A nonzero source cutoff removes suppressed sites before minimum geometry
+/// response is computed; sampled paint remains index-aligned with retained marks.
+///
 /// # Errors
 ///
 /// Returns cancellation or any stable canonical realization diagnostic without partial output.
@@ -9013,6 +9476,9 @@ pub fn realize_typed_canonical_marks_cancellable(
                     None,
                 )
             };
+            if request.mapping.suppresses(ink) {
+                return Ok(None);
+            }
             let radius = if sampled_paint.is_some_and(|(_, suppressed)| suppressed) {
                 0.0
             } else {
@@ -9065,7 +9531,7 @@ pub fn realize_typed_canonical_marks_cancellable(
                     )
                 }
             };
-            Ok((mark, sampled_paint.map(|(paint, _)| paint)))
+            Ok(Some((mark, sampled_paint.map(|(paint, _)| paint))))
         })
         .collect::<Vec<_>>();
     let completed = parallel_results
@@ -9075,7 +9541,7 @@ pub fn realize_typed_canonical_marks_cancellable(
     let mut paints = request
         .sampled_paint
         .then(|| Vec::with_capacity(completed.len()));
-    for (mark, paint) in completed {
+    for (mark, paint) in completed.into_iter().flatten() {
         marks.push(mark);
         if let Some(paint) = paint {
             paints
@@ -11654,6 +12120,9 @@ pub fn realize_typed_connection_canonical_stroke_output_cancellable(
 
 /// Samples one exact segment-local centerline position and its normalized round-brush width.
 ///
+/// A nonzero source cutoff produces a true zero-width profile sample before
+/// response minima are applied, preserving source-driven stroke gaps.
+///
 /// # Errors
 ///
 /// Propagates bounded source sampling failures without substituting a synthetic width.
@@ -11677,8 +12146,11 @@ fn stroke_sample(
     let ink = source
         .sample_mapping_response(center, canvas, mapping)
         .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
-    let thickness = response.minimum_thickness
-        + ink * (response.maximum_thickness - response.minimum_thickness);
+    let thickness = if mapping.suppresses(ink) {
+        0.0
+    } else {
+        response.minimum_thickness + ink * (response.maximum_thickness - response.minimum_thickness)
+    };
     let width = thickness * basis;
     Ok(StrokeProfileSample {
         location: PathLocation::new(segment_index, parameter).map_err(|_| {
@@ -12091,6 +12563,9 @@ pub fn realize_mapped_circular_marks(
 
 /// Realizes mapped circles in stable indexed parallel order with cooperative cancellation.
 ///
+/// A nonzero source cutoff removes suppressed sites before minimum geometry
+/// response is computed, so positive minimum fill cannot resurrect them.
+///
 /// # Errors
 ///
 /// Returns cancellation or the ordinary mapped sampling, response, support, and geometry failure
@@ -12121,6 +12596,9 @@ pub fn realize_mapped_circular_marks_cancellable(
                 ));
             }
             let ink = source.sample_mapping_response(site.position, canvas, mapping)?;
+            if mapping.suppresses(ink) {
+                return Ok(None);
+            }
             let radius = radius_from_ink_with_diameter(ink, response, site.nominal_cell_diameter)?;
             if radius > family.support_radius {
                 return Err(RealizationError::new(
@@ -12139,10 +12617,15 @@ pub fn realize_mapped_circular_marks_cancellable(
                 "realization.mark",
                 "mark geometry must be finite",
             ))?;
-            Ok(mark)
+            Ok(Some(mark))
         })
         .collect::<Vec<_>>();
-    let marks = results.into_iter().collect::<Result<Vec<_>, _>>()?;
+    let marks: Vec<CanonicalCircleMark> = results
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     let output = MappedCircularMarkRealization {
         family_fingerprint: family.family_fingerprint.clone(),
         realization_fingerprint: mapped_realization_fingerprint(
@@ -12187,7 +12670,8 @@ pub fn realize_source_color_circular_marks(
 /// Realizes source-colored circles in stable indexed parallel order with cancellation.
 ///
 /// Exact-zero-alpha sites retain their existing omission semantics, and the sequential ordered
-/// collection keeps paint/mark correspondence and fingerprints scheduling-independent.
+/// collection keeps paint/mark correspondence and fingerprints scheduling-independent. A nonzero
+/// source cutoff removes a site before its paint is retained.
 ///
 /// # Errors
 ///
@@ -12219,6 +12703,9 @@ pub fn realize_source_color_circular_marks_cancellable(
                 ));
             }
             let sample = source.sample_source_color(site.position, canvas, mapping)?;
+            if mapping.suppresses(sample.response) {
+                return Ok(None);
+            }
             let Some(paint) = sample.paint else {
                 return Ok(None);
             };
@@ -12444,6 +12931,11 @@ fn realization_identity_prefix(
     bytes.push(u8::from(mapping.inverted));
     bytes.extend(mapping.gain.to_bits().to_le_bytes());
     bytes.extend(mapping.bias.to_bits().to_le_bytes());
+    bytes.extend(mapping.tone.black_point.to_bits().to_le_bytes());
+    bytes.extend(mapping.tone.white_point.to_bits().to_le_bytes());
+    bytes.extend(mapping.tone.gamma.to_bits().to_le_bytes());
+    bytes.extend(mapping.tone.contrast.to_bits().to_le_bytes());
+    bytes.extend(mapping.tone.cutoff.to_bits().to_le_bytes());
     bytes.extend(response.minimum_fill.to_bits().to_le_bytes());
     bytes.extend(response.maximum_fill.to_bits().to_le_bytes());
     bytes.extend(response.rotation_offset_degrees.to_bits().to_le_bytes());
@@ -12512,6 +13004,11 @@ fn append_source_mapping_identity(bytes: &mut Vec<u8>, mapping: SourceMapping) {
     bytes.push(u8::from(mapping.inverted));
     bytes.extend(mapping.gain.to_bits().to_le_bytes());
     bytes.extend(mapping.bias.to_bits().to_le_bytes());
+    bytes.extend(mapping.tone.black_point.to_bits().to_le_bytes());
+    bytes.extend(mapping.tone.white_point.to_bits().to_le_bytes());
+    bytes.extend(mapping.tone.gamma.to_bits().to_le_bytes());
+    bytes.extend(mapping.tone.contrast.to_bits().to_le_bytes());
+    bytes.extend(mapping.tone.cutoff.to_bits().to_le_bytes());
 }
 
 /// Appends the complete ordered output-layer contract before derived canonical geometry.
@@ -13128,6 +13625,220 @@ mod random_prng_contract_tests {
 mod realization_tests {
     use super::*;
     use toniator_sampling::{SourceFormatHint, decode_source};
+
+    /// Verifies cutoff boundaries suppress positive minima and retain source paint alignment.
+    ///
+    /// # Panics
+    /// Panics if suppressed marks survive, threshold-equal samples disappear, stroke width
+    /// ignores cutoff, or tonal configuration fails to participate in realization identity.
+    #[test]
+    fn gate2_cutoff_suppresses_minima_and_preserves_paint_alignment() {
+        let image =
+            image::RgbaImage::from_raw(3, 1, vec![255, 0, 0, 64, 0, 255, 0, 128, 0, 0, 255, 255])
+                .unwrap();
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let source = decode_source(&bytes, SourceFormatHint::Png).unwrap();
+        let mut grid = family();
+        let prototype = grid.sites[0].clone();
+        grid.sites = (0..3)
+            .map(|x| {
+                let mut site = prototype.clone();
+                site.position = Point2::new(f64::from(x), 0.0);
+                site
+            })
+            .collect();
+        let canvas = CanvasSpec {
+            width: 2.0,
+            height: 1.0,
+        };
+        let response = MarkResponse {
+            minimum_fill: 0.4,
+            maximum_fill: 1.0,
+            rotation_offset_degrees: 0.0,
+        };
+        let mut mapping = SourceMapping::canonical(SourceMappingComponent::Alpha);
+        let original =
+            realize_mapped_circular_marks(&grid, &source, &canvas, mapping, response).unwrap();
+        assert_eq!(original.marks.len(), 3);
+        mapping.tone.cutoff = 128.0 / 255.0;
+        let clipped =
+            realize_mapped_circular_marks(&grid, &source, &canvas, mapping, response).unwrap();
+        assert_eq!(clipped.marks.len(), 2);
+        assert_eq!(clipped.marks[0], original.marks[1]);
+        assert_eq!(clipped.marks[1], original.marks[2]);
+        assert_ne!(
+            clipped.realization_fingerprint,
+            original.realization_fingerprint
+        );
+        let painted =
+            realize_source_color_circular_marks(&grid, &source, &canvas, mapping, response)
+                .unwrap();
+        assert_eq!(painted.marks.len(), 2);
+        assert_eq!(painted.marks[0].paint.green, 1.0);
+        assert_eq!(painted.marks[0].paint.red, 0.0);
+        assert_eq!(painted.marks[1].paint.blue, 1.0);
+        let path = CurvePath::polyline(
+            vec![Point2::new(0.0, 0.0), Point2::new(2.0, 0.0)],
+            PathClosure::Open,
+        )
+        .unwrap();
+        let sample = |parameter| {
+            stroke_sample(
+                &path.segments()[0],
+                0,
+                parameter,
+                &source,
+                &canvas,
+                mapping,
+                StrokeResponse {
+                    minimum_thickness: 0.4,
+                    maximum_thickness: 1.0,
+                    bias: 0.0,
+                },
+                10.0,
+            )
+            .unwrap()
+        };
+        assert_eq!(sample(0.0).width, 0.0);
+        assert!(sample(0.5).width >= 4.0);
+        let mut identities = std::collections::BTreeSet::new();
+        for tone in [
+            toniator_domain::SourceTone::identity(),
+            toniator_domain::SourceTone {
+                black_point: 0.1,
+                ..Default::default()
+            },
+            toniator_domain::SourceTone {
+                white_point: 0.9,
+                ..Default::default()
+            },
+            toniator_domain::SourceTone {
+                gamma: 1.1,
+                ..Default::default()
+            },
+            toniator_domain::SourceTone {
+                contrast: 1.1,
+                ..Default::default()
+            },
+            toniator_domain::SourceTone {
+                cutoff: 0.1,
+                ..Default::default()
+            },
+        ] {
+            let mut identity = Vec::new();
+            append_source_mapping_identity(&mut identity, SourceMapping { tone, ..mapping });
+            assert!(identities.insert(identity));
+        }
+    }
+
+    /// Verifies rotated and translated grid marks sample artwork at their document positions.
+    ///
+    /// Both immutable source fixtures exercise geometry and sampling together. Independent
+    /// trigonometry checks shared site identities; inverse-position samples must differ for
+    /// at least one interior mark, so an unchanged sampling position cannot pass unnoticed.
+    /// This covers the grid adapter only and does not certify weighted placement.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a fixture fails to decode, geometry fails to construct, or transformed
+    /// positions and canonical radii diverge from the source mapping contract.
+    #[test]
+    fn gate3_grid_transforms_sample_moved_artwork_positions() {
+        let mut request = GridInspectRequest {
+            canvas: CanvasSpec {
+                width: 90.0,
+                height: 60.0,
+            },
+            density: ResolvedDensityMetric2D {
+                across_x: 9.0,
+                across_y: 6.0,
+            },
+            rotation_degrees: 0.0,
+            translation_x: 0.0,
+            translation_y: 0.0,
+            guard_steps: 2,
+            support_radius: 10.0,
+            max_family_candidates: 20_000,
+        };
+        let baseline = evaluate_straight_grid(&request).unwrap();
+        let mapping = SourceMapping::canonical(SourceMappingComponent::Red);
+        let response = MarkResponse {
+            minimum_fill: 0.0,
+            maximum_fill: 1.0,
+            rotation_offset_degrees: 0.0,
+        };
+        for (name, hint) in [
+            ("raster-sample.png", SourceFormatHint::Png),
+            ("vector-sample.svg", SourceFormatHint::Svg),
+        ] {
+            let source = asset_field(name, hint);
+            for (angle, dx, dy) in [(37.0_f64, 0.0, 0.0), (0.0, 7.25, -4.5), (37.0, 7.25, -4.5)] {
+                request.rotation_degrees = angle;
+                request.translation_x = dx;
+                request.translation_y = dy;
+                let moved = evaluate_straight_grid(&request).unwrap();
+                let realized = realize_mapped_circular_marks(
+                    &moved,
+                    &source,
+                    &request.canvas,
+                    mapping,
+                    response,
+                )
+                .unwrap();
+                assert_eq!(realized.marks.len(), moved.sites.len());
+                let (sin, cos) = angle.to_radians().sin_cos();
+                let mut checked = 0;
+                let mut differing_samples = 0;
+                for (site, mark) in moved.sites.iter().zip(&realized.marks) {
+                    let Some(original) = baseline.sites.iter().find(|other| other.id == site.id)
+                    else {
+                        continue;
+                    };
+                    let x = original.position.x - 45.0;
+                    let y = original.position.y - 30.0;
+                    let expected =
+                        Point2::new(45.0 + x * cos - y * sin + dx, 30.0 + x * sin + y * cos + dy);
+                    assert!((site.position.x - expected.x).abs() < 1.0e-10);
+                    assert!((site.position.y - expected.y).abs() < 1.0e-10);
+                    let ink = source
+                        .sample_mapping_response(expected, &request.canvas, mapping)
+                        .unwrap();
+                    let radius =
+                        radius_from_ink_with_diameter(ink, response, site.nominal_cell_diameter)
+                            .unwrap();
+                    assert!(
+                        (mark.radius - radius).abs() < 1.0e-9,
+                        "{name}: moved sample radius"
+                    );
+                    if expected.x > 0.0
+                        && expected.x < 90.0
+                        && expected.y > 0.0
+                        && expected.y < 60.0
+                    {
+                        let old_ink = source
+                            .sample_mapping_response(original.position, &request.canvas, mapping)
+                            .unwrap();
+                        differing_samples += usize::from((ink - old_ink).abs() > 1.0e-4);
+                        checked += 1;
+                    }
+                }
+                assert!(
+                    checked > 10,
+                    "{name}: enough interior sites survive the transform"
+                );
+                assert!(
+                    differing_samples > 0,
+                    "{name}: moved sampling has a visible response witness"
+                );
+            }
+        }
+    }
 
     /// Builds a current-valid guarded grid fixture whose declared support covers normalized marks.
     ///
@@ -14034,6 +14745,7 @@ mod realization_tests {
                     inverted: true,
                     gain: 1.0,
                     bias: 0.0,
+                    tone: toniator_domain::SourceTone::identity(),
                 },
                 response,
             )

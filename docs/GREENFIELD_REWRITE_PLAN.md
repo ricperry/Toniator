@@ -2367,6 +2367,33 @@ discrete/definition animation, new Pattern mechanisms, and unrelated research
 refactors remain excluded. Use its focused verification contract rather than
 historical broad test sweeps below.
 
+## 0.3 review repair gates
+
+The user approved the [three-gate repair plan](REVIEW_0_3_REPAIR_PLAN.md) on
+2026-09-12. Gate 1 repairs ALL/bias editing, Advanced duplication, Wizard
+construction admission, and Scatter switching. Gate 2 addresses source response
+and control organization; Gate 3 addresses universal transforms, weighted
+placement, and export timing. Each gate stops for review. See ProgressTracker
+for current implementation status; approval of the plan is not acceptance.
+
+The user accepted Gate 1 and its ALL Pattern-editing, Default spacing, and Apply
+readiness corrections on 2026-09-12. Its implementation is in the working tree,
+with a local checkpoint pending. The user also accepted Gate 2 source response
+and control organization on 2026-09-12 after implementation and focused
+verification. Its implementation remains in the working tree, without a local
+checkpoint. Gate 3 subsequently began under the active implementation goal:
+export timing is implemented, verified and user-accepted on 2026-09-12; placement
+now implements the user-authorized artwork-weighted transforms and alignment
+warning under the amended Addendum. Weighting is recalculated after transformation.
+The subsequent user-authorized source-consumer boundary is implemented: recipes
+declare weighting and geometric intent, while Advanced edits independent channel
+weighting and fill mappings/responses, initialized to matching components.
+Pattern changes preserve both consumers. Focused verification and native/GTK
+inspection pass. The user subsequently explicitly accepted the remaining Gate 3
+placement and source-consumer work on 2026-09-12. All three repair gates are
+accepted awaiting checkpoint; version 0.3.1 remains unreleased. Acceptance does
+not publish packages or create a checkpoint.
+
 ## Common validation and Git gates
 
 Unless a bounded stage contract specifies a proportional checkpoint gate,

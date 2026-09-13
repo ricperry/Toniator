@@ -57,10 +57,10 @@ including live changes; native GNOME/GTK settings provide the fallback.
 
 ## Rebuild locally
 
-The current development checkout builds **0.3.0 (unreleased)**, producing
-`dist/Toniator-0.3.0-x86_64.AppImage` and `dist/Toniator-0.3.0-x86_64.flatpak`.
+The current development checkout builds **0.3.1 (unreleased)**, producing
+`dist/Toniator-0.3.1-x86_64.AppImage` and `dist/Toniator-0.3.1-x86_64.flatpak`.
 The download/install examples above and verification record below refer to the
-published 0.2.0 release. Substitute 0.3.0 when running your local development
+published 0.2.0 release. Substitute 0.3.1 when running your local development
 packages; this version bump does not publish new packages.
 
 Prerequisites: Python 3, Flatpak, GNOME SDK and Platform 50, Rust/rustup with

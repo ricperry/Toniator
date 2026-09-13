@@ -35,8 +35,8 @@ use toniator_domain::{
     PresetRecord, RandomSiteCharacter, RegionGeometryResponse, RegionGeometryResponseDelta,
     RegionResizeAlgorithm, RegionSamplingStrategy, RegionSourceIntent, SiteDensityModulation,
     SiteExclusionPolicy, SiteUseFilterRecipe, SourceComponent, SourceMapping,
-    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
-    SpiralCoveragePolicy, SpiralCurve, SpiralShape, StraightGuideDimension,
+    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId, SourceTone,
+    SourceWeighting, SpiralCoveragePolicy, SpiralCurve, SpiralShape, StraightGuideDimension,
     StraightGuideRepetition, ValidationError,
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
@@ -63,12 +63,12 @@ use media::MediaManifestDto;
 pub use media::SourceMediaManifest;
 
 pub const CONTAINER_VERSION: u32 = 2;
-pub const DOCUMENT_SCHEMA_VERSION: u32 = 8;
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 10;
 /// Current source-free document Preset archive envelope version.
-pub const DOCUMENT_PRESET_FORMAT_VERSION: u32 = 1;
+pub const DOCUMENT_PRESET_FORMAT_VERSION: u32 = 3;
 /// Standalone pure-schema preset JSON format version. It is deliberately
 /// independent from the `.toniator` container and document schema versions.
-pub const PRESET_FORMAT_VERSION: u32 = 4;
+pub const PRESET_FORMAT_VERSION: u32 = 5;
 pub const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
@@ -773,7 +773,7 @@ fn load_opened(path: &Path, mut file: File) -> Result<LoadedDocument, LoadError>
         DOCUMENT_SCHEMA_VERSION => {
             let mut ignored = Vec::new();
             let mut deserializer = serde_json::Deserializer::from_slice(&document_bytes);
-            let stored: StoredDocumentDtoV8 =
+            let stored: StoredDocumentDtoV9 =
                 serde_ignored::deserialize(&mut deserializer, |path| {
                     ignored.push(path.to_string())
                 })
@@ -870,7 +870,7 @@ pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<
             context: "document must reference the primary media source".into(),
         });
     }
-    let dto = StoredDocumentDtoV8::from_domain(document, sources)?;
+    let dto = StoredDocumentDtoV9::from_domain(document, sources)?;
     let mut document_json = serde_json::to_vec(&dto).map_err(|error| SaveError::Archive {
         context: error.to_string(),
     })?;
@@ -1289,19 +1289,19 @@ struct SourceManifestDto {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredDocumentDtoV8 {
+struct StoredDocumentDtoV9 {
     container_version: u32,
     document_schema_version: u32,
-    document: DocumentDtoV8,
+    document: DocumentDtoV9,
     sources: Vec<SourceManifestDto>,
     media: MediaManifestDto,
 }
 #[derive(Serialize, Deserialize)]
 struct CurrentDocumentDto {
-    document: DocumentDtoV8,
+    document: DocumentDtoV9,
 }
 
-impl StoredDocumentDtoV8 {
+impl StoredDocumentDtoV9 {
     /// Projects a validated document and its matching source into the current archive envelope.
     ///
     /// # Errors
@@ -1311,7 +1311,7 @@ impl StoredDocumentDtoV8 {
         Ok(Self {
             container_version: CONTAINER_VERSION,
             document_schema_version: DOCUMENT_SCHEMA_VERSION,
-            document: DocumentDtoV8::from_domain(document)?,
+            document: DocumentDtoV9::from_domain(document)?,
             sources: sources
                 .entries()
                 .enumerate()
@@ -1335,18 +1335,18 @@ impl StoredDocumentDtoV8 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DocumentDtoV8 {
+struct DocumentDtoV9 {
     id: u64,
     canvas: CanvasDto,
     source_reference_id: String,
     project_timing: ProjectTimingDto,
     #[serde(flatten)]
-    configuration: DocumentConfigurationDtoV8,
+    configuration: DocumentConfigurationDtoV9,
 }
 
-/// The shared current-v8 configuration includes End overrides without project timing or Start copies.
+/// The shared current-v9 configuration includes End overrides without project timing or Start copies.
 #[derive(Serialize, Deserialize)]
-struct DocumentConfigurationDtoV8 {
+struct DocumentConfigurationDtoV9 {
     pattern_definition_bundles: Vec<PatternDefinitionBundleDtoV6>,
     pattern_settings: DocumentPatternSettingsDto,
     channel_configuration: ChannelConfigurationDto,
@@ -1540,11 +1540,7 @@ enum RandomSiteCharacterDtoV6 {
 #[serde(deny_unknown_fields)]
 enum SiteDensityModulationDtoV6 {
     Uniform,
-    ArtworkWeighted {
-        mapping: SourceMappingDto,
-        strength: f64,
-        response: ArtworkWeightResponseDtoV6,
-    },
+    ArtworkWeighted,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -2601,6 +2597,7 @@ struct LegacyChannelDto {
     pattern_instance: ChannelPatternInstanceDto,
     appearance: AppearanceDto,
     source_mapping: LegacySourceMappingDto,
+    weighting: SourceWeightingDto,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2609,6 +2606,7 @@ struct ModeledChannelDto {
     id: u64,
     pattern_instance: ChannelPatternInstanceDto,
     mapping: SourceMappingDto,
+    weighting: SourceWeightingDto,
     paint: PaintDto,
     visible: bool,
     opacity: f64,
@@ -2895,6 +2893,23 @@ struct SourceMappingDto {
     inverted: bool,
     gain: f64,
     bias: f64,
+    tone: SourceToneDto,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceWeightingDto {
+    mapping: SourceMappingDto,
+    strength: f64,
+    response: ArtworkWeightResponseDtoV6,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceToneDto {
+    black_point: f64,
+    white_point: f64,
+    gamma: f64,
+    contrast: f64,
+    cutoff: f64,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3004,7 +3019,7 @@ dto_enum!(
     }
 );
 
-impl DocumentDtoV8 {
+impl DocumentDtoV9 {
     /// Projects authored Start settings, End overrides and timing without runtime frame state.
     ///
     /// # Errors
@@ -3028,7 +3043,7 @@ impl DocumentDtoV8 {
             },
             source_reference_id,
             project_timing: ProjectTimingDto::from_domain(document.project_timing()),
-            configuration: DocumentConfigurationDtoV8::from_domain(document)?,
+            configuration: DocumentConfigurationDtoV9::from_domain(document)?,
         })
     }
     /// Rebuilds and validates the complete authoritative document before a loaded archive commits.
@@ -3053,8 +3068,8 @@ impl DocumentDtoV8 {
     }
 }
 
-impl DocumentConfigurationDtoV8 {
-    /// Projects reusable Start settings and End intent using current-v8 authority.
+impl DocumentConfigurationDtoV9 {
+    /// Projects reusable Start settings and End intent using current-v9 authority.
     ///
     /// # Errors
     ///
@@ -3064,7 +3079,7 @@ impl DocumentConfigurationDtoV8 {
         Self::from_configuration(&DocumentConfiguration::capture(document))
     }
 
-    /// Projects source-free Start settings and End intent into the shared current-v8 field shape.
+    /// Projects source-free Start settings and End intent into the shared current-v9 field shape.
     ///
     /// # Errors
     ///
@@ -3752,32 +3767,19 @@ impl RandomSiteCharacterDtoV6 {
 }
 
 impl SiteDensityModulationDtoV6 {
+    /// Projects authored density modulation into the current flat archive representation.
     fn from_domain(value: &SiteDensityModulation) -> Self {
         match value {
             SiteDensityModulation::Uniform => Self::Uniform,
-            SiteDensityModulation::ArtworkWeighted {
-                mapping,
-                strength,
-                response,
-            } => Self::ArtworkWeighted {
-                mapping: SourceMappingDto::from_domain(*mapping),
-                strength: *strength,
-                response: ArtworkWeightResponseDtoV6::from_domain(response),
-            },
+            SiteDensityModulation::ArtworkWeighted => Self::ArtworkWeighted,
         }
     }
+
+    /// Restores authored density modulation without resolving channel-dependent source intent.
     fn into_domain(self) -> SiteDensityModulation {
         match self {
             Self::Uniform => SiteDensityModulation::Uniform,
-            Self::ArtworkWeighted {
-                mapping,
-                strength,
-                response,
-            } => SiteDensityModulation::ArtworkWeighted {
-                mapping: mapping.into_domain(),
-                strength,
-                response: response.into_domain(),
-            },
+            Self::ArtworkWeighted => SiteDensityModulation::ArtworkWeighted,
         }
     }
 }
@@ -4281,6 +4283,7 @@ impl LegacyChannelDto {
             pattern_instance: ChannelPatternInstanceDto::from_domain(&value.pattern_instance),
             appearance: AppearanceDto::from_domain(&value.appearance),
             source_mapping: LegacySourceMappingDto::from_domain(value.source_mapping),
+            weighting: SourceWeightingDto::from_domain(value.weighting),
         }
     }
     /// Rebuilds one retained legacy channel's authored instance and presentation state.
@@ -4290,6 +4293,7 @@ impl LegacyChannelDto {
             pattern_instance: self.pattern_instance.into_domain(),
             appearance: self.appearance.into_domain(),
             source_mapping: self.source_mapping.into_domain(),
+            weighting: self.weighting.into_domain(),
         }
     }
 }
@@ -4301,6 +4305,7 @@ impl ModeledChannelDto {
             id: value.id.0,
             pattern_instance: ChannelPatternInstanceDto::from_domain(&value.pattern_instance),
             mapping: SourceMappingDto::from_domain(value.mapping),
+            weighting: SourceWeightingDto::from_domain(value.weighting),
             paint: PaintDto::from_domain(&value.paint),
             visible: value.visible,
             opacity: value.opacity,
@@ -4313,6 +4318,7 @@ impl ModeledChannelDto {
             id: ChannelId(self.id),
             pattern_instance: self.pattern_instance.into_domain(),
             mapping: self.mapping.into_domain(),
+            weighting: self.weighting.into_domain(),
             paint: self.paint.into_domain(),
             visible: self.visible,
             opacity: self.opacity,
@@ -4519,6 +4525,7 @@ impl LegacySourceMappingDto {
     }
 }
 impl SourceMappingDto {
+    /// Projects concrete source mapping and all source-response controls into current JSON.
     fn from_domain(value: SourceMapping) -> Self {
         Self {
             component: value.component.into(),
@@ -4526,8 +4533,10 @@ impl SourceMappingDto {
             inverted: value.inverted,
             gain: value.gain,
             bias: value.bias,
+            tone: SourceToneDto::from_domain(value.tone),
         }
     }
+    /// Rebuilds concrete source mapping state for domain validation at load time.
     fn into_domain(self) -> SourceMapping {
         SourceMapping {
             component: self.component.into(),
@@ -4535,6 +4544,49 @@ impl SourceMappingDto {
             inverted: self.inverted,
             gain: self.gain,
             bias: self.bias,
+            tone: self.tone.into_domain(),
+        }
+    }
+}
+impl SourceWeightingDto {
+    /// Projects independent channel-owned weighting source and response state.
+    fn from_domain(value: SourceWeighting) -> Self {
+        Self {
+            mapping: SourceMappingDto::from_domain(value.mapping),
+            strength: value.strength,
+            response: ArtworkWeightResponseDtoV6::from_domain(&value.response),
+        }
+    }
+
+    /// Restores independent channel-owned weighting without consulting recipe state.
+    fn into_domain(self) -> SourceWeighting {
+        SourceWeighting {
+            mapping: self.mapping.into_domain(),
+            strength: self.strength,
+            response: self.response.into_domain(),
+        }
+    }
+}
+impl SourceToneDto {
+    /// Projects concrete source-response controls into current document JSON.
+    fn from_domain(value: SourceTone) -> Self {
+        Self {
+            black_point: value.black_point,
+            white_point: value.white_point,
+            gamma: value.gamma,
+            contrast: value.contrast,
+            cutoff: value.cutoff,
+        }
+    }
+
+    /// Rebuilds source-response controls for domain validation at the load boundary.
+    fn into_domain(self) -> SourceTone {
+        SourceTone {
+            black_point: self.black_point,
+            white_point: self.white_point,
+            gamma: self.gamma,
+            contrast: self.contrast,
+            cutoff: self.cutoff,
         }
     }
 }
@@ -4722,5 +4774,107 @@ mod stage20r_tests {
         assert!(text.contains("ordered_outputs"));
         assert!(text.contains("output_index"));
         assert!(!text.contains("output_layer_id"));
+    }
+}
+
+#[cfg(test)]
+mod source_weighting_persistence_tests {
+    use super::*;
+
+    /// Proves standalone pattern modulation persists only the weighted selector.
+    #[test]
+    fn default_mapping_round_trips_through_current_dto() {
+        let modulation = SiteDensityModulation::ArtworkWeighted;
+        let dto = SiteDensityModulationDtoV6::from_domain(&modulation);
+        let json = serde_json::to_string(&dto).expect("default mapping serializes");
+        assert_eq!(json, "{\"kind\":\"artwork_weighted\"}");
+        assert!(!json.contains("mapping"));
+        assert!(!json.contains("strength"));
+        assert!(!json.contains("response"));
+        let decoded = serde_json::from_str::<SiteDensityModulationDtoV6>(&json)
+            .expect("default mapping parses")
+            .into_domain();
+        assert_eq!(decoded, modulation);
+    }
+
+    /// Round-trips every authored tonal value through the current source-mapping DTO.
+    ///
+    /// # Panics
+    /// Panics if serialization drops, defaults, or changes any source-response field.
+    #[test]
+    fn gate2_source_tone_round_trips_current_mapping() {
+        let mapping = SourceMapping {
+            tone: toniator_domain::SourceTone {
+                black_point: 0.15,
+                white_point: 0.9,
+                gamma: 1.7,
+                contrast: 1.2,
+                cutoff: 0.3,
+            },
+            ..SourceMapping::canonical(SourceMappingComponent::Cyan)
+        };
+        let json = serde_json::to_string(&SourceMappingDto::from_domain(mapping)).unwrap();
+        let decoded: SourceMappingDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.into_domain(), mapping);
+    }
+
+    /// Round-trips independent weighting mapping, tone, strength, and curve through current JSON.
+    #[test]
+    fn channel_weighting_round_trips_complete_response() {
+        let weighting = SourceWeighting {
+            mapping: SourceMapping {
+                component: SourceMappingComponent::Green,
+                placement: SourcePlacement::StretchToCanvas,
+                inverted: true,
+                gain: 0.8,
+                bias: -0.1,
+                tone: SourceTone {
+                    black_point: 0.1,
+                    white_point: 0.9,
+                    gamma: 1.3,
+                    contrast: 1.2,
+                    cutoff: 0.25,
+                },
+            },
+            strength: 0.7,
+            response: ArtworkWeightResponse::Smoothstep,
+        };
+        let json = serde_json::to_string(&SourceWeightingDto::from_domain(weighting))
+            .expect("weighting serializes");
+        assert!(json.contains("\"component\":\"green\""));
+        assert!(json.contains("\"strength\":0.7"));
+        let decoded = serde_json::from_str::<SourceWeightingDto>(&json)
+            .expect("weighting parses")
+            .into_domain();
+        assert_eq!(decoded, weighting);
+    }
+
+    /// Proves the shared project/document-Preset configuration retains channel weighting.
+    #[test]
+    fn shared_document_configuration_round_trips_channel_weighting() {
+        let document = Document::new_default_document(
+            CanvasSpec {
+                width: 32.0,
+                height: 32.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .unwrap()
+        .apply_command(&toniator_domain::DocumentCommand::SetSourceWeightingField {
+            channel_id: ChannelId(1),
+            edit: toniator_domain::SourceWeightingFieldEdit::Component(
+                SourceMappingComponent::Green,
+            ),
+        })
+        .unwrap()
+        .0;
+        let dto = DocumentConfigurationDtoV9::from_domain(&document).unwrap();
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"weighting\""));
+        let restored = serde_json::from_str::<DocumentConfigurationDtoV9>(&json)
+            .unwrap()
+            .into_domain_configuration(&document)
+            .unwrap();
+        assert_eq!(restored, DocumentConfiguration::capture(&document));
     }
 }

@@ -79,7 +79,7 @@ fn curve_motif_recipe() -> PatternDefinitionRecipe {
     })
 }
 
-/// Builds one deliberately varied modeled configuration with exact inherited and explicit intent.
+/// Builds varied current configuration with independent fill/weighting and inherited recipe intent.
 fn modeled_document(
     model: HalftoneChannelModel,
     id: u64,
@@ -105,6 +105,13 @@ fn modeled_document(
         .to_vec();
     channels[0].mapping.gain = 0.75;
     channels[0].mapping.bias = 0.1;
+    channels[0].mapping.tone = toniator_domain::SourceTone {
+        black_point: 0.15,
+        white_point: 0.85,
+        gamma: 1.7,
+        contrast: 1.2,
+        cutoff: 0.25,
+    };
     channels[0].visible = false;
     channels[0].opacity = 0.6;
 
@@ -124,17 +131,7 @@ fn modeled_document(
                 minimum_center_distance: 0.25,
             },
             17,
-            SiteDensityModulation::ArtworkWeighted {
-                mapping: SourceMapping {
-                    component: SourceMappingComponent::Luminance,
-                    placement: toniator_domain::SourcePlacement::StretchToCanvas,
-                    inverted: true,
-                    gain: 0.8,
-                    bias: 0.1,
-                },
-                strength: 0.7,
-                response: ArtworkWeightResponse::Smoothstep,
-            },
+            SiteDensityModulation::ArtworkWeighted,
             toniator_domain::SiteExclusionPolicy::None,
             20_000,
             20_000,
@@ -153,6 +150,18 @@ fn modeled_document(
             }],
         });
         let random_channel = channels.len() - 1;
+        channels[random_channel].weighting = toniator_domain::SourceWeighting {
+            mapping: SourceMapping {
+                component: SourceMappingComponent::Luminance,
+                placement: toniator_domain::SourcePlacement::StretchToCanvas,
+                inverted: true,
+                gain: 0.8,
+                bias: 0.1,
+                tone: toniator_domain::SourceTone::identity(),
+            },
+            strength: 0.7,
+            response: ArtworkWeightResponse::Smoothstep,
+        };
         channels[random_channel]
             .pattern_instance
             .definition_override = Some(random_id);
@@ -366,7 +375,7 @@ fn source_free_presets_round_trip_all_models_and_exclude_project_authority() {
         let root: Value = serde_json::from_slice(&archive_entry(&path, "preset.json"))
             .expect("Preset JSON parses");
         assert_eq!(root["kind"], "document_preset");
-        assert_eq!(root["document_preset_format_version"], 1);
+        assert_eq!(root["document_preset_format_version"], 3);
         assert_eq!(
             root["document_schema_version"],
             toniator_io::DOCUMENT_SCHEMA_VERSION

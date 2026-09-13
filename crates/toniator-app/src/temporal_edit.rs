@@ -76,29 +76,47 @@ pub(super) fn scalar_command(
         .map_err(|error| error.to_string())
 }
 
-/// Removes only the selected scalar End override, preserving ordinary Start and other transitions.
+/// Resolves an inspector scalar's End audience, expanding ALL to its compatible channel targets.
+/// Stored document-base animation remains in the ALL audience so reset restores ordinary Start.
+fn scalar_audience(
+    document: &Document,
+    descriptor: &PropertyDescriptor,
+    all: bool,
+) -> Vec<PropertyTarget> {
+    let mut targets = vec![descriptor.target];
+    if all && let Ok(batch) = document.channel_scalar_batch(descriptor.field) {
+        targets.extend(batch.values.into_iter().map(|value| value.target));
+    }
+    targets
+}
+
+/// Removes the selected scalar End audience, preserving ordinary Start and other transitions.
 pub(super) fn reset_command(
     document: &Document,
     descriptor: &PropertyDescriptor,
+    all: bool,
 ) -> TemporalCommand {
     let mut overrides = document.temporal_end_overrides().to_vec();
+    let targets = scalar_audience(document, descriptor, all);
     overrides.retain(|entry| {
         !matches!(entry, TemporalEndOverride::Scalar(value)
-        if value.target == descriptor.target && value.field == descriptor.field)
+        if targets.contains(&value.target) && value.field == descriptor.field)
     });
     document.replace_temporal_authority_command(document.project_timing().clone(), overrides)
 }
 
-/// Changes easing on an existing scalar override without normalizing or changing its endpoint.
+/// Changes easing on the selected scalar audience without changing its endpoints.
 pub(super) fn easing_command(
     document: &Document,
     descriptor: &PropertyDescriptor,
     easing: Easing,
+    all: bool,
 ) -> TemporalCommand {
     let mut overrides = document.temporal_end_overrides().to_vec();
+    let targets = scalar_audience(document, descriptor, all);
     for entry in &mut overrides {
         if let TemporalEndOverride::Scalar(value) = entry
-            && value.target == descriptor.target
+            && targets.contains(&value.target)
             && value.field == descriptor.field
         {
             value.easing = easing;
@@ -111,6 +129,7 @@ pub(super) fn easing_command(
 ///
 /// Rejected commands preserve history, drafts and accepted pixels. Equal replacements do not
 /// dispatch, so incidental focus leave and unchanged easing selections preserve Redo.
+/// Accepted edits reconcile GTK children at idle after the native input callback unwinds.
 pub(super) fn apply(
     state: &Rc<RefCell<AppState>>,
     command: Result<TemporalCommand, String>,
@@ -144,7 +163,7 @@ pub(super) fn apply(
             set_inspector_status(&mut app, "Rendering selected frame…");
             sync_ui(&mut app);
             drop(app);
-            rebuild_inspector(state);
+            schedule_inspector_rebuild(state);
             schedule_main_preview_submission(state);
         }
         Ok(false) => {}
@@ -160,6 +179,7 @@ pub(super) fn controls(
     if !eligible(descriptor) {
         return None;
     }
+    let audience = state.borrow().inspector_runtime.target;
     let field = inspector_field_label(descriptor.field);
     let expander = gtk::Expander::new(Some("Animation"));
     expander.update_property(&[gtk::accessible::Property::Label(&format!(
@@ -204,13 +224,20 @@ pub(super) fn controls(
         };
         let command = {
             let app = state_for_easing.borrow();
-            if app.endpoint != temporal_preview::Endpoint::End {
+            if app.endpoint != temporal_preview::Endpoint::End
+                || app.inspector_runtime.target != audience
+            {
                 return;
             }
             let Some(workspace) = app.workspace.as_ref() else {
                 return;
             };
-            easing_command(workspace.document(), &descriptor_for_easing, *easing)
+            easing_command(
+                workspace.document(),
+                &descriptor_for_easing,
+                *easing,
+                app.inspector_runtime.target == InspectorTarget::DocumentAll,
+            )
         };
         apply(&state_for_easing, Ok(command), None, None);
     });
@@ -219,13 +246,19 @@ pub(super) fn controls(
     reset.connect_clicked(move |_| {
         let command = {
             let app = state_for_reset.borrow();
-            if app.endpoint != temporal_preview::Endpoint::End {
+            if app.endpoint != temporal_preview::Endpoint::End
+                || app.inspector_runtime.target != audience
+            {
                 return;
             }
             let Some(workspace) = app.workspace.as_ref() else {
                 return;
             };
-            reset_command(workspace.document(), &descriptor_for_reset)
+            reset_command(
+                workspace.document(),
+                &descriptor_for_reset,
+                app.inspector_runtime.target == InspectorTarget::DocumentAll,
+            )
         };
         apply(
             &state_for_reset,
@@ -257,24 +290,52 @@ pub(super) fn sync(app: &AppState, component: &DescriptorComponent) {
     }
     if let Some(controls) = component.temporal.as_ref() {
         controls.expander.set_visible(end);
-        let value = app
+        let values = app
             .workspace
             .as_ref()
-            .and_then(|workspace| scalar(workspace.document(), &component.value.descriptor));
-        controls.hint.set_label(if value.is_some() {
+            .map(|workspace| {
+                let targets = scalar_audience(
+                    workspace.document(),
+                    &component.value.descriptor,
+                    app.inspector_runtime.target == InspectorTarget::DocumentAll,
+                );
+                workspace
+                    .document()
+                    .temporal_end_overrides()
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        TemporalEndOverride::Scalar(value)
+                            if targets.contains(&value.target)
+                                && value.field == component.value.descriptor.field =>
+                        {
+                            Some(value)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mixed = values
+            .first()
+            .is_some_and(|first| values.iter().any(|value| value.easing != first.easing));
+        controls.hint.set_label(if mixed {
+            "Mixed interpolation. Choosing easing applies it to all compatible channels."
+        } else if !values.is_empty() {
             "This setting has an End override."
         } else {
             "End follows Start and inherited animation."
         });
-        controls.reset.set_sensitive(value.is_some());
-        controls.easing.set_sensitive(value.is_some());
+        controls.reset.set_sensitive(!values.is_empty());
+        controls.easing.set_sensitive(!values.is_empty());
         controls.syncing.set(true);
-        controls.easing.set_selected(
+        controls.easing.set_selected(if mixed {
+            gtk::INVALID_LIST_POSITION
+        } else {
             EASINGS
                 .iter()
-                .position(|(_, easing)| Some(*easing) == value.map(|value| value.easing))
-                .unwrap_or(0) as u32,
-        );
+                .position(|(_, easing)| Some(*easing) == values.first().map(|value| value.easing))
+                .unwrap_or(0) as u32
+        });
         controls.syncing.set(false);
     }
 }
@@ -283,6 +344,102 @@ pub(super) fn sync(app: &AppState, component: &DescriptorComponent) {
 mod tests {
     use super::*;
     use toniator_domain::{FrameRange, FrameRate, ProjectTiming};
+
+    /// Applies ALL easing and reset to channel overrides without altering another animated field.
+    ///
+    /// # Panics
+    /// Panics if the ALL audience omits a channel, changes Start, or loses unrelated animation.
+    #[test]
+    fn all_easing_and_reset_cover_channel_end_assignments() {
+        let document = Document::new_default_document(
+            CanvasSpec {
+                width: 100.0,
+                height: 100.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .unwrap()
+        .with_temporal_authority(
+            ProjectTiming::new(
+                FrameRate::new(30, 1).unwrap(),
+                FrameRange::new(0, 3).unwrap(),
+            ),
+            vec![],
+        )
+        .unwrap();
+        let descriptor = document
+            .property_descriptors()
+            .into_iter()
+            .find(|value| {
+                value.target == PropertyTarget::Document
+                    && value.field == PropertyFieldId::RotationDegrees
+            })
+            .unwrap();
+        let mut history = DocumentHistory::new(DocumentSession::new(document.clone()).unwrap());
+        advanced_batches::apply_fields(
+            &mut history,
+            temporal_preview::Endpoint::End,
+            &[
+                (PropertyFieldId::RotationDegrees, 60.0),
+                (PropertyFieldId::DensityAspect, 1.5),
+            ],
+        )
+        .unwrap();
+        history
+            .apply_temporal(&easing_command(
+                history.document(),
+                &descriptor,
+                Easing::Hold,
+                true,
+            ))
+            .unwrap();
+        let rotation = history
+            .document()
+            .temporal_end_overrides()
+            .iter()
+            .filter_map(|entry| match entry {
+                TemporalEndOverride::Scalar(value)
+                    if value.field == PropertyFieldId::RotationDegrees =>
+                {
+                    Some(value)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rotation.len(), 3);
+        assert!(rotation.iter().all(|value| value.easing == Easing::Hold));
+        history
+            .apply_temporal(&reset_command(history.document(), &descriptor, true))
+            .unwrap();
+        assert!(history.document().temporal_end_overrides().iter().all(|entry| {
+            matches!(entry, TemporalEndOverride::Scalar(value) if value.field == PropertyFieldId::DensityAspect)
+        }));
+        for value in history
+            .document()
+            .materialize_frame(2)
+            .unwrap()
+            .channel_scalar_batch(PropertyFieldId::RotationDegrees)
+            .unwrap()
+            .values
+        {
+            assert_eq!(value.value, 0.0);
+        }
+        assert_eq!(
+            history.document().pattern_settings(),
+            document.pattern_settings()
+        );
+        history.undo().unwrap();
+        assert_eq!(
+            history
+                .document()
+                .materialize_frame(2)
+                .unwrap()
+                .channel_scalar_batch(PropertyFieldId::RotationDegrees)
+                .unwrap()
+                .average,
+            60.0
+        );
+    }
 
     /// Exercises inspector End conversion, easing and reset against independently inherited values.
     ///
@@ -348,7 +505,12 @@ mod tests {
             document.pattern_settings()
         );
         history
-            .apply_temporal(&easing_command(history.document(), channel, Easing::Hold))
+            .apply_temporal(&easing_command(
+                history.document(),
+                channel,
+                Easing::Hold,
+                false,
+            ))
             .unwrap();
         let middle = history.document().materialize_frame(1).unwrap();
         assert_eq!(
@@ -366,7 +528,7 @@ mod tests {
             Easing::Hold
         );
         history
-            .apply_temporal(&reset_command(history.document(), channel))
+            .apply_temporal(&reset_command(history.document(), channel, false))
             .unwrap();
         assert_eq!(
             history
