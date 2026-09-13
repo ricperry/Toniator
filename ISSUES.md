@@ -98,6 +98,20 @@ an entry does not authorize a later stage or change an accepted contract.
   then CMYK, the user confirmed: “Okay that work is good now.” See
   `.codex-work/evidence/review-0.3-cmyk-transform-investigation.md`.
 
+## TON-009 — Feature size may not increase site density in random Patterns
+
+- Status: Open; user-reported on 2026-09-13, not yet independently reproduced.
+- Reported Pattern: `Even random circles`. The user suspects most random
+  Patterns are affected; that broader scope needs verification.
+- Report: Reducing `Feature size` correctly reduces mark size but does not add
+  more sites to maintain image density.
+- Expected behavior: Finer feature sizes increase the number of sites as well
+  as reducing mark size, maintaining the intended image density.
+- Next step: Reproduce with the named Pattern, then check the other random
+  Patterns to establish scope. Inspect how Feature size affects site spacing/count
+  and mark geometry. Verify both preview and export
+  against the immutable raster and vector inputs. No fix is included in 0.3.1.
+
 ## TON-001 — Intermittent RGB edit to CMYK crash
 
 - Status: Open; deferred pending a reliable reproducer and separate authorization.

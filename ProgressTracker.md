@@ -1177,7 +1177,7 @@ acceptance, checkpoint, package or publication is inferred.
 
 ### 0.3.1 development version
 
-The active goal separately requests version **0.3.1 (unreleased)**. All nine
+The implementation goal requests version **0.3.1**, now published as a prerelease. All nine
 first-party Cargo manifests and lockfile entries now agree, as do AppStream,
 packaging filenames/provenance and current development instructions. Offline
 app/CLI compilation, locked Cargo metadata and AppStream validation pass;
@@ -1236,6 +1236,23 @@ Only accepted source, documentation, tooling and explicit release artifacts ente
 the checkpoints. User artwork/fonts, stretching screenshots, unrelated deletions
 and research remain excluded. Remote main and v0.3.0 are unchanged during preparation;
 v0.3.1 publication is a separate final action.
+
+### 0.3.1 publication — 2026-09-13
+
+The user explicitly authorizes pushing main and publishing the prerelease packages.
+Source checkpoint `4e59a5d` and artifact checkpoint `a5e22fa` are pushed, with
+annotated tag `v0.3.1` resolving to `a5e22faeb461a55190b5bd64b8860b1340f1b105`.
+The [GitHub prerelease](https://github.com/ricperry/Toniator/releases/tag/v0.3.1)
+is published at 2026-09-13T04:10:17Z and is not a draft. Both packages,
+SHA256SUMS and build-info.json are uploaded. A fresh download verifies both
+package checksums and exact equality of checksum/provenance files to local
+artifacts. Git LFS transfer is complete. Subsequent documentation-only changes
+do not move the release tag or change the package source.
+
+The user also reports TON-009: Feature size shrinks marks without adding sites
+for Even random circles. A suspected effect on most random Patterns needs
+verification. It is recorded as open in ISSUES.md; no fix or broader reproduction
+is claimed in this release. No new implementation stage begins.
 
 ## Earlier startup follow-up
 

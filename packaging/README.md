@@ -1,8 +1,8 @@
 # Toniator desktop packages
 
 Download the AppImage or Flatpak from the
-[v0.3.0 GitHub release](https://github.com/ricperry/Toniator/releases/tag/v0.3.0).
-The 0.3.1 packages are prepared locally; publication remains pending.
+[v0.3.1 GitHub prerelease](https://github.com/ricperry/Toniator/releases/tag/v0.3.1).
+Both packages, checksums and build provenance were published on 2026-09-13.
 For maintainers, [release instructions](../docs/RELEASING.md) cover publishing
 the two bundles and their checksums together under one version tag.
 
@@ -20,14 +20,14 @@ their hashes; `assets/ToniatorIcon.svg` remains the editable Inkscape source.
 From the repository directory, run the AppImage directly:
 
 ```sh
-chmod +x dist/Toniator-0.3.0-x86_64.AppImage
-./dist/Toniator-0.3.0-x86_64.AppImage
+chmod +x dist/Toniator-0.3.1-x86_64.AppImage
+./dist/Toniator-0.3.1-x86_64.AppImage
 ```
 
 It needs no application installation. If FUSE mounting is unavailable:
 
 ```sh
-APPIMAGE_EXTRACT_AND_RUN=1 ./dist/Toniator-0.3.0-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./dist/Toniator-0.3.1-x86_64.AppImage
 ```
 
 The AppImage bundles GTK, its dependent libraries, image loaders, icons, and
@@ -38,7 +38,7 @@ distribution compatibility is not claimed. `--cli --help` invokes the bundled CL
 Install the Flatpak bundle for your user account:
 
 ```sh
-flatpak install --user ./dist/Toniator-0.3.0-x86_64.flatpak
+flatpak install --user ./dist/Toniator-0.3.1-x86_64.flatpak
 flatpak run com.sbdd.Toniator
 ```
 
@@ -58,10 +58,10 @@ including live changes; native GNOME/GTK settings provide the fallback.
 
 ## Rebuild locally
 
-The current development checkout builds **0.3.1 (unreleased)**, producing
+The current checkout builds **0.3.1**, producing
 `dist/Toniator-0.3.1-x86_64.AppImage` and `dist/Toniator-0.3.1-x86_64.flatpak`.
-The download/install examples above refer to the published 0.3.0 release.
-Substitute 0.3.1 when running the prepared packages; building does not publish them.
+The download/install examples above refer to the published 0.3.1 prerelease.
+Building locally does not publish or replace its release assets.
 
 Prerequisites: Python 3, Flatpak, GNOME SDK and Platform 50, Rust/rustup with
 Rust 1.94 or newer, Cargo dependencies cached for Cargo.lock, binutils, tar, and
@@ -103,7 +103,7 @@ build procedure, not a claim of bit-for-bit reproducible archives across SDK upd
 
 ## Development media verification
 
-### Prepared 0.3.1 packages
+### Published 0.3.1 packages
 
 Both bundles use optimized, stripped release binaries built inside GNOME SDK50
 with locked/offline dependencies and private media tools from source checkpoint

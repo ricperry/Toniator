@@ -13,8 +13,8 @@ Built with Rust and GTK4, Toniator includes a visual Pattern Wizard, a personal
 Pattern library, and a headless command-line renderer. It is free software under
 the [GPL-3.0-only license](LICENSE).
 
-**Development version: 0.3.1 (unreleased).**
-[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.2.0)
+**Current prerelease: 0.3.1.**
+[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.3.1)
 or [browse known issues](ISSUES.md).
 
 ## Examples

@@ -2391,8 +2391,9 @@ Pattern changes preserve both consumers. Focused verification and native/GTK
 inspection pass. The user subsequently explicitly accepted the remaining Gate 3
 placement and source-consumer work on 2026-09-12. All three repair gates are
 complete at source checkpoint `4e59a5d`, created during the separately requested
-release preparation. Version 0.3.1 packages are built and verified; remote push
-and publication are not performed by preparation alone.
+release preparation. Artifact checkpoint `a5e22fa` and tag `v0.3.1` are pushed;
+the user separately authorizes publication of the GitHub prerelease on 2026-09-13.
+Both packages, checksums and build provenance are published under that tag.
 
 ## Common validation and Git gates
 

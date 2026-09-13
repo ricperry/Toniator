@@ -222,5 +222,6 @@ commands, controls, harness corrections and verification limits. The user
 explicitly accepts this remaining Gate 3 work on 2026-09-12. All three gates
 are accepted awaiting checkpoint; the 0.3.1 implementation/version-update goal
 is fulfilled. The subsequent release-preparation request creates source checkpoint
-`4e59a5d` and verified optimized AppImage/Flatpak packages. No push or publication
-is performed during preparation; packaging/README.md records the artifact checks.
+`4e59a5d` and verified optimized AppImage/Flatpak packages. The user subsequently
+authorizes pushing main and publishing v0.3.1 on 2026-09-13. Artifact checkpoint
+`a5e22fa` is tagged and published; packaging/README.md records the artifact checks.
