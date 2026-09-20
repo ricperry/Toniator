@@ -77,8 +77,13 @@ if rg -n --glob '*.rs' '(DocumentSession|apply_command|DocumentCommand|&mut[[:sp
     fail 'toniator-render must not own writable document state'
 fi
 
-if rg -n -i 'TON-010|Stage[[:space:]]*4\.5|4\.5[A-D]' \
-    AGENTS.md .codex/agents .agents/skills; then
+# Optional local agent guidance is not distributed with the public source tree.
+local_guidance=()
+for path in AGENTS.md .codex/agents .agents/skills; do
+    [[ ! -e "$path" ]] || local_guidance+=("$path")
+done
+if (( ${#local_guidance[@]} )) && rg -n -i 'TON-010|Stage[[:space:]]*4\.5|4\.5[A-D]' \
+    "${local_guidance[@]}"; then
     fail 'obsolete TON-010 or Stage 4.5 workflow remains active'
 fi
 

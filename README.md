@@ -1,4 +1,4 @@
-<img src="assets/appicon.png" alt="Toniator icon" width="112" />
+<a href="assets/icon-final.svg"><img src="assets/appicon.png" alt="Toniator RGB halftone icon" width="112" /></a>
 
 # Toniator
 
@@ -13,8 +13,8 @@ Built with Rust and GTK4, Toniator includes a visual Pattern Wizard, a personal
 Pattern library, and a headless command-line renderer. It is free software under
 the [GPL-3.0-only license](LICENSE).
 
-**Current prerelease: 0.3.1.**
-[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.3.1)
+**Current prerelease: 0.3.2.**
+[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.3.2)
 or [browse known issues](ISSUES.md).
 
 ## Examples
@@ -34,23 +34,31 @@ See [example settings and reproduction commands](docs/examples/README.md).
 ## Download and run
 
 Download **one** of the x86_64 packages from the
-[v0.2.0 release](https://github.com/ricperry/Toniator/releases/tag/v0.2.0).
-Both include the graphical app and CLI, with application ID `com.sbdd.Toniator`.
+[0.3.2 release](https://github.com/ricperry/Toniator/releases/tag/v0.3.2).
+Both include the graphical app and CLI, with application ID
+`io.github.ricperry.Toniator`.
+
+**Upgrading from 0.3.1 or earlier:** the Flatpak ID changed from
+`com.sbdd.Toniator`. The new Flatpak installs separately and uses a new private
+data directory. Existing settings and personal Patterns are not moved or deleted.
+Your `.toniator` projects remain ordinary files and can be opened from their
+existing locations if they use a supported format. Keep the old installation
+until you have recovered any settings or personal Patterns you need.
 
 ### AppImage
 
 In the folder containing your download:
 
 ```bash
-chmod +x Toniator-0.2.0-x86_64.AppImage
-./Toniator-0.2.0-x86_64.AppImage
+chmod +x Toniator-0.3.2-x86_64.AppImage
+./Toniator-0.3.2-x86_64.AppImage
 ```
 
 This build requires **glibc 2.39 or newer**; it was tested on Fedora 44/Wayland.
 If FUSE mounting is unavailable, run it with:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.2.0-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.3.2-x86_64.AppImage
 ```
 
 ### Flatpak
@@ -58,14 +66,14 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.2.0-x86_64.AppImage
 With Flatpak installed, run:
 
 ```bash
-flatpak install --user ./Toniator-0.2.0-x86_64.flatpak
-flatpak run com.sbdd.Toniator
+flatpak install --user ./Toniator-0.3.2-x86_64.flatpak
+flatpak run io.github.ricperry.Toniator
 ```
 
 The bundle uses the shared GNOME 50 runtime, which Flatpak may download during
 installation. It is distributed here on GitHub; it is not a Flathub listing.
 Flatpak keeps its own settings, recent files, and personal Patterns under
-`~/.var/app/com.sbdd.Toniator/`, separate from a native or AppImage installation.
+`~/.var/app/io.github.ricperry.Toniator/`, separate from a native or AppImage installation.
 
 Download `SHA256SUMS` alongside the packages to verify their integrity with
 `sha256sum --ignore-missing -c SHA256SUMS`. See the
@@ -89,7 +97,7 @@ scrolls within its own bounded area.
 
 Personal Patterns can be saved, updated, copied, renamed, and moved to recoverable
 trash. Saving a Pattern to your library is separate from applying it to artwork.
-In the development build, **New → Save preset** saves the whole design configuration
+**New → Save preset** saves the whole design configuration
 as a source-free `.toniator-preset`. **Load preset...** accepts that format or an
 intact `.toniator` project, applies all channel settings, and keeps your current
 artwork and canvas. Loading is one undoable change; saving a Preset does not save
@@ -103,10 +111,9 @@ PNG exports offer background, antialiasing, and output-size options. SVG exports
 keep a transparent background. RGB PNG defaults to black, CMYK to white, and
 source-color output to transparent.
 
-### Animate artwork in the development build
+### Animate artwork
 
-The combined animation/video work is implemented in the development checkout
-and undergoing final review; it is not part of the published 0.2.0 release.
+Toniator supports a Start/End animation workflow and silent video exports.
 
 1. Start a project with a video or animated image, or use **New → Import image
    sequence…** to review an ordered image list and its frame rate. Still images
@@ -132,7 +139,7 @@ Project Preset loading keeps the current artwork and timing. Audio is retained
 inside the original source but exports are silent. Variable-rate sources are
 sampled at the displayed project rate; frames may repeat or be skipped.
 Development builds need FFmpeg and ffprobe on PATH for moving media and video
-export. The development AppImage and Flatpak bundle their own software tools;
+export. The AppImage and Flatpak bundle their own software tools;
 see [the packaging guide](packaging/README.md).
 
 ## Build from source
@@ -182,9 +189,9 @@ Use an `.svg` output filename for vector export. Render a saved project using
 its stored settings with `toniator render -i artwork.toniator -o artwork.svg`.
 Run `toniator --help` or `toniator render --help` for the supported commands.
 
-In an AppImage, prepend `./Toniator-0.2.0-x86_64.AppImage --cli` in place of
+In an AppImage, prepend `./Toniator-0.3.2-x86_64.AppImage --cli` in place of
 `toniator`. The Flatpak CLI is available through
-`flatpak run --command=toniator com.sbdd.Toniator`; direct CLI file paths must be
+`flatpak run --command=toniator io.github.ricperry.Toniator`; direct CLI file paths must be
 accessible inside its sandbox.
 
 ### Build or publish the packages
@@ -193,16 +200,15 @@ The [packaging guide](packaging/README.md) covers building AppImage and Flatpak
 bundles with the GNOME SDK. [Release instructions](docs/RELEASING.md) explain
 GitHub tags, release notes, and uploading the packages.
 
-## Development status
+## Capabilities and limitations
 
-Toniator is a pre-release native rewrite. Project formats can change between
-development versions; obsolete formats are rejected rather than automatically
-migrated. Document-level **Presets** are implemented and user-accepted in the
-development build, separately from the personal **Pattern** library. See the
-[Gate 21B-5 record](docs/STAGE_21B_GATE5_IMPLEMENTATION.md) for the format and checks.
+Toniator is prerelease software. Project formats can change between development
+versions; obsolete formats are rejected rather than automatically migrated.
+Document-level Presets store a design configuration; the personal Pattern library
+stores reusable structural recipes.
 
-The 0.3.1 development build adds independent **Fill response** and **Source
-weighting** groups in Advanced Settings. Each has its own source component,
+Advanced Settings provides independent **Fill response** and **Source
+weighting** groups. Each has its own source component,
 inversion, gain, offset, black/white points, gamma, contrast and cutoff. Weighting
 also has its own strength and curve. The Pattern Editor defines whether weighting
 is used and the geometric min/max bounds; it carries no source mapping or tone
@@ -241,14 +247,19 @@ Details and follow-up work are in [ISSUES.md](ISSUES.md).
 Package workflow checks use an isolated Wayland compositor; they do not claim
 exhaustive GNOME/Mutter or native file-portal acceptance.
 
-For development history and architecture, see [ProgressTracker.md](ProgressTracker.md),
-the [rewrite plan](docs/GREENFIELD_REWRITE_PLAN.md), and
-[current UI references](docs/ui/REFERENCES.md). The protected
-[Addendum](Project%20Specification/Addendum.md) takes precedence over other design
-documents. The GTK app and CLI share the same domain, evaluation, and rendering
-core; the archived `ToniatorLegacy/` tree is a read-only reference.
+## Project documentation
 
-Contributions follow [AGENTS.md](AGENTS.md): bounded changes, focused checks,
-and inspection of real output. GTK controls need meaningful accessibility
-names, roles, state, and keyboard paths; private Wayland checks verify semantic
-actions and screenshots. Semantic-map is retired from this project's workflow.
+- [Known issues and limitations](ISSUES.md)
+- [Example artwork and reproduction commands](docs/examples/README.md)
+- [Package installation and build guide](packaging/README.md)
+- [Release notes](docs/releases/v0.3.2.md)
+- [Architecture and design specifications](Project%20Specification/ArchitectureSchema.md)
+
+The [Addendum](Project%20Specification/Addendum.md) takes precedence over other
+design specifications. The GTK app and CLI share the same domain, evaluation,
+and rendering core. Contributions should preserve that separation and include
+focused checks and inspection of affected output. GTK controls need meaningful
+accessibility names, roles, states, and keyboard paths.
+
+Release binaries are distributed through GitHub Releases. Historical implementations,
+local planning records, and design experiments are not part of the current source tree.

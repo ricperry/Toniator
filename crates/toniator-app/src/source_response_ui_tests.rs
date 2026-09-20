@@ -14,7 +14,7 @@ fn numeric_activation_defers_inspector_hierarchy_changes() {
     register_resources();
     gtk::init().unwrap();
     let app = gtk::Application::builder()
-        .application_id("com.sbdd.Toniator.InspectorRegression")
+        .application_id("io.github.ricperry.Toniator.InspectorRegression")
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     app.register(None::<&gio::Cancellable>).unwrap();

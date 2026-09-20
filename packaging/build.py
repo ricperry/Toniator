@@ -16,7 +16,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / 'target/packaging'
 DIST = ROOT / 'dist'
-APP_ID = 'com.sbdd.Toniator'
+APP_ID = 'io.github.ricperry.Toniator'
 SDK = 'org.gnome.Sdk'
 RUNTIME = 'org.gnome.Platform'
 BRANCH = '50'
@@ -81,7 +81,7 @@ def flatpak_bundle():
     run('flatpak', 'build-finish', '--command=toniator-app', '--socket=wayland',
         '--socket=fallback-x11', '--share=ipc', '--device=dri', build)
     run('flatpak', 'build-export', '--disable-sandbox', WORK / 'repo', build, 'stable')
-    bundle = DIST / 'Toniator-0.3.1-x86_64.flatpak'
+    bundle = DIST / 'Toniator-0.3.2-x86_64.flatpak'
     temporary = DIST / ('.Toniator-' + str(time.time_ns()) + '.flatpak')
     run('flatpak', 'build-bundle', WORK / 'repo', temporary, APP_ID, 'stable',
         '--runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo')
@@ -101,7 +101,7 @@ def main():
     if not args.skip_build:
         sdk_build()
     bundle = flatpak_bundle()
-    record = {'version': '0.3.1', 'app_id': APP_ID,
+    record = {'version': '0.3.2', 'app_id': APP_ID,
               'base_commit': output('git', 'rev-parse', 'HEAD'),
               'packaging_diff': output('git', 'diff', '--', 'crates/toniator-app/src/main.rs',
                                         'crates/toniator-app/src/main_view_state.rs'),

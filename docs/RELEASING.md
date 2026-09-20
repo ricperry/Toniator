@@ -1,68 +1,52 @@
 # Publishing a GitHub release
 
-A GitHub release attaches downloadable files to a Git tag. Toniator's AppImage
-and Flatpak are two assets of the same release. At the user's 2026-09-06 request,
-the 0.3.0 acceptance checkpoint also includes both packages in `dist/` through
-Git LFS, with ordinary tracked checksum and build-provenance files. Git stores
-small pointers; Git LFS stores the package bytes. Install Git LFS and run
-`git lfs pull` after cloning to materialize these packages. This supersedes the
-earlier convention of keeping every release binary out of the repository.
-The tag identifies the source used to build them. This does not submit the app
-to Flathub or provide a Flatpak automatic-update repository.
+Release binaries belong on GitHub Releases. `dist/` and local archives are
+ignored and must not be added to Git. The source tag identifies the committed
+source used to build the packages. This does not submit the app to Flathub.
 
 ## Prepare
 
-1. Review the intended source, README, icons, packaging metadata, and version.
-   Commit only the release's explicit paths. Preserve unrelated local work.
-2. Ensure the Cargo package versions, desktop AppStream release, and versioned
-   output names in the packaging scripts agree. The current recipes target the
-   published 0.3.1 prerelease. For the next release, update notes and the
-   AppStream release date when preparing publication.
-3. Run the focused checks for changed behavior, then rebuild the two packages
-   from the committed source using [the packaging guide](../packaging/README.md).
-   Verify `dist/build-info.json` names that commit and has no packaging Rust diff.
-4. Inspect the packaged icons and exercise the actual bundles. Verify checksums
-   with `sha256sum -c SHA256SUMS` from `dist/`. Review release notes and limitations.
-5. For the requested repository package checkpoint, stage the exact two package
-   paths with `git add -f`, plus `dist/SHA256SUMS` and `dist/build-info.json`.
-   Verify `.gitattributes` applies LFS filters before committing. A local commit
-   does not publish a release; the LFS pre-push hook transfers packages when the
-   separately authorized push runs.
+1. Review source, icon exports, README, desktop metadata, and release notes.
+   Keep all nine first-party Cargo versions, Cargo.lock, AppStream release,
+   and package filenames consistent. Use a new version for changed packages;
+   never move an existing published tag.
+2. Run focused checks for affected behavior and commit the release source.
+   Do not include local planning, research, or archived material.
+3. Build both packages from that commit using the
+   [packaging guide](../packaging/README.md). Verify `dist/build-info.json`
+   names the source commit and has an empty packaging Rust diff.
+4. Check packaged CLI versions, icons, desktop metadata, relevant output,
+   and GUI startup. Run `sha256sum -c SHA256SUMS` from `dist/` after both
+   bundles finish. Keep local evidence under `target/validation/`.
 
-## Publish with GitHub CLI
+## Publish
 
-The following is the published **0.2.0** procedure as a historical example;
-use the next version and its own notes for a new release. It assumes the source
-is committed on `main`, the release files are verified, and publication is
-authorized. Authenticate with `gh auth
-login` if needed. Never move an existing published tag to a different commit.
+After publication is authorized, push the source and a new annotated tag.
+For version 0.3.2:
 
-```bash
+```sh
 git push origin main
-git tag -a v0.2.0 -m 'Toniator 0.2.0'
-git push origin refs/tags/v0.2.0
-gh release create v0.2.0 \
-  dist/Toniator-0.2.0-x86_64.AppImage \
-  dist/Toniator-0.2.0-x86_64.flatpak \
+git tag -a v0.3.2 -m 'Toniator 0.3.2'
+git push origin refs/tags/v0.3.2
+gh release create v0.3.2 \
+  dist/Toniator-0.3.2-x86_64.AppImage \
+  dist/Toniator-0.3.2-x86_64.flatpak \
   dist/SHA256SUMS dist/build-info.json \
   --verify-tag --draft --prerelease \
-  --title 'Toniator 0.2.0' --notes-file docs/releases/v0.2.0.md
+  --title 'Toniator 0.3.2 — New application identity and icon' \
+  --notes-file docs/releases/v0.3.2.md
 ```
 
-Review the draft and its four attachments, then publish:
+Review the draft and attachments, then publish:
 
-```bash
-gh release edit v0.2.0 --draft=false
-gh release view v0.2.0 --web
+```sh
+gh release edit v0.3.2 --draft=false
 ```
 
-Use a new version/tag for a later release and update the paths and notes
-accordingly. Keep pre-release status until a stable release is explicitly chosen.
-Download the published assets into a fresh directory and check their hashes.
+Download all four published assets into a fresh directory, verify their hashes,
+and confirm the release tag resolves to the intended source commit. Retain
+prerelease status until a stable release is explicitly chosen.
 
-## Publish through the website
-
-Open the repository's **Releases** page, select **Draft a new release**, choose
-the pushed version tag, enter a title and release notes, and attach the two
-packages plus `SHA256SUMS` and `build-info.json`. Mark it as a pre-release while
-Toniator is in development, review the draft, then select **Publish release**.
+The same process can be performed through GitHub's Releases page by selecting
+the pushed tag, attaching the four files, and using the versioned release notes.
+Historical releases retain their original assets and identifiers.

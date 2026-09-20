@@ -109,7 +109,7 @@ use toniator_io::{load_preset, save_preset};
 use toniator_patterns::{LayeredPresetCatalog, PresetOrigin, PresetRegistry};
 use view_models::{LifecycleViewModel, project_document};
 
-const APP_ID: &str = "com.sbdd.Toniator";
+const APP_ID: &str = "io.github.ricperry.Toniator";
 const RESOURCE_PREFIX: &str = "/com/silentbutdigital/Toniator";
 const DEFAULT_CANVAS: CanvasSpec = CanvasSpec {
     width: 1024.0,

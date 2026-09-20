@@ -1,77 +1,33 @@
-# Baseline test artwork
+# Artwork and application resources
 
-These files are Toniator's project-wide source-artwork fixtures. Use
-them in relevant source loading, sampling, rendering, preview, and export tests
-alongside smaller synthetic fixtures for isolated edge cases.
+## App icon and interface artwork
 
-| File | Required characteristics | SHA-256 |
+- `icon-final.svg`: approved editable application icon.
+- `appicon.svg` and `appicon.png`: package exports; PNG is 512×512 RGBA.
+- `Stage21D_Mockup/SplashMockup.png`: compiled welcome-screen artwork.
+- `stage20s-preset-icons/`: compiled built-in Pattern gallery icons.
+- `stage20s-preset-icon-source.svg`: synthetic source used by gallery thumbnails.
+
+The historical directory names above remain because current resources consume
+them. Unused mockups, icon experiments, and font-authoring material are preserved
+locally under ignored `ToniatorLegacy/`, not required to build the application.
+
+## Sample artwork and test fixtures
+
+The raster, vector, and video samples can be used to explore Toniator and are
+also immutable test inputs. Derived test output belongs under `target/validation/`.
+
+| File | Description | SHA-256 |
 | --- | --- | --- |
-| `raster-sample.png` | 1024×1024, 8-bit sRGB RGBA; alpha spans fully transparent through fully opaque pixels. | `324ac232e319002a13fbcfac46538ca5d7e8ba8a127eea2eaf20e8ddb3ed2ef2` |
-| `vector-sample.svg` | 900×620 SVG with gradients, transparency, a stroked path, and a live `<text>` element containing `T`. | `42eb5e23111a5dbad66f2b1802a7cc06391c7ede829b99eb28aeb1ac91596e2e` |
-| `video-sample0001-0010.mp4` | 10-frame 1080×1920 H.264 High/yuv420p video at 6 fps (1.666667 seconds), reserved for future multiframe and animation work. | `c84d4a42cf62803d41ac35152fd3fea1719a664c633900cb946b9b5a6d6bef81` |
+| `raster-sample.png` | 1024×1024 sRGB RGBA, including transparency. | `324ac232e319002a13fbcfac46538ca5d7e8ba8a127eea2eaf20e8ddb3ed2ef2` |
+| `vector-sample.svg` | 900×620 SVG with gradients, paths, transparency, and live text. | `42eb5e23111a5dbad66f2b1802a7cc06391c7ede829b99eb28aeb1ac91596e2e` |
+| `video-sample0001-0010.mp4` | Ten 1080×1920 H.264 frames at 6 fps. | `c84d4a42cf62803d41ac35152fd3fea1719a664c633900cb946b9b5a6d6bef81` |
 
-Treat the source files as immutable baselines. Write derived artifacts under
-`target/validation/`, not `assets/`. Replacing or editing a baseline requires
-explicit approval plus synchronized hash, documentation, and test updates.
+The SVG's live text depends on available fonts. Exact text pixels are not a
+portable golden unless the test supplies a deterministic font.
 
-The video fixture is not part of the current still-image Stage 6 evaluation
-gate. Exercise it only in a later explicitly approved multiframe or animation
-stage.
-
-## Obsolete-schema rejection witness
-
-`HolidayMugs_2024_2025.toniator` is a tracked real-world container-v1,
-document-schema-v5 test case. The current-only schema-v7 boundary uses
-it solely to prove that obsolete documents are rejected rather than migrated.
-Preserve its bytes and hash; do not regenerate it or treat it as a current-
-format round-trip fixture.
-
-| File | Role | SHA-256 |
-| --- | --- | --- |
-| `HolidayMugs_2024_2025.toniator` | Obsolete schema-v5 rejection witness. | `253e3977ed0a9447ad9d4bf4df789ac51db7bec07721b51495206b261ba70d4b` |
-
-## Current schema-v7 persistence fixtures
-
-`raster-sample.toniator` and `vector-sample.toniator` are current schema-v7
-containers derived from the immutable still-image baselines at their intrinsic
-canvases. They retain normalized-fill intent, use the Stage 21A
-Density/Density-aspect authority, and carry the post-21A Curve Motif
-document-v7 boundary. They are current-format validation inputs, not migration
-fixtures.
-
-| File | SHA-256 |
-| --- | --- |
-| `raster-sample.toniator` | `637bb411ac52cd7a0c8b4f343cccac0f50d54d0202113da7268d1b103a49efdf` |
-| `vector-sample.toniator` | `ffe7d23a168eae795760db333ecddfaa1aee9fe84765ac00ba13bc753f1aff81` |
-
-## Stage 10 small-preview regressions
-
-`Reddit.png` and `Reddit.svg` are user-provided small-preview regression inputs,
-not replacements for the immutable project-wide baselines above. Keep their
-bytes unchanged. `Reddit.png` is 128×128 RGBA with SHA-256
-`83842723c8cfdf3bda1a4f76bfcde13175a623123380ce155de932dd319cd185`.
-`Reddit.svg` declares 13.509999×13.509999 with viewBox 123.51999×123.51999,
-and has SHA-256
-`f37963d793f17ca381e7d356ca1a0af1c85c548ccf5522a1c0a425e3b97acb45`.
-The accepted decoder resolves that SVG to a 14×14 source identity; tests must
-not reinterpret its declared sizing or use font-dependent pixel goldens.
-
-Tests using the SVG must prove that live text is accepted and handled by the
-declared text/font policy. Do not use exact text raster pixels as a portable
-golden until the test supplies a deterministic font; system font fallback can
-vary while the fixture itself remains stable.
-
-## Gate 21B-2 adopted built-in gallery icons
-
-`stage20s-preset-icon-source.svg` is a synthetic 100×100 black-to-white
-linear-gradient source used only to generate the exact 17 approved built-in
-gallery SVG subset under `stage20s-preset-icons/`. Each icon is canonical Stage
-20S preset geometry evaluated in RGB mode, serialized through the ordinary SVG
-renderer, and given an explicit icon-only black presentation rectangle so
-additive channel color is representative outside Toniator. The rectangle is
-not part of the document, scene identity, or ordinary SVG export policy.
-Curve Motif now uses its stored generated SVG alongside the other built-ins;
-only personal-library thumbnails use ordinary canonical synthetic-source
-materialization, evaluation, and rendering instead of stored icons. These
-source/icon files are neither immutable project-wide inputs nor a replacement
-for validation artifacts under `target/validation/`.
+`Reddit.png` and `Reddit.svg` are small-image source-identity regression fixtures.
+The `.toniator` files in this directory are retained test inputs, including
+historical schema and rejection witnesses; they are not a guarantee that every
+fixture opens in the current app. Import the PNG/SVG samples for a fresh project.
+The tests reference these files directly, so preserve their bytes.

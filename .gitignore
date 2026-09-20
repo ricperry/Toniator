@@ -3,15 +3,32 @@
 .DS_Store
 *.log
 /test-artifacts/
+/archivedStuff-notNeeded/
 
-# Machine-local Codex state. Project agents and skills are versioned.
-/.codex/*
-!/.codex/agents/
-!/.codex/agents/**
-/.agents/*
-!/.agents/skills/
-!/.agents/skills/**
+# Local development guidance and evidence are retained outside the public tree.
+/.codex/
+/.agents/
 /.codex-work/
+/.semantic-map/
+/AGENTS.md
+/ProgressTracker.md
+/PatternAndPresetTerminologyRefactor.md
+/Stage*_planning_contract.md
+/Toniator-*-notes.md
+/references.md
+/stage*-regression/
+/docs/*PLAN*.md
+/docs/*IMPLEMENTATION.md
+/docs/*PLANNING*.md
+/docs/STAGE_*.md
+/docs/PatternWizardPlan.md
+/docs/GTK_ACCESSIBILITY.md
+/docs/PRE_REFACTOR_RESEARCH*.md
+/docs/ui/
+/docs/research/
+__pycache__/
+*.pyc
+*~
 
 # Local planning and credential material.
 /getStartedPrompt.md
@@ -22,13 +39,5 @@
 /resume_hydration.txt
 /nextPrompt.txt
 
-# Read-only legacy reference: retain source and authored assets, not outputs.
-/ToniatorLegacy/target/
-/ToniatorLegacy/dist/
-/ToniatorLegacy/test-artifacts/
-/ToniatorLegacy/.codex-work/
-/ToniatorLegacy/archive/webapp/node_modules/
-/ToniatorLegacy/archive/webapp/dist/
-/ToniatorLegacy/archive/webapp/test-artifacts/
-/ToniatorLegacy/BuildScriptLog.txt
-/ToniatorLegacy/nextprompt.md
+# Local archives remain on disk; distribution binaries live on GitHub Releases.
+/ToniatorLegacy/

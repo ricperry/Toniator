@@ -15,7 +15,7 @@ import tarfile
 import time
 import urllib.request
 
-from build import BRANCH, ROOT, SDK, WORK, install, output, run
+from build import APP_ID, BRANCH, ROOT, SDK, WORK, install, output, run
 
 MEDIA = WORK / 'media'
 PREFIX = MEDIA / 'prefix'
@@ -65,7 +65,7 @@ def build_tools(jobs):
     """Compile static codec libraries and FFmpeg executables without GPL/nonfree options."""
     sources = prepare_sources()
     if not (WORK / 'sdk/metadata').exists():
-        run('flatpak', 'build-init', WORK / 'sdk', 'com.sbdd.Toniator', SDK,
+        run('flatpak', 'build-init', WORK / 'sdk', APP_ID, SDK,
             'org.gnome.Platform', BRANCH)
     builds = MEDIA / 'build' / sources.name
     svt = builds / 'svt'
