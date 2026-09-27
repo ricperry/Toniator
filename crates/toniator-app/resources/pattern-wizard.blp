@@ -28,6 +28,75 @@ template $ToniatorPatternWizardShell : Gtk.Box {
     hexpand: true;
     vexpand: true;
 
+    Gtk.Box {
+        orientation: vertical;
+        spacing: 10;
+        width-request: 320;
+        hexpand: false;
+        vexpand: true;
+        Gtk.Label {
+          label: "Pattern study";
+          xalign: 0;
+          styles [ "heading" ]
+        }
+        Gtk.Label {
+          label: "A neutral light-to-dark sample shows how your pattern responds to tone. Apply it to see the result on your artwork.";
+          xalign: 0;
+          wrap: true;
+          max-width-chars: 34;
+          styles [ "dim-label" ]
+        }
+        Gtk.Label wizard_preview_status {
+          xalign: 0;
+          wrap: true;
+          max-width-chars: 34;
+          styles [ "dim-label" ]
+        }
+        Gtk.ScrolledWindow wizard_preview_viewport {
+        height-request: 320;
+        min-content-height: 320;
+        max-content-height: 320;
+        hscrollbar-policy: never;
+        vscrollbar-policy: never;
+        propagate-natural-height: false;
+        hexpand: true;
+        vexpand: false;
+
+        Gtk.Overlay wizard_preview_frame {
+          hexpand: true;
+          vexpand: false;
+
+          Gtk.Picture wizard_preview {
+            content-fit: contain;
+            can-shrink: true;
+            hexpand: true;
+            vexpand: false;
+            styles [ "toniator-wizard-preview" ]
+          }
+
+          [overlay]
+          Gtk.DrawingArea wizard_guide_overlay {
+            can-target: false;
+            focusable: false;
+          }
+
+          [overlay]
+          Gtk.Spinner wizard_spinner {
+            visible: false;
+            halign: center;
+            valign: center;
+            tooltip-text: "Preview updating";
+          }
+        }
+      }
+      Gtk.Label wizard_guide_legend {
+        label: "Blue: guide shape · preview only";
+        visible: false;
+        xalign: 0;
+        wrap: true;
+      }
+      }
+
     Gtk.ScrolledWindow wizard_gallery_panel {
       hscrollbar-policy: never;
       vscrollbar-policy: automatic;
@@ -48,7 +117,7 @@ template $ToniatorPatternWizardShell : Gtk.Box {
         }
 
         Gtk.Label wizard_gallery_instruction {
-          label: "Choose a Pattern. Review and Apply checks it before changing your document. Customize walks through its layout and drawing settings. Create new starts with a fresh layout.";
+          label: "Select a Pattern to preview it, then Review Pattern to check and apply it. Customize changes its design; Create new starts a fresh layout.";
           xalign: 0;
           wrap: true;
           styles [ "dim-label" ]
@@ -58,7 +127,7 @@ template $ToniatorPatternWizardShell : Gtk.Box {
           selection-mode: none;
           row-spacing: 10;
           column-spacing: 10;
-          max-children-per-line: 3;
+          max-children-per-line: 2;
           min-children-per-line: 1;
           hexpand: true;
           valign: start;
@@ -67,43 +136,11 @@ template $ToniatorPatternWizardShell : Gtk.Box {
     }
 
     Gtk.Box wizard_page_panel {
-      orientation: vertical;
-      spacing: 10;
+      orientation: horizontal;
+      spacing: 20;
       hexpand: true;
       vexpand: true;
       width-request: 300;
-
-      Gtk.ScrolledWindow wizard_preview_viewport {
-        height-request: 200;
-        min-content-height: 200;
-        max-content-height: 200;
-        hscrollbar-policy: never;
-        vscrollbar-policy: never;
-        propagate-natural-height: false;
-        hexpand: true;
-        vexpand: false;
-
-        Gtk.Overlay wizard_preview_frame {
-          hexpand: true;
-          vexpand: false;
-
-          Gtk.Picture wizard_preview {
-            content-fit: contain;
-            can-shrink: true;
-            hexpand: true;
-            vexpand: false;
-            styles [ "toniator-wizard-preview" ]
-          }
-
-          [overlay]
-          Gtk.Spinner wizard_spinner {
-            visible: false;
-            halign: center;
-            valign: center;
-            tooltip-text: "Preview updating";
-          }
-        }
-      }
 
       Gtk.ScrolledWindow wizard_controls_scroll {
         hscrollbar-policy: never;
@@ -111,6 +148,7 @@ template $ToniatorPatternWizardShell : Gtk.Box {
         hexpand: true;
         vexpand: true;
         min-content-height: 220;
+        min-content-width: 440;
 
         Gtk.Box wizard_controls {
           orientation: vertical;

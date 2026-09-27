@@ -188,7 +188,9 @@ Add `-ProjectPath "C:\path\to\project.toniator"` to open a project. The app and 
 
 Both locked Windows products build natively with WSL stopped; the Windows build and runtime do not depend on WSL. Native CLI checks cover raster/vector output, Windows/Fedora project reopening, and supplied-video PNG, FFV1, and AV1 workflows. Native Windows UI Automation and screenshots cover startup, keyboard Feature Size editing with Undo/Redo readback, Unicode Save As/Recent Files reopening, raster and vector PNG/SVG export parity, document preset save/load/apply/undo, personal Pattern persistence and apply, and FFV1 export/cancellation. The GUI sequence-video export remains pending because the native foreground guard blocked keyboard input and the GTK menu item exposed no UIA InvokePattern. `Value.SetValue` remains a no-op for the tested GTK entry; cancellation's visible stopped state and UIA progress readback differ. See [Windows/Fedora port status](windows-port-status.md) for current evidence and caveats.
 
-This setup does not provide an installer, signing, or a hosted CI result. User acceptance remains pending.
+This setup does not provide an installer, signing, or a hosted CI result. The
+native source port is accepted, but that does not verify the new 0.3.3 features
+on Windows or provide a 0.3.3 binary package.
 
 ## Portable Windows development prerelease
 

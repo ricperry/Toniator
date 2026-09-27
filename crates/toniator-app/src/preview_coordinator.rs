@@ -103,6 +103,21 @@ pub(crate) fn accepts_submission(
 mod tests {
     use super::*;
 
+    /// Proves new viewport intent rejects an old raster before its replacement receives a ticket.
+    #[test]
+    fn viewport_intent_rejects_previous_raster_during_debounce() {
+        let mut coordinator = PreviewCoordinator::default();
+        coordinator.submit(1, 4);
+        assert!(coordinator.accept(1, 4));
+        coordinator.submit(1, 5);
+        coordinator.queue_refresh();
+        assert!(!coordinator.accept(1, 5));
+        assert_eq!(coordinator.last_accepted_ticket(), Some(4));
+        coordinator.submit(1, 6);
+        assert!(!coordinator.accept(1, 5));
+        assert!(coordinator.accept(1, 6));
+    }
+
     /// Preserves the accepted ticket while stale or superseded completions arrive.
     #[test]
     fn coordinator_rejects_stale_generation_without_losing_last_success() {

@@ -7,7 +7,7 @@ source used to build the packages. This does not submit the app to Flathub.
 ## Prepare
 
 1. Review source, icon exports, README, desktop metadata, and release notes.
-   Keep all nine first-party Cargo versions, Cargo.lock, AppStream release,
+   Keep all ten first-party Cargo versions, Cargo.lock, AppStream release,
    and package filenames consistent. Use a new version for changed packages;
    never move an existing published tag.
 2. Run focused checks for affected behavior and commit the release source.
@@ -19,28 +19,32 @@ source used to build the packages. This does not submit the app to Flathub.
    and GUI startup. Run `sha256sum -c SHA256SUMS` from `dist/` after both
    bundles finish. Keep local evidence under `target/validation/`.
 
+The existing Windows development ZIP is a separately versioned 0.3.2 package
+built from its verified debug binaries. Do not attach or relabel it as a 0.3.3
+Windows build; a current Windows package needs its own native build and checks.
+
 ## Publish
 
 After publication is authorized, push the source and a new annotated tag.
-For version 0.3.2:
+For version 0.3.3:
 
 ```sh
 git push origin main
-git tag -a v0.3.2 -m 'Toniator 0.3.2'
-git push origin refs/tags/v0.3.2
-gh release create v0.3.2 \
-  dist/Toniator-0.3.2-x86_64.AppImage \
-  dist/Toniator-0.3.2-x86_64.flatpak \
+git tag -a v0.3.3 -m 'Toniator 0.3.3'
+git push origin refs/tags/v0.3.3
+gh release create v0.3.3 \
+  dist/Toniator-0.3.3-x86_64.AppImage \
+  dist/Toniator-0.3.3-x86_64.flatpak \
   dist/SHA256SUMS dist/build-info.json \
   --verify-tag --draft --prerelease \
-  --title 'Toniator 0.3.2 — New application identity and icon' \
-  --notes-file docs/releases/v0.3.2.md
+  --title 'Toniator 0.3.3 — Sharper previews and scalable exports' \
+  --notes-file docs/releases/v0.3.3.md
 ```
 
 Review the draft and attachments, then publish:
 
 ```sh
-gh release edit v0.3.2 --draft=false
+gh release edit v0.3.3 --draft=false
 ```
 
 Download all four published assets into a fresh directory, verify their hashes,

@@ -1609,10 +1609,13 @@ fn reconstruct_recipe_family(
                         id,
                         maximum_attempts,
                         maximum_neighbor_checks,
+                        refinement,
                         ..
-                    } if *id == site_product_id => {
-                        Some((*maximum_attempts, *maximum_neighbor_checks))
-                    }
+                    } if *id == site_product_id => Some((
+                        *maximum_attempts,
+                        *maximum_neighbor_checks,
+                        refinement.clone(),
+                    )),
                     _ => None,
                 })
                 .ok_or_else(|| unsupported("random family references a missing site product"))?;
@@ -1625,6 +1628,7 @@ fn reconstruct_recipe_family(
                 exclusion,
                 maximum_attempts: limits.0,
                 maximum_neighbor_checks: limits.1,
+                refinement: limits.2,
             })
         }
         PatternFamily::ParametricCurve {
@@ -4431,15 +4435,43 @@ pub enum RandomSiteCharacter {
     /// Independent uniform candidates; close neighbors are permitted unless
     /// the separately declared exclusion mechanism rejects them.
     RawUniform,
-    /// Sequential dart throwing with a declared center-distance construction.
-    /// This is deliberately not an alias named "BlueNoise" or "Poisson".
+    /// Bridson active-frontier Poisson-disk placement with a declared minimum center distance.
     Even { minimum_center_distance: f64 },
-    /// Parent-centered Gaussian islands mixed with a uniform background.
+    /// Parent-centered Gaussian islands mixed with a uniform background. Cluster density is the
+    /// number of parent centers per one hundred requested sites.
     Clustered {
         cluster_density: f64,
         cluster_spread: f64,
         cluster_strength: f64,
     },
+    /// One jittered candidate per regular density cell.  The jitter value is
+    /// normalized: zero keeps each candidate at its cell center and one
+    /// permits the complete cell extent.
+    Stratified { jitter: f64 },
+}
+
+/// Independent deterministic refinement applied after a random-site process
+/// publishes its initial candidates.  The product owns these controls so the
+/// same relaxed sites feed every declared output.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RandomSiteRefinement {
+    /// Enables one or more bounded Lloyd iterations.
+    pub enabled: bool,
+    /// Uses the receiving channel's decoded artwork density as centroid mass.
+    pub density_weighted: bool,
+    /// Number of centroid updates, bounded by the domain descriptor contract.
+    pub iterations: u32,
+}
+
+impl Default for RandomSiteRefinement {
+    /// Supplies the current neutral no-refinement configuration for random recipes.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            density_weighted: false,
+            iterations: 4,
+        }
+    }
 }
 
 /// Density enters site placement before collision acceptance.  Artwork
@@ -4548,6 +4580,7 @@ pub enum PatternMechanism {
         exclusion_id: PatternMechanismId,
         maximum_attempts: u32,
         maximum_neighbor_checks: u32,
+        refinement: RandomSiteRefinement,
     },
 }
 
@@ -4971,6 +5004,45 @@ impl PatternDefinition {
         maximum_neighbor_checks: u32,
         coverage: CoveragePolicy,
     ) -> Self {
+        Self::random_sites_with_refinement(
+            id,
+            name,
+            base_id,
+            modulation_id,
+            exclusion_id,
+            site_id,
+            output_id,
+            character,
+            seed,
+            density_modulation,
+            exclusion,
+            maximum_attempts,
+            maximum_neighbor_checks,
+            RandomSiteRefinement::default(),
+            coverage,
+        )
+    }
+
+    /// Constructs a random-site mechanism chain with explicit Lloyd refinement
+    /// authority while preserving one shared site product for every output.
+    #[allow(clippy::too_many_arguments)]
+    pub fn random_sites_with_refinement(
+        id: PatternDefinitionId,
+        name: impl Into<String>,
+        base_id: PatternMechanismId,
+        modulation_id: PatternMechanismId,
+        exclusion_id: PatternMechanismId,
+        site_id: PatternMechanismId,
+        output_id: PatternOutputLayerId,
+        character: RandomSiteCharacter,
+        seed: u32,
+        density_modulation: SiteDensityModulation,
+        exclusion: SiteExclusionPolicy,
+        maximum_attempts: u32,
+        maximum_neighbor_checks: u32,
+        refinement: RandomSiteRefinement,
+        coverage: CoveragePolicy,
+    ) -> Self {
         Self {
             id,
             name: name.into(),
@@ -5001,6 +5073,7 @@ impl PatternDefinition {
                     exclusion_id,
                     maximum_attempts,
                     maximum_neighbor_checks,
+                    refinement,
                 },
             ],
             output_layers: vec![PatternOutputLayer::all(
@@ -6335,8 +6408,8 @@ impl Document {
     }
 
     /// Returns deterministic schema-derived descriptors from the exhaustive
-    /// field contract. Only the three state-dependent capability predicates
-    /// supply runtime context; no static metadata is repeated here.
+    /// field contract. Runtime topology and compatible references restrict enum choices;
+    /// no frontend or catalog identity participates in this authority.
     pub fn property_descriptors(&self) -> Vec<PropertyDescriptor> {
         let mut descriptors = vec![descriptor_from_contract(
             PropertyFieldId::SourceReference,
@@ -6624,6 +6697,12 @@ impl Document {
                                     descriptors.push(descriptor_from_contract(field, target));
                                 }
                             }
+                            RandomSiteCharacter::Stratified { .. } => {
+                                descriptors.push(descriptor_from_contract(
+                                    PropertyFieldId::RandomStratifiedJitter,
+                                    target,
+                                ));
+                            }
                         }
                     }
                     PatternMechanism::SiteDensityModulation { modulation, .. } => {
@@ -6673,12 +6752,21 @@ impl Document {
                             }
                         }
                     }
-                    PatternMechanism::RandomSiteProduct { .. } => {
+                    PatternMechanism::RandomSiteProduct { refinement, .. } => {
                         for field in [
                             PropertyFieldId::RandomMaximumAttempts,
                             PropertyFieldId::RandomMaximumNeighborChecks,
+                            PropertyFieldId::RandomLloydEnabled,
                         ] {
                             descriptors.push(descriptor_from_contract(field, target));
+                        }
+                        if refinement.enabled {
+                            for field in [
+                                PropertyFieldId::RandomLloydDensityWeighted,
+                                PropertyFieldId::RandomLloydIterations,
+                            ] {
+                                descriptors.push(descriptor_from_contract(field, target));
+                            }
                         }
                     }
                     PatternMechanism::StraightGuides { .. }
@@ -6759,7 +6847,29 @@ impl Document {
                         PropertyFieldId::ConnectionMaximumDegree,
                         PropertyFieldId::ConnectionMaximumDistance,
                     ] {
-                        descriptors.push(descriptor_from_contract(field, target));
+                        let descriptor = if field == PropertyFieldId::ConnectionProgram {
+                            let intersections = layer.site_mechanism_id().is_some_and(|id| {
+                                definition.mechanisms.iter().any(|mechanism| {
+                                    mechanism.id() == id && matches!(mechanism,
+                                        PatternMechanism::GuideIntersections { .. }
+                                        | PatternMechanism::SelectedGuideIntersections { .. })
+                                })
+                            });
+                            descriptor_with_runtime_context(
+                                field,
+                                target,
+                                DescriptorRuntimeContext::StructuralChoices {
+                                    choices: if intersections {
+                                        CONNECTION_PROGRAM_CHOICES
+                                    } else {
+                                        UNSTRUCTURED_CONNECTION_PROGRAM_CHOICES
+                                    },
+                                },
+                            )
+                        } else {
+                            descriptor_from_contract(field, target)
+                        };
+                        descriptors.push(descriptor);
                     }
                     if matches!(program, ConnectionProgram::RandomLinks { .. }) {
                         descriptors.push(descriptor_from_contract(
@@ -6810,7 +6920,23 @@ impl Document {
                         PropertyFieldId::OutputPrototype,
                         PropertyFieldId::OutputOrientation,
                     ] {
-                        descriptors.push(descriptor_from_contract(field, target));
+                        let descriptor = if field == PropertyFieldId::OutputOrientation {
+                            let guides = !orientation_guide_choices(definition, layer).is_empty();
+                            descriptor_with_runtime_context(
+                                field,
+                                target,
+                                DescriptorRuntimeContext::StructuralChoices {
+                                    choices: if guides {
+                                        MARK_ORIENTATION_CHOICES
+                                    } else {
+                                        FIXED_MARK_ORIENTATION_CHOICES
+                                    },
+                                },
+                            )
+                        } else {
+                            descriptor_from_contract(field, target)
+                        };
+                        descriptors.push(descriptor);
                     }
                     if matches!(
                         orientation,
@@ -6911,8 +7037,8 @@ impl Document {
                 }),
             (
                 PropertyFieldId::OutputOrientationDimension,
-                PropertyTarget::OutputLayer(definition_id, _),
-            ) => self.guide_dimension_reference_choices(definition_id),
+                PropertyTarget::OutputLayer(definition_id, output_id),
+            ) => self.guide_dimension_reference_choices(definition_id, output_id),
             (
                 PropertyFieldId::IntersectionDimensions,
                 PropertyTarget::Mechanism(definition_id, mechanism_id),
@@ -7003,10 +7129,11 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// Returns a stable missing-definition diagnostic without changing document state.
+    /// Returns a stable missing-definition or missing-output diagnostic without changing state.
     fn guide_dimension_reference_choices(
         &self,
         definition_id: PatternDefinitionId,
+        output_id: PatternOutputLayerId,
     ) -> Result<Vec<PropertyReferenceValue>, ValidationError> {
         let definition = self.definition(definition_id).ok_or_else(|| {
             ValidationError::new(
@@ -7014,21 +7141,8 @@ impl Document {
                 "guide reference definition is missing",
             )
         })?;
-        Ok(definition
-            .mechanisms
-            .iter()
-            .flat_map(|mechanism| match mechanism {
-                PatternMechanism::StraightGuideDimensions { dimensions, .. } => dimensions
-                    .iter()
-                    .map(|dimension| PropertyReferenceValue::GuideDimension(dimension.id))
-                    .collect::<Vec<_>>(),
-                PatternMechanism::GuideDimensions { dimensions, .. } => dimensions
-                    .iter()
-                    .map(|dimension| PropertyReferenceValue::GuideDimension(dimension.id))
-                    .collect::<Vec<_>>(),
-                _ => Vec::new(),
-            })
-            .collect())
+        let output = validate_output_layer_target(definition, output_id)?;
+        Ok(orientation_guide_choices(definition, output))
     }
 
     /// Returns the same-mechanism usage-publishing outputs that one filter may reference.
@@ -9522,6 +9636,7 @@ impl Document {
                 exclusion: _,
                 maximum_attempts: _,
                 maximum_neighbor_checks: _,
+                refinement: _,
             } => {
                 let id = self.allocate_definition_id()?;
                 let base_id = self.allocate_mechanism_id()?;
@@ -9817,6 +9932,7 @@ impl Document {
                 exclusion,
                 maximum_attempts,
                 maximum_neighbor_checks,
+                refinement,
                 ..
             } => {
                 let definition = self
@@ -9867,6 +9983,27 @@ impl Document {
                     PatternDefinitionEdit::SetRandomMaximumNeighborChecks {
                         mechanism_id: *product_id,
                         maximum_neighbor_checks: *maximum_neighbor_checks,
+                    },
+                )?;
+                self.apply_recipe_edit(
+                    definition_id,
+                    PatternDefinitionEdit::SetRandomLloydEnabled {
+                        mechanism_id: *product_id,
+                        enabled: refinement.enabled,
+                    },
+                )?;
+                self.apply_recipe_edit(
+                    definition_id,
+                    PatternDefinitionEdit::SetRandomLloydDensityWeighted {
+                        mechanism_id: *product_id,
+                        density_weighted: refinement.density_weighted,
+                    },
+                )?;
+                self.apply_recipe_edit(
+                    definition_id,
+                    PatternDefinitionEdit::SetRandomLloydIterations {
+                        mechanism_id: *product_id,
+                        iterations: refinement.iterations,
                     },
                 )?;
                 let (character_choice, character_updates) = recipe_random_transition(character);
@@ -10247,11 +10384,13 @@ impl Document {
                     exclusion_id,
                     maximum_attempts,
                     maximum_neighbor_checks,
+                    refinement,
                 } => PatternMechanism::RandomSiteProduct {
                     id: remap_mechanism(*id),
                     exclusion_id: remap_mechanism(*exclusion_id),
                     maximum_attempts: *maximum_attempts,
                     maximum_neighbor_checks: *maximum_neighbor_checks,
+                    refinement: refinement.clone(),
                 },
             })
             .collect();
@@ -10984,6 +11123,13 @@ fn recipe_random_transition(
                 ),
             ],
         ),
+        RandomSiteCharacter::Stratified { jitter } => (
+            RandomCharacterKind::Stratified,
+            vec![(
+                PropertyFieldId::RandomStratifiedJitter,
+                VariantTransitionValue::FiniteF64(*jitter),
+            )],
+        ),
     }
 }
 
@@ -11544,6 +11690,21 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                 *current = *cluster_strength;
             }
         }
+        PatternDefinitionEdit::SetRandomStratifiedJitter {
+            mechanism_id,
+            jitter,
+        } => {
+            if let Some(PatternMechanism::RandomSiteProcess {
+                character: RandomSiteCharacter::Stratified { jitter: current },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = *jitter;
+            }
+        }
         PatternDefinitionEdit::SetDensityModulationVariant {
             mechanism_id,
             modulation,
@@ -11631,6 +11792,42 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                 .find(|mechanism| mechanism.id() == *mechanism_id)
             {
                 *current_checks = *maximum_neighbor_checks;
+            }
+        }
+        PatternDefinitionEdit::SetRandomLloydEnabled {
+            mechanism_id,
+            enabled,
+        } => {
+            if let Some(PatternMechanism::RandomSiteProduct { refinement, .. }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                refinement.enabled = *enabled;
+            }
+        }
+        PatternDefinitionEdit::SetRandomLloydDensityWeighted {
+            mechanism_id,
+            density_weighted,
+        } => {
+            if let Some(PatternMechanism::RandomSiteProduct { refinement, .. }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                refinement.density_weighted = *density_weighted;
+            }
+        }
+        PatternDefinitionEdit::SetRandomLloydIterations {
+            mechanism_id,
+            iterations,
+        } => {
+            if let Some(PatternMechanism::RandomSiteProduct { refinement, .. }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                refinement.iterations = *iterations;
             }
         }
         PatternDefinitionEdit::SetOutputSiteProduct {
@@ -12376,6 +12573,13 @@ fn remap_definition_edit_with(
             mechanism_id: mechanism(*mechanism_id),
             cluster_strength: *cluster_strength,
         },
+        PatternDefinitionEdit::SetRandomStratifiedJitter {
+            mechanism_id,
+            jitter,
+        } => PatternDefinitionEdit::SetRandomStratifiedJitter {
+            mechanism_id: mechanism(*mechanism_id),
+            jitter: *jitter,
+        },
         PatternDefinitionEdit::SetDensityModulationVariant {
             mechanism_id,
             modulation,
@@ -12417,6 +12621,27 @@ fn remap_definition_edit_with(
         } => PatternDefinitionEdit::SetRandomMaximumNeighborChecks {
             mechanism_id: mechanism(*mechanism_id),
             maximum_neighbor_checks: *maximum_neighbor_checks,
+        },
+        PatternDefinitionEdit::SetRandomLloydEnabled {
+            mechanism_id,
+            enabled,
+        } => PatternDefinitionEdit::SetRandomLloydEnabled {
+            mechanism_id: mechanism(*mechanism_id),
+            enabled: *enabled,
+        },
+        PatternDefinitionEdit::SetRandomLloydDensityWeighted {
+            mechanism_id,
+            density_weighted,
+        } => PatternDefinitionEdit::SetRandomLloydDensityWeighted {
+            mechanism_id: mechanism(*mechanism_id),
+            density_weighted: *density_weighted,
+        },
+        PatternDefinitionEdit::SetRandomLloydIterations {
+            mechanism_id,
+            iterations,
+        } => PatternDefinitionEdit::SetRandomLloydIterations {
+            mechanism_id: mechanism(*mechanism_id),
+            iterations: *iterations,
         },
         PatternDefinitionEdit::SetOutputSiteProduct {
             output_layer_id,
@@ -12990,6 +13215,19 @@ fn validate_definition_edit(
                 "field is inactive for the current random character",
             )),
         },
+        PatternDefinitionEdit::SetRandomStratifiedJitter {
+            mechanism_id,
+            jitter,
+        } => match validate_random_process_target(definition, *mechanism_id)? {
+            RandomSiteCharacter::Stratified { .. } => validate_unit_component(
+                *jitter,
+                "pattern_definitions.mechanisms.random_sites.stratified_jitter",
+            ),
+            _ => Err(ValidationError::new(
+                "pattern_definitions.mechanisms.random_sites.stratified_jitter",
+                "field is inactive for the current random character",
+            )),
+        },
         PatternDefinitionEdit::SetCurveMotifAuthoredStructure {
             output_layer_id, ..
         } => matches!(
@@ -13007,7 +13245,7 @@ fn validate_definition_edit(
             mechanism_id,
             cluster_density,
         } => match validate_random_process_target(definition, *mechanism_id)? {
-            RandomSiteCharacter::Clustered { .. } => validate_positive_finite(
+            RandomSiteCharacter::Clustered { .. } => validate_cluster_density(
                 *cluster_density,
                 "pattern_definitions.mechanisms.random_sites.cluster_density",
             ),
@@ -13109,6 +13347,21 @@ fn validate_definition_edit(
                     "random product work limits must be nonzero",
                 ))
             }
+        }
+        PatternDefinitionEdit::SetRandomLloydEnabled { mechanism_id, .. }
+        | PatternDefinitionEdit::SetRandomLloydDensityWeighted { mechanism_id, .. } => {
+            validate_random_product_target(definition, *mechanism_id).map(|_| ())
+        }
+        PatternDefinitionEdit::SetRandomLloydIterations {
+            mechanism_id,
+            iterations,
+        } => {
+            validate_random_product_target(definition, *mechanism_id)?;
+            validate_random_site_refinement(&RandomSiteRefinement {
+                enabled: true,
+                density_weighted: false,
+                iterations: *iterations,
+            })
         }
         PatternDefinitionEdit::SetOutputSiteProduct {
             output_layer_id,
@@ -13932,15 +14185,16 @@ fn validate_and_project_definition(
 
 /// Validates one complete typed pattern definition and its ordered family/output capability chain.
 /// The companion projection is derived only after this exhaustive structural validation succeeds.
+/// Each definition has exactly one drawing output; separate channel definitions provide mixtures.
 ///
 /// # Errors
 ///
 /// Returns the first stable family, mechanism, output, coverage, or payload diagnostic.
 fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), ValidationError> {
-    if definition.output_layers.is_empty() {
+    if definition.output_layers.len() != 1 {
         return Err(ValidationError::new(
             "pattern.output_layers.cardinality",
-            "pattern definitions require at least one output layer",
+            "each channel pattern requires exactly one drawing layer; combine patterns across channels or composite separate renders externally",
         ));
     }
     let mut output_ids = HashSet::new();
@@ -15091,6 +15345,7 @@ fn random_character_kind(character: &RandomSiteCharacter) -> RandomCharacterKind
         RandomSiteCharacter::RawUniform => RandomCharacterKind::RawUniform,
         RandomSiteCharacter::Even { .. } => RandomCharacterKind::Even,
         RandomSiteCharacter::Clustered { .. } => RandomCharacterKind::Clustered,
+        RandomSiteCharacter::Stratified { .. } => RandomCharacterKind::Stratified,
     }
 }
 
@@ -15169,6 +15424,7 @@ fn validate_random_site_definition(
             exclusion_id: product_exclusion_id,
             maximum_attempts,
             maximum_neighbor_checks,
+            refinement,
         },
     ] = definition.mechanisms.as_slice()
     else {
@@ -15205,6 +15461,7 @@ fn validate_random_site_definition(
             "random-site maximum neighbor checks must be nonzero",
         ));
     }
+    validate_random_site_refinement(refinement)?;
     let realizations = output_realizations(definition);
     let [output] = realizations.as_slice() else {
         return Err(ValidationError::new(
@@ -15264,7 +15521,7 @@ fn validate_random_character(character: &RandomSiteCharacter) -> Result<(), Vali
             cluster_spread,
             cluster_strength,
         } => {
-            validate_positive_finite(
+            validate_cluster_density(
                 *cluster_density,
                 "pattern_definitions.mechanisms.random_sites.cluster_density",
             )?;
@@ -15277,6 +15534,44 @@ fn validate_random_character(character: &RandomSiteCharacter) -> Result<(), Vali
                 "pattern_definitions.mechanisms.random_sites.cluster_strength",
             )
         }
+        RandomSiteCharacter::Stratified { jitter } => validate_unit_component(
+            *jitter,
+            "pattern_definitions.mechanisms.random_sites.stratified_jitter",
+        ),
+    }
+}
+
+/// Validates bounded Lloyd controls without tying them to a particular random algorithm.
+///
+/// # Errors
+///
+/// Returns a stable iteration diagnostic when the persisted work bound is outside `1..=12`.
+fn validate_random_site_refinement(
+    refinement: &RandomSiteRefinement,
+) -> Result<(), ValidationError> {
+    if (1..=12).contains(&refinement.iterations) {
+        Ok(())
+    } else {
+        Err(ValidationError::new(
+            "pattern_definitions.mechanisms.random_sites.lloyd_iterations",
+            "Lloyd relaxation iterations must be between 1 and 12",
+        ))
+    }
+}
+
+/// Validates the number of cluster parents expressed per one hundred requested sites.
+///
+/// # Errors
+///
+/// Returns the supplied stable path when the percentage lies outside `0.1..=100`.
+fn validate_cluster_density(value: f64, path: &'static str) -> Result<(), ValidationError> {
+    if value.is_finite() && (0.1..=100.0).contains(&value) {
+        Ok(())
+    } else {
+        Err(ValidationError::new(
+            path,
+            "cluster frequency must be between 0.1 and 100 centers per 100 points",
+        ))
     }
 }
 
@@ -15694,6 +15989,45 @@ fn validate_generalized_output_layers_ids(
         )),
     }?;
     validate_mark_orientation_site_provenance(orientation, site_mechanism)
+}
+
+/// Lists orientation references using the same provenance validation as authored mark outputs.
+/// No guide is offered when the output has no point product or consumes several Along Guides rows.
+fn orientation_guide_choices(
+    definition: &PatternDefinition,
+    output: &PatternOutputLayer,
+) -> Vec<PropertyReferenceValue> {
+    let Some(site) = output.site_mechanism_id().and_then(|id| {
+        definition
+            .mechanisms
+            .iter()
+            .find(|mechanism| mechanism.id() == id)
+    }) else {
+        return Vec::new();
+    };
+    definition
+        .mechanisms
+        .iter()
+        .flat_map(|mechanism| match mechanism {
+            PatternMechanism::StraightGuideDimensions { dimensions, .. } => dimensions
+                .iter()
+                .map(|dimension| dimension.id)
+                .collect::<Vec<_>>(),
+            PatternMechanism::GuideDimensions { dimensions, .. } => dimensions
+                .iter()
+                .map(|dimension| dimension.id)
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .filter(|id| {
+            validate_mark_orientation_site_provenance(
+                &MarkOrientation::GuideTangent { dimension_id: *id },
+                site,
+            )
+            .is_ok()
+        })
+        .map(PropertyReferenceValue::GuideDimension)
+        .collect()
 }
 
 /// Validates that a guide-relative mark is present in every emitted Along Guides provenance.
@@ -16500,6 +16834,7 @@ pub enum PropertyFieldId {
     RandomClusterDensity,
     RandomClusterSpread,
     RandomClusterStrength,
+    RandomStratifiedJitter,
     RandomSeed,
     RandomDensityModulation,
     ArtworkWeightMappingComponent,
@@ -16519,6 +16854,9 @@ pub enum PropertyFieldId {
     VisibleMarkMargin,
     RandomMaximumAttempts,
     RandomMaximumNeighborChecks,
+    RandomLloydEnabled,
+    RandomLloydDensityWeighted,
+    RandomLloydIterations,
     OutputSiteProduct,
     OutputPrototype,
     OutputAuthoredClosedShape,
@@ -16615,6 +16953,7 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::RandomClusterDensity,
     PropertyFieldId::RandomClusterSpread,
     PropertyFieldId::RandomClusterStrength,
+    PropertyFieldId::RandomStratifiedJitter,
     PropertyFieldId::RandomSeed,
     PropertyFieldId::RandomDensityModulation,
     PropertyFieldId::ArtworkWeightMappingComponent,
@@ -16634,6 +16973,9 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::VisibleMarkMargin,
     PropertyFieldId::RandomMaximumAttempts,
     PropertyFieldId::RandomMaximumNeighborChecks,
+    PropertyFieldId::RandomLloydEnabled,
+    PropertyFieldId::RandomLloydDensityWeighted,
+    PropertyFieldId::RandomLloydIterations,
     PropertyFieldId::OutputSiteProduct,
     PropertyFieldId::OutputPrototype,
     PropertyFieldId::OutputAuthoredClosedShape,
@@ -16725,6 +17067,7 @@ pub enum RandomCharacterKind {
     RawUniform,
     Even,
     Clustered,
+    Stratified,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DensityModulationKind {
@@ -16798,6 +17141,8 @@ pub enum PropertyDependency {
     RandomProcess,
     EvenRandomProcess,
     ClusteredRandomProcess,
+    StratifiedRandomProcess,
+    LloydRefinement,
     ArtworkWeightedDensity,
     MinimumCenterExclusion,
     VisibleMarkExclusion,
@@ -16824,6 +17169,8 @@ pub enum PropertyApplicability {
     RandomProcess,
     EvenRandomProcess,
     ClusteredRandomProcess,
+    StratifiedRandomProcess,
+    LloydRefinement,
     ArtworkWeightedDensity,
     MinimumCenterExclusion,
     VisibleMarkExclusion,
@@ -16873,6 +17220,8 @@ pub enum PropertyChoicePolicy {
     ModelRolePaint,
     /// Resolves filter kinds from the active output's compatible site-usage targets.
     CompatibleSiteUseFilter,
+    /// Resolves construction choices from the output's available topology and references.
+    CompatibleStructure,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16919,6 +17268,7 @@ pub enum PropertyCommandKind {
     SetRandomClusterDensity,
     SetRandomClusterSpread,
     SetRandomClusterStrength,
+    SetRandomStratifiedJitter,
     SetDensityModulationVariant,
     SetSourceWeightingField,
     SetExclusionVariant,
@@ -16926,6 +17276,9 @@ pub enum PropertyCommandKind {
     SetVisibleMarkMargin,
     SetRandomMaximumAttempts,
     SetRandomMaximumNeighborChecks,
+    SetRandomLloydEnabled,
+    SetRandomLloydDensityWeighted,
+    SetRandomLloydIterations,
     SetOutputSiteProduct,
     SetOutputMarkPrototype,
     SetOutputAuthoredClosedShape,
@@ -17330,6 +17683,7 @@ fn property_value_for_mechanism(
                 RandomSiteCharacter::RawUniform => RandomCharacterKind::RawUniform,
                 RandomSiteCharacter::Even { .. } => RandomCharacterKind::Even,
                 RandomSiteCharacter::Clustered { .. } => RandomCharacterKind::Clustered,
+                RandomSiteCharacter::Stratified { .. } => RandomCharacterKind::Stratified,
             },
         )),
         (PropertyFieldId::RandomSeed, PatternMechanism::RandomSiteProcess { seed, .. }) => {
@@ -17372,6 +17726,13 @@ fn property_value_for_mechanism(
                 ..
             },
         ) => PropertyCurrentValueKind::FiniteF64(*cluster_strength),
+        (
+            PropertyFieldId::RandomStratifiedJitter,
+            PatternMechanism::RandomSiteProcess {
+                character: RandomSiteCharacter::Stratified { jitter },
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(*jitter),
         (
             PropertyFieldId::RandomDensityModulation,
             PatternMechanism::SiteDensityModulation { modulation, .. },
@@ -17417,6 +17778,18 @@ fn property_value_for_mechanism(
                 ..
             },
         ) => PropertyCurrentValueKind::U32(*maximum_neighbor_checks),
+        (
+            PropertyFieldId::RandomLloydEnabled,
+            PatternMechanism::RandomSiteProduct { refinement, .. },
+        ) => PropertyCurrentValueKind::Boolean(refinement.enabled),
+        (
+            PropertyFieldId::RandomLloydDensityWeighted,
+            PatternMechanism::RandomSiteProduct { refinement, .. },
+        ) => PropertyCurrentValueKind::Boolean(refinement.density_weighted),
+        (
+            PropertyFieldId::RandomLloydIterations,
+            PatternMechanism::RandomSiteProduct { refinement, .. },
+        ) => PropertyCurrentValueKind::U32(refinement.iterations),
         _ => unreachable!("active mechanism descriptor field"),
     }
 }
@@ -17592,7 +17965,7 @@ fn random_transition_fields(
                     _ => unreachable!("base selector is current"),
                 }
             } else {
-                1.0
+                8.0
             };
             Ok(vec![transition_field(
                 PropertyFieldId::RandomEvenMinimumCenterDistance,
@@ -17612,7 +17985,7 @@ fn random_transition_fields(
                     _ => unreachable!("base selector is current"),
                 }
             } else {
-                (1.0, 1.0, 1.0)
+                (5.0, 16.0, 0.85)
             };
             Ok(vec![
                 transition_field(
@@ -17634,6 +18007,22 @@ fn random_transition_fields(
                     Vec::new(),
                 ),
             ])
+        }
+        RandomCharacterKind::Stratified => {
+            let jitter = if base == choice {
+                match character {
+                    RandomSiteCharacter::Stratified { jitter } => *jitter,
+                    _ => unreachable!("base selector is current"),
+                }
+            } else {
+                0.8
+            };
+            Ok(vec![transition_field(
+                PropertyFieldId::RandomStratifiedJitter,
+                target,
+                VariantTransitionValue::FiniteF64(jitter),
+                Vec::new(),
+            )])
         }
     }
 }
@@ -18085,17 +18474,7 @@ fn orientation_transition_fields(
     if choice == MarkOrientationKind::Fixed {
         return Ok(Vec::new());
     }
-    let reference_choices = definition
-        .mechanisms
-        .iter()
-        .flat_map(|mechanism| match mechanism {
-            PatternMechanism::StraightGuideDimensions { dimensions, .. } => dimensions
-                .iter()
-                .map(|dimension| PropertyReferenceValue::GuideDimension(dimension.id))
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
-        })
-        .collect::<Vec<_>>();
+    let reference_choices = orientation_guide_choices(definition, layer);
     let existing = if base == choice {
         match &layer.realization {
             PatternOutputRealization::MarkPrototype {
@@ -18435,6 +18814,9 @@ fn transition_draft_edit(
                         draft,
                         PropertyFieldId::RandomClusterStrength,
                     )?,
+                },
+                RandomCharacterKind::Stratified => RandomSiteCharacter::Stratified {
+                    jitter: transition_f64(draft, PropertyFieldId::RandomStratifiedJitter)?,
                 },
             };
             Ok(PatternDefinitionEdit::SetRandomCharacter {
@@ -18799,6 +19181,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::RandomClusterDensity => PropertyCommandKind::SetRandomClusterDensity,
             PropertyFieldId::RandomClusterSpread => PropertyCommandKind::SetRandomClusterSpread,
             PropertyFieldId::RandomClusterStrength => PropertyCommandKind::SetRandomClusterStrength,
+            PropertyFieldId::RandomStratifiedJitter => {
+                PropertyCommandKind::SetRandomStratifiedJitter
+            }
             PropertyFieldId::RandomDensityModulation => {
                 PropertyCommandKind::SetDensityModulationVariant
             }
@@ -18825,6 +19210,11 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::RandomMaximumNeighborChecks => {
                 PropertyCommandKind::SetRandomMaximumNeighborChecks
             }
+            PropertyFieldId::RandomLloydEnabled => PropertyCommandKind::SetRandomLloydEnabled,
+            PropertyFieldId::RandomLloydDensityWeighted => {
+                PropertyCommandKind::SetRandomLloydDensityWeighted
+            }
+            PropertyFieldId::RandomLloydIterations => PropertyCommandKind::SetRandomLloydIterations,
             PropertyFieldId::OutputSiteProduct => PropertyCommandKind::SetOutputSiteProduct,
             PropertyFieldId::OutputPrototype => PropertyCommandKind::SetOutputMarkPrototype,
             PropertyFieldId::OutputAuthoredClosedShape => {
@@ -18874,6 +19264,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::ModeledMappingInverted
             | PropertyFieldId::ArtworkWeightMappingInverted
             | PropertyFieldId::Visibility
+            | PropertyFieldId::RandomLloydEnabled
+            | PropertyFieldId::RandomLloydDensityWeighted
             | PropertyFieldId::CurveMotifMirrorAlternateRows => PropertyValueKind::Boolean,
             PropertyFieldId::CurveMotifAlternateRowPhase => PropertyValueKind::OptionalFiniteF64,
             PropertyFieldId::CoverageGuardSteps
@@ -18883,7 +19275,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ConnectionSeed
             | PropertyFieldId::MazeSeed
             | PropertyFieldId::RandomMaximumAttempts
-            | PropertyFieldId::RandomMaximumNeighborChecks => PropertyValueKind::U32,
+            | PropertyFieldId::RandomMaximumNeighborChecks
+            | PropertyFieldId::RandomLloydIterations => PropertyValueKind::U32,
             PropertyFieldId::LegacyMappingComponent
             | PropertyFieldId::LegacyMappingPlacement
             | PropertyFieldId::ModeledMappingComponent
@@ -18946,7 +19339,6 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::GuideStackSpacingMultiplier
             | PropertyFieldId::AlongGuideIntervalMultiplier
             | PropertyFieldId::RandomEvenMinimumCenterDistance
-            | PropertyFieldId::RandomClusterDensity
             | PropertyFieldId::RandomClusterSpread
             | PropertyFieldId::ExclusionMinimumCenterDistance
             | PropertyFieldId::RandomMaximumAttempts
@@ -19004,15 +19396,27 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ColorAlpha
             | PropertyFieldId::Opacity
             | PropertyFieldId::RandomClusterStrength
+            | PropertyFieldId::RandomStratifiedJitter
             | PropertyFieldId::ArtworkWeightStrength => unit_bounds(),
+            PropertyFieldId::RandomLloydIterations => Some(PropertyBounds {
+                minimum: Some(1.0),
+                minimum_inclusive: true,
+                maximum: Some(12.0),
+                maximum_inclusive: true,
+            }),
+            PropertyFieldId::RandomClusterDensity => Some(PropertyBounds {
+                minimum: Some(0.1),
+                minimum_inclusive: true,
+                maximum: Some(100.0),
+                maximum_inclusive: true,
+            }),
             _ => None,
         },
         unit: match field {
             PropertyFieldId::Density
             | PropertyFieldId::DensityAspect
             | PropertyFieldId::GuideSpacingMultiplier
-            | PropertyFieldId::AlongGuideIntervalMultiplier
-            | PropertyFieldId::RandomClusterDensity => PropertyUnit::Density,
+            | PropertyFieldId::AlongGuideIntervalMultiplier => PropertyUnit::Density,
             PropertyFieldId::RotationDegrees
             | PropertyFieldId::ShapeRotationDegrees
             | PropertyFieldId::GuideBaselineAngle => PropertyUnit::Degrees,
@@ -19047,6 +19451,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ModeledMappingCutoff
             | PropertyFieldId::CurveResponseBias
             | PropertyFieldId::RandomClusterStrength
+            | PropertyFieldId::RandomStratifiedJitter
             | PropertyFieldId::ArtworkWeightMappingGain
             | PropertyFieldId::ArtworkWeightMappingBias
             | PropertyFieldId::ArtworkWeightMappingBlackPoint
@@ -19060,7 +19465,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ConnectionSeed
             | PropertyFieldId::MazeSeed
             | PropertyFieldId::RandomMaximumAttempts
-            | PropertyFieldId::RandomMaximumNeighborChecks => PropertyUnit::Count,
+            | PropertyFieldId::RandomMaximumNeighborChecks
+            | PropertyFieldId::RandomClusterDensity => PropertyUnit::Count,
+            PropertyFieldId::RandomLloydIterations => PropertyUnit::Count,
             _ => PropertyUnit::None,
         },
         applicability: match field {
@@ -19116,6 +19523,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::RandomClusterStrength => {
                 PropertyApplicability::ClusteredRandomProcess
             }
+            PropertyFieldId::RandomStratifiedJitter => {
+                PropertyApplicability::StratifiedRandomProcess
+            }
             PropertyFieldId::RandomDensityModulation => {
                 PropertyApplicability::CurrentDensityModulation
             }
@@ -19126,6 +19536,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::VisibleMarkMargin => PropertyApplicability::VisibleMarkExclusion,
             PropertyFieldId::RandomMaximumAttempts
             | PropertyFieldId::RandomMaximumNeighborChecks => PropertyApplicability::RandomProcess,
+            PropertyFieldId::RandomLloydEnabled
+            | PropertyFieldId::RandomLloydDensityWeighted
+            | PropertyFieldId::RandomLloydIterations => PropertyApplicability::LloydRefinement,
             PropertyFieldId::OutputSiteProduct
             | PropertyFieldId::OutputPrototype
             | PropertyFieldId::OutputOrientation => PropertyApplicability::MarkPrototypeOutput,
@@ -19234,6 +19647,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
                 | PropertyFieldId::RandomClusterDensity
                 | PropertyFieldId::RandomClusterSpread
                 | PropertyFieldId::RandomClusterStrength
+                | PropertyFieldId::RandomStratifiedJitter
                 | PropertyFieldId::RandomSeed
                 | PropertyFieldId::RandomDensityModulation
                 | PropertyFieldId::RandomExclusion
@@ -19241,6 +19655,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
                 | PropertyFieldId::VisibleMarkMargin
                 | PropertyFieldId::RandomMaximumAttempts
                 | PropertyFieldId::RandomMaximumNeighborChecks
+                | PropertyFieldId::RandomLloydEnabled
+                | PropertyFieldId::RandomLloydDensityWeighted
+                | PropertyFieldId::RandomLloydIterations
                 | PropertyFieldId::OutputSiteProduct
                 | PropertyFieldId::OutputPrototype
                 | PropertyFieldId::OutputAuthoredClosedShape
@@ -19288,6 +19705,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
         },
         choice_policy: match field {
             PropertyFieldId::Paint => PropertyChoicePolicy::ModelRolePaint,
+            PropertyFieldId::OutputOrientation | PropertyFieldId::ConnectionProgram => {
+                PropertyChoicePolicy::CompatibleStructure
+            }
             PropertyFieldId::OutputSiteUseFilterKind => {
                 PropertyChoicePolicy::CompatibleSiteUseFilter
             }
@@ -19334,6 +19754,7 @@ const RANDOM_CHARACTER_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::RandomCharacter(RandomCharacterKind::RawUniform),
     PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Even),
     PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Clustered),
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Stratified),
 ];
 const DENSITY_MODULATION_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::DensityModulation(DensityModulationKind::Uniform),
@@ -19357,6 +19778,10 @@ const MARK_ORIENTATION_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideTangent),
     PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideNormal),
 ];
+const FIXED_MARK_ORIENTATION_CHOICES: &[PropertyEnumChoice] =
+    &[PropertyEnumChoice::MarkOrientation(
+        MarkOrientationKind::Fixed,
+    )];
 const SITE_USE_FILTER_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::SiteUseFilter(SiteUseFilterKind::All),
     PropertyEnumChoice::SiteUseFilter(SiteUseFilterKind::SitesUsedBy),
@@ -19368,6 +19793,10 @@ const CONNECTION_PROGRAM_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::ConnectionProgram(ConnectionProgramKind::NearestLinks),
     PropertyEnumChoice::ConnectionProgram(ConnectionProgramKind::RandomLinks),
     PropertyEnumChoice::ConnectionProgram(ConnectionProgramKind::GridSpanningTree),
+];
+const UNSTRUCTURED_CONNECTION_PROGRAM_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::ConnectionProgram(ConnectionProgramKind::NearestLinks),
+    PropertyEnumChoice::ConnectionProgram(ConnectionProgramKind::RandomLinks),
 ];
 const GUIDE_PROTOTYPE_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::GuidePrototype(GuidePrototypeKind::AuthoredOpenPath),
@@ -19422,6 +19851,10 @@ const fn dependency_for_contract(
         PropertyApplicability::RandomProcess => PropertyDependency::RandomProcess,
         PropertyApplicability::EvenRandomProcess => PropertyDependency::EvenRandomProcess,
         PropertyApplicability::ClusteredRandomProcess => PropertyDependency::ClusteredRandomProcess,
+        PropertyApplicability::StratifiedRandomProcess => {
+            PropertyDependency::StratifiedRandomProcess
+        }
+        PropertyApplicability::LloydRefinement => PropertyDependency::LloydRefinement,
         PropertyApplicability::ArtworkWeightedDensity => PropertyDependency::ArtworkWeightedDensity,
         PropertyApplicability::MinimumCenterExclusion => PropertyDependency::MinimumCenterExclusion,
         PropertyApplicability::VisibleMarkExclusion => PropertyDependency::VisibleMarkExclusion,
@@ -19445,6 +19878,9 @@ const fn dependency_for_contract(
 
 #[derive(Clone, Copy)]
 enum DescriptorRuntimeContext {
+    StructuralChoices {
+        choices: &'static [PropertyEnumChoice],
+    },
     Paint {
         choices: &'static [PropertyEnumChoice],
         dependency: PropertyDependency,
@@ -19506,7 +19942,8 @@ const fn descriptor_with_runtime_context(
             dependency,
             support,
         } => (contract.choices, dependency, support),
-        DescriptorRuntimeContext::SiteUseFilter { choices } => (
+        DescriptorRuntimeContext::SiteUseFilter { choices }
+        | DescriptorRuntimeContext::StructuralChoices { choices } => (
             choices,
             dependency_for_contract(contract.applicability, PropertyDependency::Always),
             contract.structural_support,
@@ -19788,6 +20225,7 @@ pub enum PatternStructureRecipe {
         exclusion: SiteExclusionPolicy,
         maximum_attempts: u32,
         maximum_neighbor_checks: u32,
+        refinement: RandomSiteRefinement,
     },
     /// ID-free intent for the existing finite parametric family and optional equal-arc sites.
     ParametricCurve {
@@ -20039,8 +20477,9 @@ impl PatternDefinitionRecipe {
                     seed: 1,
                     density_modulation: SiteDensityModulation::Uniform,
                     exclusion: SiteExclusionPolicy::None,
-                    maximum_attempts: 100_000,
-                    maximum_neighbor_checks: 100_000,
+                    maximum_attempts: 16_000_000,
+                    maximum_neighbor_checks: 16_000_000,
+                    refinement: RandomSiteRefinement::default(),
                 })
             }
             PatternRecipeFamilyKind::Parametric => {
@@ -22197,6 +22636,7 @@ fn validate_pattern_structure_recipe_with_resources(
             exclusion,
             maximum_attempts,
             maximum_neighbor_checks,
+            refinement,
         } => {
             validate_definition_draft(&PatternDefinitionDraft {
                 name: name.clone(),
@@ -22215,7 +22655,7 @@ fn validate_pattern_structure_recipe_with_resources(
                     cluster_spread,
                     cluster_strength,
                 } => {
-                    validate_positive_finite(
+                    validate_cluster_density(
                         *cluster_density,
                         "preset.recipe.character.cluster_density",
                     )?;
@@ -22228,7 +22668,11 @@ fn validate_pattern_structure_recipe_with_resources(
                         "preset.recipe.character.cluster_strength",
                     )?;
                 }
+                RandomSiteCharacter::Stratified { jitter } => {
+                    validate_unit_component(*jitter, "preset.recipe.character.stratified_jitter")?
+                }
             }
+            validate_random_site_refinement(refinement)?;
             validate_site_density_modulation(density_modulation)?;
             match exclusion {
                 SiteExclusionPolicy::None => {}
@@ -22374,7 +22818,7 @@ fn validate_pattern_structure_recipe_with_resources(
             definition,
             outputs,
         } => {
-            if outputs.is_empty()
+            if outputs.len() != 1
                 || matches!(
                     definition.as_ref(),
                     PatternStructureRecipe::ConnectionPaths { .. }
@@ -22387,7 +22831,7 @@ fn validate_pattern_structure_recipe_with_resources(
             {
                 return Err(ValidationError::new(
                     "preset.recipe.outputs",
-                    "ordered outputs require a nonempty collection over one unwrapped family recipe",
+                    "a pattern requires exactly one drawing output over one unwrapped family recipe",
                 ));
             }
             for output in outputs {
@@ -22467,7 +22911,7 @@ fn recipe_structure_without_resources(
     structure
 }
 
-/// Validates ordered ID-free responses and recipe-local dependency references.
+/// Validates the single ID-free drawing response and its recipe-local references.
 ///
 /// # Errors
 ///
@@ -22476,10 +22920,10 @@ fn validate_recipe_output_settings(
     recipe: &PatternDefinitionRecipe,
 ) -> Result<(), ValidationError> {
     let structure = recipe_structure_without_resources(&recipe.structure);
-    if recipe.output_settings.is_empty() {
+    if recipe.output_settings.len() != 1 {
         return Err(ValidationError::new(
             "preset.recipe.output_settings.cardinality",
-            "pattern recipes require at least one output setting",
+            "each channel pattern requires exactly one drawing layer",
         ));
     }
     if let PatternStructureRecipe::OrderedOutputs { outputs, .. } = structure
@@ -23064,6 +23508,10 @@ pub enum PatternDefinitionEdit {
         mechanism_id: PatternMechanismId,
         cluster_strength: f64,
     },
+    SetRandomStratifiedJitter {
+        mechanism_id: PatternMechanismId,
+        jitter: f64,
+    },
     SetDensityModulationVariant {
         mechanism_id: PatternMechanismId,
         modulation: SiteDensityModulation,
@@ -23087,6 +23535,18 @@ pub enum PatternDefinitionEdit {
     SetRandomMaximumNeighborChecks {
         mechanism_id: PatternMechanismId,
         maximum_neighbor_checks: u32,
+    },
+    SetRandomLloydEnabled {
+        mechanism_id: PatternMechanismId,
+        enabled: bool,
+    },
+    SetRandomLloydDensityWeighted {
+        mechanism_id: PatternMechanismId,
+        density_weighted: bool,
+    },
+    SetRandomLloydIterations {
+        mechanism_id: PatternMechanismId,
+        iterations: u32,
     },
     SetOutputSiteProduct {
         output_layer_id: PatternOutputLayerId,
@@ -23614,6 +24074,7 @@ impl PatternDefinitionEdit {
                         RandomSiteCharacter::RawUniform => RandomCharacterKind::RawUniform,
                         RandomSiteCharacter::Even { .. } => RandomCharacterKind::Even,
                         RandomSiteCharacter::Clustered { .. } => RandomCharacterKind::Clustered,
+                        RandomSiteCharacter::Stratified { .. } => RandomCharacterKind::Stratified,
                     },
                 )),
             ),
@@ -23642,6 +24103,10 @@ impl PatternDefinitionEdit {
             } => (
                 PropertyFieldId::RandomClusterStrength,
                 PropertyFieldValue::FiniteF64(*cluster_strength),
+            ),
+            Edit::SetRandomStratifiedJitter { jitter, .. } => (
+                PropertyFieldId::RandomStratifiedJitter,
+                PropertyFieldValue::FiniteF64(*jitter),
             ),
             Edit::SetDensityModulationVariant { modulation, .. } => (
                 PropertyFieldId::RandomDensityModulation,
@@ -23689,6 +24154,20 @@ impl PatternDefinitionEdit {
             } => (
                 PropertyFieldId::RandomMaximumNeighborChecks,
                 PropertyFieldValue::U32(*maximum_neighbor_checks),
+            ),
+            Edit::SetRandomLloydEnabled { enabled, .. } => (
+                PropertyFieldId::RandomLloydEnabled,
+                PropertyFieldValue::Boolean(*enabled),
+            ),
+            Edit::SetRandomLloydDensityWeighted {
+                density_weighted, ..
+            } => (
+                PropertyFieldId::RandomLloydDensityWeighted,
+                PropertyFieldValue::Boolean(*density_weighted),
+            ),
+            Edit::SetRandomLloydIterations { iterations, .. } => (
+                PropertyFieldId::RandomLloydIterations,
+                PropertyFieldValue::U32(*iterations),
             ),
             Edit::SetOutputSiteProduct { .. } => (
                 PropertyFieldId::OutputSiteProduct,
@@ -28010,6 +28489,168 @@ mod history_tests {
         assert!(main.squash_draft(&draft).is_err());
         assert_eq!(main.document(), &before);
         assert!(!main.can_undo());
+    }
+
+    /// Rejects unsupported construction choices before a transition can collect unusable inputs.
+    /// Descriptor filtering retains guide orientations and intersection tree connections.
+    ///
+    /// # Panics
+    /// Panics if valid fixtures lose legal choices or admit a topology-incompatible transition.
+    #[test]
+    fn construction_choices_follow_available_topology() {
+        let document = parametric_history().document().clone();
+        let orientation = document
+            .property_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.field == PropertyFieldId::OutputOrientation)
+            .unwrap();
+        assert_eq!(orientation.choices, FIXED_MARK_ORIENTATION_CHOICES);
+        assert!(
+            document
+                .variant_transition_draft(
+                    &orientation,
+                    PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideTangent)
+                )
+                .is_err()
+        );
+        document.validate_property_descriptors().unwrap();
+
+        let mut document = generic_guide_transition_history().document().clone();
+        let bundle = &mut document.pattern_definition_bundles[0];
+        let site = bundle.definition.output_layers[0]
+            .site_mechanism_id()
+            .unwrap();
+        bundle.definition.output_layers[0].realization =
+            PatternOutputRealization::ConnectionPaths {
+                site_mechanism_id: site,
+                program: connection_program(ConnectionProgramKind::NearestLinks),
+                style: PathStrokeStyle::default(),
+            };
+        bundle.output_settings[0].response =
+            PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                minimum_thickness: 0.1,
+                maximum_thickness: 1.0,
+                bias: 0.0,
+            });
+        DocumentSession::new(document.clone()).unwrap();
+        let selector = document
+            .property_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.field == PropertyFieldId::ConnectionProgram)
+            .unwrap();
+        assert_eq!(selector.choices, UNSTRUCTURED_CONNECTION_PROGRAM_CHOICES);
+        assert!(
+            document
+                .variant_transition_draft(
+                    &selector,
+                    PropertyEnumChoice::ConnectionProgram(ConnectionProgramKind::GridSpanningTree)
+                )
+                .is_err()
+        );
+        assert!(
+            document
+                .variant_transition_draft(
+                    &selector,
+                    PropertyEnumChoice::ConnectionProgram(ConnectionProgramKind::RandomLinks)
+                )
+                .is_ok()
+        );
+        document.validate_property_descriptors().unwrap();
+
+        let grid = connection_history(connection_program(ConnectionProgramKind::NearestLinks));
+        let selector = grid
+            .document()
+            .property_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.field == PropertyFieldId::ConnectionProgram)
+            .unwrap();
+        assert_eq!(selector.choices, CONNECTION_PROGRAM_CHOICES);
+        assert!(
+            grid.document()
+                .variant_transition_draft(
+                    &selector,
+                    PropertyEnumChoice::ConnectionProgram(ConnectionProgramKind::GridSpanningTree)
+                )
+                .is_ok()
+        );
+
+        let mut mixed = grid.document().clone();
+        mixed
+            .pattern_definition_bundles
+            .push(document.pattern_definition_bundles[0].clone());
+        let ChannelConfiguration::Legacy(channels) = &mut mixed.channel_configuration else {
+            panic!("fixture has legacy channel storage");
+        };
+        channels[0].pattern_instance.definition_override =
+            Some(document.pattern_settings.definition_id);
+        DocumentSession::new(mixed.clone()).unwrap();
+        assert_eq!(
+            mixed.all_pattern_enum_choices(&selector).unwrap(),
+            UNSTRUCTURED_CONNECTION_PROGRAM_CHOICES
+        );
+        assert_eq!(
+            grid.document().all_pattern_enum_choices(&selector).unwrap(),
+            CONNECTION_PROGRAM_CHOICES
+        );
+
+        let guides = generic_guide_transition_history();
+        let selector = guides
+            .document()
+            .property_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.field == PropertyFieldId::OutputOrientation)
+            .unwrap();
+        assert_eq!(selector.choices, MARK_ORIENTATION_CHOICES);
+        let transition = guides
+            .document()
+            .variant_transition_draft(
+                &selector,
+                PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideTangent),
+            )
+            .unwrap();
+        assert!(!transition.fields()[0].reference_choices.is_empty());
+
+        let mut multiple = guides.document().clone();
+        for mechanism in &mut multiple.pattern_definition_bundles[0].definition.mechanisms {
+            match mechanism {
+                PatternMechanism::GuideDimensions { dimensions, .. } => {
+                    let mut extra = dimensions[0].clone();
+                    extra.id = GuideDimensionId(80);
+                    dimensions.push(extra);
+                }
+                PatternMechanism::AlongGuideSites { dimensions, .. } => {
+                    dimensions.push(GuideDimensionId(80))
+                }
+                _ => {}
+            }
+        }
+        DocumentSession::new(multiple.clone()).unwrap();
+        let selector = multiple
+            .property_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.field == PropertyFieldId::OutputOrientation)
+            .unwrap();
+        assert_eq!(selector.choices, FIXED_MARK_ORIENTATION_CHOICES);
+        for mechanism in &mut multiple.pattern_definition_bundles[0].definition.mechanisms {
+            if let PatternMechanism::AlongGuideSites { dimensions, .. } = mechanism {
+                *dimensions = vec![GuideDimensionId(80)];
+            }
+        }
+        let selector = multiple
+            .property_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.field == PropertyFieldId::OutputOrientation)
+            .unwrap();
+        let transition = multiple
+            .variant_transition_draft(
+                &selector,
+                PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideNormal),
+            )
+            .unwrap();
+        assert_eq!(
+            transition.fields()[0].reference_choices,
+            vec![PropertyReferenceValue::GuideDimension(GuideDimensionId(80))]
+        );
     }
 
     /// Proves connection descriptors expose exact current values and only the active program payloads.

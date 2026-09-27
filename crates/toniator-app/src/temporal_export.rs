@@ -82,17 +82,17 @@ pub(super) enum Event {
     Finished(u64, Outcome),
 }
 
-/// Owns exactly one export operation and its worker; dropping cancels and reaps that worker.
+/// Owns cancellation for one export operation whose worker reaps its subprocesses.
 struct Worker {
     cancelled: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for Worker {
-    /// Cancels subprocess work and joins the worker before releasing its ownership.
+    /// Cancels subprocess work without blocking GTK while the worker reaps its subprocesses.
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
-        if let Some(handle) = self.handle.take() {
+        if let Some(handle) = self.handle.take().filter(|handle| handle.is_finished()) {
             let _ = handle.join();
         }
     }
@@ -112,7 +112,9 @@ pub(super) struct Surface {
     name: gtk::Entry,
     first: gtk::Entry,
     last: gtk::Entry,
+    size_scale: gtk::DropDown,
     dimensions: gtk::Entry,
+    size_summary: gtk::Label,
     background: gtk::DropDown,
     antialiasing: gtk::DropDown,
     temporary: gtk::Entry,
@@ -424,19 +426,48 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
         "Last export frame (included, optional)",
         &last,
     );
-    let dimensions = entry("");
-    dimensions.set_placeholder_text(Some("Original size"));
-    dimensions.set_tooltip_text(Some(
-        "Optional WIDTHxHEIGHT. Empty uses the document’s original size.",
+    let size_scale =
+        accessible_string_dropdown(&["0.5x (rapid preview)", "1x", "2x", "4x", "8x", "Custom"]);
+    size_scale.set_selected(png_export_size::video_native_position());
+    size_scale.set_tooltip_text(Some(
+        "Scale final frames from the document canvas, independent of preview zoom.",
     ));
-    row(&configuration, "Size", &dimensions);
-    let canvas = snapshot.document.canvas();
-    let size = gtk::Label::new(Some(&format!(
-        "Original size: {} × {}",
-        canvas.width, canvas.height
-    )));
-    size.set_xalign(0.0);
-    configuration.append(&size);
+    size_scale.update_property(&[
+        gtk::accessible::Property::Label("Output size"),
+        gtk::accessible::Property::Description(
+            "Scales final frames from the document canvas, independent of preview zoom",
+        ),
+    ]);
+    row(&configuration, "_Output size", &size_scale);
+    let dimensions = entry("");
+    dimensions.set_placeholder_text(Some("WIDTHxHEIGHT"));
+    dimensions.set_tooltip_text(Some(
+        "Enter positive whole-pixel dimensions. This field is available when Output size is Custom.",
+    ));
+    dimensions.update_property(&[
+        gtk::accessible::Property::Label("Custom dimensions"),
+        gtk::accessible::Property::Description(
+            "Positive whole-pixel WIDTHxHEIGHT dimensions, available only for Custom output size",
+        ),
+    ]);
+    row(&configuration, "_Custom dimensions", &dimensions);
+    let size_summary = gtk::Label::new(Some("Output dimensions unavailable"));
+    size_summary.set_xalign(0.0);
+    size_summary.set_wrap(true);
+    size_summary.set_selectable(true);
+    size_summary.update_property(&[
+        gtk::accessible::Property::Label("Output dimensions"),
+        gtk::accessible::Property::Description(
+            "Live final pixel dimensions derived from the selected size and document canvas",
+        ),
+    ]);
+    configuration.append(&size_summary);
+    let size_hint = gtk::Label::new(Some(
+        "Output size follows the document canvas. The 0.5x preset reduces the pixel count to about one quarter for rapid previews.",
+    ));
+    size_hint.set_xalign(0.0);
+    size_hint.set_wrap(true);
+    configuration.append(&size_hint);
     let background = accessible_string_dropdown(&["Transparent", "Black", "White"]);
     background.set_selected(png_background_dropdown_position(
         snapshot.document.channel_model(),
@@ -540,6 +571,7 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
             frame_count.clone().upcast(),
             first.clone().upcast(),
             last.clone().upcast(),
+            size_scale.clone().upcast(),
             dimensions.clone().upcast(),
             background.clone().upcast(),
             antialiasing.clone().upcast(),
@@ -561,7 +593,9 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
         name: name.clone(),
         first: first.clone(),
         last: last.clone(),
+        size_scale: size_scale.clone(),
         dimensions: dimensions.clone(),
+        size_summary: size_summary.clone(),
         background: background.clone(),
         antialiasing: antialiasing.clone(),
         temporary: temporary.clone(),
@@ -639,9 +673,17 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
         let app = state.clone();
         field.connect_changed(move |_| refresh_export_surface(&app, epoch, false));
     }
-    for control in [format.clone(), background.clone(), antialiasing.clone()] {
+    for control in [
+        format.clone(),
+        size_scale.clone(),
+        background.clone(),
+        antialiasing.clone(),
+    ] {
         let app = state.clone();
         control.connect_selected_notify(move |_| refresh_export_surface(&app, epoch, false));
+    }
+    if let Some(surface) = state.borrow().temporal_export.as_ref() {
+        refresh_size_summary(surface);
     }
     sync_ui(&mut state.borrow_mut());
     window.present();
@@ -670,6 +712,7 @@ fn refresh_export_surface(state: &Rc<RefCell<AppState>>, epoch: u64, timing_chan
         if timing_changed {
             refresh_timing(surface);
         }
+        refresh_size_summary(surface);
         refresh_input_status(surface);
         refresh(surface);
     }
@@ -760,7 +803,7 @@ fn interval(document: &Document, first: u64, last: u64) -> Result<Document, Stri
 ///
 /// # Errors
 /// Rejects unavailable metadata, malformed timing, invalid destination/temporary folders, invalid
-/// dimensions, and malformed optional export frame subsets.
+/// output size, and malformed optional export frame subsets.
 fn options_from_surface(
     surface: &Surface,
     destination_suffix: Option<&str>,
@@ -776,6 +819,11 @@ fn options_from_surface(
         surface.duration.text().as_str(),
     )?;
     let format = Format::selected(surface.format.selected())?;
+    let output_size = png_export_size::video_output_size(
+        surface.snapshot.document.canvas(),
+        surface.size_scale.selected(),
+        surface.dimensions.text().as_str(),
+    )?;
     let (first, last) = export_frame_range(
         &timing,
         surface.first.text().as_str(),
@@ -793,7 +841,7 @@ fn options_from_surface(
             destination,
             temporary: directory(surface.temporary.text().as_str(), true)?,
             background: png_background_for_dropdown_position(surface.background.selected()),
-            target: parse_output_target(surface.dimensions.text().as_str())?,
+            target: output_size.target(),
             antialiasing: if surface.antialiasing.selected() == 1 {
                 RasterAntialiasing::Off
             } else {
@@ -1367,7 +1415,7 @@ fn launch(
     started
 }
 
-/// Projects worker/recovery ownership into truthful enabled actions.
+/// Projects worker/recovery ownership and size-choice applicability into truthful enabled actions.
 fn refresh(surface: &Surface) {
     let running = surface.worker.is_some();
     let recovery = surface.recovery.is_some();
@@ -1376,6 +1424,11 @@ fn refresh(surface: &Surface) {
     for control in &surface.configuration_widgets {
         control.set_sensitive(!running && !recovery);
     }
+    surface.dimensions.set_sensitive(
+        !running
+            && !recovery
+            && png_export_size::video_custom_selected(surface.size_scale.selected()),
+    );
     for control in &surface.destination_widgets {
         control.set_sensitive(!running);
     }
@@ -1395,6 +1448,27 @@ fn refresh(surface: &Surface) {
     }
     surface.close.set_sensitive(!recovery);
     surface.still.set_sensitive(!running && !recovery);
+}
+
+/// Shows checked final frame dimensions or leaves the applicable size error visibly inline.
+///
+/// This readout derives only from the selected runtime choice and document canvas; it neither reads
+/// the viewport zoom nor changes export or authored document state.
+fn refresh_size_summary(surface: &Surface) {
+    let output = png_export_size::video_output_size(
+        surface.snapshot.document.canvas(),
+        surface.size_scale.selected(),
+        surface.dimensions.text().as_str(),
+    );
+    match output {
+        Ok(output) => {
+            let (width, height) = output.dimensions();
+            surface
+                .size_summary
+                .set_label(&format!("Output dimensions: {width} × {height} pixels"));
+        }
+        Err(error) => surface.size_summary.set_label(&error),
+    }
 }
 
 /// Accepts only the current sheet's progress and terminal worker result, then releases the worker.

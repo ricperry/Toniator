@@ -1,0 +1,62 @@
+{
+  "preset_format_version": 5,
+  "metadata": {
+    "id": "user-00000000-0000-4000-88d7-26a841cca68a",
+    "name": "BrokenTestPattern",
+    "category": "Scatter",
+    "description": "Personal Scatter Pattern.",
+    "thumbnail": null
+  },
+  "recipe": {
+    "structure": {
+      "kind": "ordered_outputs",
+      "definition": {
+        "kind": "random_sites",
+        "name": "Poisson disk circles",
+        "coverage": {
+          "guard_steps": 2,
+          "additional_margin": 0.0
+        },
+        "character": {
+          "kind": "clustered",
+          "cluster_density": 5.0,
+          "cluster_spread": 16.0,
+          "cluster_strength": 0.85
+        },
+        "seed": 19,
+        "density_modulation": {
+          "kind": "uniform"
+        },
+        "exclusion": {
+          "kind": "none"
+        },
+        "maximum_attempts": 16000000,
+        "maximum_neighbor_checks": 16000000,
+        "refinement": {
+          "enabled": true,
+          "density_weighted": true,
+          "iterations": 4
+        }
+      },
+      "outputs": [
+        {
+          "kind": "marks"
+        }
+      ]
+    },
+    "output_settings": [
+      {
+        "source_filter": {
+          "kind": "all"
+        },
+        "response": {
+          "kind": "marks",
+          "response": {
+            "minimum_fill": 0.0,
+            "maximum_fill": 1.0
+          }
+        }
+      }
+    ]
+  }
+}

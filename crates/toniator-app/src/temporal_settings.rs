@@ -17,10 +17,10 @@ pub(super) struct Surface {
 }
 
 impl Drop for Surface {
-    /// Cancels and reaps metadata decoding before releasing modal ownership.
+    /// Cancels metadata decoding without blocking GTK; the worker owns decoder cleanup.
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.take() {
+        if let Some(worker) = self.worker.take().filter(|worker| worker.is_finished()) {
             let _ = worker.join();
         }
     }

@@ -13,9 +13,11 @@ Built with Rust and GTK4, Toniator includes a visual Pattern Wizard, a personal
 Pattern library, and a headless command-line renderer. It is free software under
 the [GPL-3.0-only license](LICENSE).
 
-**Current prerelease: 0.3.2.**
-[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.3.2)
-or [browse known issues](ISSUES.md).
+**Current prerelease: 0.3.3.**
+[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.3.3) ·
+[Windows development build (0.3.2)](https://github.com/ricperry/Toniator/releases/tag/v0.3.2-windows-dev.20260927) ·
+[native Windows build instructions](docs/windows-build.md) ·
+[known issues](ISSUES.md).
 
 ## Examples
 
@@ -33,8 +35,8 @@ See [example settings and reproduction commands](docs/examples/README.md).
 
 ## Download and run
 
-Download **one** of the x86_64 packages from the
-[0.3.2 release](https://github.com/ricperry/Toniator/releases/tag/v0.3.2).
+Download **one** of the x86_64 Linux packages from the
+[0.3.3 release](https://github.com/ricperry/Toniator/releases/tag/v0.3.3).
 Both include the graphical app and CLI, with application ID
 `io.github.ricperry.Toniator`.
 
@@ -50,15 +52,15 @@ until you have recovered any settings or personal Patterns you need.
 In the folder containing your download:
 
 ```bash
-chmod +x Toniator-0.3.2-x86_64.AppImage
-./Toniator-0.3.2-x86_64.AppImage
+chmod +x Toniator-0.3.3-x86_64.AppImage
+./Toniator-0.3.3-x86_64.AppImage
 ```
 
 This build requires **glibc 2.39 or newer**; it was tested on Fedora 44/Wayland.
 If FUSE mounting is unavailable, run it with:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.3.2-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.3.3-x86_64.AppImage
 ```
 
 ### Flatpak
@@ -66,7 +68,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.3.2-x86_64.AppImage
 With Flatpak installed, run:
 
 ```bash
-flatpak install --user ./Toniator-0.3.2-x86_64.flatpak
+flatpak install --user ./Toniator-0.3.3-x86_64.flatpak
 flatpak run io.github.ricperry.Toniator
 ```
 
@@ -78,6 +80,18 @@ Flatpak keeps its own settings, recent files, and personal Patterns under
 Download `SHA256SUMS` alongside the packages to verify their integrity with
 `sha256sum --ignore-missing -c SHA256SUMS`. See the
 [packaging guide](packaging/README.md) for permissions and build details.
+
+### Windows development build
+
+The separate [Windows development release](https://github.com/ricperry/Toniator/releases/tag/v0.3.2-windows-dev.20260927)
+contains unsigned portable GUI and CLI binaries built as version 0.3.2. It is
+not a Windows build of this 0.3.3 prerelease; no 0.3.3 Windows package is
+provided. To build the current source natively with MSVC and without WSL, follow
+the [Windows build instructions](docs/windows-build.md). The portable package
+has no installer or signing, and video tools require the optional
+`Setup-Media.ps1` download. Extract the complete ZIP, double-click
+`Toniator.vbs` for the GUI, or run `Toniator-CLI.cmd` from a terminal. The guide
+records tested behavior and known limits.
 
 ## Make your first artwork
 
@@ -92,11 +106,74 @@ scrolls within its own bounded area.
    placement, and styling in the Pattern Wizard.
 4. Adjust Feature size, rotation, and appearance. Use **Preview / Source** to
    compare the result with your original artwork, and zoom or Fit to inspect it.
+   Zooming and panning refresh the visible viewport at display resolution to
+   keep the enlarged preview sharp.
 5. Save a `.toniator` project to keep the source image and editable settings.
    Export **PNG** for a raster image or **SVG** for editable vector geometry.
 
 Personal Patterns can be saved, updated, copied, renamed, and moved to recoverable
 trash. Saving a Pattern to your library is separate from applying it to artwork.
+
+To customize a Pattern, select its gallery card and choose **Customize**. The
+wizard follows four decisions:
+
+1. **Family** — choose guides, scattered points, or a parametric curve.
+2. **Family options** — choose the arrangement or algorithm and adjust its settings.
+3. **Drawing** — choose placement, shapes, connections, and appearance. Available
+   controls follow the capabilities of your current Pattern.
+4. **Review** — compare the preview, go Back to adjust it, or Apply Pattern as one
+   undoable document change. Cancel discards the wizard's private edits after
+   confirmation. **Save Pattern…** optionally stores a reusable library entry;
+   saving does not apply it to the document.
+
+The wizard preview uses a small, neutral light-to-dark sample to make Patterns
+easy to compare. It is a study of the Pattern, not a preview of your own artwork.
+It renders in the background on a bounded sample canvas, including connection
+Patterns. Moving between wizard pages does not wait for a render.
+In the main sidebar, **Feature size** controls pattern fineness across families:
+smaller values tighten spacing and produce more detail; larger values make the
+pattern coarser. Scatter separation and cluster spread, spiral pitch, and
+along-curve point spacing scale together. Spirals adjust their turn count to
+retain approximately the same outer extent. Saved recipe proportions remain
+unchanged. The editable minimum is **0.01**; zero is rejected.
+Guide/grid Patterns show every repeated guide as a thin blue 1pt line, revealing
+the full underlying arrangement. Parametric Patterns show their underlying curve
+in the same way. Orange 1px indicators show every visible point site, including
+positions where a drawn mark is too small to see. These overlays are preview aids
+and are not exported.
+On Review, construction is also checked in the background at your document's
+size. Apply requires a successful current check; Back and Cancel remain available.
+Invalid entries and incomplete choices are checked while editing. In **All** mode, choices reflect
+compatible channel settings; select a channel to edit it independently.
+
+Live rendering cancels obsolete requests after edits and reuses unaffected stages
+from the last accepted render. Unfinished or unaccepted stages are recomputed.
+Personal Pattern thumbnails also render in the background. Still-image exports
+offer **Cancel export** and use the artwork captured when the export started.
+
+Each channel’s Pattern draws one kind of output: shapes, lines, or filled areas.
+Mix Patterns by choosing different settings or Patterns for individual channels.
+To combine multiple renders within the same channel, export them separately and
+composite them in another application. Older experimental multi-layer Patterns
+are unsupported; their files are not modified or automatically flattened.
+
+For scattered points, **Random** allows irregular gaps, **Poisson disk** keeps a
+minimum distance with irregular spacing, **Jittered cells** places one point in
+each cell, and **Clustered** gathers points into organic groups. Cluster centers
+are specified per 100 points; spread controls the size of those groups.
+Changing the variation number gives another repeatable arrangement. **Point
+density** controls whether placement follows artwork; **Keep points apart** adds
+an exclusion rule. These are separate from how large the drawn marks become.
+
+Enable **Relax points (Lloyd)** to smooth the arrangement by moving points toward
+their local cell centers. **Follow artwork density** makes this relaxation follow
+the channel's source weighting; otherwise it aims for even spacing. **Relaxation
+steps** controls how far the arrangement settles. More relaxation can soften
+clusters. Turning relaxation off retains its settings for later use.
+
+Use the header information button, **About Toniator** in the menu, or **F1** for
+the version, license, user guide, source code, and issue-reporting links.
+
 **New → Save preset** saves the whole design configuration
 as a source-free `.toniator-preset`. **Load preset...** accepts that format or an
 intact `.toniator` project, applies all channel settings, and keeps your current
@@ -107,9 +184,10 @@ quits. Both prompt when a document has unsaved changes. The app follows the
 system light/dark preference where supported.
 
 Supported still-image inputs: PNG, SVG, JPEG, WebP, BMP, TIFF, OpenEXR, and AVIF.
-PNG exports offer background, antialiasing, and output-size options. SVG exports
-keep a transparent background. RGB PNG defaults to black, CMYK to white, and
-source-color output to transparent.
+PNG exports offer background, antialiasing, and **1x, 2x, 4x, 8x, or Custom**
+output sizes based on the document canvas, independent of preview zoom. SVG
+exports keep a transparent background. RGB PNG defaults to black, CMYK to
+white, and source-color output to transparent.
 
 ### Animate artwork
 
@@ -192,7 +270,7 @@ Use an `.svg` output filename for vector export. Render a saved project using
 its stored settings with `toniator render -i artwork.toniator -o artwork.svg`.
 Run `toniator --help` or `toniator render --help` for the supported commands.
 
-In an AppImage, prepend `./Toniator-0.3.2-x86_64.AppImage --cli` in place of
+In an AppImage, prepend `./Toniator-0.3.3-x86_64.AppImage --cli` in place of
 `toniator`. The Flatpak CLI is available through
 `flatpak run --command=toniator io.github.ricperry.Toniator`; direct CLI file paths must be
 accessible inside its sandbox.
@@ -231,10 +309,11 @@ original alignment with neutral controls. Both source consumers initially use th
 channel's matching color component, and Advanced can change them independently.
 Explicit Luminance remains available for monochrome artwork.
 
-**Export video** also exposes frame rate and duration, with a live frame count.
-Video projects initialize these values from their source. Export applies timing
-changes to the document as one undoable edit; closing the sheet before exporting
-discards them. Optional first/last frames select an export subset. PNG sequences,
+**Export video** also exposes frame rate and duration, with a live frame count,
+and **0.5x, 1x, 2x, 4x, 8x, or Custom** output sizes based on the document canvas.
+Video projects initialize timing from their source. Export applies timing changes
+to the document as one undoable edit; closing the sheet before exporting discards
+them. Optional first/last frames select an export subset. PNG sequences,
 lossless FFV1/Matroska and optional AV1/WebM remain available.
 
 Current development persistence uses document schema **10**, document-Preset
@@ -253,9 +332,10 @@ exhaustive GNOME/Mutter or native file-portal acceptance.
 ## Project documentation
 
 - [Known issues and limitations](ISSUES.md)
+- [Pattern Wizard regression checks](docs/PATTERN_WIZARD_TESTING.md)
 - [Example artwork and reproduction commands](docs/examples/README.md)
 - [Package installation and build guide](packaging/README.md)
-- [Release notes](docs/releases/v0.3.2.md)
+- [Release notes](docs/releases/v0.3.3.md)
 - [Architecture and design specifications](Project%20Specification/ArchitectureSchema.md)
 
 The [Addendum](Project%20Specification/Addendum.md) takes precedence over other

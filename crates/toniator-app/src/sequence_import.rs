@@ -24,13 +24,13 @@ pub(super) struct Surface {
 }
 
 impl Drop for Surface {
-    /// Cancels the native chooser and importer, joining the worker before releasing its input paths.
+    /// Cancels the chooser and importer without waiting on GTK; the worker owns its input paths.
     fn drop(&mut self) {
         if let Some(chooser) = self.chooser.take() {
             chooser.cancel();
         }
         self.cancelled.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.take() {
+        if let Some(worker) = self.worker.take().filter(|worker| worker.is_finished()) {
             let _ = worker.join();
         }
     }

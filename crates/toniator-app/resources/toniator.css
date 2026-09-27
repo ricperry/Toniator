@@ -56,6 +56,7 @@
 .toniator-wizard-preview {
   min-width: 1px;
   min-height: 1px;
+  background-color: white;
 }
 
 .toniator-wizard-card {

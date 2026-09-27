@@ -1,9 +1,9 @@
 use toniator_domain::{
-    CanvasSpec, CoveragePolicy, CurveWinding, GuideRepetition, MarkOrientation, MarkPrototype,
-    OffsetCleanup, ParametricCurve, PathStrokeStyle, PatternDefinition, PatternDefinitionId,
-    PatternFamily, PatternMechanism, PatternMechanismId, PatternModulation, PatternOutputLayer,
-    PatternOutputLayerId, PatternOutputRealization, ResolvedDensityMetric2D, SpiralCurve,
-    SpiralShape,
+    CanvasSpec, CoveragePolicy, CurveWinding, DensityMetric2D, GuideRepetition, MarkOrientation,
+    MarkPrototype, OffsetCleanup, ParametricCurve, PathStrokeStyle, PatternDefinition,
+    PatternDefinitionId, PatternFamily, PatternMechanism, PatternMechanismId, PatternModulation,
+    PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization, ResolvedDensityMetric2D,
+    SpiralCurve, SpiralShape,
 };
 use toniator_patterns::{
     GridInspectRequest, StructuralProductCapability, evaluate_typed_family,
@@ -142,23 +142,23 @@ fn round_spiral_publishes_one_cubic_path_product() {
     assert!(progress.windows(2).all(|pair| pair[0].0 <= pair[1].0));
 }
 
-/// Locks parametric geometry and identity outside the centered grid-prototype transform contract.
+/// Locks scaled parametric geometry and identity outside the centered grid-prototype transform contract.
 ///
 /// # Panics
 ///
 /// Panics when the parametric structural-source adapter changes its established placement or
-/// family identity while local grid prototypes adopt the centered origin.
+/// feature-size-resolved family identity while local grid prototypes adopt the centered origin.
 #[test]
 fn parametric_family_geometry_and_identity_ignore_grid_local_origin_corrections() {
     let output = evaluate_typed_family(&definition(SpiralShape::Round, true), &request())
         .expect("parametric family evaluates");
     assert_eq!(
         output.family_fingerprint(),
-        "toniator-stage-20d-guide-family-v1:fnv1a64:c9d411712b5a44b4:nominal-cell-basis:fnv1a64:4ec48ee5f2b4ecf5"
+        "toniator-stage-20d-guide-family-v1:fnv1a64:c146359a2529c88c:nominal-cell-basis:fnv1a64:08cbc941d3a6e197"
     );
     assert_eq!(
         output.site_set().sites()[0].position,
-        toniator_patterns::Point2::new(162.024_440_794_682_28, 123.336_300_100_532_98)
+        toniator_patterns::Point2::new(166.366_324_971_756_43, 130.397_815_284_439_67)
     );
 }
 
@@ -188,13 +188,21 @@ fn normal_offset_sites_keep_path_neutral_repetition_identity() {
     assert!(output.site_set().sites().iter().all(|site| matches!(&site.provenance, toniator_patterns::FamilySiteProvenance::AlongParametricCurve { location, .. } if matches!(location.path.source, toniator_patterns::StructuralPathSourceId::ParametricCurve(PatternMechanismId(91))))));
 }
 
-/// Proves parametric sites use their authored absolute interval tangentially and their
-/// source repetition spacing normally, independent of anisotropic document density.
+/// Proves parametric sites scale authored intervals and radial spacing together while retaining
+/// their separation from anisotropic document density.
+///
+/// # Panics
+/// Panics if evaluation fails or the nominal basis does not match the resolved intervals.
 #[test]
 fn parametric_site_basis_separates_absolute_interval_from_radial_spacing() {
     let mut request = request();
     request.density.across_x = 80.0;
     request.density.across_y = 12.0;
+    let default_density = DensityMetric2D::default_for_canvas(&request.canvas)
+        .expect("canvas has a finite default density")
+        .density;
+    let feature_scale =
+        default_density / (request.density.across_x * request.density.across_y).sqrt();
     let output = evaluate_typed_family(&definition(SpiralShape::Round, true), &request)
         .expect("anisotropic parametric sites");
     assert!(output.site_set().sites().iter().all(|site| {
@@ -203,7 +211,7 @@ fn parametric_site_basis_separates_absolute_interval_from_radial_spacing() {
             .axis_a
             .x
             .hypot(site.nominal_cell_basis.axis_a.y)
-            - 18.0)
+            - 18.0 * feature_scale)
             .abs()
             < 1.0e-9
             && (site
@@ -211,7 +219,7 @@ fn parametric_site_basis_separates_absolute_interval_from_radial_spacing() {
                 .axis_b
                 .x
                 .hypot(site.nominal_cell_basis.axis_b.y)
-                - 24.0)
+                - 24.0 * feature_scale)
                 .abs()
                 < 1.0e-9
     }));

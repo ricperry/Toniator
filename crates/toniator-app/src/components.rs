@@ -798,6 +798,14 @@ mod pattern_wizard_shell {
         #[template_child]
         pub wizard_preview: gtk::TemplateChild<gtk::Picture>,
         #[template_child]
+        pub wizard_guide_overlay: gtk::TemplateChild<gtk::DrawingArea>,
+        #[template_child]
+        pub wizard_guide_legend: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub wizard_preview_status: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub wizard_preview_viewport: gtk::TemplateChild<gtk::ScrolledWindow>,
+        #[template_child]
         pub wizard_spinner: gtk::TemplateChild<gtk::Spinner>,
         #[template_child]
         pub wizard_actions: gtk::TemplateChild<gtk::Box>,
@@ -884,6 +892,26 @@ impl ToniatorPatternWizardShell {
     /// Returns the private canonical preview paintable surface.
     pub fn preview(&self) -> gtk::Picture {
         self.imp().wizard_preview.get()
+    }
+
+    /// Returns the noninteractive guide overlay, separate from the pattern picture and exports.
+    pub fn guide_overlay(&self) -> gtk::DrawingArea {
+        self.imp().wizard_guide_overlay.get()
+    }
+
+    /// Returns the visible explanation of the guide overlay's preview-only meaning.
+    pub fn guide_legend(&self) -> gtk::Label {
+        self.imp().wizard_guide_legend.get()
+    }
+
+    /// Returns preview progress separately from persistent workflow instructions and validation.
+    pub fn preview_status(&self) -> gtk::Label {
+        self.imp().wizard_preview_status.get()
+    }
+
+    /// Returns the bounded preview viewport for responsive presentation without changing pixels.
+    pub fn preview_viewport(&self) -> gtk::ScrolledWindow {
+        self.imp().wizard_preview_viewport.get()
     }
 
     /// Returns the latest-only private preview pending indicator.
@@ -1090,6 +1118,12 @@ mod png_export_options {
         pub png_antialiasing: gtk::TemplateChild<gtk::DropDown>,
         #[template_child]
         pub png_dimensions: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub png_scale: gtk::TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub png_size_summary: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub png_size_error: gtk::TemplateChild<gtk::Label>,
     }
 
     #[glib::object_subclass]
@@ -1138,6 +1172,21 @@ impl ToniatorPngExportOptions {
     /// Returns the optional PNG output-dimension entry.
     pub fn dimensions(&self) -> gtk::Entry {
         self.imp().png_dimensions.get()
+    }
+
+    /// Returns the runtime-only scale choice relative to normal document output size.
+    pub fn scale(&self) -> gtk::DropDown {
+        self.imp().png_scale.get()
+    }
+
+    /// Returns the live actual pixel dimensions for the selected output choice.
+    pub fn size_summary(&self) -> gtk::Label {
+        self.imp().png_size_summary.get()
+    }
+
+    /// Returns the inline sizing diagnostic without changing document or export policy.
+    pub fn size_error(&self) -> gtk::Label {
+        self.imp().png_size_error.get()
     }
 }
 

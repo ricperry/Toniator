@@ -54,20 +54,46 @@ template $ToniatorPngExportOptions : Gtk.Box {
       label: "Output _size";
       use-underline: true;
       halign: start;
-      mnemonic-widget: png_dimensions;
+      mnemonic-widget: png_scale;
       layout {
         column: 0;
         row: 2;
       }
     }
 
-    Gtk.Entry png_dimensions {
-      placeholder-text: "Document canvas (for example 1200x800)";
-      tooltip-text: "Optional PNG pixel dimensions";
+    Gtk.DropDown png_scale {
+      tooltip-text: "Scale relative to the normal document output size";
       layout {
         column: 1;
         row: 2;
       }
+    }
+
+    Gtk.Label {
+      label: "Custom _dimensions";
+      use-underline: true;
+      halign: start;
+      mnemonic-widget: png_dimensions;
+      layout { column: 0; row: 3; }
+    }
+
+    Gtk.Entry png_dimensions {
+      placeholder-text: "WIDTHxHEIGHT";
+      tooltip-text: "Manual PNG width and height in pixels";
+      layout { column: 1; row: 3; }
+    }
+
+    Gtk.Label png_size_summary {
+      halign: start;
+      layout { column: 0; row: 4; column-span: 2; }
+    }
+
+    Gtk.Label png_size_error {
+      halign: start;
+      wrap: true;
+      max-width-chars: 48;
+      styles ["error"]
+      layout { column: 0; row: 5; column-span: 2; }
     }
   }
 }

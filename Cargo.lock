@@ -1875,7 +1875,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "toniator-app"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-channel",
  "gio",
@@ -1892,7 +1892,7 @@ dependencies = [
 
 [[package]]
 name = "toniator-cli"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "clap",
  "ctrlc",
@@ -1908,14 +1908,14 @@ dependencies = [
 
 [[package]]
 name = "toniator-domain"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "toniator-engine"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "image",
  "rayon",
@@ -1930,7 +1930,7 @@ dependencies = [
 
 [[package]]
 name = "toniator-geometry"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "rayon",
  "serde",
@@ -1940,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "toniator-io"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "libc",
  "rustix",
@@ -1955,12 +1955,13 @@ dependencies = [
 
 [[package]]
 name = "toniator-patterns"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "image",
  "rayon",
  "serde",
  "serde_json",
+ "spade",
  "toniator-domain",
  "toniator-geometry",
  "toniator-sampling",
@@ -1968,7 +1969,7 @@ dependencies = [
 
 [[package]]
 name = "toniator-render"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "image",
  "rayon",
@@ -1978,7 +1979,7 @@ dependencies = [
 
 [[package]]
 name = "toniator-sampling"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "image",
  "rayon",
@@ -1993,7 +1994,7 @@ dependencies = [
 
 [[package]]
 name = "toniator-windows-fs"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "getrandom",
  "windows-sys",

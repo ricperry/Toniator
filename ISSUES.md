@@ -4,6 +4,37 @@ This ledger records confirmed limitations and deferred reports outside the
 current gate. Closing an item requires a reproducer or verification evidence;
 an entry does not authorize a later stage or change an accepted contract.
 
+## TON-010 — Scatter choices need greater artistic variety and clearer priorities
+
+- Status: Open; development paused at the user's request (2026-09-20).
+  This entry records follow-up work only; resume development when requested.
+- Report: Clustered produces blotchy coverage that can compete with the artwork.
+  It has artistic uses, but receives too much prominence relative to choices
+  intended for image reproduction. The available algorithms remain too limited.
+- Current implementation: Four generators—Random, Poisson disk, Jittered cells,
+  and Clustered. There are no additional hidden generators. Uniform/artwork-weighted
+  density and optional ordinary/weighted Lloyd relaxation modify these generators;
+  they are not additional scatter algorithms.
+- Explanation: Clustered deliberately groups points around randomly placed centers.
+  With Uniform initial density those centers do not follow the artwork. Lower
+  strength or broader spread softens the effect, but a few weighted Lloyd steps
+  do not globally redistribute the clusters into faithful image stippling.
+- Proposed direction, pending design review: Prioritize even blue-noise stippling,
+  genuinely artwork-adaptive spacing, and a coherent artwork-weighted relaxed
+  stippling workflow. Retain Random and Clustered as secondary texture effects.
+  Distinguish initial placement, artwork-density control, and subsequent relaxation
+  in the interface rather than presenting more combinations as new algorithms.
+- Research candidates: Variable-density Poisson sampling; a complete
+  [weighted Voronoi stippling](https://www.cs.ubc.ca/labs/imager/tr/2002/secord2002b/)
+  workflow; and [weighted sample elimination](https://www.cemyuksel.com/research/sampleelimination/)
+  for point-count control. A different implementation alone does not establish
+  a meaningfully different artistic result.
+- Verification when resumed: Present labeled side-by-side render comparisons on
+  both immutable sample artworks, with settings, native PNG/SVG artifacts, test
+  logs, and preview/Review timings. Check tonal fidelity, spacing, visible variety,
+  Feature size response, cancellation and Apply/Undo. Keep the approximately
+  50-second fine Poisson Review limitation tracked separately under TON-003.
+
 ## TON-004 — A second launch does not forward a file to the running app
 
 - Status: Fixed and user-accepted (2026-09-05), checkpoint `8deb02d`.
@@ -100,17 +131,20 @@ an entry does not authorize a later stage or change an accepted contract.
 
 ## TON-009 — Feature size may not increase site density in random Patterns
 
-- Status: Open; user-reported on 2026-09-13, not yet independently reproduced.
+- Status: Implemented and user-accepted (2026-09-27) for release 0.3.3.
 - Reported Pattern: `Even random circles`. The user suspects most random
   Patterns are affected; that broader scope needs verification.
 - Report: Reducing `Feature size` correctly reduces mark size but does not add
   more sites to maintain image density.
 - Expected behavior: Finer feature sizes increase the number of sites as well
   as reducing mark size, maintaining the intended image density.
-- Next step: Reproduce with the named Pattern, then check the other random
-  Patterns to establish scope. Inspect how Feature size affects site spacing/count
-  and mark geometry. Verify both preview and export
-  against the immutable raster and vector inputs. No fix is included in 0.3.1.
+- Resolution: Feature size now scales Poisson separation, cluster spread, and
+  explicit exclusion distances alongside density-derived population. Parametric
+  pitch and along-curve spacing also follow Feature size. The control rejects
+  values below 0.01. Full-size SVG Poisson evaluation at 0.5 and 2, native PNG/SVG
+  witnesses, and private GTK inspection pass; both immutable sources are covered
+  by focused family tests. Evidence: `.codex-work/evidence/2026-09-20-feature-size.md`.
+  This fix is not part of the previously published 0.3.1 release.
 
 ## TON-001 — Intermittent RGB edit to CMYK crash
 
@@ -136,6 +170,16 @@ an entry does not authorize a later stage or change an accepted contract.
 ## TON-003 — Fine Pattern sizes have slow full-resolution previews
 
 - Status: Open; follow-up performance work.
+- 2026-09-20 wizard regression: `vector-sample.svg`, Clustered with four
+  artwork-weighted Lloyd steps, then Poisson disk at Feature size `0.1`.
+  The new GTK workflow exceeded its 90-second Review watchdog. Normal Poisson
+  construction also hit an obsolete reserved neighbor-work ceiling; that ceiling
+  is removed, with cancellation and explicit caller bounds retained. Identical
+  still-image Start/End checks now share one construction result. Review then
+  completed in about 50 seconds, which remains unacceptable interactive latency.
+  Native profiling reports roughly 543,155 sites per channel and about 45 seconds
+  in family generation/refinement. No density clamp or disabled refinement is used.
+  Reproduction and coverage: [Pattern Wizard tests](docs/PATTERN_WIZARD_TESTING.md).
 - 2026-09-05 improvement: The progress investigation found a quadratic circular-mark
   usage lookup. An exact-coordinate index now preserves the first matching family
   site and positive-radius membership without scanning every site for every mark.

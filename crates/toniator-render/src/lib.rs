@@ -1637,6 +1637,7 @@ struct RasterWork<'a> {
     completed_units: usize,
     total_units: usize,
     report_progress: &'a (dyn Fn(usize, usize) + Sync),
+    preview_clip: Option<PreviewTransform>,
 }
 
 /// Discards optional raster progress for compatibility entry points.
@@ -1674,7 +1675,15 @@ impl<'a> RasterWork<'a> {
             completed_units: 0,
             total_units,
             report_progress,
+            preview_clip: None,
         }
+    }
+
+    /// Tests the final preview canvas rectangle without clipping canonical geometry.
+    fn contains_sample(&self, x: f64, y: f64) -> bool {
+        self.preview_clip.is_none_or(|clip| {
+            x >= clip.offset_x && x < clip.right && y >= clip.offset_y && y < clip.bottom
+        })
     }
 
     /// Rejects cancellation before a bounded raster boundary can mutate a local surface.
@@ -1718,6 +1727,10 @@ pub struct OutputRasterTarget {
 }
 
 impl OutputRasterTarget {
+    /// Checks final PNG dimensions against the shared positive-size and pixel-budget authority.
+    ///
+    /// # Errors
+    /// Returns `output.target` for zero dimensions or an over-budget surface.
     pub fn new(width: u32, height: u32) -> Result<Self, RenderError> {
         if width == 0 || height == 0 {
             return Err(RenderError::new(
@@ -1734,6 +1747,17 @@ impl OutputRasterTarget {
         Ok(Self { width, height })
     }
 
+    /// Resolves the normal document output size without evaluating or changing its canvas.
+    ///
+    /// # Errors
+    /// Returns the native integral-canvas or shared output-budget diagnostic.
+    pub fn for_canvas(canvas: &CanvasSpec) -> Result<Self, RenderError> {
+        Self::new(
+            integral_dimension(canvas.width)?,
+            integral_dimension(canvas.height)?,
+        )
+    }
+
     pub const fn width(self) -> u32 {
         self.width
     }
@@ -1748,9 +1772,22 @@ impl OutputRasterTarget {
 pub struct PreviewRasterTarget {
     width: u32,
     height: u32,
+    viewport: Option<PreviewViewport>,
+}
+
+/// Retains exact finite transform bits so crop placement participates in raster identity only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct PreviewViewport {
+    origin_x: u64,
+    origin_y: u64,
+    scale: u64,
 }
 
 impl PreviewRasterTarget {
+    /// Checks a fitted preview extent against the renderer's bounded pixel allocation authority.
+    ///
+    /// # Errors
+    /// Returns `preview.target` for zero dimensions or an over-budget surface.
     pub fn new(width: u32, height: u32) -> Result<Self, RenderError> {
         if width == 0 || height == 0 {
             return Err(RenderError::new(
@@ -1764,7 +1801,68 @@ impl PreviewRasterTarget {
                 "pixel count exceeds preview safety limit",
             ));
         }
-        Ok(Self { width, height })
+        Ok(Self {
+            width,
+            height,
+            viewport: None,
+        })
+    }
+
+    /// Checks a viewport-sized raster with a canonical-document origin and physical pixel scale.
+    ///
+    /// Negative origins retain transparent letterbox space. The uniform scale maps one document
+    /// unit to physical pixels; neither the canvas nor canonical geometry is changed.
+    ///
+    /// # Errors
+    /// Returns `preview.target` for invalid extents or non-finite/non-positive transforms.
+    pub fn for_viewport(
+        width: u32,
+        height: u32,
+        origin_x: f64,
+        origin_y: f64,
+        scale: f64,
+    ) -> Result<Self, RenderError> {
+        let mut target = Self::new(width, height)?;
+        if !origin_x.is_finite()
+            || !origin_y.is_finite()
+            || !scale.is_finite()
+            || scale <= 0.0
+            || !(origin_x * scale).is_finite()
+            || !(origin_y * scale).is_finite()
+        {
+            return Err(RenderError::new(
+                "preview.target",
+                "viewport transform must be finite with positive scale",
+            ));
+        }
+        target.viewport = Some(PreviewViewport {
+            origin_x: (if origin_x == 0.0 { 0.0 } else { origin_x }).to_bits(),
+            origin_y: (if origin_y == 0.0 { 0.0 } else { origin_y }).to_bits(),
+            scale: scale.to_bits(),
+        });
+        Ok(target)
+    }
+
+    /// Returns the exact canonical crop origin and physical pixel scale, or the fitted policy.
+    pub fn viewport(self) -> Option<(f64, f64, f64)> {
+        self.viewport.map(|value| {
+            (
+                f64::from_bits(value.origin_x),
+                f64::from_bits(value.origin_y),
+                f64::from_bits(value.scale),
+            )
+        })
+    }
+
+    /// Describes only the derived raster target, including exact crop-transform bits.
+    pub fn raster_identity(self) -> String {
+        match self.viewport {
+            Some(value) => format!(
+                "{}x{}:viewport:{:016x}:{:016x}:{:016x}",
+                self.width, self.height, value.origin_x, value.origin_y, value.scale
+            ),
+            None => format!("{}x{}:fit", self.width, self.height),
+        }
     }
     pub const fn width(self) -> u32 {
         self.width
@@ -2080,10 +2178,10 @@ pub fn rasterize_preview_cancellable(
     )
 }
 
-/// Rasterizes a fitted preview while reporting completed canonical primitives.
+/// Rasterizes a fitted or cropped preview while reporting completed canonical primitives.
 ///
 /// Progress is non-authoritative and may be emitted from worker-owned raster
-/// work; it never changes target fitting, pixels, scene identity, or caching.
+/// work; it never changes the checked target transform, pixels, scene identity, or caching.
 ///
 /// # Errors
 ///
@@ -2097,6 +2195,21 @@ pub fn rasterize_preview_cancellable_with_progress(
     report_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<RasterSurface, RenderError> {
     let transform = PreviewTransform::for_scene(scene, target);
+    if ![
+        transform.scale,
+        transform.offset_x,
+        transform.offset_y,
+        transform.right,
+        transform.bottom,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+    {
+        return Err(RenderError::new(
+            "preview.target",
+            "resolved viewport transform exceeds finite raster coordinates",
+        ));
+    }
     let width = target.width;
     let height = target.height;
     let mut work = RasterWork::with_progress(
@@ -2106,6 +2219,7 @@ pub fn rasterize_preview_cancellable_with_progress(
         raster_progress_unit_count(scene),
         report_progress,
     );
+    work.preview_clip = Some(transform);
     let model = scene.model;
     let mut pixels = match model {
         Some(model) => begin_model_composition(model, width, height)?,
@@ -2139,7 +2253,19 @@ struct PreviewTransform {
     bottom: f64,
 }
 impl PreviewTransform {
+    /// Maps canonical geometry into fitted or cropped physical pixels and retains canvas clipping.
     fn for_scene(scene: &RenderScene, target: PreviewRasterTarget) -> Self {
+        if let Some((origin_x, origin_y, scale)) = target.viewport() {
+            let offset_x = -origin_x * scale;
+            let offset_y = -origin_y * scale;
+            return Self {
+                scale,
+                offset_x,
+                offset_y,
+                right: offset_x + scene.canvas.width * scale,
+                bottom: offset_y + scene.canvas.height * scale,
+            };
+        }
         let scale = (f64::from(target.width) / scene.canvas.width)
             .min(f64::from(target.height) / scene.canvas.height);
         let offset_x = (f64::from(target.width) - scene.canvas.width * scale) / 2.0;
@@ -2277,10 +2403,7 @@ fn raster_progress_unit_count(scene: &RenderScene) -> usize {
 /// Returns the stable output-target diagnostic when either finite canvas
 /// dimension is not representable as a positive integral raster dimension.
 fn native_output_target(scene: &RenderScene) -> Result<OutputRasterTarget, RenderError> {
-    OutputRasterTarget::new(
-        integral_dimension(scene.canvas.width)?,
-        integral_dimension(scene.canvas.height)?,
-    )
+    OutputRasterTarget::for_canvas(&scene.canvas)
 }
 
 /// Converts one final-consumer background choice into premultiplied linear storage.
@@ -2998,6 +3121,10 @@ fn check_parallel_raster_cancellation(
     ))
 }
 
+/// Checks native document units before converting them to integral raster dimensions.
+///
+/// # Errors
+/// Returns `raster.canvas` when a dimension is non-integral, non-positive, or unrepresentable.
 fn integral_dimension(value: f64) -> Result<u32, RenderError> {
     if !value.is_finite() || value <= 0.0 || value.fract() != 0.0 || value > f64::from(u32::MAX) {
         return Err(RenderError::new(
@@ -3401,6 +3528,12 @@ fn accumulate_nonzero_scanline_coverage(
         work.check()?;
         crossings.clear();
         let sample_y = f64::from(row) + (f64::from(sub_y) + 0.5) / f64::from(samples);
+        if work
+            .preview_clip
+            .is_some_and(|clip| sample_y < clip.offset_y || sample_y >= clip.bottom)
+        {
+            continue;
+        }
         #[cfg(test)]
         {
             coverage_work.visited_active_edges = coverage_work
@@ -3483,8 +3616,8 @@ fn accumulate_nonzero_scanline_coverage(
 /// Adds the exact subpixel samples in one active nonzero span to sparse row coverage.
 ///
 /// The span remains half-open (`start <= sample < end`) so its ownership matches the historical
-/// crossing rule. Iteration is clipped only at the final raster row bounds; canonical outline
-/// geometry is not clipped or rewritten.
+/// crossing rule. Iteration respects final raster row bounds and the optional preview canvas
+/// rectangle at every sample; canonical outline geometry is not clipped or rewritten.
 ///
 /// # Errors
 ///
@@ -3503,8 +3636,13 @@ fn accumulate_nonzero_span_coverage(
 ) -> Result<(), RenderError> {
     #[cfg(not(test))]
     let _ = coverage_work;
-    let clipped_start = start.max(f64::from(min_x));
-    let clipped_end = end.min(f64::from(max_x));
+    let clipped_start = start.max(f64::from(min_x)).max(
+        work.preview_clip
+            .map_or(f64::NEG_INFINITY, |clip| clip.offset_x),
+    );
+    let clipped_end = end
+        .min(f64::from(max_x))
+        .min(work.preview_clip.map_or(f64::INFINITY, |clip| clip.right));
     if clipped_end <= clipped_start {
         return Ok(());
     }
@@ -3768,6 +3906,9 @@ fn polygon_coverage_even_odd(
                 f64::from(x) + (f64::from(sub_x) + 0.5) / f64::from(samples),
                 f64::from(y) + (f64::from(sub_y) + 0.5) / f64::from(samples),
             );
+            if !work.contains_sample(point.x, point.y) {
+                continue;
+            }
             let mut crossings = 0usize;
             for (a, b) in edges {
                 work.check()?;
@@ -3809,7 +3950,7 @@ fn polygon_coverage_nonzero(
                 f64::from(x) + (f64::from(sub_x) + 0.5) / f64::from(samples),
                 f64::from(y) + (f64::from(sub_y) + 0.5) / f64::from(samples),
             );
-            if point_in_nonzero_outline(edges, point) {
+            if work.contains_sample(point.x, point.y) && point_in_nonzero_outline(edges, point) {
                 inside += 1;
             }
         }
@@ -3903,7 +4044,9 @@ fn ellipse_coverage(
             let point_y = f64::from(y) + (f64::from(sample_y) + 0.5) / f64::from(samples);
             let dx = (point_x - center_x) / radius_x;
             let dy = (point_y - center_y) / radius_y;
-            if dx.mul_add(dx, dy * dy) <= 1.0 {
+            if work.is_none_or(|work| work.contains_sample(point_x, point_y))
+                && dx.mul_add(dx, dy * dy) <= 1.0
+            {
                 inside += 1;
             }
         }

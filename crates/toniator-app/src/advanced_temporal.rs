@@ -42,10 +42,10 @@ impl SourceWorker {
 }
 
 impl Drop for SourceWorker {
-    /// Cancels preparation and joins its owner, ensuring decoder children are reaped on close.
+    /// Cancels preparation without blocking GTK; the worker reaps its own decoder children.
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
+        if let Some(thread) = self.thread.take().filter(|thread| thread.is_finished()) {
             let _ = thread.join();
         }
     }

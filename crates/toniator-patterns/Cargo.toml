@@ -1,6 +1,6 @@
 [package]
 name = "toniator-patterns"
-version = "0.3.2"
+version = "0.3.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 rayon.workspace = true
 serde.workspace = true
+spade.workspace = true
 toniator-domain = { path = "../toniator-domain" }
 toniator-geometry = { path = "../toniator-geometry" }
 toniator-sampling = { path = "../toniator-sampling" }

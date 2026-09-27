@@ -5,6 +5,9 @@
 #[cfg(test)]
 mod transform_regressions;
 
+#[cfg(test)]
+mod candidate_order_tests;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     error::Error,
@@ -18,6 +21,9 @@ use std::{
 
 use rayon::prelude::*;
 use serde::Serialize;
+use spade::{
+    DelaunayTriangulation, HasPosition, HierarchyHintGenerator, Point2 as SpadePoint, Triangulation,
+};
 use toniator_domain::{
     ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2, AuthoredStructureDraft,
     AuthoredStructureId, AuthoredStructureKind, CanvasSpec, ChannelId, ChannelPaint,
@@ -864,7 +870,10 @@ impl PresetRegistry {
         })
     }
 
-    /// Returns the versioned built-in pure-schema registry in stable ID order.
+    /// Returns single-drawing built-in recipes in stable ID order for independent channel use.
+    ///
+    /// # Panics
+    /// Panics if a bundled recipe violates the current domain or catalog contract.
     pub fn bundled() -> Self {
         let coverage = || toniator_domain::CoveragePolicy {
             guard_steps: 2,
@@ -923,6 +932,7 @@ impl PresetRegistry {
                 exclusion: SiteExclusionPolicy::None,
                 maximum_attempts: 16_000_000,
                 maximum_neighbor_checks: 16_000_000,
+                refinement: Default::default(),
             }
         };
         let adjacency = toniator_domain::ConnectionAdjacencyIntent {
@@ -1001,12 +1011,12 @@ impl PresetRegistry {
                 PresetRecord {
                     metadata: metadata(
                         "even-random-circles",
-                        "Even Dispersion Marks",
+                        "Poisson Disk Marks",
                         "Dispersion",
-                        "Evenly spaced circles in a repeatable random arrangement.",
+                        "Evenly spaced circles from a repeatable Poisson-disk arrangement.",
                     ),
                     recipe: mark_recipe(random(
-                        "Even random circles",
+                        "Poisson disk circles",
                         RandomSiteCharacter::Even {
                             minimum_center_distance: 8.0,
                         },
@@ -1045,24 +1055,6 @@ impl PresetRegistry {
                             },
                         ],
                     }),
-                },
-                PresetRecord {
-                    metadata: metadata(
-                        "residual-sites-along-guide",
-                        "Connected and Residual Sites",
-                        "Composites",
-                        "Nearby sites are joined first, with circles drawn at the unused sites.",
-                    ),
-                    recipe: composite_connection_marks(
-                        grid("Residual guide sites", &[0.0], true),
-                        ConnectionProgram::NearestLinks {
-                            adjacency: toniator_domain::ConnectionAdjacencyIntent {
-                                maximum_degree: 3,
-                                maximum_distance: 48.0,
-                            },
-                        },
-                        true,
-                    ),
                 },
                 PresetRecord {
                     metadata: metadata(
@@ -1128,6 +1120,7 @@ impl PresetRegistry {
                             exclusion: SiteExclusionPolicy::None,
                             maximum_attempts: 16_000_000,
                             maximum_neighbor_checks: 16_000_000,
+                            refinement: Default::default(),
                         },
                         toniator_domain::RegionGeometryResponse {
                             algorithm: RegionResizeAlgorithm::Scale,
@@ -1536,49 +1529,6 @@ mod gate2_registry_tests {
     }
 }
 
-/// Builds the approved connection-plus-residual-marks painter-order composite.
-fn composite_connection_marks(
-    definition: PatternStructureRecipe,
-    program: ConnectionProgram,
-    residual: bool,
-) -> PatternDefinitionRecipe {
-    PatternDefinitionRecipe {
-        structure: PatternStructureRecipe::OrderedOutputs {
-            definition: Box::new(definition),
-            outputs: vec![
-                toniator_domain::PatternOutputRealizationRecipe::ConnectionPaths {
-                    program,
-                    style: Default::default(),
-                },
-                toniator_domain::PatternOutputRealizationRecipe::Marks,
-            ],
-        },
-        output_settings: vec![
-            toniator_domain::PatternOutputSettingsRecipe {
-                source_filter: toniator_domain::SiteUseFilterRecipe::All,
-                response: PatternGeometryResponse::Connected(
-                    toniator_domain::ConnectedGeometryResponse {
-                        minimum_thickness: 0.0,
-                        maximum_thickness: 1.0,
-                        bias: 0.0,
-                    },
-                ),
-            },
-            toniator_domain::PatternOutputSettingsRecipe {
-                source_filter: if residual {
-                    toniator_domain::SiteUseFilterRecipe::SitesUnusedBy { output_index: 0 }
-                } else {
-                    toniator_domain::SiteUseFilterRecipe::SitesUsedBy { output_index: 0 }
-                },
-                response: PatternGeometryResponse::Marks(toniator_domain::MarkGeometryResponse {
-                    minimum_fill: 0.0,
-                    maximum_fill: 1.0,
-                }),
-            },
-        ],
-    }
-}
-
 /// The structural product a family makes available to later pipeline stages.
 /// It is deliberately typed rather than inferred from a pattern name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1668,21 +1618,22 @@ pub struct RandomSiteCapability {
     /// Explicit, persisted bound for deterministic spatial-index neighbor
     /// checks. It is distinct from candidate generation work.
     pub maximum_neighbor_checks: u32,
+    /// Optional bounded centroid refinement applied after initial site generation.
+    pub refinement: toniator_domain::RandomSiteRefinement,
+    /// Receiving-channel response used only by density-weighted Lloyd refinement.
+    pub refinement_weighting: Option<SourceWeighting>,
 }
 
 /// Whether the family identity must include decoded source pixels.  Logical
 /// source IDs remain solely at the decoder lookup boundary.
 pub fn family_requires_decoded_source(family: &FamilyCapability) -> bool {
-    matches!(
-        family
-            .random
-            .as_ref()
-            .map(|random| &random.density_modulation),
-        Some(
+    family.random.as_ref().is_some_and(|random| {
+        matches!(
+            random.density_modulation,
             ResolvedSiteDensityModulation::ArtworkWeightedUnbound
                 | ResolvedSiteDensityModulation::ArtworkWeighted { .. }
-        )
-    )
+        ) || (random.refinement.enabled && random.refinement.density_weighted)
+    })
 }
 
 /// A reusable ordered realization contract. A realizer can consume only the
@@ -4657,6 +4608,7 @@ fn resolve_random_site_pipeline(
             exclusion_id: parent_exclusion_id,
             maximum_attempts,
             maximum_neighbor_checks,
+            refinement,
         },
     ] = definition.mechanisms.as_slice()
     else {
@@ -4756,6 +4708,10 @@ fn resolve_random_site_pipeline(
                 exclusion: policy.clone(),
                 maximum_attempts: *maximum_attempts,
                 maximum_neighbor_checks: *maximum_neighbor_checks,
+                refinement: refinement.clone(),
+                refinement_weighting: (refinement.enabled && refinement.density_weighted)
+                    .then_some(weighting)
+                    .flatten(),
             }),
             generic_guides: None,
             parametric_curve: None,
@@ -5480,8 +5436,21 @@ fn evaluate_parametric_curve_with_progress_cancellable(
         .parametric_curve
         .as_ref()
         .expect("parametric branch is present");
+    let pattern_size_scale = resolved_pattern_size_scale(&request.canvas, &request.density)?;
+    let effective_curve = scaled_parametric_curve(&parametric.curve, pattern_size_scale)?;
+    let effective_site_interval = parametric
+        .site_interval
+        .map(|interval| {
+            scale_feature_length(
+                interval,
+                pattern_size_scale,
+                "pattern.parametric.feature_scale",
+                "Feature size produced a non-finite parametric site interval",
+            )
+        })
+        .transpose()?;
     let local_path = toniator_geometry::construct_parametric_curve_path_cancellable(
-        &parametric.curve,
+        &effective_curve,
         Point2::new(0.0, 0.0),
         is_cancelled,
     )?;
@@ -5514,8 +5483,8 @@ fn evaluate_parametric_curve_with_progress_cancellable(
         dimensions: vec![dimension],
         resolved_paths: vec![(None, path)],
         structural_source: Some(parametric.source_id),
-        absolute_site_interval: parametric.site_interval,
-        single_nominal_spacing: match &parametric.curve {
+        absolute_site_interval: effective_site_interval,
+        single_nominal_spacing: match &effective_curve {
             ParametricCurve::Spiral(spiral) => Some(spiral.radial_spacing),
         },
     });
@@ -6192,6 +6161,145 @@ fn resolved_pattern_size_scale(
             "pattern.family.guide_spacing",
             "pattern size must resolve to a finite positive curve scale",
         ))
+}
+
+/// Scales one authored positive length by the current artist-facing Feature size.
+///
+/// The persisted recipe remains authoritative; callers use this helper only for the resolved
+/// geometry inputs of one evaluation.  Keeping the operation checked prevents an extreme but
+/// finite density edit from turning a family into non-finite geometry.
+///
+/// # Errors
+///
+/// Returns `path` when either the authored length or its resolved product is not finite-positive.
+fn scale_feature_length(
+    value: f64,
+    scale: f64,
+    path: &'static str,
+    message: &'static str,
+) -> Result<f64, PatternPipelineError> {
+    if !value.is_finite() || value <= 0.0 || !scale.is_finite() || scale <= 0.0 {
+        return Err(PatternPipelineError::new(path, message));
+    }
+    let scaled = value * scale;
+    (scaled.is_finite() && scaled > 0.0)
+        .then_some(scaled)
+        .ok_or(PatternPipelineError::new(path, message))
+}
+
+/// Resolves the parametric spiral dimensions for one artist-facing Feature size.
+///
+/// Radial spacing follows Feature size while turns move inversely, preserving the authored
+/// spiral's approximate outer footprint as the line becomes finer or coarser.  The returned curve
+/// is an evaluation-only copy; the family capability and its provenance retain authored values.
+///
+/// # Errors
+///
+/// Returns a stable parametric-scale diagnostic when the resolved spacing or turn count cannot
+/// remain finite-positive.
+fn scaled_parametric_curve(
+    curve: &ParametricCurve,
+    scale: f64,
+) -> Result<ParametricCurve, PatternPipelineError> {
+    let ParametricCurve::Spiral(spiral) = curve;
+    let radial_spacing = scale_feature_length(
+        spiral.radial_spacing,
+        scale,
+        "pattern.parametric.feature_scale",
+        "Feature size produced a non-finite parametric radial spacing",
+    )?;
+    if !spiral.turns.is_finite() || spiral.turns <= 0.0 || !scale.is_finite() || scale <= 0.0 {
+        return Err(PatternPipelineError::new(
+            "pattern.parametric.feature_scale",
+            "Feature size produced a non-finite parametric turn count",
+        ));
+    }
+    let turns = spiral.turns / scale;
+    if !turns.is_finite() || turns <= 0.0 {
+        return Err(PatternPipelineError::new(
+            "pattern.parametric.feature_scale",
+            "Feature size produced a non-finite parametric turn count",
+        ));
+    }
+    Ok(ParametricCurve::Spiral(SpiralCurve {
+        radial_spacing,
+        turns,
+        ..spiral.clone()
+    }))
+}
+
+/// Resolves scatter lengths for one artist-facing Feature size without changing family identity.
+///
+/// Dimensionless random controls such as jitter, cluster frequency, strength, seed, and Lloyd
+/// iteration count remain authored. Even spacing, clustered spread, and explicit exclusion
+/// lengths follow the same scale as the generated feature size.
+///
+/// # Errors
+///
+/// Returns a stable random-scale diagnostic when an authored absolute length cannot be resolved.
+fn scaled_random_capability(
+    random: &RandomSiteCapability,
+    scale: f64,
+) -> Result<RandomSiteCapability, PatternPipelineError> {
+    let mut scaled = random.clone();
+    scaled.character = match &random.character {
+        RandomSiteCharacter::RawUniform => RandomSiteCharacter::RawUniform,
+        RandomSiteCharacter::Even {
+            minimum_center_distance,
+        } => RandomSiteCharacter::Even {
+            minimum_center_distance: scale_feature_length(
+                *minimum_center_distance,
+                scale,
+                "pattern.random_sites.feature_scale",
+                "Feature size produced a non-finite even-site spacing",
+            )?,
+        },
+        RandomSiteCharacter::Clustered {
+            cluster_density,
+            cluster_spread,
+            cluster_strength,
+        } => RandomSiteCharacter::Clustered {
+            cluster_density: *cluster_density,
+            cluster_spread: scale_feature_length(
+                *cluster_spread,
+                scale,
+                "pattern.random_sites.feature_scale",
+                "Feature size produced a non-finite cluster spread",
+            )?,
+            cluster_strength: *cluster_strength,
+        },
+        RandomSiteCharacter::Stratified { jitter } => {
+            RandomSiteCharacter::Stratified { jitter: *jitter }
+        }
+    };
+    scaled.exclusion = match &random.exclusion {
+        SiteExclusionPolicy::None => SiteExclusionPolicy::None,
+        SiteExclusionPolicy::MinimumCenterDistance { minimum } => {
+            SiteExclusionPolicy::MinimumCenterDistance {
+                minimum: scale_feature_length(
+                    *minimum,
+                    scale,
+                    "pattern.random_sites.feature_scale",
+                    "Feature size produced a non-finite random-site exclusion distance",
+                )?,
+            }
+        }
+        SiteExclusionPolicy::VisibleMarkMargin { margin } => {
+            SiteExclusionPolicy::VisibleMarkMargin {
+                margin: if *margin == 0.0 {
+                    0.0
+                } else {
+                    scale_feature_length(
+                        *margin,
+                        scale,
+                        "pattern.random_sites.feature_scale",
+                        "Feature size produced a non-finite random-site visible margin",
+                    )?
+                },
+            }
+        }
+    };
+    Ok(scaled)
 }
 
 /// Evaluates resolved finite guide paths using the authoritative local-grid placement policy.
@@ -7687,7 +7795,8 @@ pub fn maximum_nominal_cell_diameter(
 ) -> Result<f64, PatternPipelineError> {
     let pattern_size_scale = resolved_pattern_size_scale(canvas, density)?;
     if let Some(parametric) = &family.parametric_curve {
-        let radial_spacing = match &parametric.curve {
+        let effective_curve = scaled_parametric_curve(&parametric.curve, pattern_size_scale)?;
+        let radial_spacing = match effective_curve {
             ParametricCurve::Spiral(spiral) => spiral.radial_spacing,
         };
         let repetition_basis = match parametric.repetition {
@@ -7702,8 +7811,18 @@ pub fn maximum_nominal_cell_diameter(
             }
             GuideRepetition::NormalOffset { spacing, .. } => spacing * pattern_size_scale,
         };
-        let bound = parametric
+        let site_interval = parametric
             .site_interval
+            .map(|interval| {
+                scale_feature_length(
+                    interval,
+                    pattern_size_scale,
+                    "pattern.parametric.feature_scale",
+                    "Feature size produced a non-finite parametric site interval",
+                )
+            })
+            .transpose()?;
+        let bound = site_interval
             .unwrap_or(repetition_basis)
             .max(repetition_basis);
         return (bound.is_finite() && bound > 0.0).then_some(bound).ok_or(
@@ -7809,7 +7928,8 @@ pub fn maximum_emitted_guide_spacing(
 ) -> Result<f64, PatternPipelineError> {
     let pattern_size_scale = resolved_pattern_size_scale(canvas, density)?;
     if let Some(parametric) = &family.parametric_curve {
-        let spacing = match (&parametric.curve, &parametric.repetition) {
+        let effective_curve = scaled_parametric_curve(&parametric.curve, pattern_size_scale)?;
+        let spacing = match (&effective_curve, &parametric.repetition) {
             (ParametricCurve::Spiral(_), GuideRepetition::NormalOffset { spacing, .. }) => {
                 *spacing * pattern_size_scale
             }
@@ -8262,17 +8382,18 @@ struct SpatialIndex {
     cell_size: f64,
     cells: HashMap<(i64, i64), Vec<usize>>,
     neighbor_work: usize,
+    maximum_neighbor_work: usize,
 }
 
 impl SpatialIndex {
-    /// Creates an exclusion lookup without an application-authored work ceiling.
+    /// Creates an exclusion lookup with one persisted deterministic neighbor-work ceiling.
     ///
     /// # Errors
     ///
     /// Returns the stable spatial-index diagnostic when cell size is not
     /// finite-positive; allocation, arithmetic, and cancellation remain checked
     /// during use.
-    fn new(cell_size: f64) -> Result<Self, PatternPipelineError> {
+    fn new(cell_size: f64, maximum_neighbor_work: usize) -> Result<Self, PatternPipelineError> {
         if !cell_size.is_finite() || cell_size <= 0.0 {
             return Err(PatternPipelineError::new(
                 "coverage.random_sites.spatial_index",
@@ -8283,6 +8404,7 @@ impl SpatialIndex {
             cell_size,
             cells: HashMap::new(),
             neighbor_work: 0,
+            maximum_neighbor_work,
         })
     }
     fn cell(&self, point: Point2) -> Result<(i64, i64), PatternPipelineError> {
@@ -8348,6 +8470,12 @@ impl SpatialIndex {
                             "exclusion neighbor work overflowed",
                         ),
                     )?;
+                    if self.neighbor_work > self.maximum_neighbor_work {
+                        return Err(PatternPipelineError::new(
+                            "coverage.random_sites.neighbor_limit",
+                            "random-site neighbor check limit exceeded",
+                        ));
+                    }
                     for &index in indices {
                         // A populated cell can contain bounded-but-large work.
                         // Poll every deterministic index so cancellation cannot
@@ -8366,6 +8494,61 @@ impl SpatialIndex {
             }
         }
         Ok(None)
+    }
+    /// Tests a temporary point population used while constructing a Poisson frontier.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable coordinate, work-overflow, or cancellation diagnostics.
+    fn find_point_conflict(
+        &mut self,
+        point: Point2,
+        accepted: &[Point2],
+        distance: f64,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<bool, PatternPipelineError> {
+        let (x, y) = self.cell(point)?;
+        for dx in -1_i64..=1 {
+            for dy in -1_i64..=1 {
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                let key = (
+                    x.checked_add(dx).ok_or(PatternPipelineError::new(
+                        "coverage.random_sites.spatial_index",
+                        "Poisson neighbor coordinate overflowed",
+                    ))?,
+                    y.checked_add(dy).ok_or(PatternPipelineError::new(
+                        "coverage.random_sites.spatial_index",
+                        "Poisson neighbor coordinate overflowed",
+                    ))?,
+                );
+                if let Some(indices) = self.cells.get(&key) {
+                    self.neighbor_work = self.neighbor_work.checked_add(indices.len()).ok_or(
+                        PatternPipelineError::new(
+                            "coverage.random_sites.neighbor_limit",
+                            "Poisson neighbor work overflowed",
+                        ),
+                    )?;
+                    if self.neighbor_work > self.maximum_neighbor_work {
+                        return Err(PatternPipelineError::new(
+                            "coverage.random_sites.neighbor_limit",
+                            "Poisson neighbor check limit exceeded",
+                        ));
+                    }
+                    if indices
+                        .iter()
+                        .any(|index| point_distance(point, accepted[*index]) < distance)
+                    {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
     }
     /// Inserts one accepted-site ordinal through fallible cell and bucket growth.
     ///
@@ -8464,10 +8647,13 @@ fn evaluate_random_sites_with_progress_cancellable(
         max_family_candidates: request.max_family_candidates,
     })
     .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
-    let random = family.random.as_ref().ok_or(PatternPipelineError::new(
+    let authored_random = family.random.as_ref().ok_or(PatternPipelineError::new(
         "pattern.family.random_sites",
         "random-site capability requires a declared random mechanism chain",
     ))?;
+    let pattern_size_scale = resolved_pattern_size_scale(&request.canvas, &request.density)?;
+    let scaled_random = scaled_random_capability(authored_random, pattern_size_scale)?;
+    let random = &scaled_random;
     let weighted_source = match &random.density_modulation {
         ResolvedSiteDensityModulation::Uniform => None,
         ResolvedSiteDensityModulation::ArtworkWeightedUnbound => {
@@ -8482,6 +8668,14 @@ fn evaluate_random_sites_with_progress_cancellable(
                 "artwork-weighted site placement requires decoded source pixels",
             ))?)
         }
+    };
+    let refinement_source = if random.refinement.enabled && random.refinement.density_weighted {
+        Some(source.ok_or(PatternPipelineError::new(
+            "pattern.family.random_sites.lloyd_source",
+            "density-weighted Lloyd relaxation requires decoded source pixels",
+        ))?)
+    } else {
+        None
     };
     let canvas = Bounds::new(
         Point2::new(0.0, 0.0),
@@ -8539,6 +8733,8 @@ fn evaluate_random_sites_with_progress_cancellable(
             "random-site requested count exceeds the configured candidate limit",
         ));
     }
+    // Schema effort fields are reserved, not application-authored creative ceilings.
+    // Normal requests are unbounded; explicit diagnostic callers may still bound work.
     let candidate_budget = request.max_family_candidates;
     if candidate_budget == 0 {
         return Err(PatternPipelineError::new(
@@ -8563,10 +8759,19 @@ fn evaluate_random_sites_with_progress_cancellable(
         report_progress,
         estimated_work,
     )?;
+    let prepared_candidates = prepared_random_candidates(
+        &random.character,
+        local,
+        requested,
+        candidate_budget,
+        usize::MAX,
+        &mut prng,
+        is_cancelled,
+    )?;
     let nominal_cell_basis = density_cell_basis(&request.canvas, &request.density)?;
     let mut sites = Vec::new();
     let mut spatial_index = (exclusion_distance > 0.0)
-        .then(|| SpatialIndex::new(exclusion_distance))
+        .then(|| SpatialIndex::new(exclusion_distance, usize::MAX))
         .transpose()?;
     let mut rejected_by_density = 0;
     let mut rejected_by_exclusion = 0;
@@ -8580,7 +8785,11 @@ fn evaluate_random_sites_with_progress_cancellable(
                 "evaluation was cancelled",
             ));
         }
-        if sites.len() == requested {
+        if sites.len() == requested
+            || prepared_candidates
+                .as_ref()
+                .is_some_and(|candidates| candidate_ordinal >= candidates.len())
+        {
             break;
         }
         candidates_considered = candidate_ordinal + 1;
@@ -8592,7 +8801,10 @@ fn evaluate_random_sites_with_progress_cancellable(
                 estimated_work,
             );
         }
-        let local_point = random_candidate(&random.character, local, &parents, &mut prng);
+        let local_point = prepared_candidates
+            .as_ref()
+            .and_then(|candidates| candidates.get(candidate_ordinal).copied())
+            .unwrap_or_else(|| random_candidate(&random.character, local, &parents, &mut prng));
         let point = transform.apply_point(local_point);
         if !padded.contains(point) {
             rejected_outside_envelope += 1;
@@ -8706,6 +8918,18 @@ fn evaluate_random_sites_with_progress_cancellable(
     // completed `FamilySite` values.
     drop(spatial_index);
     drop(parents);
+    if random.refinement.enabled {
+        relax_random_sites(
+            &mut sites,
+            padded,
+            canvas,
+            &request.canvas,
+            random,
+            refinement_source,
+            exclusion_distance,
+            is_cancelled,
+        )?;
+    }
     let canvas_sites = sites
         .iter()
         .filter(|site| site.scope == SiteScope::Canvas)
@@ -8722,7 +8946,7 @@ fn evaluate_random_sites_with_progress_cancellable(
     };
     report_progress(estimated_work, estimated_work);
     Ok(RandomSiteEvaluation {
-        family_fingerprint: random_family_fingerprint(family, request, weighted_source),
+        family_fingerprint: random_family_fingerprint(family, request, source),
         generation_domain: padded,
         sites,
         diagnostics,
@@ -8785,6 +9009,701 @@ fn checked_requested_count(request: &GridInspectRequest) -> Result<usize, Patter
     Ok(expected.round().max(1.0) as usize)
 }
 
+/// Precomputes algorithms whose structure depends on the complete requested domain.
+/// Raw and clustered processes remain streaming candidates and return `None`.
+///
+/// # Errors
+///
+/// Returns cancellation, allocation, or spatial-index diagnostics without a partial population.
+fn prepared_random_candidates(
+    character: &RandomSiteCharacter,
+    bounds: Bounds,
+    requested: usize,
+    budget: usize,
+    maximum_neighbor_work: usize,
+    prng: &mut StablePrng,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Option<Vec<Point2>>, PatternPipelineError> {
+    match character {
+        RandomSiteCharacter::Even {
+            minimum_center_distance,
+        } => bridson_candidates(
+            bounds,
+            *minimum_center_distance,
+            requested,
+            budget,
+            maximum_neighbor_work,
+            prng,
+            is_cancelled,
+        )
+        .map(Some),
+        RandomSiteCharacter::Stratified { jitter } => {
+            stratified_candidates(bounds, *jitter, requested, prng, is_cancelled).map(Some)
+        }
+        RandomSiteCharacter::RawUniform | RandomSiteCharacter::Clustered { .. } => Ok(None),
+    }
+}
+
+/// Generates a domain-covering Bridson active-frontier population with deterministic reseeding.
+/// Empty-frontier reseeding reaches disconnected weighted regions before downstream density thinning.
+/// Optional overflow sampling stops at its work limit once the requested population exists.
+///
+/// # Errors
+///
+/// Returns cancellation, allocation, or spatial-index diagnostics without publishing partial sites.
+fn bridson_candidates(
+    bounds: Bounds,
+    distance: f64,
+    requested: usize,
+    budget: usize,
+    maximum_neighbor_work: usize,
+    prng: &mut StablePrng,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Point2>, PatternPipelineError> {
+    let mut points = Vec::new();
+    let mut active = Vec::new();
+    let mut index = SpatialIndex::new(distance, maximum_neighbor_work)?;
+    // Distributed initial seeds and exhausted local frontiers already cover the domain.
+    // A bounded global search checks for missed islands without scaling failed work with density.
+    let reseed_limit = 128.min(budget.max(1));
+    let mut attempts = 0_usize;
+    let mut reseed_rejections = 0_usize;
+    let target_pool = requested.saturating_mul(4).min(budget);
+    let width = bounds.max.x - bounds.min.x;
+    let height = bounds.max.y - bounds.min.y;
+    let seed_target = requested.div_ceil(16).max(4);
+    let seed_columns = ((seed_target as f64 * width / height).sqrt().round() as usize).max(1);
+    let seed_rows = seed_target.div_ceil(seed_columns).max(1);
+    for row in 0..seed_rows {
+        for column in 0..seed_columns {
+            if attempts >= budget || points.len() >= target_pool {
+                break;
+            }
+            if is_cancelled() {
+                return Err(PatternPipelineError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            attempts += 1;
+            let seed = Point2::new(
+                bounds.min.x + (column as f64 + prng.unit()) * width / seed_columns as f64,
+                bounds.min.y + (row as f64 + prng.unit()) * height / seed_rows as f64,
+            );
+            if index.find_point_conflict(seed, &points, distance, is_cancelled)? {
+                continue;
+            }
+            let ordinal = points.len();
+            try_push_family_value(
+                &mut points,
+                seed,
+                "coverage.random_sites.allocation",
+                "Poisson candidates could not reserve another site",
+            )?;
+            index.insert(seed, ordinal)?;
+            active.push(ordinal);
+        }
+    }
+    'generation: while attempts < budget {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        if active.is_empty() {
+            let seed = uniform_point(bounds, prng);
+            attempts += 1;
+            let conflict = match index.find_point_conflict(seed, &points, distance, is_cancelled) {
+                Ok(conflict) => conflict,
+                Err(error)
+                    if error.path() == "coverage.random_sites.neighbor_limit"
+                        && points.len() >= requested =>
+                {
+                    break 'generation;
+                }
+                Err(error) => return Err(error),
+            };
+            if conflict {
+                reseed_rejections += 1;
+                if reseed_rejections >= reseed_limit {
+                    break;
+                }
+                continue;
+            }
+            reseed_rejections = 0;
+            let ordinal = points.len();
+            try_push_family_value(
+                &mut points,
+                seed,
+                "coverage.random_sites.allocation",
+                "Poisson candidates could not reserve another site",
+            )?;
+            index.insert(seed, ordinal)?;
+            active.push(ordinal);
+            continue;
+        }
+        if points.len() >= target_pool {
+            break;
+        }
+        let active_slot = ((prng.unit() * active.len() as f64) as usize).min(active.len() - 1);
+        let origin = points[active[active_slot]];
+        let mut accepted = false;
+        for _ in 0..30 {
+            if attempts >= budget {
+                break;
+            }
+            attempts += 1;
+            let mut dx = prng.unit() * 2.0 - 1.0;
+            let mut dy = prng.unit() * 2.0 - 1.0;
+            let length = (dx * dx + dy * dy).sqrt();
+            if !(0.000_001..=1.0).contains(&length) {
+                continue;
+            }
+            dx /= length;
+            dy /= length;
+            let radius = distance * (1.0 + 3.0 * prng.unit()).sqrt();
+            let candidate = Point2::new(origin.x + dx * radius, origin.y + dy * radius);
+            if !bounds.contains(candidate) {
+                continue;
+            }
+            let conflict =
+                match index.find_point_conflict(candidate, &points, distance, is_cancelled) {
+                    Ok(conflict) => conflict,
+                    Err(error)
+                        if error.path() == "coverage.random_sites.neighbor_limit"
+                            && points.len() >= requested =>
+                    {
+                        break 'generation;
+                    }
+                    Err(error) => return Err(error),
+                };
+            if conflict {
+                continue;
+            }
+            let ordinal = points.len();
+            try_push_family_value(
+                &mut points,
+                candidate,
+                "coverage.random_sites.allocation",
+                "Poisson candidates could not reserve another site",
+            )?;
+            index.insert(candidate, ordinal)?;
+            active.push(ordinal);
+            accepted = true;
+            break;
+        }
+        if !accepted {
+            active.swap_remove(active_slot);
+        }
+    }
+    if attempts >= budget && !active.is_empty() && points.len() < requested {
+        return Err(PatternPipelineError::new(
+            "coverage.random_sites.attempts",
+            "Poisson placement effort limit was exhausted before domain saturation",
+        ));
+    }
+    spread_candidate_order(&mut points, requested, bounds, is_cancelled)?;
+    Ok(points)
+}
+
+/// Generates one jittered point per aspect-aware cell, covering the full domain before truncation.
+///
+/// # Errors
+///
+/// Returns an allocation diagnostic without publishing a partial population.
+fn stratified_candidates(
+    bounds: Bounds,
+    jitter: f64,
+    requested: usize,
+    prng: &mut StablePrng,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Point2>, PatternPipelineError> {
+    let width = bounds.max.x - bounds.min.x;
+    let height = bounds.max.y - bounds.min.y;
+    let columns = ((requested as f64 * width / height).sqrt().round() as usize).max(1);
+    let rows = requested.div_ceil(columns).max(1);
+    let cell_width = width / columns as f64;
+    let cell_height = height / rows as f64;
+    let mut points = Vec::new();
+    for row in 0..rows {
+        for column in 0..columns {
+            if is_cancelled() {
+                return Err(PatternPipelineError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            let offset_x = (prng.unit() - 0.5) * jitter;
+            let offset_y = (prng.unit() - 0.5) * jitter;
+            try_push_family_value(
+                &mut points,
+                Point2::new(
+                    bounds.min.x + (column as f64 + 0.5 + offset_x) * cell_width,
+                    bounds.min.y + (row as f64 + 0.5 + offset_y) * cell_height,
+                ),
+                "coverage.random_sites.allocation",
+                "stratified candidates could not reserve another site",
+            )?;
+        }
+    }
+    spread_candidate_order(&mut points, requested, bounds, is_cancelled)?;
+    Ok(points)
+}
+
+/// Moves an evenly distributed prefix ahead of overflow candidates while retaining every candidate.
+/// Caches each spatial key once and merges bounded sorted runs so cancellation stays responsive.
+/// Ordinal tie-breaking preserves the previous stable spatial ordering and every emitted site.
+///
+/// # Errors
+/// Returns cancellation or allocation failure before replacing the caller's population.
+fn spread_candidate_order(
+    points: &mut Vec<Point2>,
+    requested: usize,
+    bounds: Bounds,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), PatternPipelineError> {
+    if points.len() <= 1 || requested == 0 {
+        return Ok(());
+    }
+    let allocation = || {
+        PatternPipelineError::new(
+            "coverage.random_sites.allocation",
+            "candidate ordering allocation failed",
+        )
+    };
+    let check = || {
+        if is_cancelled() {
+            Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    let mut keys = Vec::new();
+    keys.try_reserve_exact(points.len())
+        .map_err(|_| allocation())?;
+    for (ordinal, point) in points.iter().enumerate() {
+        if ordinal % 1024 == 0 {
+            check()?;
+        }
+        keys.push((spatial_order_key(*point, bounds), ordinal));
+    }
+    const RUN: usize = 2048;
+    for run in keys.chunks_mut(RUN) {
+        check()?;
+        run.sort_unstable();
+    }
+    let mut heap = std::collections::BinaryHeap::new();
+    heap.try_reserve(keys.len().div_ceil(RUN))
+        .map_err(|_| allocation())?;
+    for start in (0..keys.len()).step_by(RUN) {
+        heap.push(std::cmp::Reverse((
+            keys[start],
+            start,
+            (start + RUN).min(keys.len()),
+        )));
+    }
+    let mut ordered = Vec::new();
+    ordered
+        .try_reserve_exact(points.len())
+        .map_err(|_| allocation())?;
+    while let Some(std::cmp::Reverse(((_, ordinal), index, end))) = heap.pop() {
+        if ordered.len() % 1024 == 0 {
+            check()?;
+        }
+        ordered.push(points[ordinal]);
+        if index + 1 < end {
+            heap.push(std::cmp::Reverse((keys[index + 1], index + 1, end)));
+        }
+    }
+    let mut intervals = std::collections::VecDeque::new();
+    intervals
+        .try_reserve(points.len())
+        .map_err(|_| allocation())?;
+    intervals.push_back((0_usize, ordered.len()));
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(points.len())
+        .map_err(|_| allocation())?;
+    while let Some((start, end)) = intervals.pop_front() {
+        if output.len() % 1024 == 0 {
+            check()?;
+        }
+        let middle = start + (end - start) / 2;
+        output.push(ordered[middle]);
+        if start < middle {
+            intervals.push_back((start, middle));
+        }
+        if middle + 1 < end {
+            intervals.push_back((middle + 1, end));
+        }
+    }
+    *points = output;
+    Ok(())
+}
+
+/// Quantizes one point into a stable interleaved spatial ordering key.
+fn spatial_order_key(point: Point2, bounds: Bounds) -> u64 {
+    let normalize = |value: f64, minimum: f64, maximum: f64| {
+        (((value - minimum) / (maximum - minimum)).clamp(0.0, 1.0) * f64::from(u32::MAX)) as u32
+    };
+    let x = normalize(point.x, bounds.min.x, bounds.max.x);
+    let y = normalize(point.y, bounds.min.y, bounds.max.y);
+    let mut key = 0_u64;
+    for bit in 0..32 {
+        key |= u64::from((x >> bit) & 1) << (bit * 2);
+        key |= u64::from((y >> bit) & 1) << (bit * 2 + 1);
+    }
+    key
+}
+
+/// Draws one uniform point from finite bounds using the stable project PRNG.
+fn uniform_point(bounds: Bounds, prng: &mut StablePrng) -> Point2 {
+    Point2::new(
+        bounds.min.x + prng.unit() * (bounds.max.x - bounds.min.x),
+        bounds.min.y + prng.unit() * (bounds.max.y - bounds.min.y),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct RelaxVertex {
+    point: SpadePoint<f64>,
+    site_index: usize,
+}
+
+impl HasPosition for RelaxVertex {
+    type Scalar = f64;
+
+    /// Supplies finite document coordinates to the temporary Delaunay topology.
+    fn position(&self) -> SpadePoint<f64> {
+        self.point
+    }
+}
+
+/// Applies bounded clipped-cell Lloyd updates while preserving IDs and exclusion guarantees.
+///
+/// # Errors
+///
+/// Returns source-sampling, triangulation, cancellation, or finite-geometry diagnostics without
+/// publishing a partially relaxed family.
+#[allow(clippy::too_many_arguments)]
+fn relax_random_sites(
+    sites: &mut [FamilySite],
+    bounds: Bounds,
+    canvas_bounds: Bounds,
+    canvas: &CanvasSpec,
+    random: &RandomSiteCapability,
+    source: Option<&SourceField>,
+    exclusion_distance: f64,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), PatternPipelineError> {
+    let weighting = if random.refinement.density_weighted {
+        Some(
+            random
+                .refinement_weighting
+                .ok_or(PatternPipelineError::new(
+                    "pattern.family.random_sites.lloyd_weighting",
+                    "density-weighted Lloyd relaxation requires channel weighting",
+                ))?,
+        )
+    } else {
+        None
+    };
+    let mut positions = sites.iter().map(|site| site.position).collect::<Vec<_>>();
+    for _ in 0..random.refinement.iterations {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let cells = clipped_relaxation_cells(&positions, bounds, is_cancelled)?;
+        let mut next = positions.clone();
+        for (index, (polygon, nearest_distance)) in cells.into_iter().enumerate() {
+            if sites[index].scope == SiteScope::Guard {
+                continue;
+            }
+            let Some(polygon) = polygon
+                .map(|polygon| clip_polygon_to_bounds(&polygon, canvas_bounds))
+                .filter(|polygon| !polygon.is_empty())
+            else {
+                continue;
+            };
+            let target = if let (Some(field), Some(weighting)) = (source, weighting) {
+                weighted_polygon_centroid(&polygon, field, canvas, weighting)?
+                    .unwrap_or(positions[index])
+            } else {
+                polygon_centroid(&polygon).unwrap_or(positions[index])
+            };
+            let dx = target.x - positions[index].x;
+            let dy = target.y - positions[index].y;
+            let length = (dx * dx + dy * dy).sqrt();
+            let maximum_move = if exclusion_distance > 0.0 && nearest_distance.is_finite() {
+                ((nearest_distance - exclusion_distance) * 0.5).max(0.0)
+            } else {
+                f64::INFINITY
+            };
+            let scale = if length > maximum_move && length > 0.0 {
+                maximum_move / length
+            } else {
+                1.0
+            };
+            next[index] = Point2::new(
+                positions[index].x + dx * scale,
+                positions[index].y + dy * scale,
+            );
+        }
+        positions = next;
+    }
+    for (site, position) in sites.iter_mut().zip(positions) {
+        site.position = position;
+    }
+    Ok(())
+}
+
+type RelaxationCell = (Option<Vec<Point2>>, f64);
+
+/// Builds each box-clipped Voronoi cell from Delaunay neighbors and nearest-neighbor slack.
+/// Duplicate sites retain their position; collinear populations remain finite through box clipping.
+/// A spatial hierarchy locates randomly ordered sites without long walks from the previous site;
+/// insertion order and the per-site cancellation boundary remain deterministic and unchanged.
+///
+/// # Errors
+///
+/// Returns cancellation or finite insertion diagnostics.
+fn clipped_relaxation_cells(
+    positions: &[Point2],
+    bounds: Bounds,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<RelaxationCell>, PatternPipelineError> {
+    let mut triangulation: DelaunayTriangulation<
+        RelaxVertex,
+        (),
+        (),
+        (),
+        HierarchyHintGenerator<f64>,
+    > = DelaunayTriangulation::new();
+    let mut unique = HashMap::new();
+    let mut duplicate = vec![false; positions.len()];
+    for (index, point) in positions.iter().copied().enumerate() {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let key = (
+            normalized_coordinate_bits(point.x),
+            normalized_coordinate_bits(point.y),
+        );
+        if unique.insert(key, index).is_some() {
+            duplicate[index] = true;
+            continue;
+        }
+        triangulation
+            .insert(RelaxVertex {
+                point: SpadePoint::new(point.x, point.y),
+                site_index: index,
+            })
+            .map_err(|_| {
+                PatternPipelineError::new(
+                    "pattern.family.random_sites.lloyd_coordinates",
+                    "Lloyd triangulation rejected finite site coordinates",
+                )
+            })?;
+    }
+    let mut cells = vec![(None, f64::INFINITY); positions.len()];
+    for vertex in triangulation.vertices() {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let index = vertex.data().site_index;
+        let site = positions[index];
+        let mut polygon = bounds.corners().to_vec();
+        let mut nearest = f64::INFINITY;
+        for edge in vertex.out_edges() {
+            let neighbor = positions[edge.to().data().site_index];
+            nearest = nearest.min(point_distance(site, neighbor));
+            polygon = clip_polygon_to_site_half_plane(&polygon, site, neighbor);
+            if polygon.is_empty() {
+                break;
+            }
+        }
+        cells[index] = ((!polygon.is_empty()).then_some(polygon), nearest);
+    }
+    for (index, is_duplicate) in duplicate.into_iter().enumerate() {
+        if is_duplicate {
+            cells[index] = (None, 0.0);
+        }
+    }
+    Ok(cells)
+}
+
+/// Normalizes signed zero before exact-coordinate duplicate grouping.
+fn normalized_coordinate_bits(value: f64) -> u64 {
+    if value == 0.0 {
+        0.0_f64.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+/// Clips a convex polygon to points no farther from `site` than from `neighbor`.
+fn clip_polygon_to_site_half_plane(
+    polygon: &[Point2],
+    site: Point2,
+    neighbor: Point2,
+) -> Vec<Point2> {
+    if polygon.is_empty() {
+        return Vec::new();
+    }
+    let nx = neighbor.x - site.x;
+    let ny = neighbor.y - site.y;
+    let boundary =
+        (neighbor.x * neighbor.x + neighbor.y * neighbor.y - site.x * site.x - site.y * site.y)
+            * 0.5;
+    let side = |point: Point2| point.x * nx + point.y * ny - boundary;
+    let mut output = Vec::new();
+    let mut previous = *polygon.last().expect("nonempty polygon has a last point");
+    let mut previous_side = side(previous);
+    for &current in polygon {
+        let current_side = side(current);
+        let previous_inside = previous_side <= 0.0;
+        let current_inside = current_side <= 0.0;
+        if previous_inside != current_inside {
+            let denominator = previous_side - current_side;
+            if denominator != 0.0 {
+                let t = previous_side / denominator;
+                output.push(Point2::new(
+                    previous.x + (current.x - previous.x) * t,
+                    previous.y + (current.y - previous.y) * t,
+                ));
+            }
+        }
+        if current_inside {
+            output.push(current);
+        }
+        previous = current;
+        previous_side = current_side;
+    }
+    output
+}
+
+/// Clips one convex cell to the visible canvas so source weighting never samples edge clamps.
+fn clip_polygon_to_bounds(polygon: &[Point2], bounds: Bounds) -> Vec<Point2> {
+    let mut output = polygon.to_vec();
+    for (site, neighbor) in [
+        (
+            Point2::new(bounds.min.x + 0.5, 0.0),
+            Point2::new(bounds.min.x - 0.5, 0.0),
+        ),
+        (
+            Point2::new(bounds.max.x - 0.5, 0.0),
+            Point2::new(bounds.max.x + 0.5, 0.0),
+        ),
+        (
+            Point2::new(0.0, bounds.min.y + 0.5),
+            Point2::new(0.0, bounds.min.y - 0.5),
+        ),
+        (
+            Point2::new(0.0, bounds.max.y - 0.5),
+            Point2::new(0.0, bounds.max.y + 0.5),
+        ),
+    ] {
+        output = clip_polygon_to_site_half_plane(&output, site, neighbor);
+    }
+    output
+}
+
+/// Returns the finite area centroid of a convex clipped cell.
+fn polygon_centroid(polygon: &[Point2]) -> Option<Point2> {
+    let mut cross_sum = 0.0;
+    let mut x_sum = 0.0;
+    let mut y_sum = 0.0;
+    for index in 0..polygon.len() {
+        let first = polygon[index];
+        let second = polygon[(index + 1) % polygon.len()];
+        let cross = first.x * second.y - second.x * first.y;
+        cross_sum += cross;
+        x_sum += (first.x + second.x) * cross;
+        y_sum += (first.y + second.y) * cross;
+    }
+    (cross_sum.abs() > f64::EPSILON)
+        .then(|| Point2::new(x_sum / (3.0 * cross_sum), y_sum / (3.0 * cross_sum)))
+}
+
+/// Integrates artwork mass over a convex cell with a linear-exact triangle quadrature.
+/// Zero-mass cells return `None`, retaining the prior site position.
+///
+/// # Errors
+///
+/// Returns the sampling layer's stable density diagnostic.
+fn weighted_polygon_centroid(
+    polygon: &[Point2],
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    weighting: SourceWeighting,
+) -> Result<Option<Point2>, PatternPipelineError> {
+    weighted_polygon_centroid_with(polygon, |point| {
+        let sampled = source
+            .sample_density_weight(point, canvas, weighting.mapping)
+            .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+        Ok(completed_density_weight(
+            sampled,
+            weighting.mapping,
+            weighting.strength,
+            &weighting.response,
+        ))
+    })
+}
+
+/// Integrates arbitrary finite density over a convex cell using linear-exact triangle quadrature.
+///
+/// # Errors
+///
+/// Returns the caller's sampling diagnostic without publishing a partial centroid.
+fn weighted_polygon_centroid_with(
+    polygon: &[Point2],
+    mut sample: impl FnMut(Point2) -> Result<f64, PatternPipelineError>,
+) -> Result<Option<Point2>, PatternPipelineError> {
+    if polygon.len() < 3 {
+        return Ok(None);
+    }
+    let anchor = polygon[0];
+    let mut mass = 0.0;
+    let mut x_moment = 0.0;
+    let mut y_moment = 0.0;
+    for index in 1..polygon.len() - 1 {
+        let second = polygon[index];
+        let third = polygon[index + 1];
+        let area = ((second.x - anchor.x) * (third.y - anchor.y)
+            - (second.y - anchor.y) * (third.x - anchor.x))
+            .abs()
+            * 0.5;
+        for (a, b, c) in [
+            (2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0),
+            (1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0),
+            (1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0),
+        ] {
+            let point = Point2::new(
+                anchor.x * a + second.x * b + third.x * c,
+                anchor.y * a + second.y * b + third.y * c,
+            );
+            let weight = sample(point)? * area / 3.0;
+            mass += weight;
+            x_moment += point.x * weight;
+            y_moment += point.y * weight;
+        }
+    }
+    Ok((mass > f64::EPSILON).then(|| Point2::new(x_moment / mass, y_moment / mass)))
+}
+
 fn random_neighborhood(random: &RandomSiteCapability, support: f64) -> f64 {
     let character = match random.character {
         RandomSiteCharacter::Even {
@@ -8835,7 +9754,7 @@ fn cluster_parent_count(character: &RandomSiteCharacter, requested: usize) -> us
     else {
         return 0;
     };
-    ((requested as f64 * cluster_density).round() as usize).clamp(1, requested.max(1))
+    ((requested as f64 * cluster_density / 100.0).round() as usize).clamp(1, requested.max(1))
 }
 
 /// Builds clustered parents incrementally with cancellation and family progress.
@@ -8882,6 +9801,7 @@ fn cluster_parents(
     Ok(parents)
 }
 
+/// Draws one streaming raw or clustered candidate in the local generation domain.
 fn random_candidate(
     character: &RandomSiteCharacter,
     bounds: Bounds,
@@ -8899,14 +9819,11 @@ fn random_candidate(
         let index = (prng.unit() * parents.len() as f64) as usize;
         let parent = parents[index.min(parents.len() - 1)];
         return Point2::new(
-            (parent.x + prng.clustered_offset() * cluster_spread).clamp(bounds.min.x, bounds.max.x),
-            (parent.y + prng.clustered_offset() * cluster_spread).clamp(bounds.min.y, bounds.max.y),
+            parent.x + prng.clustered_offset() * cluster_spread,
+            parent.y + prng.clustered_offset() * cluster_spread,
         );
     }
-    Point2::new(
-        bounds.min.x + prng.unit() * (bounds.max.x - bounds.min.x),
-        bounds.min.y + prng.unit() * (bounds.max.y - bounds.min.y),
-    )
+    uniform_point(bounds, prng)
 }
 
 /// Fixed-IEEE response curve for decoder-owned artwork weighting. This avoids
@@ -8943,6 +9860,7 @@ fn point_distance(first: Point2, second: Point2) -> f64 {
     (dx * dx + dy * dy).sqrt()
 }
 
+/// Hashes every structural, source-response, refinement, and finite request input.
 fn random_family_fingerprint(
     family: &FamilyCapability,
     request: &GridInspectRequest,
@@ -8975,6 +9893,10 @@ fn random_family_fingerprint(
             bytes.extend(cluster_density.to_bits().to_le_bytes());
             bytes.extend(cluster_spread.to_bits().to_le_bytes());
             bytes.extend(cluster_strength.to_bits().to_le_bytes());
+        }
+        RandomSiteCharacter::Stratified { jitter } => {
+            bytes.push(4);
+            bytes.extend(jitter.to_bits().to_le_bytes());
         }
     }
     match &random.density_modulation {
@@ -9011,6 +9933,25 @@ fn random_family_fingerprint(
             bytes.push(3);
             bytes.extend(margin.to_bits().to_le_bytes());
         }
+    }
+    bytes.push(u8::from(random.refinement.enabled));
+    bytes.push(u8::from(random.refinement.density_weighted));
+    bytes.extend(random.refinement.iterations.to_le_bytes());
+    if random.refinement.enabled && random.refinement.density_weighted {
+        let weighting = random
+            .refinement_weighting
+            .expect("weighted refinement has receiving-channel weighting");
+        append_source_mapping_identity(&mut bytes, weighting.mapping);
+        bytes.extend(weighting.strength.to_bits().to_le_bytes());
+        bytes.push(match weighting.response {
+            ArtworkWeightResponse::Linear => 1,
+            ArtworkWeightResponse::Smoothstep => 2,
+        });
+        let source = source.expect("weighted refinement supplies decoded source");
+        bytes.extend(source.identity().content_hash.bytes());
+        bytes.extend(source.identity().decoded_pixel_hash.bytes());
+        bytes.extend(source.identity().width.to_le_bytes());
+        bytes.extend(source.identity().height.to_le_bytes());
     }
     bytes.extend(request.canvas.width.to_bits().to_le_bytes());
     bytes.extend(request.canvas.height.to_bits().to_le_bytes());
@@ -13485,7 +14426,7 @@ mod random_prng_contract_tests {
     /// Proves populated-cell cancellation remains per-index without a recipe work ceiling.
     #[test]
     fn populated_spatial_cell_cancels_at_the_per_index_boundary() {
-        let mut index = SpatialIndex::new(10.0).unwrap();
+        let mut index = SpatialIndex::new(10.0, usize::MAX).unwrap();
         let accepted = vec![FamilySite {
             id: FamilySiteId {
                 mechanism_id: PatternMechanismId(1),
@@ -13547,6 +14488,190 @@ mod random_prng_contract_tests {
             artwork_weight_response(2.0, &ArtworkWeightResponse::Smoothstep),
             1.0
         );
+    }
+
+    /// Proves active-frontier Poisson candidates cover the domain and retain the authored gap.
+    ///
+    /// # Panics
+    /// Panics if deterministic generation fails, forms one local patch, or violates spacing.
+    #[test]
+    fn bridson_poisson_covers_the_domain_with_minimum_spacing() {
+        let bounds = Bounds::new(Point2::new(0.0, 0.0), Point2::new(100.0, 100.0)).unwrap();
+        let mut first_rng = StablePrng::new(19);
+        let first =
+            bridson_candidates(bounds, 8.0, 80, 200_000, 5_000_000, &mut first_rng, &|| {
+                false
+            })
+            .unwrap();
+        let mut second_rng = StablePrng::new(19);
+        let second = bridson_candidates(
+            bounds,
+            8.0,
+            80,
+            200_000,
+            5_000_000,
+            &mut second_rng,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert!(first.len() >= 80);
+        let prefix = &first[..80];
+        for (index, point) in prefix.iter().enumerate() {
+            assert!(
+                prefix[index + 1..]
+                    .iter()
+                    .all(|other| point_distance(*point, *other) + 1.0e-12 >= 8.0)
+            );
+        }
+        for (minimum_x, minimum_y) in [(0.0, 0.0), (50.0, 0.0), (0.0, 50.0), (50.0, 50.0)] {
+            assert!(prefix.iter().any(|point| {
+                point.x >= minimum_x
+                    && point.x < minimum_x + 50.0
+                    && point.y >= minimum_y
+                    && point.y < minimum_y + 50.0
+            }));
+        }
+    }
+
+    /// Proves an insufficient Poisson budget reports incomplete coverage rather than a local patch.
+    ///
+    /// # Panics
+    /// Panics if a partial frontier is silently returned.
+    #[test]
+    fn bridson_poisson_rejects_incomplete_budget() {
+        let bounds = Bounds::new(Point2::new(0.0, 0.0), Point2::new(100.0, 100.0)).unwrap();
+        let error =
+            bridson_candidates(bounds, 8.0, 80, 10, 1_000, &mut StablePrng::new(3), &|| {
+                false
+            })
+            .unwrap_err();
+        assert_eq!(error.path(), "coverage.random_sites.attempts");
+    }
+
+    /// Checks dense random Lloyd cells remain deterministic and cancellable during insertion.
+    ///
+    /// # Panics
+    /// Panics if the spatial hierarchy changes repeatability, loses cells, or ignores cancellation.
+    #[test]
+    fn lloyd_dense_cells_are_repeatable_and_cancellable() {
+        let bounds = Bounds::new(Point2::new(0.0, 0.0), Point2::new(100.0, 100.0)).unwrap();
+        let mut rng = StablePrng::new(19);
+        let positions = (0..10_000)
+            .map(|_| Point2::new(rng.unit() * 100.0, rng.unit() * 100.0))
+            .collect::<Vec<_>>();
+        let first = clipped_relaxation_cells(&positions, bounds, &|| false).unwrap();
+        assert!(
+            first
+                .iter()
+                .all(|(cell, distance)| cell.is_some() && *distance > 0.0)
+        );
+        assert_eq!(
+            first,
+            clipped_relaxation_cells(&positions, bounds, &|| false).unwrap()
+        );
+        let polls = std::cell::Cell::new(0);
+        let error = clipped_relaxation_cells(&positions, bounds, &|| {
+            polls.set(polls.get() + 1);
+            polls.get() == 500
+        })
+        .unwrap_err();
+        assert_eq!(error.path(), "evaluation.cancelled");
+        assert_eq!(polls.get(), 500);
+    }
+
+    /// Proves ordinary and linearly weighted clipped-cell centroids have the expected locations.
+    ///
+    /// # Panics
+    /// Panics if exact polygon integration or zero-mass retention changes.
+    #[test]
+    fn lloyd_centroids_are_uniform_weighted_and_zero_mass_stable() {
+        let polygon = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(100.0, 0.0),
+            Point2::new(100.0, 20.0),
+            Point2::new(0.0, 20.0),
+        ];
+        assert_eq!(polygon_centroid(&polygon), Some(Point2::new(50.0, 10.0)));
+        let weighted = weighted_polygon_centroid_with(&polygon, |point| Ok(point.x / 100.0))
+            .unwrap()
+            .unwrap();
+        assert!((weighted.x - 200.0 / 3.0).abs() < 1.0e-10);
+        assert!((weighted.y - 10.0).abs() < 1.0e-10);
+        assert_eq!(
+            weighted_polygon_centroid_with(&polygon, |_| Ok(0.0)).unwrap(),
+            None
+        );
+    }
+
+    /// Proves unused channel weighting cannot split family capability/cache identity after toggles.
+    ///
+    /// # Panics
+    /// Panics if ordinary Lloyd retains irrelevant weighting or weighted Lloyd hides its source need.
+    #[test]
+    fn lloyd_weighting_binding_is_normalized_by_active_toggle() {
+        let definition = PatternDefinition::random_sites_with_refinement(
+            PatternDefinitionId(601),
+            "Lloyd cache identity",
+            PatternMechanismId(602),
+            PatternMechanismId(603),
+            PatternMechanismId(604),
+            PatternMechanismId(605),
+            PatternOutputLayerId(606),
+            RandomSiteCharacter::RawUniform,
+            7,
+            SiteDensityModulation::Uniform,
+            SiteExclusionPolicy::None,
+            100_000,
+            100_000,
+            toniator_domain::RandomSiteRefinement {
+                enabled: true,
+                density_weighted: false,
+                iterations: 4,
+            },
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        let context_free = resolve_pattern_pipeline(&definition).unwrap();
+        let channel = resolve_pattern_pipeline_for_channel(
+            &definition,
+            SourceWeighting::canonical(SourceMappingComponent::Luminance),
+        )
+        .unwrap();
+        assert_eq!(context_free.family, channel.family);
+        assert!(
+            channel
+                .family
+                .random
+                .unwrap()
+                .refinement_weighting
+                .is_none()
+        );
+
+        let mut weighted = definition;
+        let PatternMechanism::RandomSiteProduct { refinement, .. } = &mut weighted.mechanisms[3]
+        else {
+            panic!("random product remains fourth in the typed chain")
+        };
+        refinement.density_weighted = true;
+        let unbound = resolve_pattern_pipeline(&weighted).unwrap();
+        assert!(family_requires_decoded_source(&unbound.family));
+        assert!(
+            unbound
+                .family
+                .random
+                .unwrap()
+                .refinement_weighting
+                .is_none()
+        );
+        let bound = resolve_pattern_pipeline_for_channel(
+            &weighted,
+            SourceWeighting::canonical(SourceMappingComponent::Luminance),
+        )
+        .unwrap();
+        assert!(bound.family.random.unwrap().refinement_weighting.is_some());
     }
 
     /// Proves visible-mark exclusion derives center spacing from active maximum support plus margin.

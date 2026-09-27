@@ -23,6 +23,7 @@ fn kind(character: &RandomSiteCharacter) -> RandomCharacterKind {
         RandomSiteCharacter::RawUniform => RandomCharacterKind::RawUniform,
         RandomSiteCharacter::Even { .. } => RandomCharacterKind::Even,
         RandomSiteCharacter::Clustered { .. } => RandomCharacterKind::Clustered,
+        RandomSiteCharacter::Stratified { .. } => RandomCharacterKind::Stratified,
     }
 }
 
@@ -142,6 +143,10 @@ impl Memory {
                         },
                         PropertyFieldId::RandomClusterStrength,
                     ) => *cluster_strength,
+                    (
+                        RandomSiteCharacter::Stratified { jitter },
+                        PropertyFieldId::RandomStratifiedJitter,
+                    ) => *jitter,
                     _ => return None,
                 };
                 Some(VariantTransitionFieldUpdate {

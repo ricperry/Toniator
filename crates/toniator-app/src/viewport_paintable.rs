@@ -6,9 +6,10 @@ use std::cell::OnceCell;
 /// Stores presentation coordinates only; canonical geometry and pixel bytes remain unchanged.
 struct Image {
     texture: gdk::Texture,
+    bounds: (f32, f32, f32, f32),
+    fallback: Option<(gdk::Texture, (f32, f32, f32, f32))>,
     width: f64,
     height: f64,
-    bounds: (f32, f32, f32, f32),
 }
 
 mod imp {
@@ -44,14 +45,14 @@ mod imp {
         fn intrinsic_width(&self) -> i32 {
             self.image
                 .get()
-                .map_or(0, |image| image.width.round() as i32)
+                .map_or(0, |image| image.width.round().max(1.0) as i32)
         }
 
         /// Reports the document-sized preferred height, independently of proxy resolution.
         fn intrinsic_height(&self) -> i32 {
             self.image
                 .get()
-                .map_or(0, |image| image.height.round() as i32)
+                .map_or(0, |image| image.height.round().max(1.0) as i32)
         }
 
         /// Preserves the preferred canvas aspect through GTK's contain layout.
@@ -74,13 +75,45 @@ mod imp {
             };
             let scale_x = (width / image.width) as f32;
             let scale_y = (height / image.height) as f32;
-            let (x, y, w, h) = image.bounds;
             snapshot.push_clip(&gtk::graphene::Rect::new(
                 0.0,
                 0.0,
                 width as f32,
                 height as f32,
             ));
+            let (x, y, w, h) = image.bounds;
+            if let Some((texture, (fx, fy, fw, fh))) = &image.fallback {
+                let left = x.clamp(0.0, image.width as f32);
+                let right = (x + w).clamp(left, image.width as f32);
+                let top = y.clamp(0.0, image.height as f32);
+                let bottom = (y + h).clamp(top, image.height as f32);
+                for (tx, ty, tw, th) in [
+                    (0.0, 0.0, left, image.height as f32),
+                    (right, 0.0, image.width as f32 - right, image.height as f32),
+                    (left, 0.0, right - left, top),
+                    (left, bottom, right - left, image.height as f32 - bottom),
+                ] {
+                    if tw <= 0.0 || th <= 0.0 {
+                        continue;
+                    }
+                    snapshot.push_clip(&gtk::graphene::Rect::new(
+                        tx * scale_x,
+                        ty * scale_y,
+                        tw * scale_x,
+                        th * scale_y,
+                    ));
+                    snapshot.append_texture(
+                        texture,
+                        &gtk::graphene::Rect::new(
+                            *fx * scale_x,
+                            *fy * scale_y,
+                            *fw * scale_x,
+                            *fh * scale_y,
+                        ),
+                    );
+                    snapshot.pop();
+                }
+            }
             snapshot.append_texture(
                 &image.texture,
                 &gtk::graphene::Rect::new(x * scale_x, y * scale_y, w * scale_x, h * scale_y),
@@ -103,12 +136,24 @@ impl ViewportPaintable {
         height: f64,
         bounds: (f32, f32, f32, f32),
     ) -> Self {
+        Self::with_fallback(texture, width, height, bounds, None)
+    }
+
+    /// Captures disjoint fallback tiles and a fresh crop without blending their pixel coverage.
+    pub(super) fn with_fallback(
+        texture: gdk::Texture,
+        width: f64,
+        height: f64,
+        bounds: (f32, f32, f32, f32),
+        fallback: Option<(gdk::Texture, (f32, f32, f32, f32))>,
+    ) -> Self {
         let object: Self = glib::Object::new();
         let _ = object.imp().image.set(Image {
             texture,
+            bounds,
+            fallback,
             width,
             height,
-            bounds,
         });
         object
     }

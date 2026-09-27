@@ -48,6 +48,11 @@ pub(crate) struct RequestKey {
     pub(crate) frame: u64,
 }
 impl RequestKey {
+    /// Identifies source pixels independently of viewport-only request epochs.
+    /// Endpoint changes with an unchanged document revision still produce distinct identities.
+    pub(crate) const fn frame_identity(self) -> (u64, u64, u64) {
+        (self.workspace, self.revision, self.frame)
+    }
     /// Checks every acceptance dimension against current application and document authority.
     pub(crate) fn is_current(
         self,
@@ -61,6 +66,34 @@ impl RequestKey {
             && self.revision == session.revision().0
             && self.frame == endpoint.frame(session.document())
     }
+}
+
+/// Proves same-revision endpoints cannot share fallback pixels while viewport epochs can.
+#[cfg(test)]
+#[test]
+fn preview_frame_identity_distinguishes_endpoint_from_viewport_intent() {
+    let start = RequestKey {
+        workspace: 4,
+        revision: 9,
+        epoch: 1,
+        frame: 0,
+    };
+    assert_eq!(
+        start.frame_identity(),
+        RequestKey { epoch: 2, ..start }.frame_identity()
+    );
+    assert_ne!(
+        start.frame_identity(),
+        RequestKey { frame: 10, ..start }.frame_identity()
+    );
+    assert_ne!(
+        start.frame_identity(),
+        RequestKey {
+            workspace: 5,
+            ..start
+        }
+        .frame_identity()
+    );
 }
 
 /// A bounded straight-RGBA source comparison image prepared entirely off the GTK thread.
@@ -305,12 +338,12 @@ pub(crate) fn start_pattern_editor_preview_bridge(
         .map_err(|error| error.to_string())
 }
 impl Drop for Worker {
-    /// Stops the worker, reaps decoder children through provider Drop, and joins before shutdown.
+    /// Cancels and wakes the worker without blocking GTK; provider Drop reaps decoder children.
     fn drop(&mut self) {
         self.cancel();
         self.shutdown.store(true, Ordering::Release);
         self.pending.1.notify_one();
-        if let Some(thread) = self.thread.take() {
+        if let Some(thread) = self.thread.take().filter(|thread| thread.is_finished()) {
             let _ = thread.join();
         }
     }

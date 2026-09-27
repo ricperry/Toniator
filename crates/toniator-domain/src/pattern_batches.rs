@@ -78,6 +78,53 @@ impl PatternRecipeEdit {
 }
 
 impl Document {
+    /// Intersects a structural output selector across the same compatible slots used by ALL edits.
+    /// Unrelated output kinds remain untouched; choice order comes from the source descriptor.
+    ///
+    /// # Errors
+    /// Returns stale descriptor or missing effective-definition diagnostics without mutating state.
+    pub fn all_pattern_enum_choices(
+        &self,
+        selector: &PropertyDescriptor,
+    ) -> Result<Vec<PropertyEnumChoice>, ValidationError> {
+        let descriptors = self.property_descriptors();
+        if !descriptors.contains(selector) {
+            return Err(ValidationError::new(
+                "document.pattern_batch",
+                "the ALL selector is stale",
+            ));
+        }
+        let mut choices = selector.choices.to_vec();
+        let PropertyTarget::OutputLayer(source_id, output_id) = selector.target else {
+            return Ok(choices);
+        };
+        let mut definitions = BTreeSet::from([source_id, self.pattern_settings.definition_id]);
+        for channel in self.channel_ids() {
+            definitions.insert(self.effective_channel_pattern(channel)?.definition_id);
+        }
+        for id in definitions {
+            self.definition(id).ok_or_else(|| {
+                ValidationError::new("document.pattern_batch", "an effective Pattern is absent")
+            })?;
+            let Some(mapped) = corresponding_output_selector(
+                &descriptors,
+                selector.field,
+                source_id,
+                output_id,
+                id,
+            ) else {
+                continue;
+            };
+            let Some(descriptor) = descriptors.iter().find(|descriptor| {
+                descriptor.field == selector.field && descriptor.target == mapped
+            }) else {
+                continue;
+            };
+            choices.retain(|choice| descriptor.choices.contains(choice));
+        }
+        Ok(choices)
+    }
+
     /// Assigns a nested editor's curve to the compatible invoking slot across ALL definitions.
     /// A fresh resource protects unrelated aliases; the complete result remains one history edit.
     ///
@@ -610,10 +657,14 @@ fn corresponding_edit(
             .iter()
             .filter(|target| std::mem::discriminant(*target) == category)
             .count();
-        let target = targets(target.id)
-            .into_iter()
-            .filter(|target| std::mem::discriminant(target) == category)
-            .nth(ordinal)?;
+        let target = if let PropertyTarget::OutputLayer(source_id, output_id) = source_target {
+            corresponding_output_selector(&descriptors, field, source_id, output_id, target.id)?
+        } else {
+            targets(target.id)
+                .into_iter()
+                .filter(|target| std::mem::discriminant(target) == category)
+                .nth(ordinal)?
+        };
         match (source_target, target) {
             (PropertyTarget::Mechanism(_, source), PropertyTarget::Mechanism(_, target)) => {
                 mechanisms.insert(source, target);
@@ -1326,6 +1377,28 @@ fn output_kind(value: &PatternOutputLayer) -> u8 {
         | PatternOutputRealization::MazeWalls { .. } => 1,
         PatternOutputRealization::Regions { .. } => 2,
     }
+}
+
+/// Maps an output field by its active descriptor ordinal, shared by ALL choices and edits.
+/// Outputs lacking that field never displace a compatible output in the mapping.
+fn corresponding_output_selector(
+    descriptors: &[PropertyDescriptor],
+    field: PropertyFieldId,
+    source: PatternDefinitionId,
+    output: PatternOutputLayerId,
+    target: PatternDefinitionId,
+) -> Option<PropertyTarget> {
+    let targets = |definition| {
+        descriptors.iter().filter(move |descriptor| {
+        descriptor.field == field
+            && matches!(descriptor.target, PropertyTarget::OutputLayer(id, _) if id == definition)
+    })
+    };
+    let ordinal = targets(source)
+        .position(|descriptor| descriptor.target == PropertyTarget::OutputLayer(source, output))?;
+    targets(target)
+        .nth(ordinal)
+        .map(|descriptor| descriptor.target)
 }
 
 /// Resolves one output by response capability and occurrence in authoritative painter order.

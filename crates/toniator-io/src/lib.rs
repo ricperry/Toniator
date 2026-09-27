@@ -1153,6 +1153,7 @@ enum PresetStructureRecipeDto {
         exclusion: SiteExclusionPolicyDtoV6,
         maximum_attempts: u32,
         maximum_neighbor_checks: u32,
+        refinement: RandomSiteRefinementDtoV6,
     },
     ParametricCurve {
         name: String,
@@ -1542,13 +1543,17 @@ enum PatternMechanismDtoV6 {
         id: u64,
         exclusion_id: u64,
         maximum_attempts: u32,
-        #[serde(default = "default_random_site_neighbor_checks")]
         maximum_neighbor_checks: u32,
+        refinement: RandomSiteRefinementDtoV6,
     },
 }
 
-const fn default_random_site_neighbor_checks() -> u32 {
-    16_000_000
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RandomSiteRefinementDtoV6 {
+    enabled: bool,
+    density_weighted: bool,
+    iterations: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1563,6 +1568,9 @@ enum RandomSiteCharacterDtoV6 {
         cluster_density: f64,
         cluster_spread: f64,
         cluster_strength: f64,
+    },
+    Stratified {
+        jitter: f64,
     },
 }
 #[derive(Serialize, Deserialize)]
@@ -2176,6 +2184,7 @@ impl PresetStructureRecipeDto {
                 exclusion,
                 maximum_attempts,
                 maximum_neighbor_checks,
+                refinement,
             } => Self::RandomSites {
                 name: name.clone(),
                 coverage: coverage(definition_coverage),
@@ -2185,6 +2194,7 @@ impl PresetStructureRecipeDto {
                 exclusion: SiteExclusionPolicyDtoV6::from_domain(exclusion),
                 maximum_attempts: *maximum_attempts,
                 maximum_neighbor_checks: *maximum_neighbor_checks,
+                refinement: RandomSiteRefinementDtoV6::from_domain(refinement),
             },
             PatternStructureRecipe::ParametricCurve {
                 name,
@@ -2340,6 +2350,7 @@ impl PresetStructureRecipeDto {
                 exclusion,
                 maximum_attempts,
                 maximum_neighbor_checks,
+                refinement,
             } => Ok(PatternStructureRecipe::RandomSites {
                 name,
                 coverage: coverage_from(stored_coverage),
@@ -2349,6 +2360,7 @@ impl PresetStructureRecipeDto {
                 exclusion: exclusion.into_domain(),
                 maximum_attempts,
                 maximum_neighbor_checks,
+                refinement: refinement.into_domain(),
             }),
             Self::ParametricCurve {
                 name,
@@ -3631,11 +3643,13 @@ impl PatternMechanismDtoV6 {
                 exclusion_id,
                 maximum_attempts,
                 maximum_neighbor_checks,
+                refinement,
             } => Self::RandomSiteProduct {
                 id: id.0,
                 exclusion_id: exclusion_id.0,
                 maximum_attempts: *maximum_attempts,
                 maximum_neighbor_checks: *maximum_neighbor_checks,
+                refinement: RandomSiteRefinementDtoV6::from_domain(refinement),
             },
         }
     }
@@ -3745,11 +3759,13 @@ impl PatternMechanismDtoV6 {
                 exclusion_id,
                 maximum_attempts,
                 maximum_neighbor_checks,
+                refinement,
             } => toniator_domain::PatternMechanism::RandomSiteProduct {
                 id: PatternMechanismId(id),
                 exclusion_id: PatternMechanismId(exclusion_id),
                 maximum_attempts,
                 maximum_neighbor_checks,
+                refinement: refinement.into_domain(),
             },
         }
     }
@@ -3773,6 +3789,7 @@ impl RandomSiteCharacterDtoV6 {
                 cluster_spread: *cluster_spread,
                 cluster_strength: *cluster_strength,
             },
+            RandomSiteCharacter::Stratified { jitter } => Self::Stratified { jitter: *jitter },
         }
     }
     fn into_domain(self) -> RandomSiteCharacter {
@@ -3792,6 +3809,27 @@ impl RandomSiteCharacterDtoV6 {
                 cluster_spread,
                 cluster_strength,
             },
+            Self::Stratified { jitter } => RandomSiteCharacter::Stratified { jitter },
+        }
+    }
+}
+
+impl RandomSiteRefinementDtoV6 {
+    /// Projects current random-site refinement into the current archive schema.
+    fn from_domain(value: &toniator_domain::RandomSiteRefinement) -> Self {
+        Self {
+            enabled: value.enabled,
+            density_weighted: value.density_weighted,
+            iterations: value.iterations,
+        }
+    }
+
+    /// Restores current random-site refinement without migration or fallback behavior.
+    fn into_domain(self) -> toniator_domain::RandomSiteRefinement {
+        toniator_domain::RandomSiteRefinement {
+            enabled: self.enabled,
+            density_weighted: self.density_weighted,
+            iterations: self.iterations,
         }
     }
 }
@@ -4906,5 +4944,38 @@ mod source_weighting_persistence_tests {
             .into_domain_configuration(&document)
             .unwrap();
         assert_eq!(restored, DocumentConfiguration::capture(&document));
+    }
+
+    /// Round-trips the new scatter algorithm and independent Lloyd controls in current schema.
+    ///
+    /// # Panics
+    /// Panics if current persistence drops jitter, enablement, weighting, or iteration values.
+    #[test]
+    fn scatter_algorithm_and_lloyd_controls_round_trip() {
+        let character = RandomSiteCharacter::Stratified { jitter: 0.73 };
+        let character_json =
+            serde_json::to_string(&RandomSiteCharacterDtoV6::from_domain(&character)).unwrap();
+        assert!(character_json.contains("stratified"));
+        assert_eq!(
+            serde_json::from_str::<RandomSiteCharacterDtoV6>(&character_json)
+                .unwrap()
+                .into_domain(),
+            character
+        );
+
+        let refinement = toniator_domain::RandomSiteRefinement {
+            enabled: true,
+            density_weighted: true,
+            iterations: 7,
+        };
+        let refinement_json =
+            serde_json::to_string(&RandomSiteRefinementDtoV6::from_domain(&refinement)).unwrap();
+        assert!(refinement_json.contains("\"density_weighted\":true"));
+        assert_eq!(
+            serde_json::from_str::<RandomSiteRefinementDtoV6>(&refinement_json)
+                .unwrap()
+                .into_domain(),
+            refinement
+        );
     }
 }

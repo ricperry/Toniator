@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Focused current Pattern Wizard regressions; --gtk runs real widgets in private Sway.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--gtk" && "$1" != "--gtk-only" ) ]]; then
+    printf 'Usage: bash scripts/test-pattern-wizard [--gtk|--gtk-only]\n' >&2
+    exit 2
+fi
+mkdir -p target/validation/pattern-wizard-suite
+exec > >(tee target/validation/pattern-wizard-suite/last-run.log) 2>&1
+if [[ "${1:-}" != "--gtk-only" ]]; then
+cargo test -p toniator-app wizard_workflow_tests -- --nocapture
+cargo test -p toniator-app wizard_feature_size_assigns_all_effective_channels -- --nocapture
+cargo test -p toniator-app saved_clustered_weighted_lloyd_preview -- --nocapture
+cargo test -p toniator-app wizard_validation::tests -- --nocapture
+for regression in \
+    stage21b_wizard_materializes_all_catalog_records_for_all_and_named_targets \
+    stage21b_wizard_edit_branches_are_capability_projected_for_all_and_named_targets \
+    stage21b_wizard_candidate_use_stays_private_until_apply \
+    stage21b_wizard_named_apply_round_trips_history_exactly \
+    stage21b_wizard_preview_acceptance_is_latest_only_and_apply_is_independent \
+    stage21b_deferred_dropdown_tokens_reject_rapid_and_cross_card_stale_actions; do
+    cargo test -p toniator-app "tests::$regression" -- --exact --nocapture
+done
+cargo test -p toniator-app tests::wizard_neutral_preview_catalog_smoke -- --ignored --exact --nocapture
+cargo test -p toniator-patterns --lib candidate_order_tests -- --nocapture
+cargo test -p toniator-patterns --test feature_size reserved_scatter_effort_fields_do_not_limit_normal_construction -- --nocapture
+cargo test -p toniator-engine --test scatter_algorithms fresh_scatter_choices_and_relaxation_evaluate_for_both_sources -- --nocapture
+fi
+if [[ "${1:-}" == "--gtk" || "${1:-}" == "--gtk-only" ]]; then
+    export TONIATOR_WAYLAND_STATE_DIR="${TONIATOR_WAYLAND_STATE_DIR:-$PWD/.codex-work/gtk-wizard-tests}"
+    export TONIATOR_VNC_PORT="${TONIATOR_VNC_PORT:-5924}"
+    harness="$PWD/.agents/skills/gtk-wayland-debug/scripts"
+    "$harness/session-start"
+    trap '"$harness/session-stop"' EXIT
+    source "$harness/common.sh"
+    load_session
+    export GSK_RENDERER=cairo
+    export TONIATOR_WIZARD_EVIDENCE="$PWD/target/validation/pattern-wizard-suite"
+    swaymsg 'for_window [title="Pattern Wizard"] floating enable'
+    timeout 180s cargo test -p toniator-app wizard_workflow_tests::gtk_current_pattern_edit_switch_review_apply -- --ignored --exact --nocapture
+fi

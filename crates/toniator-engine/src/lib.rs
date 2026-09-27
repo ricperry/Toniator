@@ -2049,7 +2049,12 @@ fn resolved_source_weighting(
         .random
         .as_ref()
         .and_then(|random| match &random.density_modulation {
-            toniator_patterns::ResolvedSiteDensityModulation::Uniform => None,
+            toniator_patterns::ResolvedSiteDensityModulation::Uniform => random
+                .refinement
+                .enabled
+                .then_some(random.refinement.density_weighted)
+                .filter(|weighted| *weighted)
+                .and(random.refinement_weighting),
             toniator_patterns::ResolvedSiteDensityModulation::ArtworkWeightedUnbound => None,
             toniator_patterns::ResolvedSiteDensityModulation::ArtworkWeighted {
                 mapping,
@@ -2721,6 +2726,7 @@ pub struct EvaluationResult {
     token: DocumentEvaluationToken,
     source_identity: SourceIdentity,
     channels: Vec<ChannelEvaluationSummary>,
+    families: Vec<Arc<TypedFamilyOutput>>,
     scene: Arc<RenderScene>,
     raster: Arc<RasterSurface>,
 }
@@ -3238,11 +3244,21 @@ impl EvaluationScheduler {
         Ok(true)
     }
 
+    /// Cancels and joins the worker for callers explicitly requiring completed shutdown.
+    ///
+    /// # Errors
+    /// Returns `WorkerPanicked` if the worker panics while stopping.
     pub fn shutdown(mut self) -> Result<(), SchedulerError> {
-        self.stop_worker()
+        self.stop_worker(true)
     }
 
-    fn stop_worker(&mut self) -> Result<(), SchedulerError> {
+    /// Cancels queued and active work, optionally waiting for worker teardown.
+    ///
+    /// # Errors
+    /// Returns `WorkerPanicked` if a joined worker panics.
+    /// # Panics
+    /// Panics if the scheduler state lock is poisoned.
+    fn stop_worker(&mut self, wait: bool) -> Result<(), SchedulerError> {
         let worker = {
             let mut state = self
                 .state
@@ -3255,18 +3271,29 @@ impl EvaluationScheduler {
             state.sender.take();
             state.worker.take()
         };
-        if let Some(worker) = worker {
+        if let Some(worker) = worker.filter(|worker| wait || worker.is_finished()) {
             worker.join().map_err(|_| SchedulerError::WorkerPanicked)?;
         }
         Ok(())
     }
 }
 impl Drop for EvaluationScheduler {
+    /// Cancels detached immutable work without blocking a frontend thread on evaluator teardown.
     fn drop(&mut self) {
-        let _ = self.stop_worker();
+        let _ = self.stop_worker(false);
     }
 }
 impl EvaluationResult {
+    /// Borrows the evaluated family product for a channel without rerunning geometry.
+    /// Diagnostic consumers may inspect its centerlines without adding marks to the rendered scene.
+    pub fn family_output(&self, channel: ChannelId) -> Option<&TypedFamilyOutput> {
+        self.channels
+            .iter()
+            .position(|summary| summary.channel_id == channel)
+            .and_then(|index| self.families.get(index))
+            .map(Arc::as_ref)
+    }
+
     pub const fn token(&self) -> DocumentEvaluationToken {
         self.token
     }
@@ -4353,10 +4380,9 @@ fn evaluate_cached_document_impl(
     }
     let raster_key = match request.raster_request {
         RasterRequest::Preview(target) => format!(
-            "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:preview-v1:{model:?}:{}x{}:edges={}",
+            "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:preview-v2:{model:?}:{}:edges={}",
             scene.identity().scene_fingerprint(),
-            target.width(),
-            target.height(),
+            target.raster_identity(),
             limits.max_flattened_raster_edges()
         ),
         RasterRequest::Native => format!(
@@ -4483,6 +4509,10 @@ fn evaluate_cached_document_impl(
         token: request.snapshot.token(),
         source_identity: source.identity().clone(),
         channels: summaries,
+        families: families
+            .iter()
+            .map(|(_, family, _)| Arc::clone(family))
+            .collect(),
         // Evaluation results share the immutable cache values directly. The
         // public accessors still expose ordinary borrows, so callers cannot
         // observe this storage optimization or mutate cached authority.
@@ -11329,6 +11359,10 @@ pub(crate) mod test_support {
         scheduler.shutdown().unwrap();
     }
 
+    /// Verifies polling and closed-scheduler admission without accepting stale results.
+    ///
+    /// # Panics
+    /// Panics if shutdown leaves a result publishable or permits another job.
     #[test]
     fn complete_scheduler_polling_is_nonblocking_and_shutdown_rejects_completion() {
         let mut scheduler = EvaluationScheduler::new().unwrap();
@@ -11339,7 +11373,7 @@ pub(crate) mod test_support {
             .unwrap();
         let completion = wait_for_document_completion(&scheduler);
         assert_eq!(completion.ticket(), ticket);
-        scheduler.stop_worker().unwrap();
+        scheduler.stop_worker(true).unwrap();
         assert!(!scheduler.accept_completion(&completion, &session).unwrap());
         assert_eq!(scheduler.try_receive_latest().unwrap(), None);
         assert_eq!(
@@ -11348,8 +11382,12 @@ pub(crate) mod test_support {
         );
     }
 
+    /// Verifies explicit shutdown joins while Drop returns before a gated worker is released.
+    ///
+    /// # Panics
+    /// Panics if either teardown fails or implicit Drop waits on the blocked evaluator.
     #[test]
-    fn complete_scheduler_shutdown_and_drop_join_gated_work_without_hanging() {
+    fn complete_scheduler_shutdown_and_drop_cancel_gated_work_without_hanging() {
         for explicit_shutdown in [true, false] {
             let (gate, entered) =
                 EvaluationStageGate::new(EvaluationStage::Decode, EvaluationCheckpoint::After);
@@ -11372,8 +11410,14 @@ pub(crate) mod test_support {
                     done_sender.send(Ok(())).unwrap();
                 }
             });
-            gate.release();
-            assert_eq!(done_receiver.recv_timeout(GUARD).unwrap(), Ok(()));
+            if explicit_shutdown {
+                gate.release();
+                assert_eq!(done_receiver.recv_timeout(GUARD).unwrap(), Ok(()));
+            } else {
+                let outcome = done_receiver.recv_timeout(GUARD);
+                gate.release();
+                assert_eq!(outcome.unwrap(), Ok(()));
+            }
         }
     }
 

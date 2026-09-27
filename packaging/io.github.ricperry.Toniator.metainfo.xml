@@ -17,6 +17,7 @@
   <url type="homepage">https://github.com/ricperry/Toniator</url>
   <url type="bugtracker">https://github.com/ricperry/Toniator/issues</url>
   <releases>
+    <release version="0.3.3" type="development" date="2026-09-27"/>
     <release version="0.3.2" type="development" date="2026-09-20"/>
     <release version="0.3.1" type="development" date="2026-09-12"/>
     <release version="0.3.0" type="development" date="2026-09-05"/>
