@@ -1,7 +1,6 @@
 use std::{
     fs,
     path::PathBuf,
-    process::Command,
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -227,6 +226,8 @@ fn supplied_video_has_exact_frames_and_reaps_on_cancel() {
 }
 
 /// Checks finite APNG/GIF playback and preserves transparent RGBA through declared-sRGB FFV1 input.
+/// # Panics
+/// Panics if finite animation timing, exact RGBA decoding, or the software encoder fails.
 #[test]
 fn animated_images_play_once_and_ffv1_alpha_is_exact() {
     let temporary = Temporary::new();
@@ -236,7 +237,7 @@ fn animated_images_play_once_and_ffv1_alpha_is_exact() {
         ("webp", AnimatedImageFormat::Webp),
     ] {
         let path = temporary.0.join(format!("animation.{extension}"));
-        let mut command = Command::new("ffmpeg");
+        let mut command = hidden_command("ffmpeg");
         command.args([
             "-v",
             "error",
@@ -290,7 +291,7 @@ fn animated_images_play_once_and_ffv1_alpha_is_exact() {
     let input = temporary.0.join("alpha.png");
     let video = temporary.0.join("alpha.mkv");
     fs::write(&input, png(16, 16, &rgba)).unwrap();
-    let output = Command::new("ffmpeg")
+    let output = hidden_command("ffmpeg")
         .args(["-v", "error", "-loop", "1", "-i"])
         .arg(&input)
         .args([
@@ -331,13 +332,15 @@ fn animated_images_play_once_and_ffv1_alpha_is_exact() {
 }
 
 /// Compares source rotation with FFmpeg's native display-matrix interpretation.
+/// # Panics
+/// Panics if the immutable video, rotation metadata, or native RGBA reference differs.
 #[test]
 fn rotated_video_matches_native_orientation() {
     let temporary = Temporary::new();
     let input = temporary.0.join("input.mp4");
     let rotated = temporary.0.join("rotated.mp4");
     fs::write(&input, asset("video-sample0001-0010.mp4")).unwrap();
-    let encoded = Command::new("ffmpeg")
+    let encoded = hidden_command("ffmpeg")
         .args(["-v", "error", "-display_rotation:v:0", "90", "-i"])
         .arg(&input)
         .args(["-c", "copy"])
@@ -345,7 +348,7 @@ fn rotated_video_matches_native_orientation() {
         .output()
         .unwrap();
     assert!(encoded.status.success());
-    let reference = Command::new("ffmpeg")
+    let reference = hidden_command("ffmpeg")
         .args(["-v", "error", "-filter_threads", "1", "-i"])
         .arg(&rotated)
         .args([
@@ -383,6 +386,8 @@ fn rotated_video_matches_native_orientation() {
 }
 
 /// Exercises unequal source intervals through the actual FFmpeg provider and exact domain time.
+/// # Panics
+/// Panics if variable-rate encoding, half-open timing, or selected frame identity differs.
 #[test]
 fn variable_frame_rate_selects_latest_presentation_timestamp() {
     let temporary = Temporary::new();
@@ -399,7 +404,7 @@ fn variable_frame_rate_selects_latest_presentation_timestamp() {
     )
     .unwrap();
     let video = temporary.0.join("vfr.mkv");
-    let encoded = Command::new("ffmpeg")
+    let encoded = hidden_command("ffmpeg")
         .args(["-v", "error", "-f", "concat", "-safe", "1", "-i"])
         .arg(&list)
         .args(["-fps_mode", "vfr", "-c:v", "ffv1", "-pix_fmt", "bgra"])
@@ -428,4 +433,17 @@ fn variable_frame_rate_selects_latest_presentation_timestamp() {
             .frame_at(source.metadata().duration.unwrap(), &|| false)
             .is_err()
     );
+}
+
+/// Constructs an ordinary test subprocess without opening a native Windows console.
+fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let command = std::process::Command::new(program);
+    #[cfg(windows)]
+    let command = {
+        use std::os::windows::process::CommandExt;
+        let mut command = command;
+        command.creation_flags(0x08000000);
+        command
+    };
+    command
 }

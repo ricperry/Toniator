@@ -197,7 +197,9 @@ pub(super) fn render_project_sequence(
 }
 
 /// Owns only signal callbacks installed for one CLI export invocation.
+#[cfg(unix)]
 pub(super) struct ExportSignals(Vec<signal_hook::SigId>);
+#[cfg(unix)]
 impl ExportSignals {
     /// Installs supported termination flags, rolling back earlier registrations if setup fails.
     ///
@@ -214,11 +216,27 @@ impl ExportSignals {
         Ok(guard)
     }
 }
+#[cfg(unix)]
 impl Drop for ExportSignals {
     /// Removes this invocation's callbacks after its worker and child processes have stopped.
     fn drop(&mut self) {
         for id in self.0.drain(..) {
             signal_hook::low_level::unregister(id);
         }
+    }
+}
+
+/// Keeps the process-lifetime Windows Ctrl+C/Ctrl+Break callback tied to its export cancellation flag.
+#[cfg(windows)]
+pub(super) struct ExportSignals;
+#[cfg(windows)]
+impl ExportSignals {
+    /// Installs the single CLI invocation's native console cancellation callback.
+    /// # Errors
+    /// Returns handler setup failure before export work starts; the callback lives until process exit.
+    pub(super) fn new(cancelled: Arc<AtomicBool>) -> Result<Self, CliError> {
+        ctrlc::set_handler(move || cancelled.store(true, std::sync::atomic::Ordering::Release))
+            .map_err(|error| CliError::new("export.signal", error.to_string()))?;
+        Ok(Self)
     }
 }

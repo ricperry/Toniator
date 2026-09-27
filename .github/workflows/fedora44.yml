@@ -1,0 +1,48 @@
+name: Fedora 44 Linux baseline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:44
+    steps:
+      - name: Install checkout prerequisite
+        run: dnf -y install git
+
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Fedora prerequisites
+        run: bash scripts/fedora/install-prerequisites.sh
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup-init -y --no-modify-path --default-toolchain none
+          export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+          rust_channel="$(bash scripts/fedora/rust-channel.sh)"
+          rustup toolchain install "$rust_channel" --profile minimal --component clippy --component rustfmt
+
+      - name: Cache Cargo data and Fedora build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/fedora44
+          key: fedora44-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/**/Cargo.toml', 'scripts/fedora/rust-channel.sh', 'scripts/fedora/install-prerequisites.sh', 'scripts/fedora/verify.sh', '.github/workflows/fedora44.yml') }}
+          restore-keys: |
+            fedora44-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Build and run focused persistence, media, CLI, and wizard checks
+        run: bash scripts/fedora/verify.sh

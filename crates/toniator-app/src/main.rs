@@ -110,6 +110,7 @@ use toniator_patterns::{LayeredPresetCatalog, PresetOrigin, PresetRegistry};
 use view_models::{LifecycleViewModel, project_document};
 
 const APP_ID: &str = "io.github.ricperry.Toniator";
+const APP_ICON_RESOURCE_PATH: &str = "/io/github/ricperry/Toniator/icons";
 const RESOURCE_PREFIX: &str = "/com/silentbutdigital/Toniator";
 const DEFAULT_CANVAS: CanvasSpec = CanvasSpec {
     width: 1024.0,
@@ -3676,12 +3677,17 @@ impl std::ops::DerefMut for AppState {
     }
 }
 
-/// Starts the GTK frontend after registering required presentation resources.
+/// Starts the GTK frontend after registering its presentation resources and product icon.
 ///
 /// This entrypoint owns process arguments and application activation only. Document, history,
 /// evaluation, and persistence authority begin in the single main-window coordinator;
 /// File activations use the existing guarded lifecycle route in the primary process;
-/// ordinary activations present the existing window. Invalid arguments exit before GTK startup.
+/// ordinary activations present the existing window. GTK startup registers the bundled window
+/// icon before activation. Invalid arguments exit before GTK startup.
+///
+/// # Panics
+///
+/// Panics when GTK startup has no default display while registering the window icon.
 fn main() {
     register_resources();
     let initial_path = match parse_args(env::args_os().skip(1).collect()) {
@@ -3695,6 +3701,7 @@ fn main() {
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
+    app.connect_startup(|_| register_application_icon());
     let controller = Rc::new(RefCell::new(std::rc::Weak::new()));
     let activation_controller = Rc::clone(&controller);
     app.connect_activate(move |app| {
@@ -3789,17 +3796,62 @@ fn register_resources() {
         .expect("failed to register compiled Toniator GResource");
 }
 
+/// Makes the bundled Toniator icon available to GTK windows through its existing icon-theme lookup.
+///
+/// The GResource is registered before GTK startup. The display owns icon-theme state, and the
+/// default window icon name supplies presentation metadata without changing any domain authority.
+///
+/// # Panics
+///
+/// Panics when GTK startup does not provide a default display.
+fn register_application_icon() {
+    let display = gtk::gdk::Display::default().expect("GTK startup provides a default display");
+    gtk::IconTheme::for_display(&display).add_resource_path(APP_ICON_RESOURCE_PATH);
+    gtk::Window::set_default_icon_name(APP_ID);
+}
+
+/// Resolves per-user roots while leaving product-specific directory ownership in `toniator-io`.
+fn library_environment() -> LibraryEnvironment {
+    #[cfg(windows)]
+    {
+        LibraryEnvironment {
+            data_home: Some(glib::user_data_dir()),
+            config_home: Some(glib::user_config_dir()),
+            home: None,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        LibraryEnvironment {
+            data_home: env::var_os("XDG_DATA_HOME").map(PathBuf::from),
+            config_home: env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+            home: env::var_os("HOME").map(PathBuf::from),
+        }
+    }
+}
+
+/// Resolves recent-file state through GLib on Windows and preserves the existing XDG/HOME policy elsewhere.
+fn default_recent_file_path() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let state_home = glib::user_state_dir();
+        toniator_io::recent::recent_file_path(Some(&state_home), None)
+    }
+    #[cfg(not(windows))]
+    {
+        let state_home = env::var_os("XDG_STATE_HOME").map(PathBuf::from);
+        let home = env::var_os("HOME").map(PathBuf::from);
+        toniator_io::recent::recent_file_path(state_home.as_deref(), home.as_deref())
+    }
+}
+
 /// Initializes the active personal library and combines its valid records with immutable built-ins.
 ///
 /// Filesystem and scan failures remain a visible nonfatal frontend notice: the returned catalog
 /// always preserves the bundled registry. This function does not create a second recipe model or
 /// change document/history authority.
 fn initialize_layered_catalog(registry: &PresetRegistry) -> LayeredCatalogInitialization {
-    let environment = LibraryEnvironment {
-        data_home: env::var_os("XDG_DATA_HOME").map(PathBuf::from),
-        config_home: env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-        home: env::var_os("HOME").map(PathBuf::from),
-    };
+    let environment = library_environment();
     let default_paths = PersonalLibraryPaths::default_for(&environment).ok();
     let loaded = default_paths.clone().map_or(Ok(None), |paths| {
         PersonalLibrary::open_or_initialize(paths)
@@ -4082,9 +4134,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     let (event_sender, event_receiver) = async_channel::unbounded();
     let presets = PresetRegistry::bundled();
     let catalog_state = initialize_layered_catalog(&presets);
-    let state_home = env::var_os("XDG_STATE_HOME").map(PathBuf::from);
-    let home = env::var_os("HOME").map(PathBuf::from);
-    let recent_path = toniator_io::recent::recent_file_path(state_home.as_deref(), home.as_deref());
+    let recent_path = default_recent_file_path();
     let (recent_files, recent_notice) = match recent_path
         .as_deref()
         .map(toniator_io::recent::load_recent_files)
@@ -14143,8 +14193,9 @@ fn scale_wizard_preview_guide_structure(
 /// # Errors
 ///
 /// Returns a cloned-document validation or command diagnostic without changing the input document
-/// or either history. The returned document has exactly one visible channel with solid black paint
-/// and a capability-derived neutral-preview-only density budget; no recipe or draft value is changed.
+/// or either history. The returned document has one visible channel; RGB/CMYK paint is solid black,
+/// while SourceColorAlpha retains its required sampled-source paint. Its density budget is derived
+/// from capabilities for neutral preview only, and no recipe or draft value is changed.
 fn wizard_preview_document(
     document: &Document,
     target: InspectorTarget,
@@ -14284,7 +14335,9 @@ fn wizard_preview_document(
         blue: 0.0,
         alpha: 1.0,
     };
-    if preview_document.modeled_channel(visible).is_some() {
+    if preview_document.channel_model() == Some(HalftoneChannelModel::SourceColorAlpha) {
+        // SourceColorAlpha evaluation requires its authoritative sampled-source paint.
+    } else if preview_document.modeled_channel(visible).is_some() {
         if preview_document
             .modeled_channel(visible)
             .is_some_and(|channel| channel.paint != ChannelPaint::Solid(black.clone()))
@@ -25627,16 +25680,28 @@ mod tests {
         );
     }
 
-    /// Preserves caller-relative and native filename bytes across URI forwarding and rejects batches.
+    /// Preserves caller-relative Unicode paths and Unix native filename bytes across URI forwarding.
+    ///
+    /// # Panics
+    ///
+    /// Panics when GIO fails to round-trip a caller-relative native path or accepts an invalid batch.
     #[test]
     fn forwarded_file_activation_preserves_native_paths() {
-        use std::os::unix::ffi::OsStringExt;
-
         assert_eq!(activation_arguments(None), ["toniator-app"]);
-        for path in [
+        let paths = vec![
             PathBuf::from("artwork with spaces #1.svg"),
-            PathBuf::from(std::ffi::OsString::from_vec(b"native-\xff.png".to_vec())),
-        ] {
+            PathBuf::from("artwork 東京 café with spaces #2.svg"),
+        ];
+        #[cfg(unix)]
+        let paths = {
+            use std::os::unix::ffi::OsStringExt;
+            let mut paths = paths;
+            paths.push(PathBuf::from(std::ffi::OsString::from_vec(
+                b"native-\xff.png".to_vec(),
+            )));
+            paths
+        };
+        for path in paths {
             let arguments = activation_arguments(Some(path.clone()));
             let file = gio::File::for_uri(&arguments[1]);
             assert_eq!(
@@ -25651,6 +25716,28 @@ mod tests {
         assert!(
             forwarded_file_path(&[gio::File::for_path("a.png"), gio::File::for_path("b.svg")])
                 .is_err()
+        );
+    }
+
+    /// Confirms Windows library and history paths retain their existing Toniator-owned suffixes.
+    ///
+    /// # Panics
+    ///
+    /// Panics when GLib roots fail to reach the active library/configuration or recent-state files.
+    #[cfg(windows)]
+    #[test]
+    fn windows_storage_roots_keep_toniator_subdirectories() {
+        let environment = library_environment();
+        let paths = PersonalLibraryPaths::default_for(&environment)
+            .expect("GLib data and config roots resolve");
+        assert_eq!(paths.root, glib::user_data_dir().join("Toniator"));
+        assert_eq!(
+            paths.config_file,
+            glib::user_config_dir().join("Toniator/library.json")
+        );
+        assert_eq!(
+            default_recent_file_path(),
+            Some(glib::user_state_dir().join("Toniator/recent-files.json"))
         );
     }
 
@@ -27446,41 +27533,50 @@ mod tests {
         );
     }
 
-    /// Proves Review derives a disposable black single-channel preview without changing its draft.
+    /// Proves RGB and CMYK Review projections blacken one disposable channel without changing the document.
     ///
     /// # Panics
     ///
-    /// Panics when the cloned review projection leaves multiple channels visible, does not blacken
-    /// its one selected channel, or mutates the source document used by private history.
+    /// Panics when either modeled color projection leaves multiple channels visible, does not
+    /// blacken its selected channel, or mutates the source document used by private history.
     #[test]
     fn stage21b_review_preview_is_one_black_channel_without_draft_mutation() {
-        let workspace = direct_png_workspace();
-        let document = workspace.document().clone();
-        let selected = authoritative_channel_ids(&document)[0];
-        let preview = wizard_preview_document(&document, InspectorTarget::Channel(selected))
-            .expect("selected review preview projection validates");
-        assert_eq!(
-            workspace.document(),
-            &document,
-            "preview leaves main history untouched"
-        );
-        let channels = preview
-            .channel_topology()
-            .expect("direct workspace uses a modeled channel topology")
-            .channels();
-        assert_eq!(channels.iter().filter(|channel| channel.visible).count(), 1);
-        let visible = channels
-            .iter()
-            .find(|channel| channel.visible)
-            .expect("one review channel remains visible");
-        assert_eq!(visible.id, selected);
-        let ChannelPaint::Solid(color) = &visible.paint else {
-            panic!("review projection uses solid black paint")
-        };
-        assert_eq!(
-            (color.red, color.green, color.blue, color.alpha),
-            (0.0, 0.0, 0.0, 1.0)
-        );
+        let mut workspace = direct_png_workspace();
+        for (model, expected_model) in [
+            (PreviewModel::Rgb, HalftoneChannelModel::Rgb),
+            (PreviewModel::Cmyk, HalftoneChannelModel::Cmyk),
+        ] {
+            if workspace.document().channel_model() != Some(expected_model) {
+                replace_model_topology(&mut workspace.history, model)
+                    .expect("modeled color topology publishes through history authority");
+            }
+            let document = workspace.document().clone();
+            let selected = authoritative_channel_ids(&document)[0];
+            let preview = wizard_preview_document(&document, InspectorTarget::Channel(selected))
+                .expect("selected review preview projection validates");
+            assert_eq!(
+                workspace.document(),
+                &document,
+                "preview leaves main history untouched"
+            );
+            let channels = preview
+                .channel_topology()
+                .expect("direct workspace uses a modeled channel topology")
+                .channels();
+            assert_eq!(channels.iter().filter(|channel| channel.visible).count(), 1);
+            let visible = channels
+                .iter()
+                .find(|channel| channel.visible)
+                .expect("one review channel remains visible");
+            assert_eq!(visible.id, selected);
+            let ChannelPaint::Solid(color) = &visible.paint else {
+                panic!("RGB/CMYK review projection uses solid black paint")
+            };
+            assert_eq!(
+                (color.red, color.green, color.blue, color.alpha),
+                (0.0, 0.0, 0.0, 1.0)
+            );
+        }
     }
 
     /// Proves New requires an explicit starter even when it matches the current recipe family.
@@ -30407,6 +30503,98 @@ mod tests {
             named.canvas().width.max(named.canvas().height),
             f64::from(WIZARD_NEUTRAL_SOURCE_EDGE_PX),
         );
+    }
+
+    /// Proves ALL and named SourceColorAlpha wizard previews retain sampled paint and render.
+    ///
+    /// Both immutable source formats feed the existing neutral preview evaluator. The source
+    /// workspace remains authoritative; only each disposable projection is rendered.
+    ///
+    /// # Panics
+    ///
+    /// Panics when either source cannot produce both scoped previews, when a projection changes
+    /// SourceColorAlpha paint, when rendering fails or has no visible alpha, or when previewing
+    /// mutates the input document.
+    #[test]
+    fn stage21b_source_color_alpha_wizard_previews_preserve_sampled_paint_and_render() {
+        register_resources();
+        for (input, format) in [
+            ("raster-sample.png", SourceFormatHint::Png),
+            ("vector-sample.svg", SourceFormatHint::Svg),
+        ] {
+            let mut workspace = Workspace::from_direct(
+                Arc::from(
+                    fs::read(asset(input))
+                        .unwrap_or_else(|error| panic!("{input} immutable source reads: {error}")),
+                ),
+                format,
+                input.into(),
+            )
+            .unwrap_or_else(|error| panic!("{input} workspace loads: {error}"));
+            replace_model_topology(&mut workspace.history, PreviewModel::SourceColorAlpha)
+                .unwrap_or_else(|error| {
+                    panic!("{input} SourceColorAlpha topology applies: {error}")
+                });
+            let document = workspace.document().clone();
+            let channel_id = authoritative_channel_ids(&document)[0];
+            let WizardPreviewSource::Ready { source } = prepare_wizard_preview_source(
+                &workspace.sources,
+                workspace.source_presentation.as_ref(),
+            ) else {
+                panic!("{input} builds the bundled neutral wizard source")
+            };
+
+            for target in [
+                InspectorTarget::DocumentAll,
+                InspectorTarget::Channel(channel_id),
+            ] {
+                let preview = wizard_preview_document(&document, target)
+                    .unwrap_or_else(|error| panic!("{input} {target:?} preview projects: {error}"));
+                assert_eq!(
+                    preview.channel_model(),
+                    Some(HalftoneChannelModel::SourceColorAlpha),
+                    "{input} {target:?} keeps the sampled-source model"
+                );
+                assert_eq!(
+                    preview
+                        .modeled_channel(channel_id)
+                        .expect("SourceColorAlpha preview retains its modeled channel")
+                        .paint,
+                    ChannelPaint::SampledSource,
+                    "{input} {target:?} keeps required sampled-source paint"
+                );
+
+                let result = evaluate_with_limits(
+                    EvaluationRequest::with_preview_target(
+                        DocumentSession::new(preview)
+                            .expect("sampled-source projection remains session-valid")
+                            .document_evaluation_snapshot(),
+                        source.clone(),
+                        toniator_engine::PreviewRasterTarget::new(
+                            WIZARD_PREVIEW_TARGET_PX,
+                            WIZARD_PREVIEW_TARGET_PX,
+                        )
+                        .expect("fixed neutral preview target remains valid"),
+                    ),
+                    EvaluationLimits::default(),
+                )
+                .unwrap_or_else(|error| panic!("{input} {target:?} preview evaluates: {error}"));
+                assert!(
+                    result
+                        .raster()
+                        .pixels()
+                        .chunks_exact(4)
+                        .any(|pixel| pixel[3] != 0),
+                    "{input} {target:?} renders visible preview alpha"
+                );
+            }
+
+            assert_eq!(
+                workspace.document(),
+                &document,
+                "{input} preview leaves source history unchanged"
+            );
+        }
     }
 
     /// Proves preview scaling preserves a valid Guide/Curve-Motif resource alias by use.

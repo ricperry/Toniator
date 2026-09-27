@@ -1,9 +1,12 @@
 use std::{
     fs,
-    io::{BufRead, BufReader, Read},
     path::PathBuf,
-    process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
+};
+#[cfg(unix)]
+use std::{
+    io::{BufRead, BufReader, Read},
+    process::Stdio,
 };
 use toniator_domain::{
     CanvasSpec, ChannelId, Document, Easing, FrameRange, FrameRate, ProjectTiming, PropertyFieldId,
@@ -41,7 +44,7 @@ fn direct_media_create_and_render_share_timing_authority() {
         "1",
     ];
     let project = directory.0.join("direct-video.toniator");
-    let result = Command::new(env!("CARGO_BIN_EXE_toniator"))
+    let result = hidden_command(env!("CARGO_BIN_EXE_toniator"))
         .args(["document", "create", "-i"])
         .arg(assets.join("video-sample0001-0010.mp4"))
         .arg("-o")
@@ -72,7 +75,7 @@ fn direct_media_create_and_render_share_timing_authority() {
         Some(toniator_io::SourceMediaManifest::Video { .. })
     ));
     let output = directory.0.join("direct-video");
-    let result = Command::new(env!("CARGO_BIN_EXE_toniator"))
+    let result = hidden_command(env!("CARGO_BIN_EXE_toniator"))
         .args(["render", "-i"])
         .arg(assets.join("video-sample0001-0010.mp4"))
         .arg("-o")
@@ -98,7 +101,7 @@ fn direct_media_create_and_render_share_timing_authority() {
         .save(&blue)
         .unwrap();
     let project = directory.0.join("ordered.toniator");
-    let result = Command::new(env!("CARGO_BIN_EXE_toniator"))
+    let result = hidden_command(env!("CARGO_BIN_EXE_toniator"))
         .args(["document", "create", "-i"])
         .arg(&red)
         .arg("--sequence-frame")
@@ -138,7 +141,7 @@ fn direct_media_create_and_render_share_timing_authority() {
     assert_eq!(source_ids[0], source_ids[2]);
     assert_ne!(source_ids[0], source_ids[1]);
     let output = directory.0.join("ordered");
-    let result = Command::new(env!("CARGO_BIN_EXE_toniator"))
+    let result = hidden_command(env!("CARGO_BIN_EXE_toniator"))
         .args(["render", "-i"])
         .arg(&project)
         .arg("-o")
@@ -237,7 +240,7 @@ fn project_frame_render_uses_shared_media_and_authored_endpoint() {
     save(&input, &document, &sources).unwrap();
     for frame in [0, 9, 10] {
         let output = directory.0.join(format!("frame-{frame}.png"));
-        let result = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        let result = hidden_command(env!("CARGO_BIN_EXE_toniator"))
             .arg("render")
             .arg("--input")
             .arg(&input)
@@ -287,7 +290,7 @@ fn project_frame_render_uses_shared_media_and_authored_endpoint() {
         ),
     ] {
         let output = directory.0.join(name);
-        let result = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        let result = hidden_command(env!("CARGO_BIN_EXE_toniator"))
             .arg("render")
             .arg("-i")
             .arg(&input)
@@ -325,7 +328,7 @@ fn project_frame_render_uses_shared_media_and_authored_endpoint() {
         vec!["--start-time", "-1"],
     ] {
         let output = directory.0.join("invalid");
-        let result = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        let result = hidden_command(env!("CARGO_BIN_EXE_toniator"))
             .arg("render")
             .arg("-i")
             .arg(&input)
@@ -339,7 +342,7 @@ fn project_frame_render_uses_shared_media_and_authored_endpoint() {
     }
     assert_eq!(toniator_io::load(&input).unwrap().document(), &document);
     let sequence = directory.0.join("sequence");
-    let result = Command::new(env!("CARGO_BIN_EXE_toniator"))
+    let result = hidden_command(env!("CARGO_BIN_EXE_toniator"))
         .arg("render")
         .arg("--input")
         .arg(&input)
@@ -359,7 +362,7 @@ fn project_frame_render_uses_shared_media_and_authored_endpoint() {
     assert_eq!(manifest["completed_frames"], 10);
     assert!(sequence.join("frame-000009.png").exists());
     let video = directory.0.join("video-output.mkv");
-    let result = Command::new(env!("CARGO_BIN_EXE_toniator"))
+    let result = hidden_command(env!("CARGO_BIN_EXE_toniator"))
         .arg("render")
         .arg("--input")
         .arg(&input)
@@ -384,37 +387,114 @@ fn project_frame_render_uses_shared_media_and_authored_endpoint() {
             .to_string_lossy()
             .starts_with("toniator-render-")
     }));
-    let cancelled_sequence = directory.0.join("cancelled-sequence");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_toniator"))
-        .arg("render")
-        .arg("--input")
-        .arg(&input)
-        .arg("--output")
-        .arg(cancelled_sequence.join("frame-%06d.png"))
-        .stderr(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut ready = String::new();
-    stderr.read_line(&mut ready).unwrap();
-    assert!(ready.contains("Preparing frame export"));
-    assert!(
-        Command::new("kill")
-            .arg("-TERM")
-            .arg(child.id().to_string())
-            .status()
-            .unwrap()
-            .success()
-    );
-    let mut diagnostic = String::new();
-    stderr.read_to_string(&mut diagnostic).unwrap();
-    assert!(!child.wait().unwrap().success());
-    assert!(diagnostic.contains("export.cancelled"), "{diagnostic}");
-    if cancelled_sequence.exists() {
-        let manifest: serde_json::Value =
-            serde_json::from_slice(&fs::read(cancelled_sequence.join("manifest.json")).unwrap())
-                .unwrap();
-        assert_eq!(manifest["complete"], false);
+    #[cfg(unix)]
+    {
+        let cancelled_sequence = directory.0.join("cancelled-sequence");
+        let mut child = hidden_command(env!("CARGO_BIN_EXE_toniator"))
+            .arg("render")
+            .arg("--input")
+            .arg(&input)
+            .arg("--output")
+            .arg(cancelled_sequence.join("frame-%06d.png"))
+            .stderr(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stderr = BufReader::new(child.stderr.take().unwrap());
+        let mut ready = String::new();
+        stderr.read_line(&mut ready).unwrap();
+        assert!(ready.contains("Preparing frame export"));
+        assert!(
+            hidden_command("kill")
+                .arg("-TERM")
+                .arg(child.id().to_string())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut diagnostic = String::new();
+        stderr.read_to_string(&mut diagnostic).unwrap();
+        assert!(!child.wait().unwrap().success());
+        assert!(diagnostic.contains("export.cancelled"), "{diagnostic}");
+        if cancelled_sequence.exists() {
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &fs::read(cancelled_sequence.join("manifest.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(manifest["complete"], false);
+        }
     }
+}
+
+/// Constructs an ordinary test subprocess without opening a native Windows console.
+fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let command = std::process::Command::new(program);
+    #[cfg(windows)]
+    let command = {
+        use std::os::windows::process::CommandExt;
+        let mut command = command;
+        command.creation_flags(0x08000000);
+        command
+    };
+    command
+}
+
+/// Cancels an active CLI export with native Ctrl+Break in a hidden new-console process group.
+/// # Panics
+/// Panics if native console delivery fails, cancellation is not cooperative, or output claims completion.
+#[cfg(windows)]
+#[test]
+fn windows_ctrl_break_cancels_process_group_export() {
+    let directory = Scratch::new();
+    let id = SourceReferenceId::new("cancel-source").unwrap();
+    let document = Document::new_default_document(
+        CanvasSpec {
+            width: 48.0,
+            height: 48.0,
+        },
+        SourceReference::Assigned(id.clone()),
+    )
+    .unwrap()
+    .with_temporal_authority(
+        ProjectTiming::new(
+            FrameRate::new(30_000, 1001).unwrap(),
+            FrameRange::new(0, 10_000).unwrap(),
+        ),
+        Vec::new(),
+    )
+    .unwrap();
+    let source = EmbeddedSource::new(
+        id,
+        EmbeddedSourceFormat::Png,
+        include_bytes!("../../../assets/raster-sample.png").as_slice(),
+        None,
+    )
+    .unwrap();
+    let input = directory.0.join("cancel.toniator");
+    save(&input, &document, &SourceBundle::new([source]).unwrap()).unwrap();
+    let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/validation/windows-port/media-integration/ctrl-break")
+        .join(format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+    let python = std::env::var_os("TONIATOR_WINDOWS_PYTHON").unwrap_or_else(|| "python".into());
+    let result = hidden_command(python)
+        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/windows_ctrl_break.py"))
+        .arg(env!("CARGO_BIN_EXE_toniator"))
+        .arg(&input)
+        .arg(directory.0.join("cancelled/frame-%06d.png"))
+        .arg(&evidence)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(evidence.join("result.json").is_file());
 }

@@ -33,7 +33,7 @@ pub enum VideoCodec {
 pub struct VideoExportOptions {
     pub destination: PathBuf,
     pub codec: VideoCodec,
-    /// Defaults to `/tmp`; a caller may explicitly choose another temporary filesystem.
+    /// Defaults to the native temporary directory; a caller may explicitly choose another filesystem.
     pub temporary_directory: Option<PathBuf>,
     pub background: Option<RasterBackground>,
     pub target: Option<OutputRasterTarget>,
@@ -234,11 +234,12 @@ impl VideoExportJob {
             &output,
             cancelled,
         )?;
+        let native_temporary = std::env::temp_dir();
         let mut workspace = RenderWorkspace::create(
             self.options
                 .temporary_directory
                 .as_deref()
-                .unwrap_or_else(|| Path::new("/tmp")),
+                .unwrap_or(&native_temporary),
         )
         .map_err(storage_error)?;
         let storage = (|| {

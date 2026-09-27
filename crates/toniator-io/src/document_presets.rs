@@ -1,11 +1,13 @@
 //! Source-free document Preset archives and guarded atomic publication.
 
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -242,17 +244,81 @@ pub fn save_document_preset(
             context: "preset.json exceeds the 4 MiB document Preset limit".into(),
         });
     }
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let (temporary, file) = create_temporary_file(parent, path)?;
-    let result = write_preset_archive(file, &json)
-        .and_then(|()| publish_temporary(&temporary, path, &guard.state));
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+    #[cfg(windows)]
+    {
+        let mut staging = super::filesystem::Staging::create(path)
+            .map_err(|error| filesystem_error(path, error.to_string()))?;
+        write_preset_archive(
+            staging
+                .file()
+                .map_err(|error| filesystem_error(path, error.to_string()))?,
+            &json,
+        )?;
+        publish_windows_staging(
+            &mut staging,
+            path,
+            &guard.state,
+            super::filesystem::Staging::sync,
+        )
     }
-    result
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let (temporary, file) = create_temporary_file(parent, path)?;
+        let result = write_preset_archive(file, &json)
+            .and_then(|()| publish_temporary(&temporary, path, &guard.state));
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+}
+
+/// Publishes retained Windows staging under the observed destination guard and reports later sync as a warning.
+///
+/// The caller supplies a fully synchronized archive. Fingerprints detect ordinary external changes;
+/// they do not promise a hostile-writer compare-and-swap transaction.
+/// # Errors
+/// Returns stale-destination or native rename errors before publication; later sync never revokes publication.
+#[cfg(windows)]
+fn publish_windows_staging(
+    staging: &mut super::filesystem::Staging,
+    path: &Path,
+    state: &DestinationState,
+    sync: impl FnOnce(&super::filesystem::Staging) -> std::io::Result<()>,
+) -> Result<DocumentPresetSaveOutcome, DocumentPresetError> {
+    if let DestinationState::Existing(expected) = state {
+        let actual = fingerprint_regular_file(path, MAX_DOCUMENT_BYTES).map_err(|_| {
+            DocumentPresetError::StaleDestination {
+                context: "document Preset destination changed externally".into(),
+            }
+        })?;
+        if &actual != expected {
+            return Err(DocumentPresetError::StaleDestination {
+                context: "document Preset destination changed externally".into(),
+            });
+        }
+    }
+    staging
+        .rename(match state {
+            DestinationState::Missing => super::filesystem::PublishMode::NoReplace,
+            DestinationState::Existing(_) => super::filesystem::PublishMode::Replace,
+        })
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                DocumentPresetError::StaleDestination {
+                    context: "document Preset destination now exists".into(),
+                }
+            } else {
+                filesystem_error(path, error.to_string())
+            }
+        })?;
+    Ok(DocumentPresetSaveOutcome {
+        durability_warning: sync(staging).err().map(|error| error.to_string()),
+    })
 }
 
 /// Selects the Preset or ordinary-project reader from validated ZIP entry names.
@@ -428,12 +494,18 @@ fn load_source_free_preset(
 /// Rejects symlinks, nonregular files, metadata/read-open failures, and files
 /// whose metadata length exceeds `limit`.
 fn open_regular_file(path: &Path, limit: u64) -> Result<File, DocumentPresetError> {
-    let mut options = OpenOptions::new();
-    options.read(true);
     #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    let file = options
-        .open(path)
+    let file = {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        options
+            .open(path)
+            .map_err(|error| filesystem_error(path, error.to_string()))?
+    };
+    #[cfg(windows)]
+    let file = super::filesystem::open_regular_file(path)
         .map_err(|error| filesystem_error(path, error.to_string()))?;
     let metadata = file
         .metadata()
@@ -479,6 +551,7 @@ fn fingerprint_regular_file(path: &Path, limit: u64) -> Result<[u8; 32], Documen
 ///
 /// Returns parent/path encoding, permission, or exhausted-name diagnostics
 /// before any destination mutation.
+#[cfg(unix)]
 fn create_temporary_file(
     parent: &Path,
     destination: &Path,
@@ -553,6 +626,7 @@ fn write_preset_archive(file: File, json: &[u8]) -> Result<(), DocumentPresetErr
 /// Overwrite publication fails if the exact no-follow fingerprint changed, or
 /// if rename fails. Successful publication returns any later directory-sync
 /// failure as a warning because the target is already visible.
+#[cfg(unix)]
 fn publish_temporary(
     temporary: &Path,
     destination: &Path,
@@ -603,9 +677,9 @@ fn publish_temporary(
 /// # Errors
 ///
 /// Returns the directory open or sync failure after the target itself has been published.
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), DocumentPresetError> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
+    super::filesystem::sync_directory(path)
         .map_err(|error| filesystem_error(path, error.to_string()))
 }
 
@@ -681,5 +755,38 @@ mod tests {
         assert_eq!(mode, 0o600);
         fs::remove_file(temporary).expect("remove temporary");
         fs::remove_dir(directory).expect("remove test directory");
+    }
+
+    /// Keeps published Preset bytes and returns a warning when native directory durability fails after rename.
+    /// # Panics
+    /// Panics if postpublication sync is fatal, cleanup removes the target, or a staging sibling remains.
+    #[cfg(windows)]
+    #[test]
+    fn published_preset_retains_bytes_on_durability_warning() {
+        let root = std::env::temp_dir().join(format!(
+            "toniator-preset-{}",
+            super::super::filesystem::random_suffix().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("warning.toniator-preset");
+        let mut staging = super::super::filesystem::Staging::create(&path).unwrap();
+        let mut file = staging.file().unwrap();
+        file.write_all(b"published preset").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let result =
+            publish_windows_staging(&mut staging, &path, &DestinationState::Missing, |_| {
+                Err(std::io::Error::other("injected directory sync failure"))
+            })
+            .unwrap();
+        assert_eq!(
+            result.durability_warning.as_deref(),
+            Some("injected directory sync failure")
+        );
+        drop(staging);
+        assert_eq!(fs::read(&path).unwrap(), b"published preset");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 }

@@ -1,7 +1,7 @@
 //! Current-schema container integration witnesses.
 //!
 //! Toniator is pre-release, so obsolete schema migration belongs nowhere in this suite. These
-//! tests exercise the public current-v5 boundary, archive hardening, deterministic bytes,
+//! tests exercise the public current-schema boundary, archive hardening, deterministic bytes,
 //! transactional publication, source correspondence, and Stage 20 visible-mark exclusion intent.
 
 use std::{
@@ -288,10 +288,11 @@ fn assert_load_error(bytes: &[u8], predicate: impl FnOnce(&LoadError) -> bool) {
     fs::remove_file(path).expect("hostile input removes");
 }
 
-/// Proves current-v5 saves are byte deterministic and reload exact authoritative state.
+/// Proves current-schema saves are byte deterministic and reload exact authoritative state.
+/// # Panics
+/// Panics if native publication fails, deterministic archives differ, or current state does not reload.
 #[test]
-fn current_v5_round_trip_is_byte_deterministic() {
-    assert_eq!(DOCUMENT_SCHEMA_VERSION, 5);
+fn current_schema_round_trip_is_byte_deterministic() {
     let (document, sources) = source_backed_document();
     let first = temporary("first.toniator");
     let second = temporary("second.toniator");
@@ -402,24 +403,33 @@ fn current_archive_metadata_and_json_are_deterministic_and_intent_only() {
 }
 
 /// Proves source length and digest correspondence reject changed payloads without extraction.
+/// # Panics
+/// Panics if changed digests or lengths pass their current integrity or archive-limit boundaries.
 #[test]
 fn source_length_and_hash_integrity_are_checked_before_publication() {
     let (document, sources) = source_backed_document();
     let (json, source_name, source) = saved_parts(&document, &sources);
     let mut same_length = source.clone();
     same_length[0] ^= 1;
-    for changed in [same_length, b"different length".to_vec()] {
-        assert_load_error(
-            &archive_from_entries(&[
-                ("document.json", &json, CompressionMethod::Stored),
-                (&source_name, &changed, CompressionMethod::Stored),
-            ]),
-            |error| matches!(error, LoadError::Integrity { .. }),
-        );
-    }
+    assert_load_error(
+        &archive_from_entries(&[
+            ("document.json", &json, CompressionMethod::Stored),
+            (&source_name, &same_length, CompressionMethod::Stored),
+        ]),
+        |error| matches!(error, LoadError::Integrity { .. }),
+    );
+    assert_load_error(
+        &archive_from_entries(&[
+            ("document.json", &json, CompressionMethod::Stored),
+            (&source_name, b"different length", CompressionMethod::Stored),
+        ]),
+        |error| matches!(error, LoadError::Limits { context } if context.contains("source lengths disagree")),
+    );
 }
 
 /// Proves hostile names, duplicate members, malformed payloads, and unsupported compression reject.
+/// # Panics
+/// Panics if generated hostile archives are invalid witnesses or any malformed input bypasses its boundary.
 #[test]
 fn archive_topology_and_compression_reject_without_panic() {
     let (document, sources) = source_backed_document();
@@ -442,11 +452,11 @@ fn archive_topology_and_compression_reject_without_panic() {
             |error| matches!(error, LoadError::EntryTopology { .. }),
         );
     }
-    let alternate_name = source_name.replace("source.svg", "sourcf.svg");
+    let alternate_name = "sources/undeclared.svg";
     let multiple_sources = archive_from_entries(&[
         ("document.json", &json, CompressionMethod::Stored),
         (&source_name, &source, CompressionMethod::Stored),
-        (&alternate_name, &source, CompressionMethod::Stored),
+        (alternate_name, &source, CompressionMethod::Stored),
     ]);
     assert_load_error(&multiple_sources, |error| {
         matches!(error, LoadError::EntryTopology { .. })

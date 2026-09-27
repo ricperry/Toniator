@@ -94,13 +94,15 @@ fn recent_files_reject_bad_metadata_and_allow_explicit_clear() {
 /// Panics if path selection escapes the supplied absolute XDG/home authority.
 #[test]
 fn recent_files_use_xdg_state_with_home_fallback() {
-    let home = std::path::Path::new("/home/artist");
+    let root = std::env::temp_dir();
+    let home = root.join("artist");
+    let state = root.join("state");
     assert_eq!(
-        recent_file_path(Some(std::path::Path::new("/state")), Some(home)),
-        Some(PathBuf::from("/state/Toniator/recent-files.json"))
+        recent_file_path(Some(&state), Some(&home)),
+        Some(state.join("Toniator/recent-files.json"))
     );
     assert_eq!(
-        recent_file_path(Some(std::path::Path::new("relative")), Some(home)),
+        recent_file_path(Some(std::path::Path::new("relative")), Some(&home)),
         Some(home.join(".local/state/Toniator/recent-files.json"))
     );
     assert_eq!(recent_file_path(None, None), None);

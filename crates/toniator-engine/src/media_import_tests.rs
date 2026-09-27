@@ -37,7 +37,7 @@ fn local_import_detects_png_webp_gif_and_avif_animation() {
     let scratch = Scratch::new();
     for extension in ["png", "webp", "gif", "avif"] {
         let path = scratch.0.join(format!("animation.{extension}"));
-        let mut command = std::process::Command::new("ffmpeg");
+        let mut command = hidden_command("ffmpeg");
         command.args([
             "-v",
             "error",
@@ -319,4 +319,17 @@ fn local_import_uses_shared_formats_and_explicit_sequence_order() {
     );
     assert!(import_source_media(&[raster], None, MediaTools::default(), &|| true).is_err());
     assert!(import_source_media(&[assets], None, MediaTools::default(), &|| false).is_err());
+}
+
+/// Constructs an ordinary test subprocess without opening a native Windows console.
+fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let command = std::process::Command::new(program);
+    #[cfg(windows)]
+    let command = {
+        use std::os::windows::process::CommandExt;
+        let mut command = command;
+        command.creation_flags(0x08000000);
+        command
+    };
+    command
 }

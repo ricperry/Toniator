@@ -1,0 +1,8 @@
+diff --git a/gvsbuild/projects/librsvg.py b/gvsbuild/projects/librsvg.py
+--- a/gvsbuild/projects/librsvg.py
++++ b/gvsbuild/projects/librsvg.py
+@@ -56,3 +56,3 @@
+         self.builder.exec_cargo(["install", "cargo-c", "--version", "0.10.23+cargo-0.97.1", "--locked"])
+-        Meson.build(self)
++        Meson.build(self, add_path=str(Path(self.builder.vs_env["CARGO_HOME"]) / "bin"))
+         self.install(r".\COPYING.LIB share\doc\librsvg")

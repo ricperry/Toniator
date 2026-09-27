@@ -1,13 +1,15 @@
 //! Personal export destinations remain outside documents and reusable Presets.
 
 use serde::{Deserialize, Serialize};
+#[cfg(any(unix, test))]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
+#[cfg(any(unix, test))]
 static NEXT_WRITE: AtomicU64 = AtomicU64::new(0);
 
 /// Stores optional personal folders; absence prompts the artist at export time.
@@ -54,24 +56,35 @@ impl ExportDefaults {
             .filter(|path| path.is_absolute())
             .ok_or_else(|| io::Error::other("Export settings need an absolute parent folder."))?;
         fs::create_dir_all(parent)?;
-        let temporary = parent.join(format!(
-            ".export-defaults-{}-{}",
-            std::process::id(),
-            NEXT_WRITE.fetch_add(1, Ordering::Relaxed)
-        ));
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        let result = (|| {
+        #[cfg(windows)]
+        {
+            let mut staging = super::filesystem::Staging::create(path)?;
+            let mut file = staging.file()?;
             file.write_all(&bytes)?;
             file.sync_all()?;
-            fs::rename(&temporary, path)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
+            staging.rename(super::filesystem::PublishMode::Replace)
         }
-        result
+        #[cfg(unix)]
+        {
+            let temporary = parent.join(format!(
+                ".export-defaults-{}-{}",
+                std::process::id(),
+                NEXT_WRITE.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            let result = (|| {
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+                fs::rename(&temporary, path)
+            })();
+            if result.is_err() {
+                let _ = fs::remove_file(&temporary);
+            }
+            result
+        }
     }
 
     /// Validates portable local absolute-path intent while allowing expired grants to be displayed.

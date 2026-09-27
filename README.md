@@ -172,6 +172,9 @@ For development, `cargo run -p toniator-app` builds and launches the application
 For a headless build, use `cargo build --release --locked -p toniator-cli`;
 GTK and Blueprint are unnecessary, but the native `dav1d` dependency still applies.
 
+For the verified native Windows development build and its current limits, see
+[Windows build notes](docs/windows-build.md).
+
 ### Command-line rendering
 
 Render a source image using the default circular-mark Pattern:

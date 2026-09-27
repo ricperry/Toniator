@@ -1,17 +1,20 @@
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::{
     fmt,
-    fs::OpenOptions,
     io::Read,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
         mpsc::{Receiver, SyncSender, sync_channel},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+#[cfg(unix)]
+use std::{fs::OpenOptions, sync::atomic::AtomicU64};
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -26,7 +29,16 @@ const MAX_FRAME_COUNT: usize = 1_000_000;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const DECODE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const DEMUXERS: &str = "mov,matroska,webm,avi,ogg,mpeg,mpegts,gif,apng,webp_pipe";
+#[cfg(unix)]
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(unix)]
+const PROBE_PROTOCOLS: &str = "file";
+#[cfg(windows)]
+const PROBE_PROTOCOLS: &str = "file,fd";
+#[cfg(unix)]
+const DECODE_PROTOCOLS: &str = "file,pipe";
+#[cfg(windows)]
+const DECODE_PROTOCOLS: &str = "file,pipe,fd";
 
 /// Identifies which supported source container owns a frame provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -272,7 +284,10 @@ pub(crate) fn fingerprint(bytes: &[u8]) -> String {
 
 #[derive(Debug)]
 pub(crate) struct OwnedMediaFile {
+    #[cfg(unix)]
     path: PathBuf,
+    #[cfg(windows)]
+    entry: Option<toniator_windows_fs::Entry>,
 }
 
 impl OwnedMediaFile {
@@ -289,52 +304,145 @@ impl OwnedMediaFile {
                 "temporary suffix is unsafe",
             ));
         }
-        for _ in 0..64 {
-            let nonce = TEMP_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "toniator-media-{}-{nonce}.{suffix}",
-                std::process::id()
-            ));
-            use std::os::unix::fs::OpenOptionsExt;
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&path)
-            {
-                Ok(mut file) => {
-                    use std::io::Write;
-                    file.write_all(bytes).map_err(|error| {
-                        let _ = std::fs::remove_file(&path);
-                        SourceError::new("source.temp", format!("could not write source: {error}"))
-                    })?;
-                    return Ok(Self { path });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => {
-                    return Err(SourceError::new(
-                        "source.temp",
-                        format!("could not create private source: {error}"),
-                    ));
+        #[cfg(windows)]
+        {
+            let parent = toniator_windows_fs::Directory::open(&std::env::temp_dir())
+                .map_err(|error| SourceError::new("source.temp", error.to_string()))?;
+            let name = format!(
+                "toniator-media-{}.{}",
+                toniator_windows_fs::random_suffix()
+                    .map_err(|error| SourceError::new("source.temp", error.to_string()))?,
+                suffix
+            );
+            let mut owned = Self {
+                entry: Some(
+                    parent
+                        .create_file(std::ffi::OsStr::new(&name))
+                        .map_err(|error| SourceError::new("source.temp", error.to_string()))?,
+                ),
+            };
+            use std::io::Write;
+            owned
+                .entry
+                .as_mut()
+                .expect("new retained media entry")
+                .file()
+                .write_all(bytes)
+                .map_err(|error| SourceError::new("source.temp", error.to_string()))?;
+            Ok(owned)
+        }
+        #[cfg(unix)]
+        {
+            for _ in 0..64 {
+                let nonce = TEMP_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "toniator-media-{}-{nonce}.{suffix}",
+                    std::process::id()
+                ));
+                use std::os::unix::fs::OpenOptionsExt;
+                match OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&path)
+                {
+                    Ok(mut file) => {
+                        use std::io::Write;
+                        file.write_all(bytes).map_err(|error| {
+                            let _ = std::fs::remove_file(&path);
+                            SourceError::new(
+                                "source.temp",
+                                format!("could not write source: {error}"),
+                            )
+                        })?;
+                        return Ok(Self { path });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        return Err(SourceError::new(
+                            "source.temp",
+                            format!("could not create private source: {error}"),
+                        ));
+                    }
                 }
             }
+            Err(SourceError::new(
+                "source.temp",
+                "could not allocate a unique private source path",
+            ))
         }
-        Err(SourceError::new(
-            "source.temp",
-            "could not allocate a unique private source path",
-        ))
     }
 
-    /// Returns the exact private path passed as one subprocess argument.
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
+    /// Supplies the exact private Unix path or an independently positioned retained Windows input handle.
+    /// # Errors
+    /// Returns native independent-reader failures without following a visible staging path.
+    fn configure_input(&self, command: &mut Command, decode: bool) -> Result<(), SourceError> {
+        #[cfg(unix)]
+        {
+            if decode {
+                command.arg("-i");
+            }
+            command.arg(&self.path).stdin(Stdio::null());
+        }
+        #[cfg(windows)]
+        {
+            let file = self
+                .entry
+                .as_ref()
+                .expect("live retained media entry")
+                .independent_reader()
+                .map_err(|error| SourceError::new("source.temp", error.to_string()))?;
+            command.args(["-fd", "0"]);
+            if decode {
+                command.arg("-i");
+            }
+            command.arg("fd:").stdin(Stdio::from(file));
+        }
+        Ok(())
     }
 }
 
 impl Drop for OwnedMediaFile {
     /// Removes only the exact private file owned by this provider.
     fn drop(&mut self) {
+        #[cfg(unix)]
         let _ = std::fs::remove_file(&self.path);
+        #[cfg(windows)]
+        if let Some(entry) = self.entry.take() {
+            let _ = entry.discard();
+        }
+    }
+}
+
+#[cfg(test)]
+mod retained_input_tests {
+    use super::*;
+
+    /// Decodes concurrently through one owned compressed input while retaining independent reader cursors.
+    /// # Panics
+    /// Panics if probing, independent decoder transport, identical first-frame pixels, or process cleanup fails.
+    #[test]
+    fn concurrent_decoders_share_identity_without_sharing_cursors() {
+        let bytes = include_bytes!("../../../../assets/video-sample0001-0010.mp4");
+        let input = OwnedMediaFile::create(bytes, "media").unwrap();
+        let tools = MediaTools::default();
+        let probe = probe_moving(&tools, &input, SourceMediaKind::Video, &|| false).unwrap();
+        let fingerprint = fingerprint(bytes);
+        let decode = || {
+            let mut state = DecodeState::default();
+            decode_selected(&mut state, &tools, &input, &probe, &fingerprint, 0, &|| {
+                false
+            })
+            .unwrap()
+            .identity
+            .decoded_pixel_hash
+        };
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(&decode);
+            let second = scope.spawn(&decode);
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        assert_eq!(first, second);
     }
 }
 
@@ -501,14 +609,14 @@ pub(crate) fn probe_moving(
         "-of",
         "json",
         "-protocol_whitelist",
-        "file",
+        PROBE_PROTOCOLS,
         "-format_whitelist",
         DEMUXERS,
     ]);
     if let Some(decoder) = decoder {
         command.args(["-c:v:0", decoder]);
     }
-    command.arg(file.path());
+    file.configure_input(&mut command, false)?;
     let output = run_bounded(
         &mut command,
         MAX_PROBE_STDOUT,
@@ -700,15 +808,14 @@ impl DecodeSession {
             "1",
             "-noautorotate",
             "-protocol_whitelist",
-            "file,pipe",
+            DECODE_PROTOCOLS,
             "-format_whitelist",
             DEMUXERS,
         ]);
         if let Some(decoder) = probe.decoder {
             command.args(["-c:v:0", decoder]);
         }
-        command.arg("-i");
-        command.arg(file.path());
+        file.configure_input(&mut command, true)?;
         match &probe.filter {
             DecodeFilter::Simple(filter) => {
                 command.args(["-map", &format!("0:{}", probe.metadata.stream_index)]);
@@ -738,10 +845,9 @@ impl DecodeSession {
             "rgba",
             "pipe:1",
         ]);
-        command
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null());
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(windows)]
+        command.creation_flags(0x08000000);
         let mut child = command.spawn().map_err(|error| {
             SourceError::new(
                 "source.process",
@@ -983,10 +1089,9 @@ fn run_bounded(
     timeout: Duration,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, SourceError> {
-    command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null());
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
     let mut child = command.spawn().map_err(|error| {
         SourceError::new(
             "source.process",
@@ -1192,11 +1297,11 @@ fn probe_streams(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<ProbeStream>, SourceError> {
     let mut command = Command::new(&tools.ffprobe);
-    command.args(["-v", "error", "-show_entries", "stream=index,codec_type,codec_name,width,height,pix_fmt,sample_aspect_ratio,avg_frame_rate,r_frame_rate,time_base,start_pts,duration_ts,color_range,color_space,color_transfer,color_primaries:stream_side_data=rotation:stream_tags=alpha_mode", "-of", "json", "-protocol_whitelist", "file", "-format_whitelist", DEMUXERS]);
+    command.args(["-v", "error", "-show_entries", "stream=index,codec_type,codec_name,width,height,pix_fmt,sample_aspect_ratio,avg_frame_rate,r_frame_rate,time_base,start_pts,duration_ts,color_range,color_space,color_transfer,color_primaries:stream_side_data=rotation:stream_tags=alpha_mode", "-of", "json", "-protocol_whitelist", PROBE_PROTOCOLS, "-format_whitelist", DEMUXERS]);
     if let Some(decoder) = decoder {
         command.args(["-c:v:0", decoder]);
     }
-    command.arg(file.path());
+    file.configure_input(&mut command, false)?;
     let output = run_bounded(
         &mut command,
         1024 * 1024,

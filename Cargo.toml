@@ -9,6 +9,7 @@ members = [
     "crates/toniator-engine",
     "crates/toniator-cli",
     "crates/toniator-app",
+    "crates/toniator-windows-fs",
 ]
 exclude = ["ToniatorLegacy"]
 resolver = "3"

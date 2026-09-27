@@ -14,15 +14,15 @@ rg -q '^exclude = \["ToniatorLegacy"\]$' Cargo.toml || fail 'workspace must excl
 
 metadata="$(cargo metadata --format-version 1 --no-deps)"
 member_count="$(jq -r '.workspace_members | length' <<<"$metadata")"
-[[ "$member_count" == '9' ]] || fail "expected nine workspace members, found $member_count"
+[[ "$member_count" == '10' ]] || fail "expected ten workspace members, found $member_count"
 
-expected_members=$'toniator-app\ntoniator-cli\ntoniator-domain\ntoniator-engine\ntoniator-geometry\ntoniator-io\ntoniator-patterns\ntoniator-render\ntoniator-sampling'
+expected_members=$'toniator-app\ntoniator-cli\ntoniator-domain\ntoniator-engine\ntoniator-geometry\ntoniator-io\ntoniator-patterns\ntoniator-render\ntoniator-sampling\ntoniator-windows-fs'
 actual_members="$(jq -r --arg root "$repo_root" '
     .packages[]
     | select(.manifest_path | startswith($root + "/crates/"))
     | .name
 ' <<<"$metadata" | sort)"
-[[ "$actual_members" == "$expected_members" ]] || fail 'workspace members do not match the Stage 1 crate set'
+[[ "$actual_members" == "$expected_members" ]] || fail 'workspace members do not match the core and Windows infrastructure crate set'
 
 while IFS=$'\t' read -r package dependency; do
     [[ -z "$package" ]] && continue
@@ -30,12 +30,14 @@ while IFS=$'\t' read -r package dependency; do
         toniator-geometry:toniator-domain | \
         toniator-sampling:toniator-domain | \
         toniator-sampling:toniator-geometry | \
+        toniator-sampling:toniator-windows-fs | \
         toniator-patterns:toniator-domain | \
         toniator-patterns:toniator-geometry | \
         toniator-patterns:toniator-sampling | \
         toniator-render:toniator-domain | \
         toniator-render:toniator-geometry | \
         toniator-io:toniator-domain | \
+        toniator-io:toniator-windows-fs | \
         toniator-engine:toniator-domain | \
         toniator-engine:toniator-sampling | \
         toniator-engine:toniator-patterns | \

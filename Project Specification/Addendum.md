@@ -1586,3 +1586,20 @@ presets reject without adapters. Preset-v4 embeds motif geometry and layout.
 The sixteen-entry bundled catalog remains unchanged; a future Curve Motif
 gallery card and personal-preset/shape-library work remain separately gated in
 Stage 21B.
+
+## Native Windows filesystem infrastructure
+
+`toniator-windows-fs` is a platform-specific infrastructure leaf for safe native
+Windows filesystem operations. It may encapsulate unsafe Windows ABI calls and
+may be consumed by `toniator-io` and `toniator-sampling`; existing headless core
+crates retain their unsafe-code prohibition. It has no frontend, GTK, domain,
+rendering, or product-policy authority. Non-Windows builds contain no platform
+implementation or disabled product-feature fallback.
+
+The boundary preserves retained-directory and file identity, exclusive private
+creation, no-follow relevant reparse leaves, caller-available capacity, full
+synchronization, atomic publication, and ownership-bounded explicit deletion.
+Filename policy and recovery decisions remain with callers. Publication revokes
+staging cleanup authority before parent synchronization; synchronization failure
+does not authorize deletion of an already published output. Drop never removes
+caller-retained partials or recovery artifacts.

@@ -270,11 +270,12 @@ impl PartialOrd for Candidate {
     }
 }
 
-/// Builds an atomic mutual-nearest graph using a deterministic uniform spatial index.
+/// Builds an atomic mutual-nearest graph using a deterministic balanced spatial index.
 ///
-/// The index cell width equals the policy distance and visits each node's fixed `3x3` cell
-/// neighbourhood. Nodes retain source order; all returned topology is canonical and independent
-/// of operational limits.
+/// A median-partitioned index searches nearer half-planes first and omits half-planes strictly
+/// beyond the retained neighbour radius. The original policy-sized `3x3` cell eligibility,
+/// Euclidean distance, zero-distance exclusion, and stable ID ties remain authoritative.
+/// Nodes retain source order; returned topology and fingerprints exclude operational limits.
 ///
 /// # Errors
 ///
@@ -310,7 +311,12 @@ pub fn build_site_adjacency_cancellable(
         nodes.push(SiteAdjacencyNode::try_from_site(site)?);
         indexed.push((cell_for(site.position, policy.maximum_distance())?, index));
     }
-    indexed.sort_unstable();
+    partition_spatial_index(&mut indexed, &nodes, 0, is_cancelled)?;
+    // At extreme coordinates an omitted eligible pair could hide hypot overflow. Inside this
+    // conservative range both differences are at most MAX/2, so every pair distance is finite.
+    let finite_pair_distances = nodes.iter().all(|node| {
+        node.position.x.abs() <= f64::MAX / 4.0 && node.position.y.abs() <= f64::MAX / 4.0
+    });
 
     let degree = policy.maximum_degree();
     let mut selections = Vec::<Vec<FamilySiteId>>::new();
@@ -324,55 +330,28 @@ pub fn build_site_adjacency_cancellable(
         nearest.try_reserve(degree).map_err(|_| {
             SiteAdjacencyError::new("adjacency.allocation", "adjacency allocation failed")
         })?;
-        for dy in -1_i64..=1 {
-            for dx in -1_i64..=1 {
-                let cell = Cell {
-                    x: origin.x.checked_add(dx).ok_or(SiteAdjacencyError::new(
-                        "adjacency.cell_coordinate",
-                        "spatial cell coordinate is not representable",
-                    ))?,
-                    y: origin.y.checked_add(dy).ok_or(SiteAdjacencyError::new(
-                        "adjacency.cell_coordinate",
-                        "spatial cell coordinate is not representable",
-                    ))?,
-                };
-                let start = indexed.partition_point(|(candidate, _)| *candidate < cell);
-                let end = indexed.partition_point(|(candidate, _)| *candidate <= cell);
-                for &(_, other) in &indexed[start..end] {
-                    cancelled(is_cancelled)?;
-                    if index == other {
-                        continue;
-                    }
-                    distance_checks =
-                        distance_checks
-                            .checked_add(1)
-                            .ok_or(SiteAdjacencyError::new(
-                                "adjacency.limits.distance_checks",
-                                "distance-check count exceeds configured adjacency limit",
-                            ))?;
-                    if distance_checks > limits.maximum_distance_checks {
-                        return Err(SiteAdjacencyError::new(
-                            "adjacency.limits.distance_checks",
-                            "distance-check count exceeds configured adjacency limit",
-                        ));
-                    }
-                    let distance = distance_between(nodes[index].position, nodes[other].position)?;
-                    if distance == 0.0 || distance > policy.maximum_distance() {
-                        continue;
-                    }
-                    let candidate = Candidate {
-                        id: nodes[other].id,
-                        distance,
-                    };
-                    if nearest.len() < degree {
-                        nearest.push(candidate);
-                    } else if nearest.peek().is_some_and(|farthest| candidate < *farthest) {
-                        nearest.pop();
-                        nearest.push(candidate);
-                    }
-                }
+        // Preserve the original index's representable inclusive neighbourhood boundary.
+        for coordinate in [origin.x, origin.y] {
+            if coordinate.checked_sub(1).is_none() || coordinate.checked_add(1).is_none() {
+                return Err(SiteAdjacencyError::new(
+                    "adjacency.cell_coordinate",
+                    "spatial cell coordinate is not representable",
+                ));
             }
         }
+        select_nearest_cancellable(
+            &indexed,
+            &nodes,
+            index,
+            origin,
+            0,
+            finite_pair_distances,
+            policy,
+            limits.maximum_distance_checks,
+            &mut distance_checks,
+            &mut nearest,
+            is_cancelled,
+        )?;
         let mut chosen = nearest.into_sorted_vec();
         retained_memberships =
             retained_memberships
@@ -495,6 +474,148 @@ pub fn build_site_adjacency_cancellable(
         edges,
         components,
     })
+}
+
+/// Median-partitions evaluator indices on alternating axes without changing source node order.
+///
+/// Each recursive slice shrinks by at least half, so stack depth is bounded by the index length's
+/// bit width. Stable IDs break equal-coordinate ties. No further allocation occurs here.
+///
+/// # Errors
+///
+/// Returns cancellation between partitions without exposing a partially constructed graph.
+fn partition_spatial_index(
+    indexed: &mut [(Cell, usize)],
+    nodes: &[SiteAdjacencyNode],
+    depth: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), SiteAdjacencyError> {
+    cancelled(is_cancelled)?;
+    if indexed.len() < 2 {
+        return Ok(());
+    }
+    let middle = indexed.len() / 2;
+    indexed.select_nth_unstable_by(middle, |&(_, left), &(_, right)| {
+        axis_coordinate(nodes[left].position, depth)
+            .total_cmp(&axis_coordinate(nodes[right].position, depth))
+            .then_with(|| nodes[left].id.cmp(&nodes[right].id))
+    });
+    let (left, rest) = indexed.split_at_mut(middle);
+    partition_spatial_index(left, nodes, depth + 1, is_cancelled)?;
+    partition_spatial_index(&mut rest[1..], nodes, depth + 1, is_cancelled)
+}
+
+/// Selects exact nearest candidates while pruning only strictly separated finite half-planes.
+///
+/// The bounded max-heap retains the original `hypot` distance and ID tie order. A split's axis
+/// separation is a lower bound on Euclidean distance; an outward-rounded radius keeps boundary
+/// ties eligible. Pruning is disabled outside the conservative finite-pair coordinate range so
+/// an overflowing eligible distance still returns the existing diagnostic.
+/// Only actual eligible pair-distance evaluations consume the caller's distance-check budget.
+/// The balanced index bounds recursion depth; cancellation is checked at every visited node.
+///
+/// # Errors
+///
+/// Returns cancellation, distance overflow, or exhausted distance-check budget atomically.
+#[allow(clippy::too_many_arguments)]
+fn select_nearest_cancellable(
+    indexed: &[(Cell, usize)],
+    nodes: &[SiteAdjacencyNode],
+    index: usize,
+    origin: Cell,
+    depth: usize,
+    finite_pair_distances: bool,
+    policy: SiteAdjacencyPolicy,
+    maximum_distance_checks: usize,
+    distance_checks: &mut usize,
+    nearest: &mut BinaryHeap<Candidate>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), SiteAdjacencyError> {
+    if indexed.is_empty() {
+        return Ok(());
+    }
+    cancelled(is_cancelled)?;
+    let middle = indexed.len() / 2;
+    let (cell, other) = indexed[middle];
+    let separation = axis_coordinate(nodes[index].position, depth)
+        - axis_coordinate(nodes[other].position, depth);
+    let (near, far) = if separation <= 0.0 {
+        (&indexed[..middle], &indexed[middle + 1..])
+    } else {
+        (&indexed[middle + 1..], &indexed[..middle])
+    };
+    select_nearest_cancellable(
+        near,
+        nodes,
+        index,
+        origin,
+        depth + 1,
+        finite_pair_distances,
+        policy,
+        maximum_distance_checks,
+        distance_checks,
+        nearest,
+        is_cancelled,
+    )?;
+    if index != other && origin.x.abs_diff(cell.x) <= 1 && origin.y.abs_diff(cell.y) <= 1 {
+        *distance_checks = distance_checks
+            .checked_add(1)
+            .ok_or(SiteAdjacencyError::new(
+                "adjacency.limits.distance_checks",
+                "distance-check count exceeds configured adjacency limit",
+            ))?;
+        if *distance_checks > maximum_distance_checks {
+            return Err(SiteAdjacencyError::new(
+                "adjacency.limits.distance_checks",
+                "distance-check count exceeds configured adjacency limit",
+            ));
+        }
+        let distance = distance_between(nodes[index].position, nodes[other].position)?;
+        if distance != 0.0 && distance <= policy.maximum_distance() {
+            let candidate = Candidate {
+                id: nodes[other].id,
+                distance,
+            };
+            if nearest.len() < policy.maximum_degree() {
+                nearest.push(candidate);
+            } else if nearest.peek().is_some_and(|farthest| candidate < *farthest) {
+                nearest.pop();
+                nearest.push(candidate);
+            }
+        }
+    }
+    let radius = if nearest.len() == policy.maximum_degree() {
+        nearest
+            .peek()
+            .map_or(policy.maximum_distance(), |candidate| candidate.distance)
+    } else {
+        policy.maximum_distance()
+    };
+    if !finite_pair_distances || separation.abs() <= radius.next_up() {
+        select_nearest_cancellable(
+            far,
+            nodes,
+            index,
+            origin,
+            depth + 1,
+            finite_pair_distances,
+            policy,
+            maximum_distance_checks,
+            distance_checks,
+            nearest,
+            is_cancelled,
+        )?;
+    }
+    Ok(())
+}
+
+/// Returns the finite source coordinate for the alternating balanced-index axis.
+fn axis_coordinate(point: Point2, depth: usize) -> f64 {
+    if depth.is_multiple_of(2) {
+        point.x
+    } else {
+        point.y
+    }
 }
 
 /// Returns cancellation before a caller can observe a partial topology result.

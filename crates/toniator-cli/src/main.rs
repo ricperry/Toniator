@@ -218,7 +218,7 @@ struct RenderArgs {
     /// Absolute output frame in the selected range; omitted selects its Start frame.
     #[arg(long, conflicts_with_all = ["start_frame", "end_frame", "start_time", "end_time"])]
     frame: Option<u64>,
-    /// Temporary parent for video PNG intermediates; omitted uses /tmp.
+    /// Temporary parent for video PNG intermediates; omitted uses the native temporary directory.
     #[arg(long)]
     temporary_directory: Option<PathBuf>,
     /// Authoritative ordered halftone channel topology for a direct source.

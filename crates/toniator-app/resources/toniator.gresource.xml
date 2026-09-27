@@ -31,4 +31,7 @@
     <file alias="preset-icons/two-guide-cells-uniform-offset.svg">../../../assets/stage20s-preset-icons/two-guide-cells-uniform-offset.svg</file>
     <file alias="preset-icons/two-guide-maze.svg">../../../assets/stage20s-preset-icons/two-guide-maze.svg</file>
   </gresource>
+  <gresource prefix="/io/github/ricperry/Toniator/icons">
+    <file alias="512x512/apps/io.github.ricperry.Toniator.png">../../../assets/appicon.png</file>
+  </gresource>
 </gresources>

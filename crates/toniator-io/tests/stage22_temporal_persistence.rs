@@ -171,6 +171,8 @@ fn rewrite_json(path: &Path, mutate: impl FnOnce(&mut Value)) {
 }
 
 /// Proves projects persist only End intent and retain exact rational timing and evaluated frames.
+/// # Panics
+/// Panics if native archives fail to roundtrip current schema, authored timing, or End-only overrides.
 #[test]
 fn project_roundtrip_keeps_start_and_end_authority_separate() {
     let directory = TestDirectory::new();
@@ -178,7 +180,10 @@ fn project_roundtrip_keeps_start_and_end_authority_separate() {
     let (document, sources) = fixture();
     save(&path, &document, &sources).unwrap();
     let saved = json(&path);
-    assert_eq!(saved["document_schema_version"], 8);
+    assert_eq!(
+        saved["document_schema_version"],
+        toniator_io::DOCUMENT_SCHEMA_VERSION
+    );
     let overrides = saved["document"]["end_overrides"].as_array().unwrap();
     assert_eq!(overrides.len(), 3);
     for value in overrides {

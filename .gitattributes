@@ -1,2 +1,6 @@
 # Preserve design-reference PDF bytes and avoid treating compressed streams as text.
 *.pdf binary
+
+# Keep the shared Fedora verification recipe executable from Windows archives.
+scripts/fedora/*.sh text eol=lf
+scripts/validate_architecture.sh text eol=lf

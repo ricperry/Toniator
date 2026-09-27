@@ -55,6 +55,8 @@ fn record(name: &str) -> PresetRecord {
 
 /// Keeps complete JSON visible to concurrent readers while one writer publishes, then rejects a stale observer.
 /// This tests the documented single-writer contract, not a cross-process compare-and-swap promise.
+/// # Panics
+/// Panics if readers observe incomplete current-schema files or a stale writer replaces newer state.
 #[test]
 fn single_writer_publication_is_atomic_to_readers_and_stale_observers() {
     let (root, library) = library("readers");
@@ -72,7 +74,10 @@ fn single_writer_publication_is_atomic_to_readers_and_stale_observers() {
         while reader_running.load(Ordering::Acquire) || reads == 0 {
             let bytes = fs::read(&reader_path).unwrap();
             let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(json["preset_format_version"], 4);
+            assert_eq!(
+                json["preset_format_version"],
+                toniator_io::PRESET_FORMAT_VERSION
+            );
             assert!(
                 json["metadata"]["name"]
                     .as_str()

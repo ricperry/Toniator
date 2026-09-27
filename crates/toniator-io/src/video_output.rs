@@ -11,7 +11,7 @@ mod tests {
     /// Panics if any operation affects an existing destination or an unexpected workspace entry.
     #[test]
     fn video_storage_preserves_existing_files_and_bounds_discard_ownership() {
-        let mut root = RenderWorkspace::create(Path::new("/tmp")).unwrap();
+        let mut root = RenderWorkspace::create(&std::env::temp_dir()).unwrap();
         let path = root.path().join("video.mkv");
         let output = VideoOutput::reserve(&path, 4096).unwrap();
         output
@@ -37,11 +37,14 @@ mod tests {
         fs::remove_file(&path).unwrap();
         fs::create_dir(root.frames_path()).unwrap();
         fs::write(root.frames_path().join("frame-000000.png"), b"owned").unwrap();
+        assert_eq!(root.read_frame(0, 5).unwrap(), b"owned");
+        assert!(root.read_frame(0, 4).is_err());
         fs::write(root.frames_path().join("user-notes.txt"), b"keep").unwrap();
         assert!(root.discard().is_err());
         assert!(root.frames_path().join("frame-000000.png").exists());
         fs::remove_file(root.frames_path().join("user-notes.txt")).unwrap();
         fs::create_dir(root.frames_path().join("frame-000001.png")).unwrap();
+        assert!(root.read_frame(1, 1024).is_err());
         assert!(root.discard().is_err());
         assert!(root.frames_path().join("frame-000000.png").exists());
         fs::remove_dir(root.frames_path().join("frame-000001.png")).unwrap();
@@ -49,17 +52,40 @@ mod tests {
         root.discard().unwrap();
         assert!(!root_path.exists());
     }
+
+    /// Retains a successfully renamed video when the later metadata durability barrier fails.
+    /// # Panics
+    /// Panics if failure cleanup removes published bytes or leaves an unpublished staging sibling.
+    #[test]
+    fn video_publication_survives_parent_sync_failure() {
+        let mut root = RenderWorkspace::create(&std::env::temp_dir()).unwrap();
+        let path = root.path().join("video.mkv");
+        let output = VideoOutput::reserve(&path, 4096).unwrap();
+        output
+            .file_handle()
+            .unwrap()
+            .write_all(b"published video")
+            .unwrap();
+        assert!(
+            output
+                .publish_with_sync(|_| Err(std::io::Error::other("injected sync failure")))
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"published video");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        fs::remove_file(path).unwrap();
+        root.discard().unwrap();
+        assert!(!root.path().exists());
+        root.discard().unwrap();
+        assert!(root.require_space(0).is_err());
+    }
 }
 
-use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags};
+use crate::filesystem::{self, Directory, Entry, PublishMode};
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs::{self, File},
     io::{Read, Seek},
-    os::{
-        fd::AsRawFd,
-        unix::fs::{DirBuilderExt, MetadataExt},
-    },
     path::{Path, PathBuf},
 };
 
@@ -89,14 +115,14 @@ impl std::error::Error for VideoStorageError {}
 /// Holds one open temporary sibling until an encoder validates and publishes the file.
 ///
 /// The encoder writes a duplicated file handle; it never opens the destination path. Drop removes
-/// only the original staging inode. Final publication atomically refuses an existing destination.
+/// only the verified unpublished staging link. Final publication atomically refuses an existing destination.
 #[derive(Debug)]
 pub struct VideoOutput {
-    parent: File,
+    parent: Directory,
     parent_path: PathBuf,
     target: OsString,
     temporary: OsString,
-    file: File,
+    staging: Option<Entry>,
 }
 impl VideoOutput {
     /// Reserves a private temporary sibling after checking destination absence and space.
@@ -115,28 +141,23 @@ impl VideoOutput {
         )
         .map_err(|error| VideoStorageError::new(path, error))?;
         let parent = open_directory(&parent_path)?;
-        match rustix::fs::statat(&parent, &target, AtFlags::SYMLINK_NOFOLLOW) {
-            Err(rustix::io::Errno::NOENT) => {}
-            Ok(_) => return Err(VideoStorageError::new(path, "destination already exists")),
-            Err(error) => return Err(VideoStorageError::new(path, error)),
+        if parent
+            .entry_exists(&target)
+            .map_err(|error| VideoStorageError::new(path, error))?
+        {
+            return Err(VideoStorageError::new(path, "destination already exists"));
         }
         require_space(&parent, &parent_path, estimated_bytes)?;
         let temporary = OsString::from(format!(".toniator-video-{}.part", random_suffix()?));
-        let file = File::from(
-            rustix::fs::openat(
-                &parent,
-                &temporary,
-                OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::RUSR | Mode::WUSR,
-            )
-            .map_err(|error| VideoStorageError::new(path, error))?,
-        );
+        let staging = parent
+            .create_file(&temporary)
+            .map_err(|error| VideoStorageError::new(path, error))?;
         Ok(Self {
             parent,
             parent_path,
             target,
             temporary,
-            file,
+            staging: Some(staging),
         })
     }
 
@@ -146,8 +167,8 @@ impl VideoOutput {
     /// Returns descriptor duplication or seek failures without reopening a path.
     pub fn file_handle(&self) -> Result<File, VideoStorageError> {
         let mut file = self
-            .file
-            .try_clone()
+            .entry()?
+            .try_clone_file()
             .map_err(|error| VideoStorageError::new(&self.path(), error))?;
         file.rewind()
             .map_err(|error| VideoStorageError::new(&self.path(), error))?;
@@ -175,16 +196,7 @@ impl VideoOutput {
         &self,
         workspace: &RenderWorkspace,
     ) -> Result<bool, VideoStorageError> {
-        Ok(self
-            .parent
-            .metadata()
-            .map_err(|error| VideoStorageError::new(&self.parent_path, error))?
-            .dev()
-            == workspace
-                .directory
-                .metadata()
-                .map_err(|error| VideoStorageError::new(&workspace.path, error))?
-                .dev())
+        Ok(self.parent.identity().volume == workspace.directory()?.identity().volume)
     }
 
     /// Truncates only this owned staging file after a successful capability probe.
@@ -192,7 +204,8 @@ impl VideoOutput {
     /// # Errors
     /// Returns truncation/seek failures; the destination remains unpublished.
     pub fn clear(&self) -> Result<(), VideoStorageError> {
-        self.file
+        self.entry()?
+            .file()
             .set_len(0)
             .map_err(|error| VideoStorageError::new(&self.path(), error))?;
         self.file_handle()?;
@@ -204,10 +217,21 @@ impl VideoOutput {
     /// # Errors
     /// Rejects moved/replaced staging or parent paths, empty files, collisions, or sync failures.
     pub fn publish(self) -> Result<PathBuf, VideoStorageError> {
+        self.publish_with_sync(Directory::sync)
+    }
+
+    /// Publishes through the production rename boundary while exposing its later sync barrier for tests.
+    /// # Errors
+    /// Returns prepublication or sync failures; rename success permanently revokes staging cleanup.
+    fn publish_with_sync(
+        mut self,
+        sync: impl FnOnce(&Directory) -> std::io::Result<()>,
+    ) -> Result<PathBuf, VideoStorageError> {
         ensure_directory_identity(&self.parent, &self.parent_path)?;
         if !self.owns_temporary()
             || self
-                .file
+                .entry()?
+                .file()
                 .metadata()
                 .map_err(|error| VideoStorageError::new(&self.path(), error))?
                 .len()
@@ -218,41 +242,45 @@ impl VideoOutput {
                 "staging file changed or is empty",
             ));
         }
-        self.file
+        self.entry()?
+            .file()
             .sync_all()
             .map_err(|error| VideoStorageError::new(&self.path(), error))?;
-        rustix::fs::renameat_with(
-            &self.parent,
-            &self.temporary,
-            &self.parent,
-            &self.target,
-            RenameFlags::NOREPLACE,
-        )
-        .map_err(|error| VideoStorageError::new(&self.path(), error))?;
-        self.parent
-            .sync_all()
-            .map_err(|error| VideoStorageError::new(&self.path(), error))?;
+        let path = self.path();
+        self.staging
+            .as_mut()
+            .ok_or_else(|| VideoStorageError::new(&path, "staging handle released"))?
+            .rename(&self.parent, &self.target, PublishMode::NoReplace)
+            .map_err(|error| VideoStorageError::new(&path, error))?;
+        sync(&self.parent).map_err(|error| VideoStorageError::new(&self.path(), error))?;
         Ok(self.path())
     }
 
     /// Checks the staging name still references the exclusively created regular file.
     fn owns_temporary(&self) -> bool {
-        let Ok(actual) =
-            rustix::fs::statat(&self.parent, &self.temporary, AtFlags::SYMLINK_NOFOLLOW)
-        else {
-            return false;
-        };
-        let Ok(owned) = self.file.metadata() else {
-            return false;
-        };
-        actual.st_dev == owned.dev() && actual.st_ino == owned.ino()
+        self.staging.as_ref().is_some_and(|owned| {
+            self.parent
+                .open_file(&self.temporary)
+                .is_ok_and(|actual| actual.identity() == owned.identity())
+        })
+    }
+
+    /// Returns the live staging capability without reopening its path.
+    /// # Errors
+    /// Rejects a released staging handle instead of substituting another file.
+    fn entry(&self) -> Result<&Entry, VideoStorageError> {
+        self.staging
+            .as_ref()
+            .ok_or_else(|| VideoStorageError::new(&self.path(), "staging handle released"))
     }
 }
 impl Drop for VideoOutput {
-    /// Removes only the unpublished original temporary inode; never follows a replaced name.
+    /// Removes only the verified unpublished staging link; published outputs survive later sync failures.
     fn drop(&mut self) {
-        if self.owns_temporary() {
-            let _ = rustix::fs::unlinkat(&self.parent, &self.temporary, AtFlags::empty());
+        if let Some(entry) = self.staging.take()
+            && !entry.is_published()
+        {
+            let _ = entry.discard();
         }
     }
 }
@@ -264,26 +292,26 @@ impl Drop for VideoOutput {
 #[derive(Debug)]
 pub struct RenderWorkspace {
     path: PathBuf,
-    directory: File,
+    directory: Option<Directory>,
     discarded: bool,
 }
 impl RenderWorkspace {
-    /// Creates a random private render directory under `/tmp` or an explicit temporary parent.
+    /// Creates a random private render directory through the caller-selected temporary parent.
     ///
     /// # Errors
     /// Returns parent, random-source, directory-creation or descriptor-opening failures.
     pub fn create(parent: &Path) -> Result<Self, VideoStorageError> {
         let parent =
             fs::canonicalize(parent).map_err(|error| VideoStorageError::new(parent, error))?;
-        let path = parent.join(format!("toniator-render-{}", random_suffix()?));
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
+        let parent_directory = open_directory(&parent)?;
+        let name = OsString::from(format!("toniator-render-{}", random_suffix()?));
+        let path = parent.join(&name);
+        let directory = parent_directory
+            .create_directory(&name)
             .map_err(|error| VideoStorageError::new(&path, error))?;
-        let directory = open_directory(&path)?;
         Ok(Self {
             path,
-            directory,
+            directory: Some(directory),
             discarded: false,
         })
     }
@@ -302,7 +330,7 @@ impl RenderWorkspace {
     /// # Errors
     /// Returns an unavailable/insufficient-space diagnostic for the owned workspace.
     pub fn require_space(&self, bytes: u64) -> Result<(), VideoStorageError> {
-        require_space(&self.directory, &self.path, bytes)
+        require_space(self.directory()?, &self.path, bytes)
     }
 
     /// Reads one retained numbered PNG through an owned directory handle and a caller byte bound.
@@ -310,17 +338,13 @@ impl RenderWorkspace {
     /// # Errors
     /// Rejects discarded workspaces, missing/nonregular files, path replacement or excess bytes.
     pub fn read_frame(&self, index: u64, maximum_bytes: u64) -> Result<Vec<u8>, VideoStorageError> {
-        ensure_directory_identity(&self.directory, &self.path)?;
+        ensure_directory_identity(self.directory()?, &self.path)?;
         let frames = self.open_frames()?;
         let name = format!("frame-{index:06}.png");
-        let fd = rustix::fs::openat(
-            &frames,
-            &name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|error| VideoStorageError::new(&self.frames_path(), error))?;
-        let file = File::from(fd);
+        let entry = frames
+            .open_file(OsStr::new(&name))
+            .map_err(|error| VideoStorageError::new(&self.frames_path(), error))?;
+        let file = entry.file();
         let metadata = file
             .metadata()
             .map_err(|error| VideoStorageError::new(&self.frames_path(), error))?;
@@ -355,8 +379,8 @@ impl RenderWorkspace {
         if self.discarded {
             return Ok(());
         }
-        ensure_directory_identity(&self.directory, &self.path)?;
-        let entries = directory_names(&self.directory, &self.path)?;
+        ensure_directory_identity(self.directory()?, &self.path)?;
+        let entries = directory_names(self.directory()?, &self.path)?;
         if entries.iter().any(|name| name != "frames") {
             return Err(VideoStorageError::new(
                 &self.path,
@@ -372,26 +396,27 @@ impl RenderWorkspace {
                     "unexpected frame entries; cleanup refused",
                 ));
             }
-            for name in &names {
-                let stat = rustix::fs::statat(&frames, name, AtFlags::SYMLINK_NOFOLLOW)
-                    .map_err(|error| VideoStorageError::new(&self.frames_path(), error))?;
-                if rustix::fs::FileType::from_raw_mode(stat.st_mode)
-                    != rustix::fs::FileType::RegularFile
-                {
-                    return Err(VideoStorageError::new(
-                        &self.frames_path(),
-                        "unexpected nonregular frame entry; cleanup refused",
-                    ));
-                }
-            }
+            let mut validated = Vec::with_capacity(names.len());
             for name in names {
-                rustix::fs::unlinkat(&frames, &name, AtFlags::empty())
+                let entry = frames
+                    .open_file(OsStr::new(&name))
+                    .map_err(|error| VideoStorageError::new(&self.frames_path(), error))?;
+                validated.push(entry);
+            }
+            for entry in validated {
+                entry
+                    .discard()
                     .map_err(|error| VideoStorageError::new(&self.frames_path(), error))?;
             }
-            rustix::fs::unlinkat(&self.directory, "frames", AtFlags::REMOVEDIR)
+            frames
+                .remove_empty()
                 .map_err(|error| VideoStorageError::new(&self.path, error))?;
         }
-        fs::remove_dir(&self.path).map_err(|error| VideoStorageError::new(&self.path, error))?;
+        self.directory()?
+            .clone()
+            .remove_empty()
+            .map_err(|error| VideoStorageError::new(&self.path, error))?;
+        self.directory.take();
         self.discarded = true;
         Ok(())
     }
@@ -400,79 +425,63 @@ impl RenderWorkspace {
     ///
     /// # Errors
     /// Returns missing/discarded/invalid-directory diagnostics.
-    fn open_frames(&self) -> Result<File, VideoStorageError> {
+    fn open_frames(&self) -> Result<Directory, VideoStorageError> {
         if self.discarded {
             return Err(VideoStorageError::new(
                 &self.path,
                 "workspace was already discarded",
             ));
         }
-        rustix::fs::openat(
-            &self.directory,
-            "frames",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map(File::from)
-        .map_err(|error| VideoStorageError::new(&self.frames_path(), error))
+        self.directory()?
+            .open_directory(OsStr::new("frames"))
+            .map_err(|error| VideoStorageError::new(&self.frames_path(), error))
+    }
+
+    /// Returns the retained workspace until successful explicit removal releases it.
+    /// # Errors
+    /// Rejects a discarded workspace instead of reopening its visible path.
+    fn directory(&self) -> Result<&Directory, VideoStorageError> {
+        self.directory
+            .as_ref()
+            .ok_or_else(|| VideoStorageError::new(&self.path, "workspace was already discarded"))
     }
 }
 
-/// Opens one directory under the Linux-native no-follow descriptor boundary.
+/// Opens one directory under the native no-follow retained-handle boundary.
 ///
 /// # Errors
 /// Returns the exact directory-open diagnostic.
-fn open_directory(path: &Path) -> Result<File, VideoStorageError> {
-    rustix::fs::open(
-        path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map(File::from)
-    .map_err(|error| VideoStorageError::new(path, error))
+fn open_directory(path: &Path) -> Result<Directory, VideoStorageError> {
+    Directory::open(path).map_err(|error| VideoStorageError::new(path, error))
 }
 
-/// Obtains a random bounded filename component from the Linux random device.
+/// Obtains a random bounded filename component from the native system random source.
 ///
 /// # Errors
 /// Returns random-device open/read failures instead of falling back to predictable names.
 fn random_suffix() -> Result<String, VideoStorageError> {
-    let mut bytes = [0_u8; 16];
-    File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut bytes))
-        .map_err(|error| VideoStorageError::new(Path::new("/dev/urandom"), error))?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    filesystem::random_suffix()
+        .map_err(|error| VideoStorageError::new(Path::new("system random source"), error))
 }
 
 /// Rejects visible directory paths that no longer identify their retained owner descriptor.
 ///
 /// # Errors
 /// Returns moved/replaced-directory or metadata diagnostics.
-fn ensure_directory_identity(directory: &File, path: &Path) -> Result<(), VideoStorageError> {
-    let actual = fs::symlink_metadata(path).map_err(|error| VideoStorageError::new(path, error))?;
-    let owned = directory
-        .metadata()
-        .map_err(|error| VideoStorageError::new(path, error))?;
-    if !actual.is_dir() || (actual.dev(), actual.ino()) != (owned.dev(), owned.ino()) {
-        return Err(VideoStorageError::new(
-            path,
-            "owned directory was moved or replaced",
-        ));
-    }
-    Ok(())
+fn ensure_directory_identity(directory: &Directory, path: &Path) -> Result<(), VideoStorageError> {
+    directory
+        .ensure_path(path)
+        .map_err(|error| VideoStorageError::new(path, error))
 }
 
 /// Checks caller-available space using the directory descriptor's filesystem.
 ///
 /// # Errors
 /// Returns filesystem-query, arithmetic-overflow or insufficient-space diagnostics.
-fn require_space(directory: &File, path: &Path, bytes: u64) -> Result<(), VideoStorageError> {
-    let stats =
-        rustix::fs::fstatvfs(directory).map_err(|error| VideoStorageError::new(path, error))?;
-    let available = stats
-        .f_bavail
-        .checked_mul(stats.f_frsize)
-        .ok_or_else(|| VideoStorageError::new(path, "available space overflowed"))?;
+fn require_space(directory: &Directory, path: &Path, bytes: u64) -> Result<(), VideoStorageError> {
+    let available = directory
+        .available_bytes()
+        .map_err(|error| VideoStorageError::new(path, error))?;
     if available < bytes {
         return Err(VideoStorageError::new(
             path,
@@ -482,27 +491,20 @@ fn require_space(directory: &File, path: &Path, bytes: u64) -> Result<(), VideoS
     Ok(())
 }
 
-/// Enumerates at most the known maximum frame count through a stable Linux descriptor path.
+/// Enumerates at most the known maximum frame count through the retained native directory.
 ///
 /// # Errors
 /// Returns directory-read failures, non-UTF-8 names or excessive entries without removing files.
-fn directory_names(directory: &File, path: &Path) -> Result<Vec<String>, VideoStorageError> {
-    let entries = fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))
-        .map_err(|error| VideoStorageError::new(path, error))?;
-    let mut names = Vec::new();
-    for entry in entries {
-        if names.len() >= 1_000_003 {
-            return Err(VideoStorageError::new(path, "too many workspace entries"));
-        }
-        names.push(
-            entry
-                .map_err(|error| VideoStorageError::new(path, error))?
-                .file_name()
-                .into_string()
-                .map_err(|_| VideoStorageError::new(path, "unexpected non-UTF-8 workspace name"))?,
-        );
-    }
-    Ok(names)
+fn directory_names(directory: &Directory, path: &Path) -> Result<Vec<String>, VideoStorageError> {
+    directory
+        .names(1_000_003, 1_000_003 * 50)
+        .map_err(|error| VideoStorageError::new(path, error))?
+        .into_iter()
+        .map(|name| {
+            name.into_string()
+                .map_err(|_| VideoStorageError::new(path, "unexpected non-Unicode workspace name"))
+        })
+        .collect()
 }
 
 /// Recognizes only filenames produced by the current bounded PNG sequence writer.

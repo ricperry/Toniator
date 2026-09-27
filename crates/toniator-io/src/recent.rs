@@ -1,10 +1,14 @@
 //! Bounded recent-file metadata for the startup screen, independent of document contents.
 
+#[cfg(unix)]
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::OpenOptions,
+    sync::atomic::{AtomicU64, Ordering},
+};
+use std::{
+    fs::{self, File},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
 use serde::{Deserialize, Serialize};
@@ -12,6 +16,7 @@ use serde::{Deserialize, Serialize};
 /// Limits the startup list without retaining an unbounded file history.
 pub const MAX_RECENT_FILES: usize = 12;
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
+#[cfg(unix)]
 static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Records a successfully opened source/project or saved project, never embedded artwork.
@@ -154,26 +159,37 @@ fn publish_recent_files(path: &Path, entries: &[RecentFile]) -> io::Result<()> {
         ));
     }
     fs::create_dir_all(parent)?;
-    let temporary = parent.join(format!(
-        ".recent-{}-{}.tmp",
-        std::process::id(),
-        WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
-    let result = (|| {
+        let mut staging = super::filesystem::Staging::create(path)?;
+        let mut file = staging.file()?;
         file.write_all(&bytes)?;
         file.sync_all()?;
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+        staging.rename(super::filesystem::PublishMode::Replace)
     }
-    result
+    #[cfg(unix)]
+    {
+        let temporary = parent.join(format!(
+            ".recent-{}-{}.tmp",
+            std::process::id(),
+            WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        let result = (|| {
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            fs::rename(&temporary, path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
 }

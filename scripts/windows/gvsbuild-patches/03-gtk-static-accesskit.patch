@@ -1,0 +1,19 @@
+diff --git a/gvsbuild/projects/gtk.py b/gvsbuild/projects/gtk.py
+--- a/gvsbuild/projects/gtk.py
++++ b/gvsbuild/projects/gtk.py
+@@ -167,3 +167,13 @@
+     def build(self):
+-        Meson.build(self)
+-        self.install(r".\COPYING share\doc\gtk4")
++        meson_path = os.path.join(self.build_dir, "meson.build")
++        with open(meson_path, encoding="utf-8") as meson_file:
++            meson_text = meson_file.read()
++        original = "accesskit_dep = dependency('accesskit-c-0.18', required: get_option('accesskit').enabled())"
++        replacement = original.replace(", required:", ", static: true, required:")
++        if original not in meson_text and replacement not in meson_text:
++            raise RuntimeError("GTK AccessKit dependency declaration changed")
++        if original in meson_text:
++            with open(meson_path, "w", encoding="utf-8", newline="") as meson_file:
++                meson_file.write(meson_text.replace(original, replacement))
++        Meson.build(self)
++        self.install(r".\COPYING share\doc\gtk4")

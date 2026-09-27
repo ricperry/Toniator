@@ -12,6 +12,10 @@ use std::{
 const STDOUT_LIMIT: usize = 1024 * 1024;
 const DIAGNOSTIC_LIMIT: usize = 64 * 1024;
 const LINE_LIMIT: usize = 8192;
+#[cfg(unix)]
+const VIDEO_PROTOCOLS: &str = "file,pipe";
+#[cfg(windows)]
+const VIDEO_PROTOCOLS: &str = "file,pipe,fd";
 
 #[cfg(test)]
 mod tests {
@@ -124,7 +128,7 @@ pub(super) fn encode(
     command
         .args([
             "-protocol_whitelist",
-            "file,pipe",
+            VIDEO_PROTOCOLS,
             "-f",
             "image2",
             "-framerate",
@@ -163,8 +167,12 @@ pub(super) fn validate(
     cancelled: &AtomicBool,
 ) -> Result<(), ExportError> {
     let mut command = Command::new(&tools.ffprobe);
-    command.args(["-v", "error", "-protocol_whitelist", "file,pipe", "-count_frames", "-show_entries", "stream=codec_type,codec_name,width,height,pix_fmt,nb_read_frames,avg_frame_rate,r_frame_rate", "-of", "json", "/proc/self/fd/0"])
+    command.args(["-v", "error", "-protocol_whitelist", VIDEO_PROTOCOLS, "-count_frames", "-show_entries", "stream=codec_type,codec_name,width,height,pix_fmt,nb_read_frames,avg_frame_rate,r_frame_rate", "-of", "json"])
         .stdin(Stdio::from(output.file_handle().map_err(storage_error)?)).stdout(Stdio::piped());
+    #[cfg(unix)]
+    command.arg("/proc/self/fd/0");
+    #[cfg(windows)]
+    command.args(["-fd", "0", "fd:"]);
     let bytes = run_process(&mut command, cancelled, None, None, None, &|_, _| {})?;
     let json: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|error| ExportError::new("export.validate", error))?;
@@ -269,7 +277,10 @@ fn append_output(command: &mut Command, codec: VideoCodec, frames: u64) {
         }
     }
     // The inherited regular file descriptor remains seekable for finalized container metadata.
+    #[cfg(unix)]
     command.args(["-y", "/proc/self/fd/1"]);
+    #[cfg(windows)]
+    command.args(["-y", "-fd", "1", "fd:"]);
 }
 
 /// Parses an exact positive frame-rate fraction through domain validation.
@@ -388,6 +399,11 @@ fn run_process(
 ) -> Result<Vec<u8>, ExportError> {
     check_cancelled(cancelled)?;
     command.stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
     let mut child = command
         .spawn()
         .map_err(|error| ExportError::new("export.process", error))?;

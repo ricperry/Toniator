@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::Read,
-    process::{Command, Stdio},
+    process::Stdio,
     time::{SystemTime, UNIX_EPOCH},
 };
 use toniator_io::EmbeddedSourceFormat;
@@ -22,7 +22,7 @@ impl Scratch {
     fn new(keep: bool) -> Self {
         let base = if keep {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/validation/stage22-video-export")
+                .join("../../target/validation/windows-port/media-integration/video-export")
         } else {
             std::env::temp_dir()
         };
@@ -104,7 +104,7 @@ fn fractional_rate_retry_preserves_hidden_rgba() {
         .write_image(&rgba, 64, 64, image::ColorType::Rgba8.into())
         .unwrap();
     let timing = ProjectTiming::new(rate, FrameRange::new(0, 2).unwrap());
-    let workspace = RenderWorkspace::create(Path::new("/tmp")).unwrap();
+    let workspace = RenderWorkspace::create(&std::env::temp_dir()).unwrap();
     let mut writer = SequenceWriter::create(
         &workspace.frames_path(),
         SequenceManifest::new(SequenceFormat::Png, 64, 64, &timing),
@@ -145,7 +145,7 @@ fn fractional_rate_retry_preserves_hidden_rgba() {
             &|_| {},
         )
         .unwrap();
-    let decoded = Command::new("ffmpeg")
+    let decoded = hidden_command("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(&path)
         .args(["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
@@ -186,7 +186,7 @@ fn native_ffv1_video_preserves_all_rendered_rgba_frames() {
         })
         .unwrap();
     let frames = recovery.frames_path().unwrap();
-    assert!(frames.starts_with("/tmp"));
+    assert!(frames.starts_with(fs::canonicalize(std::env::temp_dir()).unwrap()));
     let mut hashes = Vec::new();
     for index in 0..10 {
         let png = frames.join(format!("frame-{index:06}.png"));
@@ -205,7 +205,7 @@ fn native_ffv1_video_preserves_all_rendered_rgba_frames() {
     assert_eq!(result.frame_count, 10);
     assert!(result.cleanup_warning.is_none());
     assert!(!frames.exists());
-    let mut decoder = Command::new("ffmpeg")
+    let mut decoder = hidden_command("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(&destination)
         .args([
@@ -383,7 +383,7 @@ fn av1_sharing_requires_matte_and_preserves_sdr_patch_colors() {
         FrameRate::new(6, 1).unwrap(),
         FrameRange::new(0, 1).unwrap(),
     );
-    let workspace = RenderWorkspace::create(Path::new("/tmp")).unwrap();
+    let workspace = RenderWorkspace::create(&std::env::temp_dir()).unwrap();
     let mut writer = SequenceWriter::create(
         &workspace.frames_path(),
         SequenceManifest::new(SequenceFormat::Png, 128, 128, &timing),
@@ -432,4 +432,17 @@ fn av1_sharing_requires_matte_and_preserves_sdr_patch_colors() {
             );
         }
     }
+}
+
+/// Constructs an ordinary test subprocess without opening a native Windows console.
+fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let command = std::process::Command::new(program);
+    #[cfg(windows)]
+    let command = {
+        use std::os::windows::process::CommandExt;
+        let mut command = command;
+        command.creation_flags(0x08000000);
+        command
+    };
+    command
 }

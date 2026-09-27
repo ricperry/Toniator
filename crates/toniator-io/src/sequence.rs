@@ -1,11 +1,12 @@
 //! Exclusive numbered-frame publication and truthful incomplete/completed manifests.
 
-use rustix::fs::{Mode, OFlags, RenameFlags};
+use crate::filesystem::{self, Directory, Entry, PublishMode};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::fs;
 use std::{
-    fs::{self, File},
+    ffi::OsStr,
     io::Write,
-    os::unix::fs::{DirBuilderExt, MetadataExt},
     path::{Path, PathBuf},
 };
 use toniator_domain::ProjectTiming;
@@ -113,6 +114,31 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// Publishes frame and truthful progress before reporting a failed final metadata barrier.
+    /// # Panics
+    /// Panics if directory sync failure leaves manifest progress behind already renamed frame bytes.
+    #[test]
+    fn sequence_progress_precedes_directory_sync_failure() {
+        let root = root();
+        let path = root.join("frames");
+        let mut writer = SequenceWriter::create(&path, manifest(), 4096).unwrap();
+        assert!(
+            writer
+                .write_frame_with_sync(b"first", |_| Err(std::io::Error::other(
+                    "injected sync failure"
+                )))
+                .is_err()
+        );
+        assert_eq!(fs::read(path.join("frame-000000.png")).unwrap(), b"first");
+        let progress: SequenceManifest =
+            serde_json::from_slice(&fs::read(path.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(progress.completed_frames, 1);
+        assert!(!progress.complete);
+        writer.write_frame(b"second").unwrap();
+        writer.finish().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 impl SequenceFormat {
@@ -209,11 +235,7 @@ impl std::error::Error for SequenceError {}
 /// # Errors
 /// Returns the filesystem diagnostic or checked-size overflow for the requested existing path.
 pub fn available_space(path: &Path) -> Result<u64, SequenceError> {
-    let stats = rustix::fs::statvfs(path).map_err(|error| SequenceError::new(path, error))?;
-    stats
-        .f_bavail
-        .checked_mul(stats.f_frsize)
-        .ok_or_else(|| SequenceError::new(path, "available space overflowed"))
+    filesystem::available_space(path).map_err(|error| SequenceError::new(path, error))
 }
 
 /// Owns an exclusively created directory and writes only fixed names relative to its open handle.
@@ -222,7 +244,7 @@ pub fn available_space(path: &Path) -> Result<u64, SequenceError> {
 /// never traverses a replaced directory path and never removes a user's preexisting directory.
 pub struct SequenceWriter {
     path: PathBuf,
-    directory: File,
+    directory: Directory,
     manifest: SequenceManifest,
 }
 
@@ -251,24 +273,24 @@ impl SequenceWriter {
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        if available_space(parent)? < estimated_bytes {
+        let parent_directory =
+            Directory::open(parent).map_err(|error| SequenceError::new(path, error))?;
+        if parent_directory
+            .available_bytes()
+            .map_err(|error| SequenceError::new(parent, error))?
+            < estimated_bytes
+        {
             return Err(SequenceError::new(
                 path,
                 "insufficient space for the estimated full sequence",
             ));
         }
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(path)
+        let name = path
+            .file_name()
+            .ok_or_else(|| SequenceError::new(path, "destination must name a directory"))?;
+        let directory = parent_directory
+            .create_directory(name)
             .map_err(|error| SequenceError::new(path, error))?;
-        let directory = File::from(
-            rustix::fs::open(
-                path,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|error| SequenceError::new(path, error))?,
-        );
         let writer = Self {
             path: path.into(),
             directory,
@@ -289,6 +311,17 @@ impl SequenceWriter {
     /// Rejects excessive/empty frames, space exhaustion, name collisions, and write/sync failures.
     /// An interrupted frame remains a `.partial` file, never a completed numbered frame.
     pub fn write_frame(&mut self, bytes: &[u8]) -> Result<(), SequenceError> {
+        self.write_frame_with_sync(bytes, Directory::sync)
+    }
+
+    /// Preserves file-sync, frame-rename, progress, manifest-rename, then directory-sync ordering.
+    /// # Errors
+    /// Returns prepublication or final sync failures while retaining truthful renamed-frame progress.
+    fn write_frame_with_sync(
+        &mut self,
+        bytes: &[u8],
+        sync: impl FnOnce(&Directory) -> std::io::Result<()>,
+    ) -> Result<(), SequenceError> {
         if bytes.is_empty()
             || self.manifest.complete
             || self.manifest.completed_frames
@@ -306,17 +339,12 @@ impl SequenceWriter {
             self.manifest.format.extension()
         );
         let temporary = format!(".{name}.partial");
-        self.create_file(&temporary, bytes)?;
-        rustix::fs::renameat_with(
-            &self.directory,
-            &temporary,
-            &self.directory,
-            &name,
-            RenameFlags::NOREPLACE,
-        )
-        .map_err(|error| SequenceError::new(&self.path.join(&name), error))?;
+        let mut staging = self.create_file(&temporary, bytes)?;
+        staging
+            .rename(&self.directory, OsStr::new(&name), PublishMode::NoReplace)
+            .map_err(|error| SequenceError::new(&self.path.join(&name), error))?;
         self.manifest.completed_frames += 1;
-        self.write_manifest(false)
+        self.write_manifest_with_sync(false, sync)
     }
 
     /// Marks completion only after all numbered frames are durably published.
@@ -324,18 +352,9 @@ impl SequenceWriter {
     /// # Errors
     /// Rejects incomplete sequences and returns final manifest/directory synchronization failures.
     pub fn finish(mut self) -> Result<PathBuf, SequenceError> {
-        let actual = fs::symlink_metadata(&self.path)
+        self.directory
+            .ensure_path(&self.path)
             .map_err(|error| SequenceError::new(&self.path, error))?;
-        let owned = self
-            .directory
-            .metadata()
-            .map_err(|error| SequenceError::new(&self.path, error))?;
-        if !actual.is_dir() || (actual.dev(), actual.ino()) != (owned.dev(), owned.ino()) {
-            return Err(SequenceError::new(
-                &self.path,
-                "output directory moved or replaced; frames remain in the original directory",
-            ));
-        }
         if self.manifest.completed_frames
             != self.manifest.end_frame_exclusive - self.manifest.start_frame
         {
@@ -354,12 +373,10 @@ impl SequenceWriter {
     /// # Errors
     /// Returns storage-query, overflow or insufficient-space diagnostics before writing bytes.
     fn require_space(&self, required: u64) -> Result<(), SequenceError> {
-        let stats = rustix::fs::fstatvfs(&self.directory)
+        let available = self
+            .directory
+            .available_bytes()
             .map_err(|error| SequenceError::new(&self.path, error))?;
-        let available = stats
-            .f_bavail
-            .checked_mul(stats.f_frsize)
-            .ok_or_else(|| SequenceError::new(&self.path, "available space overflowed"))?;
         if available < required {
             return Err(SequenceError::new(
                 &self.path,
@@ -373,18 +390,16 @@ impl SequenceWriter {
     ///
     /// # Errors
     /// Returns create/write/sync failures without replacing any existing file or following links.
-    fn create_file(&self, name: &str, bytes: &[u8]) -> Result<(), SequenceError> {
-        let fd = rustix::fs::openat(
-            &self.directory,
-            name,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::RUSR | Mode::WUSR,
-        )
-        .map_err(|error| SequenceError::new(&self.path.join(name), error))?;
-        let mut file = File::from(fd);
+    fn create_file(&self, name: &str, bytes: &[u8]) -> Result<Entry, SequenceError> {
+        let entry = self
+            .directory
+            .create_file(OsStr::new(name))
+            .map_err(|error| SequenceError::new(&self.path.join(name), error))?;
+        let mut file = entry.file();
         file.write_all(bytes)
             .and_then(|()| file.sync_all())
-            .map_err(|error| SequenceError::new(&self.path.join(name), error))
+            .map_err(|error| SequenceError::new(&self.path.join(name), error))?;
+        Ok(entry)
     }
 
     /// Atomically replaces only the job-owned manifest after all declared frames are synchronized.
@@ -392,24 +407,32 @@ impl SequenceWriter {
     /// # Errors
     /// Returns JSON, exclusive temporary file, rename or directory synchronization failures.
     fn write_manifest(&self, initial: bool) -> Result<(), SequenceError> {
+        self.write_manifest_with_sync(initial, Directory::sync)
+    }
+
+    /// Replaces synchronized manifest bytes before the caller-selected final metadata barrier.
+    /// # Errors
+    /// Returns serialization/create/file-sync/rename or later directory-sync failures without rolling progress back.
+    fn write_manifest_with_sync(
+        &self,
+        initial: bool,
+        sync: impl FnOnce(&Directory) -> std::io::Result<()>,
+    ) -> Result<(), SequenceError> {
         let mut bytes = serde_json::to_vec_pretty(&self.manifest)
             .map_err(|error| SequenceError::new(&self.path, error))?;
         bytes.push(b'\n');
-        self.create_file(".manifest.partial", &bytes)?;
-        rustix::fs::renameat_with(
-            &self.directory,
-            ".manifest.partial",
-            &self.directory,
-            "manifest.json",
-            if initial {
-                RenameFlags::NOREPLACE
-            } else {
-                RenameFlags::empty()
-            },
-        )
-        .map_err(|error| SequenceError::new(&self.path, error))?;
-        self.directory
-            .sync_all()
-            .map_err(|error| SequenceError::new(&self.path, error))
+        let mut staging = self.create_file(".manifest.partial", &bytes)?;
+        staging
+            .rename(
+                &self.directory,
+                OsStr::new("manifest.json"),
+                if initial {
+                    PublishMode::NoReplace
+                } else {
+                    PublishMode::Replace
+                },
+            )
+            .map_err(|error| SequenceError::new(&self.path, error))?;
+        sync(&self.directory).map_err(|error| SequenceError::new(&self.path, error))
     }
 }

@@ -16,7 +16,12 @@ serde.workspace = true
 toniator-domain = { path = "../toniator-domain" }
 toniator-engine = { path = "../toniator-engine" }
 toniator-io = { path = "../toniator-io" }
+
+[target.'cfg(unix)'.dependencies]
 signal-hook = { version = "0.4.4", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = "3.5.2"
 
 [dev-dependencies]
 image.workspace = true

@@ -1,0 +1,8 @@
+diff --git a/gvsbuild/projects/librsvg.py b/gvsbuild/projects/librsvg.py
+--- a/gvsbuild/projects/librsvg.py
++++ b/gvsbuild/projects/librsvg.py
+@@ -56,3 +56,3 @@
+     def build(self):
+-        self.builder.exec_cargo(["install", "cargo-c", "--locked"])
++        self.builder.exec_cargo(["install", "cargo-c", "--version", "0.10.23+cargo-0.97.1", "--locked"])
+         Meson.build(self)

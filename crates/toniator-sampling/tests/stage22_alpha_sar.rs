@@ -1,7 +1,8 @@
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
@@ -15,7 +16,7 @@ use toniator_sampling::{FrameSource, MediaTools, VideoSource};
 /// Panics if the validation directory or exact test PNG cannot be created.
 fn witness() -> (PathBuf, Vec<u8>) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/validation/stage22-alpha-sar")
+        .join("../../target/validation/windows-port/media-integration/alpha-sar")
         .join(format!(
             "{}-{}",
             std::process::id(),
@@ -80,7 +81,7 @@ fn video_alpha_uses_matching_software_probe_and_decode() {
             "[0:v]split[color][alpha];[alpha]alphaextract[mask];[color]scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuv444p12le,colorspace=iall=bt709:itrc=srgb:irange=pc:all=bt709:range=tv:format={format}[converted];[converted][mask]alphamerge,setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709[out]"
         );
         let path = root.join(name);
-        let mut command = Command::new("ffmpeg");
+        let mut command = hidden_command("ffmpeg");
         command
             .args(["-v", "error", "-n", "-loop", "1", "-framerate", "2", "-i"])
             .arg(root.join("source.png"))
@@ -128,6 +129,7 @@ fn video_alpha_uses_matching_software_probe_and_decode() {
                 assert!(frame.identity.decoder_contract.ends_with(codec));
             }
         }
+        #[cfg(unix)]
         if codec == "libvpx-vp9" {
             let wrapper = root.join("no-vpx-ffprobe");
             fs::write(&wrapper, "#!/bin/sh\nfor arg do\n case \"$arg\" in libvpx*) echo 'Unknown decoder' >&2; exit 1;; esac\ndone\nexec ffprobe \"$@\"\n").unwrap();
@@ -149,7 +151,7 @@ fn video_alpha_uses_matching_software_probe_and_decode() {
 fn video_sample_aspect_preserves_square_pixel_color_and_alpha() {
     let (root, rgba) = witness();
     let path = root.join("sar.mkv");
-    let mut command = Command::new("ffmpeg");
+    let mut command = hidden_command("ffmpeg");
     command
         .args(["-v", "error", "-n", "-loop", "1", "-framerate", "2", "-i"])
         .arg(root.join("source.png"))
@@ -187,4 +189,17 @@ fn video_sample_aspect_preserves_square_pixel_color_and_alpha() {
         frame.field.identity().decoded_pixel_hash,
         expected.identity().decoded_pixel_hash
     );
+}
+
+/// Constructs an ordinary test subprocess without opening a native Windows console.
+fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let command = std::process::Command::new(program);
+    #[cfg(windows)]
+    let command = {
+        use std::os::windows::process::CommandExt;
+        let mut command = command;
+        command.creation_flags(0x08000000);
+        command
+    };
+    command
 }

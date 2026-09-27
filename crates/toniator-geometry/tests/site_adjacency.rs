@@ -500,3 +500,295 @@ fn dense_graph_never_exceeds_policy_maximum_degree_per_node() {
         assert!(degree <= 2, "node {} has degree {degree}", node.id.ordinal);
     }
 }
+
+/// Exhaustively selects the original policy-cell candidates by exact `hypot` distance and ID.
+///
+/// This independent oracle retains coincident nodes, excludes zero-length edges, and returns
+/// canonical mutual pairs without depending on the production spatial partition.
+fn exhaustive_edges(points: &[(f64, f64)], policy: SiteAdjacencyPolicy) -> Vec<(usize, usize)> {
+    let width = policy.maximum_distance();
+    let cells = points
+        .iter()
+        .map(|&(x, y)| ((x / width).floor() as i64, (y / width).floor() as i64))
+        .collect::<Vec<_>>();
+    let selections = points
+        .iter()
+        .enumerate()
+        .map(|(index, &(x, y))| {
+            let mut candidates = points
+                .iter()
+                .enumerate()
+                .filter(|&(other, _)| {
+                    index != other
+                        && cells[index].0.abs_diff(cells[other].0) <= 1
+                        && cells[index].1.abs_diff(cells[other].1) <= 1
+                })
+                .filter_map(|(other, &(other_x, other_y))| {
+                    let distance = (x - other_x).hypot(y - other_y);
+                    (distance != 0.0 && distance <= width).then_some((distance, other))
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_unstable_by(|left, right| {
+                left.0.total_cmp(&right.0).then(left.1.cmp(&right.1))
+            });
+            candidates
+                .into_iter()
+                .take(policy.maximum_degree())
+                .map(|(_, other)| other)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut edges = Vec::new();
+    for (index, selected) in selections.iter().enumerate() {
+        for &other in selected {
+            if index < other && selections[other].contains(&index) {
+                edges.push((index, other));
+            }
+        }
+    }
+    edges.sort_unstable();
+    edges
+}
+
+/// Compares canonical edges, evaluator-ordered nodes, and all components with exhaustive selection.
+///
+/// # Panics
+///
+/// Panics if a finite oracle fixture fails evaluation or publishes different topology.
+fn assert_matches_exhaustive(points: &[(f64, f64)], policy: SiteAdjacencyPolicy) {
+    let expected_edges = exhaustive_edges(points, policy);
+    let product = sites(points);
+    let graph =
+        build_site_adjacency_cancellable(&product, policy, SiteAdjacencyLimits::default(), &|| {
+            false
+        })
+        .expect("finite bounded oracle fixture evaluates");
+    assert_eq!(
+        graph
+            .edges()
+            .iter()
+            .map(|edge| (edge.first.ordinal, edge.second.ordinal))
+            .collect::<Vec<_>>(),
+        expected_edges,
+    );
+    assert!(
+        graph
+            .nodes()
+            .iter()
+            .zip(product.iter())
+            .all(|(node, site)| {
+                node.id == site.id
+                    && node.position == site.position
+                    && node.provenance == site.provenance
+            })
+    );
+    let mut visited = vec![false; points.len()];
+    let mut expected_components = Vec::new();
+    for start in 0..points.len() {
+        if visited[start] {
+            continue;
+        }
+        let mut pending = vec![start];
+        let mut members = Vec::new();
+        visited[start] = true;
+        while let Some(current) = pending.pop() {
+            members.push(current);
+            for &(first, second) in &expected_edges {
+                let next = if first == current {
+                    second
+                } else if second == current {
+                    first
+                } else {
+                    continue;
+                };
+                if !visited[next] {
+                    visited[next] = true;
+                    pending.push(next);
+                }
+            }
+        }
+        members.sort_unstable();
+        expected_components.push(members);
+    }
+    assert_eq!(
+        graph
+            .components()
+            .iter()
+            .map(|component| component
+                .members
+                .iter()
+                .map(|id| id.ordinal)
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        expected_components
+    );
+}
+
+/// Proves spatial pruning retains exact ties, duplicate positions, negative cells and radius edges.
+///
+/// # Panics
+///
+/// Panics if any finite boundary fixture differs from exhaustive original selection.
+#[test]
+fn spatial_search_matches_exhaustive_at_ties_cells_and_distance_boundaries() {
+    let points = [
+        (0.0, 0.0),
+        (-0.0, 0.0),
+        (-1.0, 0.0),
+        (1.0, 0.0),
+        (0.0, -1.0),
+        (0.0, 1.0),
+        (1.0, 1.0),
+        (-1.0, -1.0),
+        (48.0, 0.0),
+        (48.0_f64.next_down(), 0.0),
+        (48.0_f64.next_up(), 0.0),
+        (-48.0, 0.0),
+        (-48.0_f64.next_down(), 0.0),
+        (-48.0_f64.next_up(), 0.0),
+        (96.0, 0.0),
+        (-96.0, 0.0),
+        (300.0, -300.0),
+    ];
+    for maximum_degree in [1, 3, 8, 32] {
+        for maximum_distance in [
+            1.0_f64.next_down(),
+            1.0,
+            1.0_f64.next_up(),
+            2.0_f64.sqrt(),
+            48.0_f64.next_down(),
+            48.0,
+            48.0_f64.next_up(),
+        ] {
+            assert_matches_exhaustive(
+                &points,
+                SiteAdjacencyPolicy::MutualNearest {
+                    maximum_degree,
+                    maximum_distance,
+                },
+            );
+        }
+    }
+}
+
+/// Proves uneven dense clusters and sparse outliers preserve exhaustive topology across degrees.
+///
+/// # Panics
+///
+/// Panics if deterministic varied-scale fixtures differ from the original distance and ID rule.
+#[test]
+fn spatial_search_matches_exhaustive_for_uneven_and_extreme_scales() {
+    let mut state = 0x89ab_cdef_0123_4567_u64;
+    let mut points = Vec::new();
+    for index in 0..192 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let x = (state & 0xffff) as f64 / 65536.0;
+        let y = ((state >> 16) & 0xffff) as f64 / 65536.0;
+        let spread = if index % 4 == 0 { 200.0 } else { 0.25 };
+        points.push(((x - 0.5) * spread, (y - 0.5) * spread));
+    }
+    for scale in [1.0e-150, 1.0, 1.0e150] {
+        let scaled = points
+            .iter()
+            .map(|&(x, y)| (x * scale, y * scale))
+            .collect::<Vec<_>>();
+        for maximum_degree in [1, 3, 32] {
+            for radius in [0.01, 1.0, 48.0] {
+                assert_matches_exhaustive(
+                    &scaled,
+                    SiteAdjacencyPolicy::MutualNearest {
+                        maximum_degree,
+                        maximum_distance: radius * scale,
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// Proves fine dense spacing does not require exhaustive comparisons inside one policy-sized cell.
+///
+/// The explicit work budget bounds actual distances rather than elapsed test time or authored sites.
+///
+/// # Panics
+///
+/// Panics if the dense nearest-neighbour search exhausts its linear fixture work budget.
+#[test]
+fn dense_small_spacing_completes_with_bounded_distance_work() {
+    let points = (0..64)
+        .flat_map(|y| (0..64).map(move |x| (f64::from(x) * 0.32, f64::from(y) * 0.32)))
+        .collect::<Vec<_>>();
+    let graph = build_site_adjacency_cancellable(
+        &sites(&points),
+        SiteAdjacencyPolicy::MutualNearest {
+            maximum_degree: 3,
+            maximum_distance: 48.0,
+        },
+        SiteAdjacencyLimits::new(
+            points.len(),
+            points.len() * 3,
+            points.len() * 3,
+            points.len() * 128,
+        )
+        .expect("nonzero explicit limits"),
+        &|| false,
+    )
+    .expect("dense sites complete within bounded actual pair-distance work");
+    assert_eq!(graph.nodes().len(), points.len());
+    assert!(!graph.edges().is_empty());
+}
+
+/// Proves cancellation interrupts spatial querying without returning a partial graph.
+///
+/// # Panics
+///
+/// Panics if a cancellation probe reached after index construction does not return its diagnostic.
+#[test]
+fn cancellation_interrupts_dense_spatial_query() {
+    let points = (0..1024)
+        .map(|index| (f64::from(index % 32), f64::from(index / 32)))
+        .collect::<Vec<_>>();
+    let checks = Cell::new(0_usize);
+    let error = build_site_adjacency_cancellable(
+        &sites(&points),
+        SiteAdjacencyPolicy::MutualNearest {
+            maximum_degree: 3,
+            maximum_distance: 48.0,
+        },
+        SiteAdjacencyLimits::default(),
+        &|| {
+            checks.set(checks.get() + 1);
+            checks.get() >= points.len() * 4
+        },
+    )
+    .expect_err("search cancellation prevents partial graph publication");
+    assert_eq!(error.path(), "evaluation.cancelled");
+}
+
+/// Proves near neighbours cannot hide an eligible overflowing diagonal distance at extreme scales.
+///
+/// # Panics
+///
+/// Panics if spatial pruning suppresses the original nonfinite-pair diagnostic.
+#[test]
+fn spatial_search_preserves_overflow_diagnostics_beyond_near_neighbours() {
+    let error = build_site_adjacency_cancellable(
+        &sites(&[
+            (0.0, 0.0),
+            (0.5e308, 0.0),
+            (1.1e308, 0.0),
+            (1.3e308, 1.3e308),
+            (1.5e308, 1.5e308),
+        ]),
+        SiteAdjacencyPolicy::MutualNearest {
+            maximum_degree: 1,
+            maximum_distance: 1.0e308,
+        },
+        SiteAdjacencyLimits::default(),
+        &|| false,
+    )
+    .expect_err("every eligible overflowing pair retains its diagnostic");
+    assert_eq!(error.path(), "adjacency.distance");
+}

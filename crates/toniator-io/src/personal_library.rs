@@ -5,12 +5,13 @@
 
 use std::{
     collections::BTreeSet,
-    fmt,
-    fs::{self, File, OpenOptions},
+    fmt, fs,
     io::{Read, Write},
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -888,15 +889,21 @@ fn validate_personal_preset(preset: &PresetRecord) -> Result<(), PersonalLibrary
 /// Rejects symlinks, nonregular files, read failures, and files whose actual byte stream exceeds
 /// the configured limit. The returned bytes are the exact bytes later parsed by callers.
 fn read_bounded_regular_file(path: &Path) -> Result<Vec<u8>, PersonalLibraryError> {
-    let mut options = OpenOptions::new();
-    options.read(true);
     #[cfg(unix)]
-    {
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|source| io_error(path, source))?;
+    let mut file = {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        options
+            .open(path)
+            .map_err(|source| io_error(path, source))?
+    };
+    #[cfg(windows)]
+    let mut file =
+        super::filesystem::open_regular_file(path).map_err(|source| io_error(path, source))?;
     let metadata = file.metadata().map_err(|source| io_error(path, source))?;
     if !metadata.file_type().is_file() {
         return Err(error(
@@ -918,7 +925,14 @@ fn read_bounded_regular_file(path: &Path) -> Result<Vec<u8>, PersonalLibraryErro
     Ok(bytes)
 }
 /// Requires a regular non-symlink file whose parent is one existing directory.
+/// # Errors
+/// Returns metadata or native no-follow type errors before permitting library mutation.
 fn require_regular_direct_child(path: &Path) -> Result<(), PersonalLibraryError> {
+    #[cfg(windows)]
+    let metadata = super::filesystem::open_regular_file(path)
+        .and_then(|file| file.metadata())
+        .map_err(|source| io_error(path, source))?;
+    #[cfg(unix)]
     let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
     if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
         return Err(error(
@@ -1035,6 +1049,8 @@ enum PublishGuard<'a> {
 /// The stale check is repeated immediately before rename. This remains a single-process writer
 /// boundary: ordinary external changes are detected at the two checks, while simultaneous hostile
 /// writers cannot receive a cross-process compare-and-swap guarantee from portable rename alone.
+/// # Errors
+/// Returns stale-target, write, synchronization, or rename failures; published entries survive later sync errors.
 fn atomic_write(
     target: &Path,
     bytes: &[u8],
@@ -1044,40 +1060,60 @@ fn atomic_write(
         .parent()
         .ok_or_else(|| error("personal library target has no parent"))?;
     fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
-    for attempt in 0..1024_u32 {
-        let temp = parent.join(format!(
-            ".{}.tmp.{attempt}",
-            target
-                .file_name()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| error("personal library target must be UTF-8"))?
-        ));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            options.mode(0o600);
-        }
-        match options.open(&temp) {
-            Ok(mut file) => {
-                let result = (|| {
-                    file.write_all(bytes)
-                        .map_err(|source| io_error(&temp, source))?;
-                    file.sync_all().map_err(|source| io_error(&temp, source))?;
-                    verify_publish_target(target, guard)?;
-                    fs::rename(&temp, target).map_err(|source| io_error(target, source))?;
-                    sync_dir(parent)
-                })();
-                if result.is_err() {
-                    let _ = fs::remove_file(&temp);
-                }
-                return result;
-            }
-            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(source) => return Err(io_error(&temp, source)),
-        }
+    #[cfg(windows)]
+    {
+        let mut staging = super::filesystem::Staging::create(target)
+            .map_err(|source| io_error(target, source))?;
+        let mut file = staging.file().map_err(|source| io_error(target, source))?;
+        file.write_all(bytes)
+            .map_err(|source| io_error(target, source))?;
+        file.sync_all().map_err(|source| io_error(target, source))?;
+        verify_publish_target(target, guard)?;
+        staging
+            .rename(match guard {
+                PublishGuard::CreateOnly => super::filesystem::PublishMode::NoReplace,
+                _ => super::filesystem::PublishMode::Replace,
+            })
+            .map_err(|source| io_error(target, source))?;
+        staging.sync().map_err(|source| io_error(parent, source))
     }
-    Err(error("personal library temporary filename space exhausted"))
+    #[cfg(unix)]
+    {
+        for attempt in 0..1024_u32 {
+            let temp = parent.join(format!(
+                ".{}.tmp.{attempt}",
+                target
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .ok_or_else(|| error("personal library target must be UTF-8"))?
+            ));
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                options.mode(0o600);
+            }
+            match options.open(&temp) {
+                Ok(mut file) => {
+                    let result = (|| {
+                        file.write_all(bytes)
+                            .map_err(|source| io_error(&temp, source))?;
+                        file.sync_all().map_err(|source| io_error(&temp, source))?;
+                        verify_publish_target(target, guard)?;
+                        fs::rename(&temp, target).map_err(|source| io_error(target, source))?;
+                        sync_dir(parent)
+                    })();
+                    if result.is_err() {
+                        let _ = fs::remove_file(&temp);
+                    }
+                    return result;
+                }
+                Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(source) => return Err(io_error(&temp, source)),
+            }
+        }
+        Err(error("personal library temporary filename space exhausted"))
+    }
 }
 
 /// Rechecks the intended target state immediately before atomic rename publication.
@@ -1199,11 +1235,10 @@ fn path_exists(path: &Path) -> Result<bool, PersonalLibraryError> {
     }
 }
 /// Synchronizes one metadata directory after a rename publication.
+/// # Errors
+/// Returns the native directory open or full synchronization failure after publication.
 fn sync_dir(path: &Path) -> Result<(), PersonalLibraryError> {
-    File::open(path)
-        .map_err(|source| io_error(path, source))?
-        .sync_all()
-        .map_err(|source| io_error(path, source))
+    super::filesystem::sync_directory(path).map_err(|source| io_error(path, source))
 }
 /// Removes duplicate case-insensitive presets from an otherwise valid snapshot and records warnings.
 fn reject_duplicate_names(

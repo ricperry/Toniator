@@ -418,7 +418,14 @@ fn preset_path(mut path: PathBuf) -> PathBuf {
     path
 }
 
-/// Resolves the new resource directory independently from the structural Pattern Library root.
+/// Resolves the Preset directory under GLib's native per-user data root on Windows.
+#[cfg(windows)]
+fn default_directory() -> Option<PathBuf> {
+    Some(glib::user_data_dir().join("Toniator/document-presets"))
+}
+
+/// Preserves XDG/HOME resolution for the Preset directory outside Windows.
+#[cfg(not(windows))]
 fn default_directory() -> Option<PathBuf> {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)

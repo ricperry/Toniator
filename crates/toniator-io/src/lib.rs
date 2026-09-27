@@ -6,9 +6,11 @@
 //! DTOs below. Domain structures neither derive archive serde nor know about
 //! ZIP/filesystem details.
 
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::{
     collections::{BTreeMap, HashSet},
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -56,6 +58,8 @@ pub mod recent;
 /// Project timing and End-only configuration persistence.
 mod temporal;
 use temporal::{EndOverrideDto, ProjectTimingDto};
+/// Retained native filesystem operations; publication and cleanup policy stay with callers.
+mod filesystem;
 mod media;
 pub mod sequence;
 pub mod video_output;
@@ -880,19 +884,41 @@ pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<
             context: "document.json exceeds the 4 MiB container limit".into(),
         });
     }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let (temporary_path, file) = create_temp(parent, path)?;
-    let result = write_archive(file, &document_json, sources);
-    match result.and_then(|()| {
-        fs::rename(&temporary_path, path).map_err(|error| SaveError::Filesystem {
+    #[cfg(windows)]
+    {
+        let mut staging =
+            filesystem::Staging::create(path).map_err(|error| SaveError::Filesystem {
+                path: path.to_owned(),
+                context: error.to_string(),
+            })?;
+        let file = staging.file().map_err(|error| SaveError::Filesystem {
             path: path.to_owned(),
             context: error.to_string(),
-        })
-    }) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = fs::remove_file(&temporary_path);
-            Err(error)
+        })?;
+        write_archive(file, &document_json, sources)?;
+        staging
+            .rename(filesystem::PublishMode::Replace)
+            .map_err(|error| SaveError::Filesystem {
+                path: path.to_owned(),
+                context: error.to_string(),
+            })
+    }
+    #[cfg(unix)]
+    {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let (temporary_path, file) = create_temp(parent, path)?;
+        let result = write_archive(file, &document_json, sources);
+        match result.and_then(|()| {
+            fs::rename(&temporary_path, path).map_err(|error| SaveError::Filesystem {
+                path: path.to_owned(),
+                context: error.to_string(),
+            })
+        }) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let _ = fs::remove_file(&temporary_path);
+                Err(error)
+            }
         }
     }
 }
@@ -942,6 +968,10 @@ fn write_archive(
     })
 }
 
+/// Allocates one exclusive adjacent Unix temporary file without replacing existing entries.
+/// # Errors
+/// Returns create failures or exhausted bounded candidate names before destination publication.
+#[cfg(unix)]
 fn create_temp(parent: &Path, destination: &Path) -> Result<(PathBuf, File), SaveError> {
     for attempt in 0..128_u32 {
         let candidate = parent.join(format!(
