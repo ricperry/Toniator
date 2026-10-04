@@ -22,6 +22,8 @@ use std::{
 pub mod export;
 mod media;
 mod media_import;
+/// Bounded advisory analysis of one actual final transparent output raster.
+pub mod print_preflight;
 mod scheduler;
 #[cfg(test)]
 mod temporal_tests;

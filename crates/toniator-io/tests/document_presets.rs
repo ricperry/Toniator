@@ -378,7 +378,7 @@ fn source_free_presets_round_trip_all_models_and_exclude_project_authority() {
         assert_eq!(root["document_preset_format_version"], 3);
         assert_eq!(
             root["document_schema_version"],
-            toniator_io::DOCUMENT_SCHEMA_VERSION
+            toniator_io::DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION
         );
         let configuration_json = root["configuration"]
             .as_object()

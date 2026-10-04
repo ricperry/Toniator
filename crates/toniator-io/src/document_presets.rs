@@ -20,9 +20,10 @@ use toniator_domain::{Document, DocumentConfiguration};
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 use super::{
-    DOCUMENT_PRESET_FORMAT_VERSION, DOCUMENT_SCHEMA_VERSION, DocumentConfigurationDtoV9, LoadError,
-    MAX_ARCHIVE_BYTES, MAX_DOCUMENT_BYTES, SaveError, declared_zip_entry_count,
-    ensure_supported_file_compression, load_opened, read_limited, safe_archive_name,
+    DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION, DOCUMENT_PRESET_FORMAT_VERSION,
+    DocumentConfigurationDtoV9, LoadError, MAX_ARCHIVE_BYTES, MAX_DOCUMENT_BYTES, SaveError,
+    declared_zip_entry_count, ensure_supported_file_compression, load_opened, read_limited,
+    safe_archive_name,
 };
 
 const PRESET_ENTRY_NAME: &str = "preset.json";
@@ -146,7 +147,8 @@ struct DocumentPresetMetadataDto {
     document_schema_version: u32,
 }
 
-/// Loads either a source-free document Preset or a complete current project as reusable configuration.
+/// Loads a source-free v3/configuration-10 Preset or a supported project as
+/// reusable configuration, preserving destination print intent at binding.
 ///
 /// Archive shape selects the reader, so renaming a project cannot bypass the
 /// ordinary project's source manifest, byte-length, digest, reference, schema,
@@ -207,7 +209,8 @@ pub fn capture_document_preset_destination(
     })
 }
 
-/// Serializes and atomically publishes one immutable source-free configuration snapshot.
+/// Serializes and atomically publishes one source-free v3/configuration-10
+/// snapshot without project-owned print intent.
 ///
 /// Missing destinations use atomic no-replace publication. Existing targets
 /// are fingerprinted again immediately before an atomic rename. That overwrite
@@ -231,7 +234,7 @@ pub fn save_document_preset(
     let envelope = DocumentPresetEnvelopeDto {
         kind: "document_preset".into(),
         document_preset_format_version: DOCUMENT_PRESET_FORMAT_VERSION,
-        document_schema_version: DOCUMENT_SCHEMA_VERSION,
+        document_schema_version: DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION,
         configuration: DocumentConfigurationDtoV9::from_configuration(configuration)
             .map_err(map_save_error)?,
     };
@@ -445,7 +448,7 @@ fn load_source_free_preset(
             ),
         });
     }
-    if metadata.document_schema_version != DOCUMENT_SCHEMA_VERSION {
+    if metadata.document_schema_version != DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION {
         return Err(DocumentPresetError::Version {
             context: format!(
                 "unsupported document configuration schema version {}",

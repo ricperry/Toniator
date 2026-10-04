@@ -33,8 +33,9 @@ use toniator_domain::{
     PathStrokeStyle, PatternDefinition, PatternDefinitionBundle, PatternDefinitionDraft,
     PatternDefinitionId, PatternDefinitionRecipe, PatternGeometryResponse, PatternMechanismId,
     PatternOutputLayerId, PatternOutputRealizationRecipe, PatternOutputResponseDelta,
-    PatternOutputSettings, PatternOutputSettingsRecipe, PatternStructureRecipe, PresetMetadata,
-    PresetRecord, RandomSiteCharacter, RegionGeometryResponse, RegionGeometryResponseDelta,
+    PatternOutputSettings, PatternOutputSettingsRecipe, PatternStructureRecipe,
+    PhysicalPrintSizeMm, PresetMetadata, PresetRecord, PrintPreparationSettings,
+    RandomSiteCharacter, RegionGeometryResponse, RegionGeometryResponseDelta,
     RegionResizeAlgorithm, RegionSamplingStrategy, RegionSourceIntent, SiteDensityModulation,
     SiteExclusionPolicy, SiteUseFilterRecipe, SourceComponent, SourceMapping,
     SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId, SourceTone,
@@ -67,7 +68,10 @@ use media::MediaManifestDto;
 pub use media::SourceMediaManifest;
 
 pub const CONTAINER_VERSION: u32 = 2;
-pub const DOCUMENT_SCHEMA_VERSION: u32 = 10;
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 11;
+/// Frozen schema for the source-free v3 document Preset field shape.
+pub const DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION: u32 = 10;
+const PREVIOUS_DOCUMENT_SCHEMA_VERSION: u32 = 10;
 /// Current source-free document Preset archive envelope version.
 pub const DOCUMENT_PRESET_FORMAT_VERSION: u32 = 3;
 /// Standalone pure-schema preset JSON format version. It is deliberately
@@ -624,7 +628,8 @@ fn declared_zip_entry_count(file: &mut File, length: u64) -> Result<usize, LoadE
     Ok(scanned_entries)
 }
 
-/// Loads one current-schema document and its portable media from container 2.
+/// Loads strict project schema 11 or supported prechange schema 10 with
+/// portable media from container 2; other schema versions are rejected.
 ///
 /// Raw central-directory cardinality is retained before `zip` can collapse duplicate names;
 /// topology, limits, integrity, and current-domain validation then complete transactionally.
@@ -641,7 +646,7 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
     load_opened(path, file)
 }
 
-/// Loads one current project from an already opened file handle.
+/// Loads a strict schema-11 or supported schema-10 project from an opened file.
 ///
 /// This internal seam lets archive-kind dispatch retain the exact no-follow
 /// file identity it inspected instead of reopening a potentially replaced
@@ -773,8 +778,32 @@ fn load_opened(path: &Path, mut file: File) -> Result<LoadedDocument, LoadError>
             ),
         });
     }
-    let (current, manifests, media_manifest) = match envelope.document_schema_version {
+    let (document, manifests, media_manifest) = match envelope.document_schema_version {
         DOCUMENT_SCHEMA_VERSION => {
+            let mut ignored = Vec::new();
+            let mut deserializer = serde_json::Deserializer::from_slice(&document_bytes);
+            let stored: StoredDocumentDtoV11 =
+                serde_ignored::deserialize(&mut deserializer, |path| {
+                    ignored.push(path.to_string())
+                })
+                .map_err(|error| LoadError::Json {
+                    context: error.to_string(),
+                })?;
+            deserializer.end().map_err(|error| LoadError::Json {
+                context: error.to_string(),
+            })?;
+            if !ignored.is_empty() {
+                return Err(LoadError::Json {
+                    context: format!("unknown field at {}", ignored.join(", ")),
+                });
+            }
+            (
+                stored.document.into_domain().map_err(domain_error)?,
+                stored.sources,
+                stored.media,
+            )
+        }
+        PREVIOUS_DOCUMENT_SCHEMA_VERSION => {
             let mut ignored = Vec::new();
             let mut deserializer = serde_json::Deserializer::from_slice(&document_bytes);
             let stored: StoredDocumentDtoV9 =
@@ -793,9 +822,7 @@ fn load_opened(path: &Path, mut file: File) -> Result<LoadedDocument, LoadError>
                 });
             }
             (
-                CurrentDocumentDto {
-                    document: stored.document,
-                },
+                stored.document.into_domain().map_err(domain_error)?,
                 stored.sources,
                 stored.media,
             )
@@ -811,7 +838,6 @@ fn load_opened(path: &Path, mut file: File) -> Result<LoadedDocument, LoadError>
         .media()
         .and_then(SourceMediaManifest::primary_source_id)
         .expect("validated media has a primary source");
-    let document = current.document.into_domain().map_err(domain_error)?;
     match document.source() {
         SourceReference::Assigned(id) if id == source_id => {}
         _ => {
@@ -844,7 +870,8 @@ fn ensure_supported_file_compression(
     })
 }
 
-/// Saves one fully source-backed current document with a deterministic container-2 media manifest.
+/// Saves one fully source-backed schema-11 document with a deterministic
+/// container-2 media manifest.
 ///
 /// # Errors
 /// Rejects invalid documents, mismatched source ownership, oversized JSON, and filesystem/archive
@@ -874,7 +901,7 @@ pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<
             context: "document must reference the primary media source".into(),
         });
     }
-    let dto = StoredDocumentDtoV9::from_domain(document, sources)?;
+    let dto = StoredDocumentDtoV11::from_domain(document, sources)?;
     let mut document_json = serde_json::to_vec(&dto).map_err(|error| SaveError::Archive {
         context: error.to_string(),
     })?;
@@ -1327,13 +1354,36 @@ struct StoredDocumentDtoV9 {
     sources: Vec<SourceManifestDto>,
     media: MediaManifestDto,
 }
+/// Current project envelope adds print intent without changing the embedded-source container.
 #[derive(Serialize, Deserialize)]
-struct CurrentDocumentDto {
-    document: DocumentDtoV9,
+#[serde(deny_unknown_fields)]
+struct StoredDocumentDtoV11 {
+    container_version: u32,
+    document_schema_version: u32,
+    document: DocumentDtoV11,
+    sources: Vec<SourceManifestDto>,
+    media: MediaManifestDto,
+}
+
+impl StoredDocumentDtoV11 {
+    /// Projects current document authority while retaining the v10 source manifest shape.
+    ///
+    /// # Errors
+    /// Returns a save error before publication if source or document projection fails.
+    fn from_domain(document: &Document, sources: &SourceBundle) -> Result<Self, SaveError> {
+        let old = StoredDocumentDtoV9::from_domain(document, sources)?;
+        Ok(Self {
+            container_version: CONTAINER_VERSION,
+            document_schema_version: DOCUMENT_SCHEMA_VERSION,
+            document: DocumentDtoV11::from_domain(document, old.document),
+            sources: old.sources,
+            media: old.media,
+        })
+    }
 }
 
 impl StoredDocumentDtoV9 {
-    /// Projects a validated document and its matching source into the current archive envelope.
+    /// Projects shared v10 document fields and source manifest for schema-11 packaging.
     ///
     /// # Errors
     ///
@@ -1373,6 +1423,123 @@ struct DocumentDtoV9 {
     project_timing: ProjectTimingDto,
     #[serde(flatten)]
     configuration: DocumentConfigurationDtoV9,
+}
+
+/// Required project-only intent in schema 11; source-free Presets keep schema 10.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DocumentDtoV11 {
+    id: u64,
+    canvas: CanvasDto,
+    source_reference_id: String,
+    project_timing: ProjectTimingDto,
+    print_preparation: PrintPreparationDto,
+    #[serde(flatten)]
+    configuration: DocumentConfigurationDtoV9,
+}
+
+impl DocumentDtoV11 {
+    /// Projects validated print intent alongside unchanged document configuration fields.
+    fn from_domain(document: &Document, old: DocumentDtoV9) -> Self {
+        Self {
+            id: old.id,
+            canvas: old.canvas,
+            source_reference_id: old.source_reference_id,
+            project_timing: old.project_timing,
+            print_preparation: PrintPreparationDto::from_domain(document.print_preparation()),
+            configuration: old.configuration,
+        }
+    }
+
+    /// Restores schema-11 print intent after the shared v10 document fields validate.
+    ///
+    /// # Errors
+    /// Rejects malformed physical dimensions and thresholds without publishing a document.
+    fn into_domain(self) -> Result<Document, ValidationError> {
+        let old = DocumentDtoV9 {
+            id: self.id,
+            canvas: self.canvas,
+            source_reference_id: self.source_reference_id,
+            project_timing: self.project_timing,
+            configuration: self.configuration,
+        };
+        old.into_domain()?
+            .with_print_preparation(self.print_preparation.into_domain()?)
+    }
+}
+
+/// Project-only physical placement and advisory thresholds in canonical millimetres.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrintPreparationDto {
+    #[serde(deserialize_with = "deserialize_required_option")]
+    physical_size_mm: Option<PhysicalPrintSizeDto>,
+    minimum_positive_feature_width_mm: f64,
+    minimum_negative_gap_width_mm: f64,
+}
+
+/// Requires an explicit nullable field so schema-11 archives cannot omit placement intent.
+///
+/// # Errors
+/// Returns the field decoder's error for a non-object or malformed placement.
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+impl PrintPreparationDto {
+    /// Projects validated project intent without persisting a UI display unit.
+    fn from_domain(settings: &PrintPreparationSettings) -> Self {
+        Self {
+            physical_size_mm: settings.size_mm().map(PhysicalPrintSizeDto::from_domain),
+            minimum_positive_feature_width_mm: settings.minimum_positive_feature_width_mm(),
+            minimum_negative_gap_width_mm: settings.minimum_negative_gap_width_mm(),
+        }
+    }
+
+    /// Validates archive values at the domain boundary.
+    ///
+    /// # Errors
+    /// Rejects absent required values, negative or non-finite thresholds, and invalid size.
+    fn into_domain(self) -> Result<PrintPreparationSettings, ValidationError> {
+        PrintPreparationSettings::new(
+            self.physical_size_mm
+                .map(PhysicalPrintSizeDto::into_domain)
+                .transpose()?,
+            self.minimum_positive_feature_width_mm,
+            self.minimum_negative_gap_width_mm,
+        )
+    }
+}
+
+/// Explicit dimensions of the complete final output placement.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PhysicalPrintSizeDto {
+    width_mm: f64,
+    height_mm: f64,
+}
+
+impl PhysicalPrintSizeDto {
+    /// Projects canonical dimensions without rounding or unit conversion.
+    fn from_domain(size: PhysicalPrintSizeMm) -> Self {
+        let (width_mm, height_mm) = size.millimetres();
+        Self {
+            width_mm,
+            height_mm,
+        }
+    }
+
+    /// Revalidates persisted physical dimensions before document restoration.
+    ///
+    /// # Errors
+    /// Rejects nonpositive or non-finite dimensions.
+    fn into_domain(self) -> Result<PhysicalPrintSizeMm, ValidationError> {
+        PhysicalPrintSizeMm::new(self.width_mm, self.height_mm)
+    }
 }
 
 /// The shared current-v9 configuration includes End overrides without project timing or Start copies.

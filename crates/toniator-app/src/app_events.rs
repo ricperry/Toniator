@@ -6,6 +6,8 @@ use toniator_engine::{EvaluationCompletion, EvaluationProgress};
 /// Carries worker results without granting workers GTK or document authority.
 #[allow(clippy::large_enum_variant)] // Save events deliberately own one authoritative document snapshot.
 pub(crate) enum AppEvent {
+    /// Completes one optional print-preparation check for main-thread freshness admission.
+    PrintPreparation(crate::print_preparation::CheckCompletion),
     /// Reports full-document construction validity for one private wizard revision.
     WizardValidation {
         epoch: u64,

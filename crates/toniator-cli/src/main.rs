@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod preflight;
 mod temporal;
 
 use std::sync::{
@@ -49,6 +50,8 @@ enum Command {
     Document(DocumentArgs),
     /// Verify and summarize the schema-derived headless capability surface.
     Capabilities(CapabilitiesArgs),
+    /// Measure bounded final-alpha print advisories for one project frame; advisory only, never certification.
+    Preflight(preflight::PreflightArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -388,6 +391,10 @@ fn main() -> ExitCode {
     }
 }
 
+/// Dispatches one parsed headless command to its authority-owning implementation.
+///
+/// # Errors
+/// Returns the selected command's stable input, authority, evaluation, or output diagnostic.
 fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Some(Command::Validate(arguments)) => validate(arguments),
@@ -395,6 +402,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Some(Command::Render(arguments)) => render(arguments),
         Some(Command::Document(arguments)) => document_command(arguments),
         Some(Command::Capabilities(arguments)) => capabilities(arguments),
+        Some(Command::Preflight(arguments)) => preflight::run(arguments),
         None => Ok(()),
     }
 }

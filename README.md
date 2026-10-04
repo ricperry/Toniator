@@ -316,10 +316,32 @@ to the document as one undoable edit; closing the sheet before exporting discard
 them. Optional first/last frames select an export subset. PNG sequences,
 lossless FFV1/Matroska and optional AV1/WebM remain available.
 
-Current development persistence uses document schema **10**, document-Preset
-format **3**, media container **2**, and Pattern format **5**. Earlier
-document schemas are rejected; existing project files are not migrated or
-overwritten automatically.
+Current development writes project document schema **11** in media container
+**2**. The strict reader also accepts pre-change schema **10**, supplying default
+print-preparation settings; opening that project leaves its file untouched, and
+saving it writes schema 11. The pre-G1a v0.3.3 application cannot read schema 11.
+Document Presets remain format **3** with frozen configuration schema **10**,
+and Pattern format remains **5**. Other unsupported or hybrid document schemas
+are rejected; projects are not downgraded automatically.
+
+Current development also includes a headless, advisory garment preflight. For
+example:
+
+```bash
+cargo run --locked -p toniator-cli -- preflight \
+  --input artwork.toniator --unit mm \
+  --print-width 300 --print-height 400 \
+  --positive-threshold 0.8 --gap-threshold 0.6
+```
+
+Replace these example values with the intended complete-canvas placement and
+process-specific thresholds; they are not Toniator recommendations. Command-line
+overrides are used for that report and never saved to the project. The analysis
+inventories the final transparent output even when either width check is
+disabled. Its `--help` identifies the command as advisory and says it never
+certifies print safety. The 0.3.3 release binaries predate this command; there
+is no desktop preflight interface yet. The [garment preparation plan](docs/GARMENT_PRINT_PREPARATION_PLAN.md)
+records this work-in-progress checkpoint and its remaining validation limits.
 
 Known limitations include slow previews at very fine feature sizes, first-use
 personal thumbnail latency, and an intermittent reported RGB-to-CMYK crash.

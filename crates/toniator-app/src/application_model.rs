@@ -17,6 +17,8 @@ use crate::{PreviewModel, Workspace, preview_coordinator::PreviewCoordinator};
 /// selected artist channel and scheduler identity. GTK may borrow it only long
 /// enough to project immutable view models or dispatch existing typed commands.
 pub(crate) struct ApplicationModel {
+    /// Owns the optional one-at-a-time print-preparation worker and retained exact pair.
+    pub(crate) print_preparation: crate::print_preparation::Controller,
     /// Prepares decoded source frames on its own worker before evaluator submission.
     pub(crate) media_worker: Option<crate::temporal_preview::Worker>,
     /// Selects Start or End without creating a document edit or playback position.
@@ -60,6 +62,7 @@ impl ApplicationModel {
     /// constructed; without it the desktop application cannot render previews.
     pub(crate) fn new() -> Self {
         Self {
+            print_preparation: crate::print_preparation::Controller::default(),
             media_worker: None,
             endpoint: crate::temporal_preview::Endpoint::Start,
             media_epoch: 0,

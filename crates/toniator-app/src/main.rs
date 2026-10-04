@@ -21,6 +21,7 @@ mod paint_editor;
 mod personal_pattern_management;
 mod png_export_size;
 mod preview_coordinator;
+mod print_preparation;
 mod scatter_memory;
 mod sequence_import;
 mod source_notice;
@@ -4634,6 +4635,32 @@ fn apply_history_navigation(state: &Rc<RefCell<AppState>>, redo: bool) {
         Ok(None) => {}
         Err(error) => show_error(&mut state.borrow_mut(), error.to_string()),
     }
+}
+
+/// Applies project-owned physical settings through G1a history and retires old review tokens.
+///
+/// `SetPrintPreparation` reports `None` art invalidation. The ordinary pending
+/// preview route cancels any old-token decode/evaluation while retaining last
+/// good pixels and engine caches; its current-token request may reuse them.
+/// No G2a control invokes this until the explicit G2b Apply form exists.
+#[allow(dead_code)]
+fn apply_print_preparation_settings(
+    state: &Rc<RefCell<AppState>>,
+    settings: toniator_domain::PrintPreparationSettings,
+) -> Result<bool, String> {
+    let mut app = state.borrow_mut();
+    if main_document_edits_blocked(&app) {
+        return Err("Document edits are currently unavailable.".into());
+    }
+    let workspace = app.workspace.as_mut().ok_or("No document is open.")?;
+    if !print_preparation::apply_settings(&mut workspace.history, settings)? {
+        return Ok(false);
+    }
+    set_preview_pending(&mut app);
+    sync_ui(&mut app);
+    drop(app);
+    schedule_main_preview_submission(state);
+    Ok(true)
 }
 
 fn install_css() {
@@ -22802,8 +22829,28 @@ fn choose_export(state: &Rc<RefCell<AppState>>) {
     temporal_export::open(state);
 }
 
-/// Opens PNG/SVG export for the selected endpoint when document-Preset interaction is idle.
-/// Cancelling or rejecting the chooser leaves document/history and output files untouched.
+/// Clones one live session, source bundle, and endpoint before any asynchronous chooser.
+fn capture_still_export(
+    workspace: &Workspace,
+    frame: u64,
+    lifecycle_generation: u64,
+    workspace_generation: u64,
+) -> print_preparation::ExportCapture {
+    print_preparation::ExportCapture {
+        session: workspace.history.session().clone(),
+        sources: workspace.sources.clone(),
+        frame,
+        lifecycle_generation,
+        workspace_generation,
+    }
+}
+
+/// Captures live PNG/SVG document, source, and endpoint authority before the save chooser.
+///
+/// `Workspace::can_save` checks the same source-presentation and nonempty-source
+/// applicability previously rechecked at worker startup. Later same-workspace
+/// edits cannot substitute different art for this initiated export; workspace
+/// replacement rejects chooser and options callbacks.
 fn choose_still_export(state: &Rc<RefCell<AppState>>) {
     if state.borrow().document_presets.busy() {
         return;
@@ -22820,23 +22867,34 @@ fn choose_still_export(state: &Rc<RefCell<AppState>>) {
         );
         return;
     }
+    let (capture, initial_name) = {
+        let app = state.borrow();
+        let workspace = app.workspace.as_ref().expect("checked workspace");
+        (
+            capture_still_export(
+                workspace,
+                app.endpoint.frame(workspace.document()),
+                app.generation,
+                app.workspace_generation,
+            ),
+            suggested_export_filename(workspace, ExportFormat::Png),
+        )
+    };
     let dialog = gtk::FileDialog::new();
     dialog.set_title("Export image");
     dialog.set_filters(Some(&export_filters()));
-    let initial_name = suggested_export_filename(
-        state
-            .borrow()
-            .workspace
-            .as_ref()
-            .expect("checked workspace"),
-        ExportFormat::Png,
-    );
     dialog.set_initial_name(Some(&initial_name));
     state.borrow_mut().pending_file_chooser = true;
     sync_ui(&mut state.borrow_mut());
     let state = Rc::clone(state);
     let window = state.borrow().window.clone();
     dialog.save(Some(&window), None::<&gio::Cancellable>, move |result| {
+        if !capture.workspace_is_current(
+            state.borrow().generation,
+            state.borrow().workspace_generation,
+        ) {
+            return;
+        }
         state.borrow_mut().pending_file_chooser = false;
         sync_ui(&mut state.borrow_mut());
         let Ok(file) = result else { return };
@@ -22849,7 +22907,7 @@ fn choose_still_export(state: &Rc<RefCell<AppState>>) {
             }
         };
         match format {
-            ExportFormat::Png => choose_png_export_options(&state, path),
+            ExportFormat::Png => choose_png_export_options(&state, path, capture.clone()),
             ExportFormat::Svg => start_export(
                 &state,
                 path,
@@ -22859,6 +22917,7 @@ fn choose_still_export(state: &Rc<RefCell<AppState>>) {
                     antialiasing: RasterAntialiasing::On,
                     output_target: None,
                 },
+                capture.clone(),
             ),
         }
     });
@@ -22884,7 +22943,11 @@ fn export_filters() -> gio::ListStore {
 /// The selected backing remains runtime dialog state and never mutates document, scene, history,
 /// preview, or cache identity. Invalid output dimensions fail before export submission.
 #[allow(deprecated)] // GTK 4.10's lightweight custom-content dialog remains available on Fedora.
-fn choose_png_export_options(state: &Rc<RefCell<AppState>>, path: PathBuf) {
+fn choose_png_export_options(
+    state: &Rc<RefCell<AppState>>,
+    path: PathBuf,
+    capture: print_preparation::ExportCapture,
+) {
     let dialog = gtk::Dialog::builder()
         .title("PNG export options")
         .modal(true)
@@ -22901,14 +22964,27 @@ fn choose_png_export_options(state: &Rc<RefCell<AppState>>, path: PathBuf) {
         "Black",
         "White",
     ])));
-    let default_background = state
-        .borrow()
-        .workspace
-        .as_ref()
-        .and_then(|workspace| workspace.document().channel_model());
+    let default_background = capture.session.document().channel_model();
     background.set_selected(png_background_dropdown_position(default_background));
+    let background_choice = Rc::new(Cell::new(print_preparation::BackgroundChoice::Automatic));
+    {
+        let background_choice = Rc::clone(&background_choice);
+        let state = Rc::clone(state);
+        background.connect_selected_notify(move |background| {
+            background_choice.set(print_preparation::BackgroundChoice::Explicit(
+                png_background_for_dropdown_position(background.selected()),
+            ));
+            state.borrow_mut().print_preparation.invalidate();
+        });
+    }
     let antialiasing = options.antialiasing();
     antialiasing.set_model(Some(&gtk::StringList::new(&["On", "Off"])));
+    {
+        let state = Rc::clone(state);
+        antialiasing.connect_selected_notify(move |_| {
+            state.borrow_mut().print_preparation.invalidate();
+        });
+    }
     let dimensions = options.dimensions();
     let scale = options.scale();
     scale.set_model(Some(&gtk::StringList::new(&[
@@ -22916,14 +22992,7 @@ fn choose_png_export_options(state: &Rc<RefCell<AppState>>, path: PathBuf) {
     ])));
     scale.update_property(&[gtk::accessible::Property::Label("Output size")]);
     dimensions.update_property(&[gtk::accessible::Property::Label("Custom dimensions")]);
-    let Some(canvas) = state
-        .borrow()
-        .workspace
-        .as_ref()
-        .map(|workspace| workspace.document().canvas().clone())
-    else {
-        return;
-    };
+    let canvas = capture.session.document().canvas().clone();
     if let Ok(native) = OutputRasterTarget::for_canvas(&canvas) {
         dimensions.set_text(&format!("{}x{}", native.width(), native.height()));
     }
@@ -22939,17 +23008,30 @@ fn choose_png_export_options(state: &Rc<RefCell<AppState>>, path: PathBuf) {
     };
     {
         let update_size = Rc::clone(&update_size);
-        scale.connect_selected_notify(move |_| update_size());
+        let state = Rc::clone(state);
+        scale.connect_selected_notify(move |_| {
+            state.borrow_mut().print_preparation.invalidate();
+            update_size();
+        });
     }
     {
         let update_size = Rc::clone(&update_size);
-        dimensions.connect_changed(move |_| update_size());
+        let state = Rc::clone(state);
+        dimensions.connect_changed(move |_| {
+            state.borrow_mut().print_preparation.invalidate();
+            update_size();
+        });
     }
     update_size();
     content.append(&options);
     let state = Rc::clone(state);
     dialog.connect_response(move |dialog, response| {
-        if response == gtk::ResponseType::Accept {
+        if response == gtk::ResponseType::Accept
+            && capture.workspace_is_current(
+                state.borrow().generation,
+                state.borrow().workspace_generation,
+            )
+        {
             let output_target = match png_export_size::target(
                 &canvas,
                 scale.selected(),
@@ -22962,12 +23044,18 @@ fn choose_png_export_options(state: &Rc<RefCell<AppState>>, path: PathBuf) {
                     return;
                 }
             };
-            let background = png_background_for_dropdown_position(background.selected());
             let antialiasing = if antialiasing.selected() == 1 {
                 RasterAntialiasing::Off
             } else {
                 RasterAntialiasing::On
             };
+            let selection = print_preparation::OutputSelection {
+                target: output_target.expect("validated PNG output target"),
+                antialiasing,
+                background: background_choice.get(),
+            };
+            let background = selection.background_for(&capture.session);
+            state.borrow_mut().print_preparation.select(selection);
             start_export(
                 &state,
                 path.clone(),
@@ -22977,8 +23065,10 @@ fn choose_png_export_options(state: &Rc<RefCell<AppState>>, path: PathBuf) {
                     antialiasing,
                     output_target,
                 },
+                capture.clone(),
             );
         }
+        state.borrow_mut().print_preparation.invalidate();
         dialog.close();
     });
     dialog.present();
@@ -23277,26 +23367,25 @@ fn still_export_progress_window(
     progress
 }
 
-/// Captures the selected endpoint and immutable export settings before starting a cancellable worker.
-fn start_export(state: &Rc<RefCell<AppState>>, path: PathBuf, settings: ExportSettings) {
-    let (snapshot, frame, generation, workspace_generation) = {
-        let mut state = state.borrow_mut();
+/// Exports the document/source/frame captured before the chooser, with immutable output settings.
+///
+/// Workspace replacement rejects the callback. Later edits in the same workspace
+/// cannot silently substitute a different document or endpoint for this initiated export.
+fn start_export(
+    state: &Rc<RefCell<AppState>>,
+    path: PathBuf,
+    settings: ExportSettings,
+    capture: print_preparation::ExportCapture,
+) {
+    let (generation, workspace_generation) = {
+        let state = state.borrow();
         if state.pending_export {
             return;
         }
-        let Some(workspace) = state.workspace.as_ref() else {
-            return;
-        };
-        if workspace.source_presentation.is_none() {
-            show_error(&mut state, "Export requires an active source.".to_owned());
+        if !capture.workspace_is_current(state.generation, state.workspace_generation) {
             return;
         }
-        (
-            workspace.snapshot(),
-            state.endpoint.frame(workspace.document()),
-            state.generation,
-            state.workspace_generation,
-        )
+        (capture.lifecycle_generation, capture.workspace_generation)
     };
     let event_sender = state.borrow().event_sender.clone();
     let format = settings.format;
@@ -23306,7 +23395,7 @@ fn start_export(state: &Rc<RefCell<AppState>>, path: PathBuf, settings: ExportSe
     state.borrow_mut().still_export_cancel = Some(cancelled.clone());
     state.borrow_mut().still_export_progress = Some(progress);
     thread::spawn(move || {
-        let result = export_snapshot_frame_cancellable(snapshot, path, settings, frame, &cancelled);
+        let result = export_captured_frame_cancellable(capture, path, settings, &cancelled);
         let _ = event_sender.send_blocking(AppEvent::Export {
             generation,
             workspace_generation,
@@ -23323,6 +23412,7 @@ fn start_export(state: &Rc<RefCell<AppState>>, path: PathBuf, settings: ExportSe
 ///
 /// # Errors
 /// Rejects source, timing, evaluation, rasterization or filesystem failures without editing history.
+#[cfg(test)]
 fn export_snapshot_frame_cancellable(
     snapshot: SavedContent,
     path: PathBuf,
@@ -23331,15 +23421,43 @@ fn export_snapshot_frame_cancellable(
     cancelled: &AtomicBool,
 ) -> Result<(), String> {
     let session = DocumentSession::new(snapshot.document).map_err(|error| error.to_string())?;
+    export_captured_frame_cancellable(
+        print_preparation::ExportCapture {
+            session,
+            sources: snapshot.sources,
+            frame,
+            lifecycle_generation: 0,
+            workspace_generation: 0,
+        },
+        path,
+        settings,
+        cancelled,
+    )
+}
+
+/// Evaluates one coherent chooser-time session/source/frame capture for PNG or SVG.
+///
+/// # Errors
+/// Rejects source, timing, evaluation, rasterization or filesystem failures
+/// without editing history or consulting a later live document.
+fn export_captured_frame_cancellable(
+    capture: print_preparation::ExportCapture,
+    path: PathBuf,
+    settings: ExportSettings,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
     let mut media = toniator_engine::open_source_media(
-        &snapshot.sources,
+        &capture.sources,
         toniator_engine::MediaTools::default(),
         &|| cancelled.load(Ordering::Acquire),
     )
     .map_err(|error| error.to_string())?;
-    let request = toniator_engine::frame_evaluation_request(&session, &mut media, frame, &|| {
-        cancelled.load(Ordering::Acquire)
-    })
+    let request = toniator_engine::frame_evaluation_request(
+        &capture.session,
+        &mut media,
+        capture.frame,
+        &|| cancelled.load(Ordering::Acquire),
+    )
     .map_err(|error| error.to_string())?;
     let request = match settings.format {
         ExportFormat::Png => request.for_output(
@@ -23372,6 +23490,48 @@ fn export_snapshot_frame_cancellable(
     }
     fs::write(&path, output)
         .map_err(|error| format!("output.write: could not write {}: {error}", path.display()))
+}
+
+/// Starts one explicit optional preflight request against the chooser-time live capture.
+///
+/// G2a has no visible Review action; the future G2b control calls this internal
+/// entry. Ordinary export never starts or waits for a preflight worker.
+#[allow(dead_code)]
+fn start_print_preparation_check(
+    state: &Rc<RefCell<AppState>>,
+    capture: print_preparation::ExportCapture,
+    selection: print_preparation::OutputSelection,
+) {
+    let job = state
+        .borrow_mut()
+        .print_preparation
+        .request(capture, selection);
+    if let Some(job) = job {
+        launch_print_preparation_job(state, job);
+    }
+}
+
+/// Runs one admitted print-preparation job off GTK and posts its immutable completion.
+fn launch_print_preparation_job(state: &Rc<RefCell<AppState>>, job: print_preparation::CheckJob) {
+    let sender = state.borrow().event_sender.clone();
+    thread::spawn(move || {
+        let _ = sender.send_blocking(AppEvent::PrintPreparation(job.run()));
+    });
+}
+
+/// Admits only a current exact pair and starts a queued successor after worker exit.
+fn complete_print_preparation_check(
+    state: &Rc<RefCell<AppState>>,
+    completion: print_preparation::CheckCompletion,
+) {
+    let next = {
+        let mut app = state.borrow_mut();
+        let live = print_preparation_live_authority(&app);
+        app.print_preparation.complete(completion, live)
+    };
+    if let Some(job) = next {
+        launch_print_preparation_job(state, job);
+    }
 }
 
 /// Evaluates a test snapshot at its explicit endpoint without requesting cancellation.
@@ -23412,6 +23572,9 @@ fn export_snapshot(
 /// pending quit request. Stale results never replace the workspace or populate Recent Files.
 fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
     match event {
+        AppEvent::PrintPreparation(completion) => {
+            complete_print_preparation_check(state, completion)
+        }
         AppEvent::TemporalExport(event) => temporal_export::event(state, event),
         AppEvent::DocumentPreset(completion) => document_presets::complete(state, completion),
         AppEvent::Load {
@@ -23906,6 +24069,8 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
     let (model, pattern_editor_window, advanced_settings_window, pattern_wizard_window) = {
         let mut state = state.borrow_mut();
         state.scatter_memory = scatter_memory::Memory::default();
+        state.print_preparation.close();
+        state.pending_file_chooser = false;
         state.workspace_generation = state.workspace_generation.saturating_add(1);
         state.preview_coordinator.clear_submission();
         sync_main_preview_pending(&state);
@@ -24010,6 +24175,8 @@ fn clear_workspace(state: &Rc<RefCell<AppState>>) {
     let (pattern_editor_window, pattern_wizard_window, advanced_window) = {
         let mut state = state.borrow_mut();
         state.scatter_memory = scatter_memory::Memory::default();
+        state.print_preparation.close();
+        state.pending_file_chooser = false;
         state.generation = state.generation.saturating_add(1);
         state.workspace_generation = state.workspace_generation.saturating_add(1);
         state.preview_coordinator.clear_submission();
@@ -24543,6 +24710,17 @@ fn dismiss_main_message(state: &Rc<RefCell<AppState>>) {
     }
 }
 
+/// Captures live document token and endpoint for cheap main-thread preflight admission.
+fn print_preparation_live_authority(state: &AppState) -> Option<print_preparation::LiveAuthority> {
+    let workspace = state.workspace.as_ref()?;
+    Some(print_preparation::LiveAuthority {
+        token: workspace.history.session().document_evaluation_token(),
+        frame: state.endpoint.frame(workspace.document()),
+        lifecycle_generation: state.generation,
+        workspace_generation: state.workspace_generation,
+    })
+}
+
 /// Projects immutable application state into persistent GTK widgets.
 ///
 /// The projection updates enabled state, labels, and presentation only; it
@@ -24551,6 +24729,8 @@ fn sync_ui(state: &mut AppState) {
     if let Some(workspace) = state.workspace.as_ref() {
         state.endpoint = state.endpoint.for_document(workspace.document());
     }
+    let live = print_preparation_live_authority(state);
+    state.print_preparation.reconcile(live);
     let policy = ui_policy(
         state.workspace.as_ref(),
         main_document_edits_blocked(state),
@@ -26585,6 +26765,145 @@ mod tests {
             source_path.to_string_lossy()
         );
         fs::remove_file(output).unwrap();
+    }
+
+    /// Proves chooser-time export keeps one live document/source/frame snapshot without a report.
+    ///
+    /// A later same-workspace edit changes live output, but not this initiated
+    /// export. Replaced-workspace callbacks fail the capture's generation gate.
+    ///
+    /// # Panics
+    /// Panics if export reads the later document or reconstructs the live revision.
+    #[test]
+    fn g2a_export_uses_coherent_chooser_capture_across_later_edit() {
+        let mut workspace = load_workspace(&asset("raster-sample.png")).unwrap();
+        let frame = workspace.document().project_timing().frame_range().start();
+        let capture = capture_still_export(&workspace, frame, 3, 7);
+        let token = capture.session.document_evaluation_token();
+        let target = OutputRasterTarget::new(256, 256).unwrap();
+        let choice = print_preparation::OutputSelection {
+            target,
+            antialiasing: RasterAntialiasing::On,
+            background: print_preparation::BackgroundChoice::Automatic,
+        };
+        let settings = ExportSettings {
+            format: ExportFormat::Png,
+            background: choice.background_for(&capture.session),
+            antialiasing: choice.antialiasing,
+            output_target: Some(choice.target),
+        };
+        let channel = workspace.document().channel_topology().unwrap().channels()[0].id;
+        workspace
+            .history
+            .apply(&DocumentCommand::SetVisibility {
+                channel_id: channel,
+                visible: false,
+            })
+            .unwrap();
+        assert_ne!(
+            workspace.history.session().document_evaluation_token(),
+            token
+        );
+        assert_eq!(capture.session.document_evaluation_token(), token);
+        assert!(capture.workspace_is_current(3, 7));
+        assert!(!capture.workspace_is_current(3, 8));
+
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/validation/garment-g2a-20261004/export-capture");
+        fs::create_dir_all(&directory).unwrap();
+        let captured_path = directory.join("chooser-captured.png");
+        export_captured_frame_cancellable(
+            capture.clone(),
+            captured_path.clone(),
+            settings,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let mut media = toniator_engine::open_source_media(
+            &capture.sources,
+            toniator_engine::MediaTools::default(),
+            &|| false,
+        )
+        .unwrap();
+        let request = toniator_engine::frame_evaluation_request(
+            &capture.session,
+            &mut media,
+            capture.frame,
+            &|| false,
+        )
+        .unwrap()
+        .for_output(
+            settings.background,
+            settings.output_target,
+            settings.antialiasing,
+        );
+        let expected = toniator_engine::evaluate_cancellable_with_limits(
+            request,
+            EvaluationLimits::default(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(&captured_path).unwrap(),
+            encode_png(expected.raster()).unwrap()
+        );
+
+        for (label, background) in [
+            ("transparent", RasterBackground::Transparent),
+            ("white", RasterBackground::OpaqueWhite),
+            ("black", RasterBackground::OpaqueBlack),
+        ] {
+            let selected = ExportSettings {
+                background,
+                ..settings
+            };
+            let path = directory.join(format!("chooser-captured-{label}.png"));
+            export_captured_frame_cancellable(
+                capture.clone(),
+                path.clone(),
+                selected,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            let mut media = toniator_engine::open_source_media(
+                &capture.sources,
+                toniator_engine::MediaTools::default(),
+                &|| false,
+            )
+            .unwrap();
+            let request = toniator_engine::frame_evaluation_request(
+                &capture.session,
+                &mut media,
+                capture.frame,
+                &|| false,
+            )
+            .unwrap()
+            .for_output(background, selected.output_target, selected.antialiasing);
+            let rendered = toniator_engine::evaluate_cancellable_with_limits(
+                request,
+                EvaluationLimits::default(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read(path).unwrap(),
+                encode_png(rendered.raster()).unwrap()
+            );
+        }
+
+        let later_path = directory.join("later-live.png");
+        export_snapshot_frame_cancellable(
+            workspace.snapshot(),
+            later_path.clone(),
+            settings,
+            frame,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_ne!(
+            fs::read(captured_path).unwrap(),
+            fs::read(later_path).unwrap()
+        );
     }
 
     /// Persists and exports both immutable stage inputs through app-owned boundaries.

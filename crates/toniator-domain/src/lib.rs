@@ -15,9 +15,11 @@ mod channel_defaults;
 mod color_authoring;
 mod pattern_batches;
 pub use pattern_batches::PatternRecipeEdit;
+mod print_intent;
 mod temporal;
 
 pub use color_authoring::*;
+pub use print_intent::{PhysicalPrintSizeMm, PrintPreparationSettings, PrintResolutionPpi};
 pub use temporal::*;
 
 /// A stable identifier for an authoritative document.
@@ -5181,6 +5183,7 @@ pub struct Document {
     id: DocumentId,
     canvas: CanvasSpec,
     source: SourceReference,
+    print_preparation: PrintPreparationSettings,
     pattern_definition_bundles: Vec<PatternDefinitionBundle>,
     channel_configuration: ChannelConfiguration,
     authored_structures: Vec<AuthoredStructure>,
@@ -5201,7 +5204,8 @@ enum ChannelConfiguration {
 /// An immutable snapshot of the reusable authored document configuration.
 ///
 /// This authority deliberately excludes document identity, canvas dimensions,
-/// source identity, revisions, history, evaluator state, and frontend state.
+/// source identity, physical print intent, revisions, history, evaluator state,
+/// and frontend state.
 /// Binding always supplies those project-specific values from a destination
 /// document and validates the complete resulting document before returning it.
 #[derive(Clone, Debug, PartialEq)]
@@ -5218,7 +5222,7 @@ impl DocumentConfiguration {
     ///
     /// The snapshot preserves exact IDs, sharing relationships, channel order,
     /// inheritance versus explicit channel intent, and source-interpretation
-    /// settings while excluding the source reference itself.
+    /// settings while excluding source reference and physical print intent.
     pub fn capture(document: &Document) -> Self {
         Self {
             pattern_definition_bundles: document.pattern_definition_bundles.clone(),
@@ -5229,7 +5233,8 @@ impl DocumentConfiguration {
         }
     }
 
-    /// Binds this reusable configuration to one destination's immutable project authority.
+    /// Binds reusable configuration while preserving destination source, canvas,
+    /// timing, and physical print intent.
     ///
     /// # Errors
     ///
@@ -5241,6 +5246,7 @@ impl DocumentConfiguration {
             id: destination.id,
             canvas: destination.canvas.clone(),
             source: destination.source.clone(),
+            print_preparation: destination.print_preparation.clone(),
             pattern_definition_bundles: self.pattern_definition_bundles.clone(),
             channel_configuration: self.channel_configuration.clone(),
             authored_structures: self.authored_structures.clone(),
@@ -5303,7 +5309,8 @@ impl Document {
     /// workspaces so their `DocumentSession`/`DocumentHistory` begins at
     /// revision zero. The fixed template stays encapsulated in the headless
     /// document layer rather than requiring caller-side construction details.
-    /// It initializes the Stage 20C authored-structure store empty.
+    /// It initializes the Stage 20C authored-structure store empty and physical
+    /// print intent to unknown placement with disabled thresholds.
     ///
     /// # Errors
     ///
@@ -5366,7 +5373,8 @@ impl Document {
     }
 
     /// Constructs and validates a document with an unassigned source reference.
-    /// It delegates to the empty-authored-store legacy constructor.
+    /// It delegates to the empty-authored-store legacy constructor, which starts
+    /// with unknown physical placement and disabled thresholds.
     ///
     /// # Errors
     ///
@@ -5390,7 +5398,8 @@ impl Document {
     }
 
     /// Constructs and validates a document with explicitly supplied source state.
-    /// It initializes the Stage 20C authored-structure store empty.
+    /// It initializes the Stage 20C authored-structure store empty and print
+    /// intent with unknown placement and disabled thresholds.
     ///
     /// # Errors
     ///
@@ -5408,6 +5417,7 @@ impl Document {
             id,
             canvas,
             source,
+            print_preparation: PrintPreparationSettings::default(),
             pattern_definition_bundles,
             channel_configuration: ChannelConfiguration::Legacy(channels),
             authored_structures: Vec::new(),
@@ -5423,7 +5433,8 @@ impl Document {
     /// ordered topology. This is intentionally the narrow construction seam
     /// used by persistence to rebuild a validated authoritative document; it
     /// does not expose the private channel-configuration representation. It
-    /// initializes the Stage 20C authored-structure store empty.
+    /// initializes the Stage 20C authored-structure store empty and print
+    /// intent with unknown placement and disabled thresholds.
     ///
     /// # Errors
     ///
@@ -5442,6 +5453,7 @@ impl Document {
             id,
             canvas,
             source,
+            print_preparation: PrintPreparationSettings::default(),
             pattern_definition_bundles,
             channel_configuration: ChannelConfiguration::Topology { model, topology },
             authored_structures: Vec::new(),
@@ -5453,7 +5465,8 @@ impl Document {
         Ok(document)
     }
 
-    /// Constructs and validates a legacy-channel document with explicit authored construction structures.
+    /// Constructs a legacy-channel document with explicit authored structures
+    /// and unknown physical placement with disabled thresholds.
     ///
     /// # Errors
     ///
@@ -5472,6 +5485,7 @@ impl Document {
             id,
             canvas,
             source,
+            print_preparation: PrintPreparationSettings::default(),
             pattern_definition_bundles,
             channel_configuration: ChannelConfiguration::Legacy(channels),
             authored_structures,
@@ -5483,7 +5497,8 @@ impl Document {
         Ok(document)
     }
 
-    /// Constructs and validates a modeled-topology document with explicit authored construction structures.
+    /// Constructs a modeled document with explicit authored structures and
+    /// unknown physical placement with disabled thresholds.
     ///
     /// # Errors
     ///
@@ -5504,6 +5519,7 @@ impl Document {
             id,
             canvas,
             source,
+            print_preparation: PrintPreparationSettings::default(),
             pattern_definition_bundles,
             channel_configuration: ChannelConfiguration::Topology { model, topology },
             authored_structures,
@@ -5525,6 +5541,27 @@ impl Document {
 
     pub fn source(&self) -> &SourceReference {
         &self.source
+    }
+
+    /// Returns project-specific physical placement and independent advisory width intent.
+    pub fn print_preparation(&self) -> &PrintPreparationSettings {
+        &self.print_preparation
+    }
+
+    /// Installs validated persisted print intent during project construction, without a history edit.
+    ///
+    /// Runtime edits instead use `DocumentCommand::SetPrintPreparation` through history.
+    ///
+    /// # Errors
+    /// Rejects invalid print values before returning a complete document.
+    pub fn with_print_preparation(
+        mut self,
+        settings: PrintPreparationSettings,
+    ) -> Result<Self, ValidationError> {
+        settings.validate()?;
+        self.print_preparation = settings;
+        self.validate()?;
+        Ok(self)
     }
 
     /// Returns the project-only constant-frame-rate and selected output range authority.
@@ -10603,11 +10640,12 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// Returns stable authored-structure, canvas, definition, channel, or
-    /// topology diagnostics without mutating the document.
+    /// Returns stable print-intent, authored-structure, canvas, definition,
+    /// channel, or topology diagnostics without mutating the document.
     pub fn validate(&self) -> Result<(), ValidationError> {
         validate_positive_finite(self.canvas.width, "canvas.width")?;
         validate_positive_finite(self.canvas.height, "canvas.height")?;
+        self.print_preparation.validate()?;
         validate_authored_structures(&self.authored_structures)?;
 
         let mut definition_ids = HashSet::new();
@@ -23626,6 +23664,11 @@ pub enum PatternDefinitionEdit {
 /// evaluator.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DocumentCommand {
+    /// Replaces project-only print intent against an exact stale base through reversible history.
+    SetPrintPreparation {
+        base: PrintPreparationSettings,
+        settings: PrintPreparationSettings,
+    },
     /// Replaces the document-owned settings after comparing an exact stale
     /// base; all channel instances are revalidated atomically before publish.
     SetDocumentPatternSettings {
@@ -23864,6 +23907,7 @@ pub struct PropertyCommandFieldProjection {
 /// omitted from descriptor/command completeness checks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NonFieldCommandOperation {
+    PrintPreparation,
     EffectivePatternAuthority,
     MoveOutputLayer,
     AddAuthoredStructure,
@@ -24269,6 +24313,9 @@ impl DocumentCommand {
             ])
         };
         match self {
+            Command::SetPrintPreparation { .. } => DocumentCommandFieldClassification::NonField(
+                NonFieldCommandOperation::PrintPreparation,
+            ),
             Command::SetDocumentPatternSettings { .. }
             | Command::ReplaceDocumentPatternDefinitionRecipe { .. }
             | Command::SetChannelPatternDefinitionOverride { .. }
@@ -24553,8 +24600,8 @@ impl DocumentCommand {
         }
     }
 
-    /// Returns whether a document-owned structural resource or definition
-    /// transition requires reversible `DocumentHistory` ownership.
+    /// Returns whether a document-level print, structural-resource, or
+    /// definition transition requires reversible `DocumentHistory` ownership.
     ///
     /// The public `DocumentSession` boundary intentionally rejects these
     /// commands; only history records their before/after authoritative
@@ -24562,7 +24609,8 @@ impl DocumentCommand {
     fn requires_history(&self) -> bool {
         matches!(
             self,
-            Self::SetDocumentPatternSettings { .. }
+            Self::SetPrintPreparation { .. }
+                | Self::SetDocumentPatternSettings { .. }
                 | Self::ReplaceDocumentPatternDefinitionRecipe { .. }
                 | Self::ReplaceChannelPatternDefinitionOverrideRecipe { .. }
                 | Self::AddAuthoredStructure { .. }
@@ -24582,7 +24630,7 @@ impl DocumentCommand {
         )
     }
 
-    /// Returns a command's channel target or a neutral ID for document-scoped structural commands.
+    /// Returns a command's channel target or a neutral ID for document-scoped commands.
     ///
     /// The neutral value is used only after command classification exempts non-channel operations
     /// from channel lookup; it is never an implicit document reference.
@@ -24610,7 +24658,8 @@ impl DocumentCommand {
             | Self::SetChannelPaint { channel_id, .. }
             | Self::EditSelectedChannelPatternDefinition { channel_id, .. }
             | Self::EditSelectedChannelPatternDefinitionBundle { channel_id, .. } => *channel_id,
-            Self::SetSourceReference { .. }
+            Self::SetPrintPreparation { .. }
+            | Self::SetSourceReference { .. }
             | Self::SetDocumentPatternSettings { .. }
             | Self::ReplaceDocumentPatternDefinitionRecipe { .. }
             | Self::ReplaceChannelTopology { .. }
@@ -24637,7 +24686,8 @@ impl DocumentCommand {
     fn validate(&self, document: &Document) -> Result<(), ValidationError> {
         if !matches!(
             self,
-            Self::SetSourceReference { .. }
+            Self::SetPrintPreparation { .. }
+                | Self::SetSourceReference { .. }
                 | Self::SetDocumentPatternSettings { .. }
                 | Self::ReplaceDocumentPatternDefinitionRecipe { .. }
                 | Self::ReplaceChannelTopology { .. }
@@ -24665,6 +24715,15 @@ impl DocumentCommand {
         }
 
         match self {
+            Self::SetPrintPreparation { base, settings } => {
+                if &document.print_preparation != base {
+                    return Err(ValidationError::new(
+                        "print.settings.base",
+                        "print preparation base is stale",
+                    ));
+                }
+                settings.validate()
+            }
             Self::SetDocumentPatternSettings { base, settings } => {
                 if &document.pattern_settings != base {
                     return Err(ValidationError::new(
@@ -25254,6 +25313,10 @@ impl DocumentCommand {
     /// partial candidate; authoritative session/history code installs the completed clone atomically.
     fn apply_to_valid_document(&self, document: &mut Document) {
         match self {
+            Self::SetPrintPreparation { settings, .. } => {
+                document.print_preparation = settings.clone();
+                return;
+            }
             Self::SetDocumentPatternSettings { settings, .. } => {
                 document.pattern_settings = settings.clone();
                 document.prune_document_base_output_response_deltas();
@@ -25752,6 +25815,13 @@ impl DocumentCommand {
     /// Authored resource replacements enumerate every current generic-guide consumer in channel
     /// order, while unreferenced resource operations retain the established empty result.
     fn result_for_transition(&self, before: &Document, after: &Document) -> CommandResult {
+        if matches!(self, Self::SetPrintPreparation { .. }) {
+            return CommandResult {
+                affected_channels: Vec::new(),
+                invalidation: None,
+                created_authored_structure_id: None,
+            };
+        }
         match self {
             Self::EditSelectedChannelPatternDefinitionBundle {
                 channel_id,
@@ -25856,6 +25926,9 @@ impl DocumentCommand {
                 property_field_contract(projection.field).invalidation
             }
             DocumentCommandFieldClassification::NonField(operation) => match operation {
+                NonFieldCommandOperation::PrintPreparation => {
+                    unreachable!("print preparation has no render invalidation")
+                }
                 NonFieldCommandOperation::EffectivePatternAuthority => InvalidationLevel::Family,
                 NonFieldCommandOperation::MoveOutputLayer => InvalidationLevel::Presentation,
                 NonFieldCommandOperation::AddAuthoredStructure
