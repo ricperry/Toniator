@@ -346,3 +346,11 @@ accessibility names, roles, states, and keyboard paths.
 
 Release binaries are distributed through GitHub Releases. Historical implementations,
 local planning records, and design experiments are not part of the current source tree.
+
+## Support development
+
+If you find Toniator useful, you can support development with an optional
+[tip on Ko-fi](https://ko-fi.com/silentbutdigitaldesigns).
+
+For artwork and design products, visit
+[Silent But Digital Designs](https://silentbutdigitaldesigns.com).
