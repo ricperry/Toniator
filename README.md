@@ -13,8 +13,8 @@ Built with Rust and GTK4, Toniator includes a visual Pattern Wizard, a personal
 Pattern library, and a headless command-line renderer. It is free software under
 the [GPL-3.0-only license](LICENSE).
 
-**Current prerelease: 0.3.3.**
-[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.3.3) ·
+**Current prerelease: 0.4.0.**
+[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.4.0) ·
 [Windows development build (0.3.2)](https://github.com/ricperry/Toniator/releases/tag/v0.3.2-windows-dev.20260927) ·
 [native Windows build instructions](docs/windows-build.md) ·
 [known issues](ISSUES.md).
@@ -36,7 +36,7 @@ See [example settings and reproduction commands](docs/examples/README.md).
 ## Download and run
 
 Download **one** of the x86_64 Linux packages from the
-[0.3.3 release](https://github.com/ricperry/Toniator/releases/tag/v0.3.3).
+[0.4.0 release](https://github.com/ricperry/Toniator/releases/tag/v0.4.0).
 Both include the graphical app and CLI, with application ID
 `io.github.ricperry.Toniator`.
 
@@ -52,15 +52,17 @@ until you have recovered any settings or personal Patterns you need.
 In the folder containing your download:
 
 ```bash
-chmod +x Toniator-0.3.3-x86_64.AppImage
-./Toniator-0.3.3-x86_64.AppImage
+chmod +x Toniator-0.4.0-x86_64.AppImage
+./Toniator-0.4.0-x86_64.AppImage
 ```
 
-This build requires **glibc 2.39 or newer**; it was tested on Fedora 44/Wayland.
-If FUSE mounting is unavailable, run it with:
+The AppImage's recorded minimum glibc version is in the attached
+`build-info.json`. Fedora 44/Wayland is the tested development environment;
+broad distribution compatibility is not established. If FUSE mounting is
+unavailable, run it with:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.3.3-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.0-x86_64.AppImage
 ```
 
 ### Flatpak
@@ -68,7 +70,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.3.3-x86_64.AppImage
 With Flatpak installed, run:
 
 ```bash
-flatpak install --user ./Toniator-0.3.3-x86_64.flatpak
+flatpak install --user ./Toniator-0.4.0-x86_64.flatpak
 flatpak run io.github.ricperry.Toniator
 ```
 
@@ -85,7 +87,7 @@ Download `SHA256SUMS` alongside the packages to verify their integrity with
 
 The separate [Windows development release](https://github.com/ricperry/Toniator/releases/tag/v0.3.2-windows-dev.20260927)
 contains unsigned portable GUI and CLI binaries built as version 0.3.2. It is
-not a Windows build of this 0.3.3 prerelease; no 0.3.3 Windows package is
+not a Windows build of this 0.4.0 prerelease; no 0.4.0 Windows package is
 provided. To build the current source natively with MSVC and without WSL, follow
 the [Windows build instructions](docs/windows-build.md). The portable package
 has no installer or signing, and video tools require the optional
@@ -106,6 +108,7 @@ scrolls within its own bounded area.
    placement, and styling in the Pattern Wizard.
 4. Adjust Feature size, rotation, and appearance. Use **Preview / Source** to
    compare the result with your original artwork, and zoom or Fit to inspect it.
+   When zoomed beyond Fit, drag the artwork with the left mouse button to pan.
    Zooming and panning refresh the visible viewport at display resolution to
    keep the enlarged preview sharp.
 5. Save a `.toniator` project to keep the source image and editable settings.
@@ -270,7 +273,7 @@ Use an `.svg` output filename for vector export. Render a saved project using
 its stored settings with `toniator render -i artwork.toniator -o artwork.svg`.
 Run `toniator --help` or `toniator render --help` for the supported commands.
 
-In an AppImage, prepend `./Toniator-0.3.3-x86_64.AppImage --cli` in place of
+In an AppImage, prepend `./Toniator-0.4.0-x86_64.AppImage --cli` in place of
 `toniator`. The Flatpak CLI is available through
 `flatpak run --command=toniator io.github.ricperry.Toniator`; direct CLI file paths must be
 accessible inside its sandbox.
@@ -316,7 +319,7 @@ to the document as one undoable edit; closing the sheet before exporting discard
 them. Optional first/last frames select an export subset. PNG sequences,
 lossless FFV1/Matroska and optional AV1/WebM remain available.
 
-Current development writes project document schema **11** in media container
+Version 0.4.0 writes project document schema **11** in media container
 **2**. The strict reader also accepts pre-change schema **10**, supplying default
 print-preparation settings; opening that project leaves its file untouched, and
 saving it writes schema 11. The pre-G1a v0.3.3 application cannot read schema 11.
@@ -324,7 +327,7 @@ Document Presets remain format **3** with frozen configuration schema **10**,
 and Pattern format remains **5**. Other unsupported or hybrid document schemas
 are rejected; projects are not downgraded automatically.
 
-Current development also includes a headless, advisory garment preflight. For
+Version 0.4.0 includes a headless, advisory garment preflight. For
 example:
 
 ```bash
@@ -339,9 +342,25 @@ process-specific thresholds; they are not Toniator recommendations. Command-line
 overrides are used for that report and never saved to the project. The analysis
 inventories the final transparent output even when either width check is
 disabled. Its `--help` identifies the command as advisory and says it never
-certifies print safety. The 0.3.3 release binaries predate this command; there
-is no desktop preflight interface yet. The [garment preparation plan](docs/GARMENT_PRINT_PREPARATION_PLAN.md)
-records this work-in-progress checkpoint and its remaining validation limits.
+certifies print safety. The v0.4.0 CLI includes this command.
+
+PNG export options include **Prepare for garment printing**, off by default.
+When enabled, maximum physical width and height in mm or in plus DPI set one
+aspect-preserving pixel size and matching PNG density. Preparation makes pixels
+with alpha at least 128 fully opaque and lower-alpha pixels transparent. It can
+remove isolated marks, thicken narrow features, or treat
+narrow gaps by filling or growing them. Each correction has its own threshold;
+zero disables it. The preview updates automatically and shows the same prepared
+pixels as the exported file beside the settings, with a draggable divider,
+zoom, and pan. Background and custom fills have separate swatches; both provide
+**Use garment color**, which copies the viewer swatch once. These settings do
+not change the project or ordinary PNG exports. The result is not a print-safety
+certification. See the
+[garment preparation plan](docs/GARMENT_PRINT_PREPARATION_PLAN.md)
+for exact behavior and validation limits.
+
+The updated main preview can also be panned by dragging the artwork with the
+primary mouse button when zoomed beyond Fit.
 
 Known limitations include slow previews at very fine feature sizes, first-use
 personal thumbnail latency, and an intermittent reported RGB-to-CMYK crash.
@@ -357,7 +376,8 @@ exhaustive GNOME/Mutter or native file-portal acceptance.
 - [Pattern Wizard regression checks](docs/PATTERN_WIZARD_TESTING.md)
 - [Example artwork and reproduction commands](docs/examples/README.md)
 - [Package installation and build guide](packaging/README.md)
-- [Release notes](docs/releases/v0.3.3.md)
+- [Release notes](docs/releases/v0.4.0.md)
+- [Previous release notes](docs/releases/v0.3.3.md)
 - [Architecture and design specifications](Project%20Specification/ArchitectureSchema.md)
 
 The [Addendum](Project%20Specification/Addendum.md) takes precedence over other

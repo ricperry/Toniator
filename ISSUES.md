@@ -198,23 +198,21 @@ an entry does not authorize a later stage or change an accepted contract.
   below, including cancellation and both source formats. Preserve canonical
   geometry/export fidelity and truthful preview state when scoping an optimization.
 
-## TON-011 — Garment print preflight has no desktop workflow
+## TON-011 — Optional garment PNG preparation
 
-- Status: G1a and G1b are user-accepted and included in the 2026-10-04
-  work-in-progress checkpoint; G1b was accepted on 2026-10-04. G0 evidence
-  and its measurement contract are the accepted implementation baseline; its
-  uncertainty band remains provisional. G2a is implemented and awaiting user
-  review, not accepted. This checkpoint adds no visible
-  controls; GTK/chooser runtime behavior, heavy-decode cancellation, physical
-  print validation, and any print-safety claim remain unverified. G2b UI, G2c
-  GUI evidence, and G2R cleanup remain separately gated.
-- Request: Before exporting garment artwork, show physical print dimensions,
-  effective pixels per inch, partial alpha/coverage, and configurable warnings
-  for isolated details, narrow positive features, and narrow negative gaps.
-- Boundary: Start with user-entered physical width and height. The document
-  canvas currently has no physical unit, and no supplier SKU or placement has
-  been selected. Do not invent universal print thresholds or imply a safe-print
-  certificate. Keep the source editable and all findings advisory.
+- Status: G0 and its measurement contract are accepted as the G1a implementation
+  baseline; the uncertainty band remains provisional. G1a, G1b, and G2a are
+  accepted. The user accepted the revised G2b implementation on 2026-10-07 for
+  the v0.4.0 release. G2c broader evidence and work beyond the explicitly
+  authorized G2b corrections remain gated.
+- Request: Offer an optional PNG preparation path for garment printing. Let the
+  artist set maximum physical dimensions and DPI, choose export-local pixel
+  corrections, preview the result, and preserve the editable project and normal
+  PNG export behavior.
+- Boundary: No supplier product, placement, universal DPI recommendation, or
+  minimum print feature is assumed. Prepared output is not a print-safe
+  certificate or a prediction of fabric color, adhesion, hand, or wash life.
+  Preparation is explicitly enabled for each PNG export; the default is off.
 - Implemented G1a: document-owned optional physical size in canonical mm and
   independent positive-feature/negative-gap thresholds; zero disables either
   threshold. History-only edits support undo/redo and do not invalidate renders.
@@ -242,12 +240,46 @@ an entry does not authorize a later stage or change an accepted contract.
   review uses a tiny analytic fixture; it was not run across the full asset
   matrix. Stress performance and active cancellation during heavy work remain
   unverified. See the report for limits, raw outputs, and review derivatives.
-- Next step: User review of the [G2a headless report](target/validation/garment-g2a-20261004/report.md)
-  and [permission diagnosis](target/validation/garment-g2a-20261004/permission-diagnosis.md).
-  Three engine, nine controller, and one app-export test passed; ordinary export
-  needs no report and retains existing default pixels. G2b/G2c and GTK/physical
-  validation need separate acceptance. TON-013 remains a separate deferred SVG
-  issue; no SVG change is part of G2a.
+- Accepted G2a: The [G2a headless report](target/validation/garment-g2a-20261004/report.md)
+  remains historical evidence for the accepted internal report/raster pair and
+  chooser-entry capture. Its 2026-10-04 tests do not establish the later G2b PNG
+  preparation workflow. The [permission diagnosis](target/validation/garment-g2a-20261004/permission-diagnosis.md)
+  remains attached to that earlier work.
+- Accepted G2b: PNG options have an explicit, default-off **Prepare for
+  garment printing** control. Maximum physical width/height and DPI determine
+  one aspect-preserving pixel target, with the corresponding PNG density
+  metadata. At alpha 128, the prepared raster becomes binary alpha. Optional
+  export-local corrections remove isolated marks below a separate cutoff,
+  thicken narrow positive features, and treat narrow gaps using average-edge
+  fill, background-color fill, custom-color fill, or growth to minimum width.
+  All correction thresholds default to zero, and zero disables that pass.
+  Preview and PNG export use the same captured
+  prepared pixels. Preview updates automatically on open and after changes,
+  with debounced cancellation and one worker retaining the latest request. The
+  mm/in selector precedes dimensions. See the [automatic-preview evidence](target/validation/garment-auto-preview-20261007/verification.md). The correction preview supports 100%/200% zoom and scrollbars
+  for panning. A separate background-fill swatch is used on transparent output;
+  **Use garment color** copies the viewer swatch once and later viewer changes do
+  not change the copied fill. These choices do not edit or persist to the
+  project. There is no advisory findings section in this dialog. Ordinary PNG
+  export remains on its existing path when preparation is off.
+- G2b verification: Focused cleanup, alpha-boundary, preview/export parity,
+  physical-fit, view, and PNG metadata tests passed. Formatting, strict app
+  Clippy, app build, and `git diff --check` passed. Private Sway verification
+  covered the final controls, keyboard/pointer input, swatch independence,
+  zoom/pan, and a native chooser export from the raster input. Headless export
+  tests cover both immutable inputs, raw RGBA parity, binary alpha, dimensions,
+  and density metadata. The exact commands,
+  screenshots, logs, and raw outputs are in
+  [revised G2b verification](target/validation/garment-binary-alpha-20261007/verification.md).
+- Limits: Square-grid/axis conventions approximate diagonal physical widths.
+  Correction is capped at 32 million pixels, 256 pixels per width, and bounded
+  expansion work; a budget failure writes no partial file. This is not physical
+  print validation. GNOME/Mutter, production-portal behavior, and human review
+  are not established by the private Sway run. The earlier
+  [G2b runtime report](target/validation/garment-g2b-20261007/runtime-verification.md)
+  is historical evidence for the superseded advisory-review UI, not proof of the
+  revised workflow. TON-013 remains a separate deferred SVG issue; no SVG change
+  is part of this work.
 
 ## TON-012 — Transparency and color confidence needs separate investigation
 
@@ -338,3 +370,92 @@ an entry does not authorize a later stage or change an accepted contract.
   raster appearance parity. Test Inkscape selection/union only in a separately
   authorized GUI check. Do not alter raster/preview output, minimum-fill
   geometry, or unrelated numeric formatting as part of this fix.
+
+## TON-014 — SVG font discovery can reject available system fonts
+
+- Status: Open; low priority and deferred at the user's request. Tracking only;
+  no diagnosis or fix is authorized by this entry.
+- Observed failure: The unchanged published `b819fd4` AppImage rejects
+  `vector-sample.svg` on a clean Debian 13.7 / Xfce 4.20 / X11 VM during stock
+  file-chooser import and a separate direct-file launch:
+  `source.svg.font_policy: no usable system sans-serif font is available`.
+  DejaVu fonts are installed and `fc-match sans` succeeds. Root cause remains
+  unresolved; these observations do not establish why the importer rejects them.
+- Candidate SHA-256:
+  `9643e6fc6577c2ec7a687283d71fdbe132062c569ebac652bfba50f2ed00e86a`.
+  Existing packaged-QA evidence: `packaged-qa-progress.json` and
+  `vm-check-toniator-vector-direct.png` in the local 2026-10-05 QA evidence.
+- Scope: Raster import/edit, project save/close/relaunch/reopen, and PNG/SVG
+  export passed in that VM. SVG export success does not establish SVG source
+  import success or exact font/output parity. This issue is separate from
+  TON-013's SVG-export geometry finding.
+- Product boundary: Toniator is a deforming/conversion tool; original artwork
+  is retained as reference material, not reproduced pixel for pixel. This issue
+  concerns SVG import availability and font resolution, not source/output pixel
+  equivalence. Deterministic transformations, saved reference data, and persistence
+  remain separate verification concerns.
+- User guidance: Convert SVG text to paths/curves in the authoring tool before
+  export when precise source-reference interpretation matters, instead of relying
+  on other consumers having identical fonts installed. This stabilizes the source
+  reference, not Toniator output fidelity. It is not a verified workaround for
+  the importer error above; textless/outlined SVG import has not been tested for
+  this failure.
+
+## TON-015 — Advanced sidebar entry has conflicting disclosure behavior
+
+- Status: Open; user-reported, not reproduced; tracking only. No implementation
+  is authorized by this entry.
+- Report: The main sidebar presents a single button under a collapsible
+  Advanced heading. The user considers this organization confusing.
+- Acceptable designs, pending implementation planning: make Advanced a complete
+  collapsible section containing its settings, or make it a direct button that
+  opens a dialog. This entry does not choose between them.
+- Verification: Inspect the live sidebar and keyboard/accessibility behavior;
+  confirm the chosen design has either settings inside the expanded section or
+  a direct dialog-opening action, with no orphan button under the heading.
+
+## TON-016 — Shared appearance baseline should survive channel-model changes
+
+- Status: Open; user-reported concern, not reproduced; tracking only. No
+  persistence or schema change is proposed by this entry.
+- Report: Appearance settings applied to All compatible channels may lose their
+  shared baseline when Color & Channel Model changes.
+- Expected behavior: Preserve the shared baseline across model changes. Only
+  channel-specific deviations without a relevant counterpart in the destination
+  model may change; such an exception must not reset the shared baseline or all
+  channel appearances.
+- Verification: Apply distinct appearance values to All compatible channels,
+  change Color & Channel Model, and verify the shared values remain. Repeat with
+  a per-channel override and verify only an override without a destination-model
+  counterpart may change.
+
+## TON-017 — Applying a built-in Pattern should not require a review step
+
+- Status: Open; user-reported, not reproduced; tracking only. No implementation
+  is authorized by this entry.
+- Report: Selecting a built-in Pattern in Pattern Wizard presents Review Pattern
+  as an action before applying the familiar Pattern.
+- Expected behavior: The selected built-in offers exactly Cancel, Customize,
+  Create new, and Apply Pattern. Apply Pattern directly applies the familiar
+  built-in without another review step; this is a behavior change, not only a
+  label change. Preserve Cancel, Customize, and Create new semantics. Customize
+  remains the way to inspect and step through settings. This issue does not
+  authorize redesigning the custom-Pattern workflow.
+- Verification: In the live wizard, verify the four actions and direct built-in
+  application; also verify Customize can inspect/step through settings and that
+  Cancel and Create new retain their current behavior.
+
+## TON-018 — Calibrate RGB and CMYK advanced settings for source-tone fidelity
+
+- Status: Deferred at the user's request (2026-10-07); tracking only. Do not
+  begin calibration until the user requests it and supplies the presets.
+- Goal: Dial in Advanced settings separately for RGB and CMYK, using each
+  mode's respective user-provided preset, so the overall image tone matches
+  the source artwork.
+- Inputs pending: The user will provide the preset or presets for the two
+  modes before calibration begins.
+- Scope when resumed: Compare each preset's rendered result with the source,
+  tune its Advanced settings, and record the final values for each mode.
+- Verification: Present source, baseline, and calibrated comparisons for RGB
+  and CMYK, with the corresponding preset and settings identified, for the
+  user's review of overall tonal fidelity.

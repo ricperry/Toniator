@@ -100,6 +100,42 @@ impl MainViewState {
     }
 }
 
+/// Projects a pointer drag into one native adjustment value when that axis can actually scroll.
+///
+/// The GTK adjustment remains the viewport authority; this helper subtracts drag movement from
+/// the captured origin and clamps it to the adjustment's current legal range. It returns `None`
+/// for non-finite or invalid ranges and for an axis with no overflow.
+pub(crate) fn pan_adjustment_value(
+    lower: f64,
+    upper: f64,
+    page_size: f64,
+    origin: f64,
+    pointer_delta: f64,
+) -> Option<f64> {
+    if !lower.is_finite()
+        || !upper.is_finite()
+        || !page_size.is_finite()
+        || !origin.is_finite()
+        || !pointer_delta.is_finite()
+        || upper < lower
+        || page_size < 0.0
+    {
+        return None;
+    }
+    let maximum = upper - page_size;
+    if !maximum.is_finite() {
+        return None;
+    }
+    let maximum = maximum.max(lower);
+    if maximum <= lower {
+        return None;
+    }
+    let requested = origin - pointer_delta;
+    requested
+        .is_finite()
+        .then(|| requested.clamp(lower, maximum))
+}
+
 /// Retains desktop preference subscriptions without document or persistence authority.
 pub(crate) struct SystemThemeBridge {
     _desktop_settings: Option<gio::Settings>,
@@ -268,5 +304,32 @@ mod tests {
         assert!(!state.can_zoom_out());
         state.fit();
         assert!(state.is_fit());
+    }
+
+    /// Checks pointer movement follows the drag and clamps to the live adjustment range.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any result differs from the expected bounded adjustment projection.
+    #[test]
+    fn pan_adjustment_value_clamps_and_requires_overflow() {
+        assert_eq!(
+            pan_adjustment_value(0.0, 1000.0, 200.0, 300.0, 75.0),
+            Some(225.0)
+        );
+        assert_eq!(
+            pan_adjustment_value(0.0, 1000.0, 200.0, 20.0, 90.0),
+            Some(0.0)
+        );
+        assert_eq!(
+            pan_adjustment_value(0.0, 1000.0, 200.0, 780.0, -90.0),
+            Some(800.0)
+        );
+        assert_eq!(pan_adjustment_value(0.0, 200.0, 200.0, 0.0, 40.0), None);
+        assert_eq!(pan_adjustment_value(10.0, 9.0, 0.0, 10.0, 0.0), None);
+        assert_eq!(
+            pan_adjustment_value(0.0, f64::INFINITY, 100.0, 0.0, 0.0),
+            None
+        );
     }
 }

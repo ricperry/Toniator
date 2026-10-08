@@ -2,98 +2,565 @@ using Gtk 4.0;
 
 template $ToniatorPngExportOptions : Gtk.Box {
   orientation: vertical;
-  spacing: 12;
-  margin-top: 18;
-  margin-bottom: 18;
-  margin-start: 18;
-  margin-end: 18;
+  spacing: 0;
 
-  Gtk.Grid {
-    row-spacing: 12;
-    column-spacing: 12;
+  Gtk.Paned print_options_paned {
+    orientation: horizontal;
+    position: 520;
+    hexpand: true;
+    vexpand: true;
+    wide-handle: true;
+    resize-start-child: true;
+    shrink-start-child: false;
+    resize-end-child: true;
+    shrink-end-child: false;
+    accessibility {
+      label: "PNG settings and final preview divider";
+      description: "Press F8 to focus or cycle the divider, use Left and Right arrows to resize, and press Tab to leave.";
+    }
 
-    Gtk.Label {
-      label: "_Background";
-      use-underline: true;
-      halign: start;
-      mnemonic-widget: png_background;
-      layout {
-        column: 0;
-        row: 0;
+    [start]
+    Gtk.ScrolledWindow print_options_scroll {
+      min-content-width: 470;
+      hexpand: true;
+      vexpand: true;
+      hscrollbar-policy: never;
+      vscrollbar-policy: automatic;
+      Gtk.Box print_options_body {
+        orientation: vertical;
+        spacing: 12;
+        margin-top: 18;
+        margin-bottom: 12;
+        margin-start: 18;
+        margin-end: 18;
+
+        Gtk.Grid {
+          row-spacing: 10;
+          column-spacing: 10;
+
+          Gtk.Label {
+            label: "_Background";
+            use-underline: true;
+            halign: start;
+            mnemonic-widget: png_background;
+            layout { column: 0; row: 0; }
+          }
+          Gtk.DropDown png_background {
+            tooltip-text: "PNG-only final-consumer backing";
+            hexpand: true;
+            layout { column: 1; row: 0; }
+          }
+          Gtk.Label {
+            label: "_Antialiasing";
+            use-underline: true;
+            halign: start;
+            mnemonic-widget: png_antialiasing;
+            layout { column: 0; row: 1; }
+          }
+          Gtk.DropDown png_antialiasing {
+            tooltip-text: "PNG edge rasterization";
+            hexpand: true;
+            layout { column: 1; row: 1; }
+          }
+          Gtk.Label {
+            label: "Output _size";
+            use-underline: true;
+            halign: start;
+            mnemonic-widget: png_scale;
+            layout { column: 0; row: 2; }
+          }
+          Gtk.DropDown png_scale {
+            tooltip-text: "Scale relative to the normal document output size";
+            hexpand: true;
+            layout { column: 1; row: 2; }
+          }
+          Gtk.Label {
+            label: "Custom _dimensions";
+            use-underline: true;
+            halign: start;
+            mnemonic-widget: png_dimensions;
+            layout { column: 0; row: 3; }
+          }
+          Gtk.Entry png_dimensions {
+            placeholder-text: "WIDTHxHEIGHT";
+            tooltip-text: "Manual PNG width and height in pixels";
+            hexpand: true;
+            layout { column: 1; row: 3; }
+          }
+          Gtk.Label png_size_summary {
+            halign: start;
+            wrap: true;
+            layout { column: 0; row: 4; column-span: 2; }
+          }
+          Gtk.Label png_size_error {
+            halign: start;
+            wrap: true;
+            max-width-chars: 48;
+            styles ["error"]
+            layout { column: 0; row: 5; column-span: 2; }
+          }
+          Gtk.Label png_backing_summary {
+            label: "PNG backing: Automatic · transparent; transparency is retained.";
+            halign: start;
+            wrap: true;
+            layout { column: 0; row: 6; column-span: 2; }
+          }
+        }
+
+        Gtk.Button print_review_button {
+          visible: false;
+          label: "Review…";
+          halign: start;
+          tooltip-text: "Expand the optional final-output print-preparation review";
+          accessibility { label: "Review print preparation"; }
+        }
+
+        Gtk.Expander print_review_expander {
+          label: "Print preparation";
+          accessibility { label: "Print preparation"; }
+          expanded: false;
+          styles ["toniator-print-review"]
+          Gtk.Box print_review_content {
+            orientation: vertical;
+            spacing: 10;
+            margin-top: 8;
+            margin-bottom: 8;
+
+            Gtk.CheckButton print_prepare_toggle {
+              label: "Prepare for garment printing";
+              tooltip-text: "Convert final transparent artwork to fully opaque or transparent pixels at 50% alpha before applying the selected PNG background";
+            }
+            Gtk.Label {
+              label: "Edges below 50% opacity become transparent; edges at or above 50% become solid. The preview updates automatically.";
+              xalign: 0;
+              wrap: true;
+              styles ["dim-label"]
+            }
+
+            Gtk.Grid print_box_settings {
+              row-spacing: 6;
+              column-spacing: 10;
+              visible: false;
+              Gtk.Label {
+                label: "Print box _units";
+                use-underline: true;
+                mnemonic-widget: print_box_unit;
+                halign: start;
+                layout { column: 0; row: 0; }
+              }
+              Gtk.DropDown print_box_unit {
+                tooltip-text: "Display units for the export-local maximum print box";
+                accessibility { label: "Print box units"; }
+                hexpand: true;
+                layout { column: 1; row: 0; }
+              }
+              Gtk.Label print_box_width_label {
+                label: "Maximum print _width (mm)";
+                use-underline: true;
+                mnemonic-widget: print_box_width;
+                halign: start;
+                layout { column: 0; row: 1; }
+              }
+              Gtk.Entry print_box_width {
+                input-purpose: number;
+                placeholder-text: "Maximum width";
+                accessibility { label: "Maximum print box width in millimetres"; }
+                hexpand: true;
+                layout { column: 1; row: 1; }
+              }
+              Gtk.Label print_box_height_label {
+                label: "Maximum print _height (mm)";
+                use-underline: true;
+                mnemonic-widget: print_box_height;
+                halign: start;
+                layout { column: 0; row: 2; }
+              }
+              Gtk.Entry print_box_height {
+                input-purpose: number;
+                placeholder-text: "Maximum height";
+                accessibility { label: "Maximum print box height in millimetres"; }
+                hexpand: true;
+                layout { column: 1; row: 2; }
+              }
+              Gtk.Label {
+                label: "_Resolution (DPI)";
+                use-underline: true;
+                mnemonic-widget: print_target_dpi;
+                halign: start;
+                layout { column: 0; row: 3; }
+              }
+              Gtk.Entry print_target_dpi {
+                input-purpose: number;
+                text: "300";
+                accessibility { label: "Print resolution in DPI"; }
+                hexpand: true;
+                layout { column: 1; row: 3; }
+              }
+            }
+
+            Gtk.Label print_box_message {
+              label: "Artwork keeps its proportions and fits inside this maximum print box.";
+              xalign: 0;
+              wrap: true;
+              visible: false;
+              styles ["dim-label"]
+            }
+
+            Gtk.Grid print_correction_settings {
+              row-spacing: 6;
+              column-spacing: 10;
+              visible: false;
+              Gtk.Label { label: "Minimum _feature width (px)"; use-underline: true; mnemonic-widget: print_min_feature; halign: start; layout { column: 0; row: 0; } }
+              Gtk.Entry print_min_feature { text: "0"; input-purpose: digits; accessibility { label: "Minimum feature width in pixels"; } tooltip-text: "Thicken local thin features; zero disables thickening"; layout { column: 1; row: 0; } }
+              Gtk.Label { label: "_Remove isolated below (px)"; use-underline: true; mnemonic-widget: print_remove_below; halign: start; layout { column: 0; row: 1; } }
+              Gtk.Entry print_remove_below { text: "0"; input-purpose: digits; accessibility { label: "Remove isolated features below pixels"; } tooltip-text: "Remove whole isolated features narrower than this value; attached spurs remain part of their larger feature"; layout { column: 1; row: 1; } }
+              Gtk.Label { label: "Minimum _gap width (px)"; use-underline: true; mnemonic-widget: print_min_gap; halign: start; layout { column: 0; row: 2; } }
+              Gtk.Entry print_min_gap { text: "0"; input-purpose: digits; accessibility { label: "Minimum gap width in pixels"; } tooltip-text: "Treat locally narrow gaps bounded by artwork; zero disables gap correction"; layout { column: 1; row: 2; } }
+              Gtk.Label { label: "Gap _strategy"; use-underline: true; mnemonic-widget: print_gap_strategy; halign: start; layout { column: 0; row: 3; } }
+              Gtk.DropDown print_gap_strategy { accessibility { label: "Gap strategy"; } hexpand: true; layout { column: 1; row: 3; } }
+            }
+
+            Gtk.Box print_gap_colors {
+              orientation: vertical;
+              spacing: 8;
+              visible: false;
+              Gtk.Box print_background_color_row {
+                orientation: vertical;
+                spacing: 6;
+                Gtk.Box {
+                  spacing: 8;
+                  Gtk.Label { label: "Background fill"; }
+                  Gtk.Entry print_background_fill { text: "#FFFFFF"; max-length: 7; width-chars: 9; accessibility { label: "Background gap fill color"; } tooltip-text: "Used for Background fill when PNG backing is Transparent"; }
+                  Gtk.DrawingArea print_background_swatch { content-width: 24; content-height: 24; can-target: false; accessibility { label: "Background gap fill swatch"; } }
+                }
+                Gtk.Button print_use_garment_color { label: "Use garment color"; halign: start; tooltip-text: "Copy the current preview garment color into the separate background fill swatch"; }
+              }
+              Gtk.Box print_custom_color_row {
+                orientation: vertical;
+                spacing: 6;
+                Gtk.Box {
+                  spacing: 8;
+                  Gtk.Label { label: "Custom fill"; }
+                  Gtk.Entry print_custom_fill { text: "#FFFFFF"; max-length: 7; width-chars: 9; accessibility { label: "Custom gap fill color"; } }
+                  Gtk.DrawingArea print_custom_swatch { content-width: 24; content-height: 24; can-target: false; accessibility { label: "Custom gap fill swatch"; } }
+                }
+                Gtk.Button print_use_custom_garment_color { label: "Use garment color"; halign: start; tooltip-text: "Copy the current preview garment color into the separate custom gap fill swatch"; }
+              }
+            }
+
+            Gtk.Box {
+              visible: false;
+              spacing: 8;
+              Gtk.Label {
+                label: "_Entry units";
+                mnemonic-widget: print_entry_unit;
+                use-underline: true;
+              }
+              Gtk.DropDown print_entry_unit {
+                tooltip-text: "Display units for physical size and independent width thresholds";
+                accessibility { label: "Physical entry units"; }
+              }
+            }
+
+            Gtk.Label {
+              visible: false;
+              label: "Placement describes the complete output canvas. Leave both physical dimensions blank for Unknown.";
+              xalign: 0;
+              wrap: true;
+              styles ["dim-label"]
+            }
+            Gtk.Grid {
+              visible: false;
+              row-spacing: 6;
+              column-spacing: 10;
+              Gtk.Label {
+                label: "Physical _width";
+                use-underline: true;
+                halign: start;
+                mnemonic-widget: print_physical_width;
+                layout { column: 0; row: 0; }
+              }
+              Gtk.Entry print_physical_width {
+                placeholder-text: "Unknown";
+                input-purpose: number;
+                accessibility { label: "Physical width"; }
+                layout { column: 1; row: 0; }
+              }
+              Gtk.Label {
+                label: "Physical _height";
+                use-underline: true;
+                halign: start;
+                mnemonic-widget: print_physical_height;
+                layout { column: 2; row: 0; }
+              }
+              Gtk.Entry print_physical_height {
+                placeholder-text: "Unknown";
+                input-purpose: number;
+                accessibility { label: "Physical height"; }
+                layout { column: 3; row: 0; }
+              }
+              Gtk.Label {
+                label: "Minimum positive _width";
+                use-underline: true;
+                halign: start;
+                mnemonic-widget: print_positive_width;
+                layout { column: 0; row: 1; }
+              }
+              Gtk.Entry print_positive_width {
+                input-purpose: number;
+                accessibility { label: "Minimum positive feature width"; }
+                layout { column: 1; row: 1; }
+              }
+              Gtk.Label {
+                label: "Minimum _gap width";
+                use-underline: true;
+                halign: start;
+                mnemonic-widget: print_negative_gap;
+                layout { column: 2; row: 1; }
+              }
+              Gtk.Entry print_negative_gap {
+                input-purpose: number;
+                accessibility { label: "Minimum negative gap width"; }
+                layout { column: 3; row: 1; }
+              }
+            }
+            Gtk.Label {
+              visible: false;
+              label: "Positive-feature and gap thresholds are independent. Zero disables only that width check.";
+              xalign: 0;
+              wrap: true;
+              styles ["dim-label"]
+            }
+            Gtk.Box {
+              visible: false;
+              spacing: 8;
+              Gtk.Button print_apply_settings {
+                label: "Apply settings";
+                tooltip-text: "Validate and apply the complete physical-intent draft to project history";
+                styles ["suggested-action"]
+              }
+              Gtk.Label print_intent_message {
+                xalign: 0;
+                hexpand: true;
+                wrap: true;
+                styles ["dim-label"]
+              }
+            }
+            Gtk.Label print_applied_summary {
+              visible: false;
+              label: "Applied: Unknown size · positive width off · gap width off";
+              xalign: 0;
+              wrap: true;
+              selectable: true;
+            }
+
+            Gtk.Label print_width_status {
+              label: "Width checks: Not checked";
+              xalign: 0;
+              wrap: true;
+              selectable: true;
+              visible: false;
+            }
+            Gtk.Grid {
+              visible: false;
+              row-spacing: 6;
+              column-spacing: 8;
+              Gtk.Label {
+                label: "Finding _category";
+                use-underline: true;
+                halign: start;
+                mnemonic-widget: print_finding_category;
+                layout { column: 0; row: 0; }
+              }
+              Gtk.DropDown print_finding_category {
+                tooltip-text: "Choose which bounded advisory category to inspect";
+                accessibility { label: "Finding category"; }
+                layout { column: 1; row: 0; }
+              }
+            }
+            Gtk.ScrolledWindow {
+              visible: false;
+              min-content-height: 132;
+              max-content-height: 200;
+              hscrollbar-policy: never;
+              vscrollbar-policy: automatic;
+              accessibility { label: "Print preparation findings"; }
+              Gtk.ListBox print_findings {
+                selection-mode: single;
+                activate-on-single-click: true;
+                accessibility { label: "Print preparation finding list"; }
+              }
+            }
+            Gtk.Box {
+              visible: false;
+              spacing: 8;
+              Gtk.Button print_previous_page {
+                label: "Previous page";
+                tooltip-text: "Show the previous findings page";
+              }
+              Gtk.Label print_page_summary {
+                label: "No findings";
+                xalign: 0.5;
+                hexpand: true;
+                selectable: true;
+              }
+              Gtk.Button print_next_page {
+                label: "Next page";
+                tooltip-text: "Show the next findings page";
+              }
+            }
+            Gtk.Box {
+              visible: false;
+              spacing: 8;
+              Gtk.ToggleButton print_highlight_toggle {
+                label: "Highlight selected runs";
+                active: true;
+                tooltip-text: "Overlay the selected engine pixel runs on the transparent final raster";
+              }
+              Gtk.Button print_zoom_to_location {
+                label: "Zoom to location";
+                tooltip-text: "Zoom and center the selected output-pixel bounds";
+              }
+              Gtk.Button print_fit_view {
+                label: "Fit view";
+                tooltip-text: "Show the complete final raster in the preview area";
+              }
+            }
+          }
+        }
       }
     }
 
-    Gtk.DropDown png_background {
-      tooltip-text: "PNG-only final-consumer backing";
-      layout {
-        column: 1;
-        row: 0;
+    [end]
+    Gtk.Box print_preview_panel {
+      orientation: vertical;
+      spacing: 8;
+      margin-top: 12;
+      margin-bottom: 12;
+      margin-start: 12;
+      margin-end: 18;
+      hexpand: true;
+      vexpand: true;
+      accessibility { label: "Final PNG preview"; }
+
+      Gtk.Box {
+        spacing: 8;
+        Gtk.Label print_check_status {
+          label: "Preview not rendered";
+          xalign: 0;
+          hexpand: true;
+          wrap: true;
+          styles ["heading"]
+        }
+      }
+      Gtk.Label print_target_summary {
+        label: "Final output: target unavailable";
+        xalign: 0;
+        wrap: true;
+        selectable: true;
+        visible: false;
+      }
+
+      Gtk.Box {
+        spacing: 8;
+        Gtk.Button print_preview_zoom_out { label: "Zoom out"; }
+        Gtk.Button print_preview_actual_size { label: "100%"; tooltip-text: "Show one output pixel per preview pixel"; }
+        Gtk.Button print_preview_zoom_in { label: "Zoom in"; }
+        Gtk.Button print_preview_fit { label: "Fit"; tooltip-text: "Fit the whole final PNG in the preview area"; }
+      }
+
+      Gtk.Box {
+        spacing: 8;
+        Gtk.Label {
+          label: "Preview _backdrop";
+          use-underline: true;
+          mnemonic-widget: print_preview_backdrop;
+        }
+        Gtk.DropDown print_preview_backdrop {
+          accessibility { label: "Preview backdrop"; }
+          tooltip-text: "Viewer-only backdrop; does not change exported pixels";
+          hexpand: true;
+        }
+      }
+      Gtk.Box {
+        spacing: 8;
+        Gtk.Label {
+          label: "_Garment color";
+          use-underline: true;
+          mnemonic-widget: print_garment_color;
+        }
+        Gtk.Entry print_garment_color {
+          text: "#7040A0";
+          placeholder-text: "#RRGGBB";
+          max-length: 7;
+          width-chars: 9;
+          accessibility { label: "Garment display color"; }
+          tooltip-text: "Viewer color only; not fabric, underbase, adhesive, or CMYK simulation";
+        }
+        Gtk.DrawingArea print_garment_swatch {
+          content-width: 28;
+          content-height: 28;
+          tooltip-text: "Garment display color swatch";
+          accessibility { label: "Garment display color swatch"; }
+        }
+      }
+      Gtk.Label print_garment_message {
+        xalign: 0;
+        wrap: true;
+        styles ["error"]
+        visible: false;
+      }
+
+      Gtk.ScrolledWindow print_canvas_scroll {
+        min-content-width: 320;
+        min-content-height: 280;
+        hexpand: true;
+        vexpand: true;
+        hscrollbar-policy: automatic;
+        vscrollbar-policy: automatic;
+        accessibility { label: "Transparent final output review canvas"; }
+        Gtk.Overlay print_canvas {
+          hexpand: true;
+          vexpand: true;
+          Gtk.DrawingArea print_backdrop_painter {
+            hexpand: true;
+            vexpand: true;
+            can-target: false;
+          }
+          [overlay]
+          Gtk.Picture print_raster_picture {
+            can-shrink: true;
+            content-fit: contain;
+            hexpand: true;
+            vexpand: true;
+            accessibility { label: "Transparent final output raster"; }
+          }
+          [overlay]
+          Gtk.Picture print_highlight_picture {
+            can-shrink: true;
+            content-fit: contain;
+            hexpand: true;
+            vexpand: true;
+            can-target: false;
+            accessibility { label: "Selected exact pixel-run highlights"; }
+          }
+        }
       }
     }
+  }
 
-    Gtk.Label {
-      label: "_Antialiasing";
-      use-underline: true;
-      halign: start;
-      mnemonic-widget: png_antialiasing;
-      layout {
-        column: 0;
-        row: 1;
-      }
-    }
-
-    Gtk.DropDown png_antialiasing {
-      tooltip-text: "PNG edge rasterization";
-      layout {
-        column: 1;
-        row: 1;
-      }
-    }
-
-    Gtk.Label {
-      label: "Output _size";
-      use-underline: true;
-      halign: start;
-      mnemonic-widget: png_scale;
-      layout {
-        column: 0;
-        row: 2;
-      }
-    }
-
-    Gtk.DropDown png_scale {
-      tooltip-text: "Scale relative to the normal document output size";
-      layout {
-        column: 1;
-        row: 2;
-      }
-    }
-
-    Gtk.Label {
-      label: "Custom _dimensions";
-      use-underline: true;
-      halign: start;
-      mnemonic-widget: png_dimensions;
-      layout { column: 0; row: 3; }
-    }
-
-    Gtk.Entry png_dimensions {
-      placeholder-text: "WIDTHxHEIGHT";
-      tooltip-text: "Manual PNG width and height in pixels";
-      layout { column: 1; row: 3; }
-    }
-
-    Gtk.Label png_size_summary {
-      halign: start;
-      layout { column: 0; row: 4; column-span: 2; }
-    }
-
-    Gtk.Label png_size_error {
-      halign: start;
-      wrap: true;
-      max-width-chars: 48;
-      styles ["error"]
-      layout { column: 0; row: 5; column-span: 2; }
+  Gtk.Box {
+    halign: end;
+    spacing: 8;
+    margin-top: 8;
+    margin-bottom: 16;
+    margin-start: 18;
+    margin-end: 18;
+    Gtk.Button print_close_button { label: "Close"; }
+    Gtk.Button print_export_button {
+      label: "Export PNG…";
+      tooltip-text: "Export the selected PNG with the visible print preparation settings";
+      styles ["suggested-action"]
     }
   }
 }

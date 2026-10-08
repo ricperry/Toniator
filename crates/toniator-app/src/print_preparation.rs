@@ -11,13 +11,14 @@ use std::{
     },
 };
 
+use crate::print_cleanup;
 use toniator_domain::{
     DocumentCommand, DocumentEvaluationToken, DocumentHistory, DocumentSession,
     HalftoneChannelModel, PrintPreparationSettings,
 };
 use toniator_engine::{
     EvaluationLimits, MediaTools, OutputRasterTarget, RasterAntialiasing, RasterBackground,
-    open_source_media,
+    RasterSurface, open_source_media,
     print_preflight::{
         PreflightLimits, PreflightRasterOutcome, PreflightRasterReport, PreflightSelection,
         preflight_current_frame_with_raster,
@@ -48,6 +49,46 @@ pub(crate) struct OutputSelection {
     pub(crate) target: OutputRasterTarget,
     pub(crate) antialiasing: RasterAntialiasing,
     pub(crate) background: BackgroundChoice,
+    /// Explicit PNG-only garment preparation; a collapsed section never changes this value.
+    pub(crate) prepare_for_print: bool,
+    /// Exact integer PNG pHYs density, present only for a validated print box.
+    pub(crate) pixels_per_metre: Option<u32>,
+    pub(crate) cleanup: print_cleanup::Settings,
+}
+
+/// Converts a transparent final composition to a binary mask, then applies export backing.
+///
+/// Alpha below 128 becomes transparent black; alpha 128 or above becomes fully
+/// opaque with its original RGB. Opaque backing fills only the discarded pixels;
+/// applying backing after thresholding prevents prematted RGB from changing survivors.
+///
+/// # Errors
+/// Returns an allocation or surface-validation error without publishing partial pixels.
+pub(crate) fn prepare_binary_alpha(
+    surface: &RasterSurface,
+    backing: RasterBackground,
+    cancelled: &AtomicBool,
+) -> Result<RasterSurface, String> {
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(surface.pixels().len())
+        .map_err(|error| format!("print preparation: could not allocate final pixels: {error}"))?;
+    pixels.extend_from_slice(surface.pixels());
+    for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+        if index % 4096 == 0 && cancelled.load(Ordering::Acquire) {
+            return Err("Print preparation cancelled.".into());
+        }
+        if pixel[3] < 128 {
+            match backing {
+                RasterBackground::Transparent => pixel.copy_from_slice(&[0, 0, 0, 0]),
+                RasterBackground::OpaqueBlack => pixel.copy_from_slice(&[0, 0, 0, 255]),
+                RasterBackground::OpaqueWhite => pixel.copy_from_slice(&[255, 255, 255, 255]),
+            }
+        } else {
+            pixel[3] = 255;
+        }
+    }
+    RasterSurface::new(surface.width(), surface.height(), pixels).map_err(|error| error.to_string())
 }
 
 impl OutputSelection {
@@ -384,7 +425,7 @@ impl Controller {
 }
 
 /// Borrowed live authority checked after off-thread source freshness succeeds.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LiveAuthority {
     pub(crate) token: DocumentEvaluationToken,
     pub(crate) frame: u64,
@@ -403,7 +444,7 @@ impl LiveAuthority {
     }
 }
 
-const MAX_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Accounts for retained RGBA and result-vector payload capacity.
 ///
@@ -411,7 +452,7 @@ const MAX_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
 /// RSS or hard object cap: identity strings, allocator overhead, source/provider
 /// and evaluator allocations are outside it. Future texture/highlight ownership
 /// must charge this same budget before retention.
-fn retained_bytes(pair: &PreflightRasterReport) -> Option<u64> {
+pub(crate) fn retained_bytes(pair: &PreflightRasterReport) -> Option<u64> {
     let report = pair.report();
     let mut bytes = u64::try_from(pair.raster().pixels().len()).ok()?;
     for (capacity, item_size) in [
@@ -505,6 +546,49 @@ mod tests {
     use std::path::Path;
     use toniator_domain::{CanvasSpec, Document, PhysicalPrintSizeMm, SourceReference};
 
+    /// Checks every eight-bit alpha value at the fixed cutoff and both backing outcomes.
+    #[test]
+    fn garment_binary_alpha_preserves_survivor_rgb_and_eliminates_fractional_alpha() {
+        let mut source = Vec::new();
+        for alpha in 0..=255_u8 {
+            source.extend_from_slice(&[37, 89, 201, alpha]);
+        }
+        let surface = RasterSurface::new(256, 1, source).unwrap();
+        let transparent = prepare_binary_alpha(
+            &surface,
+            RasterBackground::Transparent,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let white = prepare_binary_alpha(
+            &surface,
+            RasterBackground::OpaqueWhite,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        for alpha in 0..=255_usize {
+            let offset = alpha * 4;
+            assert_eq!(
+                &transparent.pixels()[offset..offset + 4],
+                if alpha < 128 {
+                    &[0, 0, 0, 0]
+                } else {
+                    &[37, 89, 201, 255]
+                }
+            );
+            assert_eq!(
+                &white.pixels()[offset..offset + 4],
+                if alpha < 128 {
+                    &[255, 255, 255, 255]
+                } else {
+                    &[37, 89, 201, 255]
+                }
+            );
+        }
+        assert_eq!(surface.pixels()[127 * 4 + 3], 127);
+        assert_eq!(surface.pixels()[128 * 4 + 3], 128);
+    }
+
     /// Builds an authoritative headless history without starting GTK or source work.
     fn history() -> DocumentHistory {
         let document = Document::new_default_document(
@@ -535,6 +619,9 @@ mod tests {
             target: OutputRasterTarget::new(64, 48).unwrap(),
             antialiasing: RasterAntialiasing::On,
             background: BackgroundChoice::Automatic,
+            prepare_for_print: false,
+            pixels_per_metre: None,
+            cleanup: print_cleanup::Settings::default(),
         }
     }
 

@@ -445,6 +445,9 @@ mod tests {
                 path.clone(),
                 crate::ExportSettings {
                     format: crate::ExportFormat::Png,
+                    prepare_for_print: false,
+                    pixels_per_metre: None,
+                    cleanup: crate::print_cleanup::Settings::default(),
                     background: toniator_engine::RasterBackground::Transparent,
                     output_target: None,
                     antialiasing: toniator_engine::RasterAntialiasing::On,

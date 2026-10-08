@@ -693,6 +693,9 @@ fn tonal_controls_publish_selected_frame_and_native_outputs() {
                 directory.join(format!("{name}-end.{suffix}")),
                 ExportSettings {
                     format,
+                    prepare_for_print: false,
+                    pixels_per_metre: None,
+                    cleanup: crate::print_cleanup::Settings::default(),
                     background: RasterBackground::Transparent,
                     output_target: None,
                     antialiasing: RasterAntialiasing::On,

@@ -460,6 +460,9 @@ mod tests {
                 )),
                 ExportSettings {
                     format,
+                    prepare_for_print: false,
+                    pixels_per_metre: None,
+                    cleanup: crate::print_cleanup::Settings::default(),
                     background: RasterBackground::Transparent,
                     output_target: None,
                     antialiasing: RasterAntialiasing::On,

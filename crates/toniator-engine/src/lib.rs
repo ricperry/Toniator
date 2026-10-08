@@ -80,10 +80,10 @@ use toniator_patterns::{
 pub use toniator_render::{
     GeometryOutput, OutputRasterTarget, PreviewRasterTarget, RasterAntialiasing, RasterBackground,
     RasterSurface, RenderError, RenderLayer, RenderScene, SceneIdentity, encode_png,
-    linear_to_srgb, raster_output_identity, rasterize, rasterize_cancellable,
-    rasterize_cancellable_with_progress, rasterize_output, rasterize_preview,
-    rasterize_preview_cancellable, rasterize_preview_cancellable_with_progress, srgb_to_linear,
-    write_svg,
+    encode_png_with_density, linear_to_srgb, raster_output_identity, rasterize,
+    rasterize_cancellable, rasterize_cancellable_with_progress, rasterize_output,
+    rasterize_preview, rasterize_preview_cancellable, rasterize_preview_cancellable_with_progress,
+    srgb_to_linear, write_svg,
 };
 pub use toniator_sampling::{
     DECODER_CONTRACT_ID, ReducedPreviewSource, SourceField, SourceFormat, SourceFormatHint,

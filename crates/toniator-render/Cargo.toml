@@ -1,12 +1,13 @@
 [package]
 name = "toniator-render"
-version = "0.3.3"
+version = "0.4.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
 image.workspace = true
+png = "0.18.1"
 rayon.workspace = true
 toniator-domain = { path = "../toniator-domain" }
 toniator-geometry = { path = "../toniator-geometry" }

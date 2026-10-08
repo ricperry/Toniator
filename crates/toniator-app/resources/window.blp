@@ -361,6 +361,41 @@ template $ToniatorMainShell : Gtk.Box {
           Gtk.Label { label: "Options"; xalign: 0; styles [ "heading" ] }
           Gtk.Box options_controls { orientation: vertical; spacing: 7; }
         }
+        Gtk.Box print_preparation_group {
+          orientation: vertical;
+          spacing: 7;
+          styles [ "toniator-inspector-group" ]
+          Gtk.Label { label: "Print preparation"; xalign: 0; styles [ "heading" ] }
+          Gtk.Box {
+            spacing: 6;
+            Gtk.Label print_preparation_summary {
+              label: "Unknown size · positive width off · gap width off · Not checked";
+              xalign: 0;
+              hexpand: true;
+              wrap: true;
+              selectable: true;
+              max-width-chars: 34;
+              styles [ "dim-label" ]
+            }
+            Gtk.Button print_preparation_review {
+              label: "Review…";
+              tooltip-text: "Review the selected PNG output and physical print settings";
+              accessibility { label: "Review print preparation"; }
+              styles [ "suggested-action" ]
+            }
+          }
+          Gtk.Expander print_preparation_details {
+            label: "Applied settings";
+            accessibility { label: "Applied settings"; }
+            expanded: false;
+            Gtk.Label print_preparation_details_text {
+              label: "Physical dimensions describe the complete output canvas. Positive-feature and gap thresholds are independent; zero disables that check.";
+              xalign: 0;
+              wrap: true;
+              selectable: true;
+            }
+          }
+        }
         Gtk.Expander advanced_expander {
           label: "Advanced";
           expanded: false;

@@ -717,6 +717,9 @@ mod tests {
                     directory.join(format!("{name}-{suffix}.{extension}")),
                     ExportSettings {
                         format,
+                        prepare_for_print: false,
+                        pixels_per_metre: None,
+                        cleanup: crate::print_cleanup::Settings::default(),
                         background: RasterBackground::Transparent,
                         antialiasing: RasterAntialiasing::On,
                         output_target: None,

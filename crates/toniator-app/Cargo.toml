@@ -1,6 +1,6 @@
 [package]
 name = "toniator-app"
-version = "0.3.3"
+version = "0.4.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -16,6 +16,9 @@ toniator-io = { path = "../toniator-io" }
 toniator-patterns = { path = "../toniator-patterns" }
 serde_json.workspace = true
 async-channel = "2.5.0"
+
+[dev-dependencies]
+png = "0.18.1"
 
 [build-dependencies]
 glib-build-tools = "0.22.0"

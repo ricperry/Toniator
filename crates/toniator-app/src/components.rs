@@ -95,6 +95,14 @@ mod main_shell {
         #[template_child]
         pub options_controls: gtk::TemplateChild<gtk::Box>,
         #[template_child]
+        pub print_preparation_summary: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub print_preparation_review: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub print_preparation_details: gtk::TemplateChild<gtk::Expander>,
+        #[template_child]
+        pub print_preparation_details_text: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
         pub advanced_controls: gtk::TemplateChild<gtk::Box>,
     }
 
@@ -329,6 +337,26 @@ impl ToniatorMainShell {
     /// Returns the contextual options control group.
     pub fn options_controls(&self) -> gtk::Box {
         self.imp().options_controls.get()
+    }
+
+    /// Returns the applied size, threshold, and review-state summary.
+    pub fn print_preparation_summary(&self) -> gtk::Label {
+        self.imp().print_preparation_summary.get()
+    }
+
+    /// Returns the visible action that opens the shared PNG review surface.
+    pub fn print_preparation_review(&self) -> gtk::Button {
+        self.imp().print_preparation_review.get()
+    }
+
+    /// Returns the collapsed details expander for applied print settings.
+    pub fn print_preparation_details(&self) -> gtk::Expander {
+        self.imp().print_preparation_details.get()
+    }
+
+    /// Returns the explanatory label for complete-canvas print intent.
+    pub fn print_preparation_details_text(&self) -> gtk::Label {
+        self.imp().print_preparation_details_text.get()
     }
 
     /// Returns the collapsed advanced action and control group.
@@ -1113,6 +1141,8 @@ mod png_export_options {
     #[template(resource = "/com/silentbutdigital/Toniator/png-export-options.ui")]
     pub struct ToniatorPngExportOptions {
         #[template_child]
+        pub print_options_paned: gtk::TemplateChild<gtk::Paned>,
+        #[template_child]
         pub png_background: gtk::TemplateChild<gtk::DropDown>,
         #[template_child]
         pub png_antialiasing: gtk::TemplateChild<gtk::DropDown>,
@@ -1124,6 +1154,124 @@ mod png_export_options {
         pub png_size_summary: gtk::TemplateChild<gtk::Label>,
         #[template_child]
         pub png_size_error: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub png_backing_summary: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub print_review_button: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub print_review_expander: gtk::TemplateChild<gtk::Expander>,
+        #[template_child]
+        pub print_prepare_toggle: gtk::TemplateChild<gtk::CheckButton>,
+        #[template_child]
+        pub print_box_settings: gtk::TemplateChild<gtk::Grid>,
+        #[template_child]
+        pub print_box_width_label: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub print_box_width: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub print_box_height_label: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub print_box_height: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub print_box_unit: gtk::TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub print_target_dpi: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub print_box_message: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub print_correction_settings: gtk::TemplateChild<gtk::Grid>,
+        #[template_child]
+        pub print_min_feature: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub print_remove_below: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub print_min_gap: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub print_gap_strategy: gtk::TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub print_gap_colors: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub print_background_color_row: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub print_custom_color_row: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub print_background_fill: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub print_background_swatch: gtk::TemplateChild<gtk::DrawingArea>,
+        #[template_child]
+        pub print_use_garment_color: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub print_custom_fill: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub print_use_custom_garment_color: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub print_custom_swatch: gtk::TemplateChild<gtk::DrawingArea>,
+        #[template_child]
+        pub print_entry_unit: gtk::TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub print_physical_width: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub print_physical_height: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub print_positive_width: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub print_negative_gap: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub print_apply_settings: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub print_intent_message: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub print_applied_summary: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub print_check_status: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub print_target_summary: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub print_width_status: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub print_finding_category: gtk::TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub print_findings: gtk::TemplateChild<gtk::ListBox>,
+        #[template_child]
+        pub print_previous_page: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub print_next_page: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub print_page_summary: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub print_highlight_toggle: gtk::TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub print_zoom_to_location: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub print_fit_view: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub print_preview_zoom_out: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub print_preview_actual_size: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub print_preview_zoom_in: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub print_preview_fit: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub print_preview_backdrop: gtk::TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub print_garment_color: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub print_garment_swatch: gtk::TemplateChild<gtk::DrawingArea>,
+        #[template_child]
+        pub print_garment_message: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub print_canvas_scroll: gtk::TemplateChild<gtk::ScrolledWindow>,
+        #[template_child]
+        pub print_raster_picture: gtk::TemplateChild<gtk::Picture>,
+        #[template_child]
+        pub print_highlight_picture: gtk::TemplateChild<gtk::Picture>,
+        #[template_child]
+        pub print_backdrop_painter: gtk::TemplateChild<gtk::DrawingArea>,
+        #[template_child]
+        pub print_close_button: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub print_export_button: gtk::TemplateChild<gtk::Button>,
     }
 
     #[glib::object_subclass]
@@ -1188,6 +1336,142 @@ impl ToniatorPngExportOptions {
     pub fn size_error(&self) -> gtk::Label {
         self.imp().png_size_error.get()
     }
+
+    /// Returns the real template-owned controls for the shared print review surface.
+    pub(crate) fn print_preparation_controls(&self) -> PrintPreparationControls {
+        let imp = self.imp();
+        PrintPreparationControls {
+            options_paned: imp.print_options_paned.get(),
+            backing_summary: imp.png_backing_summary.get(),
+            review_button: imp.print_review_button.get(),
+            review_expander: imp.print_review_expander.get(),
+            prepare_toggle: imp.print_prepare_toggle.get(),
+            box_settings: imp.print_box_settings.get(),
+            box_width_label: imp.print_box_width_label.get(),
+            box_width: imp.print_box_width.get(),
+            box_height_label: imp.print_box_height_label.get(),
+            box_height: imp.print_box_height.get(),
+            box_unit: imp.print_box_unit.get(),
+            target_dpi: imp.print_target_dpi.get(),
+            box_message: imp.print_box_message.get(),
+            correction_settings: imp.print_correction_settings.get(),
+            min_feature: imp.print_min_feature.get(),
+            remove_below: imp.print_remove_below.get(),
+            min_gap: imp.print_min_gap.get(),
+            gap_strategy: imp.print_gap_strategy.get(),
+            gap_colors: imp.print_gap_colors.get(),
+            background_color_row: imp.print_background_color_row.get(),
+            custom_color_row: imp.print_custom_color_row.get(),
+            background_fill: imp.print_background_fill.get(),
+            background_swatch: imp.print_background_swatch.get(),
+            use_garment_color: imp.print_use_garment_color.get(),
+            custom_fill: imp.print_custom_fill.get(),
+            use_custom_garment_color: imp.print_use_custom_garment_color.get(),
+            custom_swatch: imp.print_custom_swatch.get(),
+            unit: imp.print_entry_unit.get(),
+            physical_width: imp.print_physical_width.get(),
+            physical_height: imp.print_physical_height.get(),
+            positive_width: imp.print_positive_width.get(),
+            negative_gap: imp.print_negative_gap.get(),
+            apply: imp.print_apply_settings.get(),
+            intent_message: imp.print_intent_message.get(),
+            applied_summary: imp.print_applied_summary.get(),
+            status: imp.print_check_status.get(),
+            target_summary: imp.print_target_summary.get(),
+            width_status: imp.print_width_status.get(),
+            category: imp.print_finding_category.get(),
+            findings: imp.print_findings.get(),
+            previous_page: imp.print_previous_page.get(),
+            next_page: imp.print_next_page.get(),
+            page_summary: imp.print_page_summary.get(),
+            highlight: imp.print_highlight_toggle.get(),
+            zoom_to_location: imp.print_zoom_to_location.get(),
+            fit_view: imp.print_fit_view.get(),
+            preview_zoom_out: imp.print_preview_zoom_out.get(),
+            preview_actual_size: imp.print_preview_actual_size.get(),
+            preview_zoom_in: imp.print_preview_zoom_in.get(),
+            preview_fit: imp.print_preview_fit.get(),
+            preview_backdrop: imp.print_preview_backdrop.get(),
+            garment_color: imp.print_garment_color.get(),
+            garment_swatch: imp.print_garment_swatch.get(),
+            garment_message: imp.print_garment_message.get(),
+            canvas_scroll: imp.print_canvas_scroll.get(),
+            raster_picture: imp.print_raster_picture.get(),
+            highlight_picture: imp.print_highlight_picture.get(),
+            backdrop_painter: imp.print_backdrop_painter.get(),
+            close: imp.print_close_button.get(),
+            export: imp.print_export_button.get(),
+        }
+    }
+}
+
+/// Holds typed GTK references from the PNG review Blueprint for semantic actions and readback.
+pub(crate) struct PrintPreparationControls {
+    /// Resizable settings/preview split whose native handle supports keyboard adjustment.
+    pub(crate) options_paned: gtk::Paned,
+    pub(crate) backing_summary: gtk::Label,
+    pub(crate) review_button: gtk::Button,
+    pub(crate) review_expander: gtk::Expander,
+    pub(crate) prepare_toggle: gtk::CheckButton,
+    pub(crate) box_settings: gtk::Grid,
+    /// Visible maximum-width label updated with the selected physical unit.
+    pub(crate) box_width_label: gtk::Label,
+    pub(crate) box_width: gtk::Entry,
+    /// Visible maximum-height label updated with the selected physical unit.
+    pub(crate) box_height_label: gtk::Label,
+    pub(crate) box_height: gtk::Entry,
+    /// Export-local millimetre/inch selector for the print box only.
+    pub(crate) box_unit: gtk::DropDown,
+    pub(crate) target_dpi: gtk::Entry,
+    pub(crate) box_message: gtk::Label,
+    pub(crate) correction_settings: gtk::Grid,
+    pub(crate) min_feature: gtk::Entry,
+    pub(crate) remove_below: gtk::Entry,
+    pub(crate) min_gap: gtk::Entry,
+    pub(crate) gap_strategy: gtk::DropDown,
+    pub(crate) gap_colors: gtk::Box,
+    pub(crate) background_color_row: gtk::Box,
+    pub(crate) custom_color_row: gtk::Box,
+    pub(crate) background_fill: gtk::Entry,
+    pub(crate) background_swatch: gtk::DrawingArea,
+    pub(crate) use_garment_color: gtk::Button,
+    pub(crate) custom_fill: gtk::Entry,
+    /// Copies the current garment preview color once into the independent custom fill entry.
+    pub(crate) use_custom_garment_color: gtk::Button,
+    pub(crate) custom_swatch: gtk::DrawingArea,
+    pub(crate) unit: gtk::DropDown,
+    pub(crate) physical_width: gtk::Entry,
+    pub(crate) physical_height: gtk::Entry,
+    pub(crate) positive_width: gtk::Entry,
+    pub(crate) negative_gap: gtk::Entry,
+    pub(crate) apply: gtk::Button,
+    pub(crate) intent_message: gtk::Label,
+    pub(crate) applied_summary: gtk::Label,
+    pub(crate) status: gtk::Label,
+    pub(crate) target_summary: gtk::Label,
+    pub(crate) width_status: gtk::Label,
+    pub(crate) category: gtk::DropDown,
+    pub(crate) findings: gtk::ListBox,
+    pub(crate) previous_page: gtk::Button,
+    pub(crate) next_page: gtk::Button,
+    pub(crate) page_summary: gtk::Label,
+    pub(crate) highlight: gtk::ToggleButton,
+    pub(crate) zoom_to_location: gtk::Button,
+    pub(crate) fit_view: gtk::Button,
+    pub(crate) preview_zoom_out: gtk::Button,
+    pub(crate) preview_actual_size: gtk::Button,
+    pub(crate) preview_zoom_in: gtk::Button,
+    pub(crate) preview_fit: gtk::Button,
+    pub(crate) preview_backdrop: gtk::DropDown,
+    pub(crate) garment_color: gtk::Entry,
+    pub(crate) garment_swatch: gtk::DrawingArea,
+    pub(crate) garment_message: gtk::Label,
+    pub(crate) canvas_scroll: gtk::ScrolledWindow,
+    pub(crate) raster_picture: gtk::Picture,
+    pub(crate) highlight_picture: gtk::Picture,
+    pub(crate) backdrop_painter: gtk::DrawingArea,
+    pub(crate) close: gtk::Button,
+    pub(crate) export: gtk::Button,
 }
 
 impl Default for ToniatorPngExportOptions {

@@ -20,31 +20,31 @@ source used to build the packages. This does not submit the app to Flathub.
    bundles finish. Keep local evidence under `target/validation/`.
 
 The existing Windows development ZIP is a separately versioned 0.3.2 package
-built from its verified debug binaries. Do not attach or relabel it as a 0.3.3
+built from its verified debug binaries. Do not attach or relabel it as a 0.4.0
 Windows build; a current Windows package needs its own native build and checks.
 
 ## Publish
 
 After publication is authorized, push the source and a new annotated tag.
-For version 0.3.3:
+For version 0.4.0:
 
 ```sh
 git push origin main
-git tag -a v0.3.3 -m 'Toniator 0.3.3'
-git push origin refs/tags/v0.3.3
-gh release create v0.3.3 \
-  dist/Toniator-0.3.3-x86_64.AppImage \
-  dist/Toniator-0.3.3-x86_64.flatpak \
+git tag -a v0.4.0 -m 'Toniator 0.4.0'
+git push origin refs/tags/v0.4.0
+gh release create v0.4.0 \
+  dist/Toniator-0.4.0-x86_64.AppImage \
+  dist/Toniator-0.4.0-x86_64.flatpak \
   dist/SHA256SUMS dist/build-info.json \
   --verify-tag --draft --prerelease \
-  --title 'Toniator 0.3.3 — Sharper previews and scalable exports' \
-  --notes-file docs/releases/v0.3.3.md
+  --title 'Toniator 0.4.0 — Optional garment PNG preparation' \
+  --notes-file docs/releases/v0.4.0.md
 ```
 
 Review the draft and attachments, then publish:
 
 ```sh
-gh release edit v0.3.3 --draft=false
+gh release edit v0.4.0 --draft=false
 ```
 
 Download all four published assets into a fresh directory, verify their hashes,

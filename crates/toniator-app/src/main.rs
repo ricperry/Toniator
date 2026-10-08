@@ -20,8 +20,11 @@ mod main_view_state;
 mod paint_editor;
 mod personal_pattern_management;
 mod png_export_size;
+mod prepared_paintable;
 mod preview_coordinator;
+mod print_cleanup;
 mod print_preparation;
+mod print_preparation_view;
 mod scatter_memory;
 mod sequence_import;
 mod source_notice;
@@ -46,7 +49,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
-    rc::Rc,
+    rc::{Rc, Weak},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -100,7 +103,7 @@ use toniator_domain::{
 use toniator_engine::{
     EvaluationLimits, EvaluationRequest, EvaluationScheduler, OutputRasterTarget,
     RasterAntialiasing, RasterBackground, RasterSurface, ResolvedSource, SourceFormatHint,
-    SourceIdentity, encode_png, write_svg,
+    SourceIdentity, encode_png, encode_png_with_density, write_svg,
 };
 #[cfg(test)]
 use toniator_engine::{rasterize_output, reduced_preview_png, resolve_source_identity};
@@ -843,6 +846,9 @@ struct ExportSettings {
     background: RasterBackground,
     antialiasing: RasterAntialiasing,
     output_target: Option<OutputRasterTarget>,
+    prepare_for_print: bool,
+    pixels_per_metre: Option<u32>,
+    cleanup: print_cleanup::Settings,
 }
 
 fn save_route(workspace: Option<&Workspace>) -> SaveRoute {
@@ -3508,6 +3514,55 @@ impl PatternEditorDraft {
     }
 }
 
+/// Keeps only the latest valid pixel identity until one debounce and one worker slot admit it.
+struct PrintPreviewIntent<K> {
+    desired: Option<K>,
+    ticket: u64,
+    ready: bool,
+}
+
+impl<K: Copy + Eq> PrintPreviewIntent<K> {
+    /// Replaces obsolete intent and invalidates any prior timer ticket.
+    fn reconcile(&mut self, desired: Option<K>) -> Option<u64> {
+        if self.desired == desired {
+            return None;
+        }
+        self.desired = desired;
+        self.ticket = self.ticket.wrapping_add(1);
+        self.ready = false;
+        Some(self.ticket)
+    }
+
+    /// Admits only the latest timer as a pending render; stale timer callbacks are inert.
+    fn timer_elapsed(&mut self, ticket: u64) -> bool {
+        if self.ticket != ticket || self.desired.is_none() {
+            return false;
+        }
+        self.ready = true;
+        true
+    }
+
+    /// Takes the latest pending intent only after the one running worker slot is free.
+    fn take_ready(&mut self, worker_busy: bool) -> Option<K> {
+        if worker_busy || !self.ready {
+            return None;
+        }
+        self.ready = false;
+        self.desired
+    }
+}
+
+impl<K> Default for PrintPreviewIntent<K> {
+    /// Starts without a queued render or previously attempted identity.
+    fn default() -> Self {
+        Self {
+            desired: None,
+            ticket: 0,
+            ready: false,
+        }
+    }
+}
+
 struct AppState {
     still_export_cancel: Option<Arc<AtomicBool>>,
     still_export_progress: Option<gtk::Window>,
@@ -3574,6 +3629,20 @@ struct AppState {
     advanced_epoch: u64,
     temporal_export: Option<temporal_export::Surface>,
     temporal_export_epoch: u64,
+    print_preparation_surface: Option<print_preparation_view::Surface>,
+    print_preparation_surface_epoch: u64,
+    /// One running exact PNG preview worker, retained across dialog close and stale results.
+    print_png_preview_worker: Option<(u64, u64, Arc<AtomicBool>)>,
+    print_png_preview_intent: PrintPreviewIntent<(
+        u64,
+        print_preparation::LiveAuthority,
+        print_preparation::OutputSelection,
+    )>,
+    print_png_preview_debounce: Option<glib::SourceId>,
+    print_png_preview_start_queued: bool,
+    print_png_preview_self: Weak<RefCell<AppState>>,
+    pending_png_export_chooser: bool,
+    pending_png_export_surface_epoch: Option<u64>,
     temporal_settings: Option<temporal_settings::Surface>,
     sequence_import: Option<sequence_import::Surface>,
     pattern_wizard: Option<PatternWizardSurface>,
@@ -4167,6 +4236,15 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         advanced_epoch: 0,
         temporal_export: None,
         temporal_export_epoch: 0,
+        print_preparation_surface: None,
+        print_preparation_surface_epoch: 0,
+        print_png_preview_worker: None,
+        print_png_preview_intent: PrintPreviewIntent::default(),
+        print_png_preview_debounce: None,
+        print_png_preview_start_queued: false,
+        print_png_preview_self: Weak::new(),
+        pending_png_export_chooser: false,
+        pending_png_export_surface_epoch: None,
         temporal_settings: None,
         sequence_import: None,
         pattern_wizard: None,
@@ -4195,6 +4273,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         preview_bridge_stop: Arc::new(AtomicBool::new(false)),
         _theme_bridge: theme_bridge,
     }));
+    state.borrow_mut().print_png_preview_self = Rc::downgrade(&state);
     if let Some(notice) = state.borrow().catalog_notice.as_deref() {
         state
             .borrow()
@@ -4521,6 +4600,15 @@ fn connect_actions(state: &Rc<RefCell<AppState>>) {
         action.connect_activate(move |_, _| choose_still_export(&state));
     }
     {
+        let review = state.borrow().shell.print_preparation_review();
+        let weak = Rc::downgrade(state);
+        review.connect_clicked(move |_| {
+            if let Some(state) = weak.upgrade() {
+                open_print_preparation_surface(&state, None, true);
+            }
+        });
+    }
+    {
         let state = Rc::clone(state);
         let action = state.borrow().actions.export_video.clone();
         action.connect_activate(move |_, _| choose_export(&state));
@@ -4628,9 +4716,14 @@ fn apply_history_navigation(state: &Rc<RefCell<AppState>>, redo: bool) {
     };
     match result {
         Ok(Some(_)) => {
-            state.borrow_mut().scatter_memory = scatter_memory::Memory::default();
+            {
+                let mut app = state.borrow_mut();
+                app.scatter_memory = scatter_memory::Memory::default();
+                app.print_preparation.invalidate();
+            }
             document_presets::refresh_configuration(state);
             set_inspector_status(&mut state.borrow_mut(), "Rendering preview…");
+            sync_ui(&mut state.borrow_mut());
         }
         Ok(None) => {}
         Err(error) => show_error(&mut state.borrow_mut(), error.to_string()),
@@ -4656,6 +4749,7 @@ fn apply_print_preparation_settings(
     if !print_preparation::apply_settings(&mut workspace.history, settings)? {
         return Ok(false);
     }
+    app.print_preparation.invalidate();
     set_preview_pending(&mut app);
     sync_ui(&mut app);
     drop(app);
@@ -4754,6 +4848,128 @@ fn connect_main_view_controls(state: &Rc<RefCell<AppState>>) {
             }
         });
     }
+    connect_main_view_pan_gesture(state);
+}
+
+/// Installs left-button panning on the main viewport using its native scroll adjustments.
+///
+/// The stationary scrolled window supplies stable drag coordinates, and a hit test restricts the
+/// gesture to the presented image. Fit mode and images without actual adjustment overflow remain
+/// stationary; changing adjustments reuses the existing coalesced viewport raster pipeline.
+fn connect_main_view_pan_gesture(state: &Rc<RefCell<AppState>>) {
+    let scroll = state.borrow().viewport_scroll.clone();
+    let picture = state.borrow().picture.clone();
+    let drag_origin = Rc::new(Cell::new(None::<(f64, f64)>));
+    let gesture = gtk::GestureDrag::new();
+    gesture.set_button(1);
+    gesture.set_exclusive(false);
+    gesture.set_propagation_phase(gtk::PropagationPhase::Bubble);
+
+    let origin_for_begin = Rc::clone(&drag_origin);
+    let scroll_for_begin = scroll.clone();
+    let picture_for_begin = picture.clone();
+    let weak = Rc::downgrade(state);
+    gesture.connect_drag_begin(move |gesture, x, y| {
+        origin_for_begin.set(None);
+        let picked_picture = scroll_for_begin
+            .pick(x, y, gtk::PickFlags::DEFAULT)
+            .is_some_and(|picked| {
+                picked == picture_for_begin || picked.is_ancestor(&picture_for_begin)
+            });
+        let Some(state) = weak.upgrade() else {
+            gesture.set_state(gtk::EventSequenceState::Denied);
+            return;
+        };
+        let (eligible, horizontal, vertical) = {
+            let state = state.borrow();
+            (
+                picked_picture && !state.view_state.is_fit() && state.picture.paintable().is_some(),
+                state.viewport_scroll.hadjustment(),
+                state.viewport_scroll.vadjustment(),
+            )
+        };
+        if !eligible {
+            gesture.set_state(gtk::EventSequenceState::Denied);
+            return;
+        }
+        let can_pan = main_view_state::pan_adjustment_value(
+            horizontal.lower(),
+            horizontal.upper(),
+            horizontal.page_size(),
+            horizontal.value(),
+            0.0,
+        )
+        .is_some()
+            || main_view_state::pan_adjustment_value(
+                vertical.lower(),
+                vertical.upper(),
+                vertical.page_size(),
+                vertical.value(),
+                0.0,
+            )
+            .is_some();
+        if !can_pan {
+            gesture.set_state(gtk::EventSequenceState::Denied);
+            return;
+        }
+        origin_for_begin.set(Some((horizontal.value(), vertical.value())));
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        scroll_for_begin.set_cursor_from_name(Some("grabbing"));
+    });
+
+    let origin_for_update = Rc::clone(&drag_origin);
+    let weak = Rc::downgrade(state);
+    gesture.connect_drag_update(move |_, offset_x, offset_y| {
+        let Some((origin_x, origin_y)) = origin_for_update.get() else {
+            return;
+        };
+        let Some(state) = weak.upgrade() else {
+            return;
+        };
+        let (is_fit, horizontal, vertical) = {
+            let state = state.borrow();
+            (
+                state.view_state.is_fit(),
+                state.viewport_scroll.hadjustment(),
+                state.viewport_scroll.vadjustment(),
+            )
+        };
+        if is_fit {
+            return;
+        }
+        if let Some(value) = main_view_state::pan_adjustment_value(
+            horizontal.lower(),
+            horizontal.upper(),
+            horizontal.page_size(),
+            origin_x,
+            offset_x,
+        ) {
+            horizontal.set_value(value);
+        }
+        if let Some(value) = main_view_state::pan_adjustment_value(
+            vertical.lower(),
+            vertical.upper(),
+            vertical.page_size(),
+            origin_y,
+            offset_y,
+        ) {
+            vertical.set_value(value);
+        }
+    });
+
+    let origin_for_end = Rc::clone(&drag_origin);
+    let scroll_for_end = scroll.clone();
+    gesture.connect_drag_end(move |_, _, _| {
+        origin_for_end.set(None);
+        scroll_for_end.set_cursor(None);
+    });
+    let origin_for_cancel = Rc::clone(&drag_origin);
+    let scroll_for_cancel = scroll.clone();
+    gesture.connect_cancel(move |_, _| {
+        origin_for_cancel.set(None);
+        scroll_for_cancel.set_cursor(None);
+    });
+    scroll.add_controller(gesture);
 }
 
 /// Returns the worker-prepared source comparison image for the current workspace.
@@ -5019,12 +5235,12 @@ fn apply_main_view_presentation(state: &mut AppState) {
         MainViewMode::Source => "Source artwork",
     };
     state.viewport_scroll.set_tooltip_text(Some(&format!(
-        "{mode_name}; scroll to pan when zoomed beyond the window."
+        "{mode_name}; scroll or left-drag to pan when the artwork is larger than the viewport."
     )));
     state.viewport_scroll.update_property(&[
         gtk::accessible::Property::Label("Canvas viewport"),
         gtk::accessible::Property::Description(
-            "Scroll to pan when the artwork is larger than the viewport.",
+            "Scroll or drag with the left mouse button to pan when the artwork is larger than the viewport.",
         ),
     ]);
     state.picture.update_property(&[
@@ -22907,12 +23123,15 @@ fn choose_still_export(state: &Rc<RefCell<AppState>>) {
             }
         };
         match format {
-            ExportFormat::Png => choose_png_export_options(&state, path, capture.clone()),
+            ExportFormat::Png => open_print_preparation_surface(&state, Some(path), false),
             ExportFormat::Svg => start_export(
                 &state,
                 path,
                 ExportSettings {
                     format,
+                    prepare_for_print: false,
+                    pixels_per_metre: None,
+                    cleanup: print_cleanup::Settings::default(),
                     background: RasterBackground::Transparent,
                     antialiasing: RasterAntialiasing::On,
                     output_target: None,
@@ -22938,150 +23157,15 @@ fn export_filters() -> gio::ListStore {
     filters
 }
 
-/// Presents PNG-only consumer controls with a default backing derived from the current model.
+/// Projects runtime-only PNG sizing validity and custom applicability into GTK.
 ///
-/// The selected backing remains runtime dialog state and never mutates document, scene, history,
-/// preview, or cache identity. Invalid output dimensions fail before export submission.
-#[allow(deprecated)] // GTK 4.10's lightweight custom-content dialog remains available on Fedora.
-fn choose_png_export_options(
-    state: &Rc<RefCell<AppState>>,
-    path: PathBuf,
-    capture: print_preparation::ExportCapture,
-) {
-    let dialog = gtk::Dialog::builder()
-        .title("PNG export options")
-        .modal(true)
-        .transient_for(&state.borrow().window)
-        .build();
-    dialog.add_button("_Cancel", gtk::ResponseType::Cancel);
-    dialog.add_button("_Export", gtk::ResponseType::Accept);
-    dialog.set_default_response(gtk::ResponseType::Accept);
-    let content = dialog.content_area();
-    let options = components::ToniatorPngExportOptions::new();
-    let background = options.background();
-    background.set_model(Some(&gtk::StringList::new(&[
-        "Transparent",
-        "Black",
-        "White",
-    ])));
-    let default_background = capture.session.document().channel_model();
-    background.set_selected(png_background_dropdown_position(default_background));
-    let background_choice = Rc::new(Cell::new(print_preparation::BackgroundChoice::Automatic));
-    {
-        let background_choice = Rc::clone(&background_choice);
-        let state = Rc::clone(state);
-        background.connect_selected_notify(move |background| {
-            background_choice.set(print_preparation::BackgroundChoice::Explicit(
-                png_background_for_dropdown_position(background.selected()),
-            ));
-            state.borrow_mut().print_preparation.invalidate();
-        });
-    }
-    let antialiasing = options.antialiasing();
-    antialiasing.set_model(Some(&gtk::StringList::new(&["On", "Off"])));
-    {
-        let state = Rc::clone(state);
-        antialiasing.connect_selected_notify(move |_| {
-            state.borrow_mut().print_preparation.invalidate();
-        });
-    }
-    let dimensions = options.dimensions();
-    let scale = options.scale();
-    scale.set_model(Some(&gtk::StringList::new(&[
-        "1x", "2x", "4x", "8x", "Custom",
-    ])));
-    scale.update_property(&[gtk::accessible::Property::Label("Output size")]);
-    dimensions.update_property(&[gtk::accessible::Property::Label("Custom dimensions")]);
-    let canvas = capture.session.document().canvas().clone();
-    if let Ok(native) = OutputRasterTarget::for_canvas(&canvas) {
-        dimensions.set_text(&format!("{}x{}", native.width(), native.height()));
-    }
-    let update_size = {
-        let options = options.downgrade();
-        let dialog = dialog.downgrade();
-        let canvas = canvas.clone();
-        Rc::new(move || {
-            if let (Some(options), Some(dialog)) = (options.upgrade(), dialog.upgrade()) {
-                sync_png_export_size(&options, &dialog, &canvas);
-            }
-        })
-    };
-    {
-        let update_size = Rc::clone(&update_size);
-        let state = Rc::clone(state);
-        scale.connect_selected_notify(move |_| {
-            state.borrow_mut().print_preparation.invalidate();
-            update_size();
-        });
-    }
-    {
-        let update_size = Rc::clone(&update_size);
-        let state = Rc::clone(state);
-        dimensions.connect_changed(move |_| {
-            state.borrow_mut().print_preparation.invalidate();
-            update_size();
-        });
-    }
-    update_size();
-    content.append(&options);
-    let state = Rc::clone(state);
-    dialog.connect_response(move |dialog, response| {
-        if response == gtk::ResponseType::Accept
-            && capture.workspace_is_current(
-                state.borrow().generation,
-                state.borrow().workspace_generation,
-            )
-        {
-            let output_target = match png_export_size::target(
-                &canvas,
-                scale.selected(),
-                dimensions.text().as_str(),
-            ) {
-                Ok(target) => Some(target),
-                Err(error) => {
-                    options.size_error().set_label(&error);
-                    dialog.set_response_sensitive(gtk::ResponseType::Accept, false);
-                    return;
-                }
-            };
-            let antialiasing = if antialiasing.selected() == 1 {
-                RasterAntialiasing::Off
-            } else {
-                RasterAntialiasing::On
-            };
-            let selection = print_preparation::OutputSelection {
-                target: output_target.expect("validated PNG output target"),
-                antialiasing,
-                background: background_choice.get(),
-            };
-            let background = selection.background_for(&capture.session);
-            state.borrow_mut().print_preparation.select(selection);
-            start_export(
-                &state,
-                path.clone(),
-                ExportSettings {
-                    format: ExportFormat::Png,
-                    background,
-                    antialiasing,
-                    output_target,
-                },
-                capture.clone(),
-            );
-        }
-        state.borrow_mut().print_preparation.invalidate();
-        dialog.close();
-    });
-    dialog.present();
-}
-
-/// Projects runtime-only PNG sizing validity, dimensions and custom applicability into GTK.
-/// The shared renderer validates the budget; this callback never changes the document or zoom.
-#[allow(deprecated)]
+/// The shared renderer validates the budget; this callback never changes the document, zoom,
+/// review backdrop, or report authority.
 fn sync_png_export_size(
     options: &components::ToniatorPngExportOptions,
-    dialog: &gtk::Dialog,
+    export: &gtk::Button,
     canvas: &CanvasSpec,
-) {
+) -> Result<OutputRasterTarget, String> {
     options
         .dimensions()
         .set_sensitive(options.scale().selected() == 4);
@@ -23098,7 +23182,8 @@ fn sync_png_export_size(
             ));
             options.size_error().set_label("");
             options.size_error().set_visible(false);
-            dialog.set_response_sensitive(gtk::ResponseType::Accept, true);
+            export.set_sensitive(true);
+            Ok(target)
         }
         Err(error) => {
             options
@@ -23106,9 +23191,59 @@ fn sync_png_export_size(
                 .set_label("PNG dimensions unavailable");
             options.size_error().set_label(&error);
             options.size_error().set_visible(true);
-            dialog.set_response_sensitive(gtk::ResponseType::Accept, false);
+            export.set_sensitive(false);
+            Err(error)
         }
     }
+}
+
+/// Validates export-local pixel corrections and resolves only the selected fill color.
+///
+/// # Errors
+/// Returns a field-specific width or selected-swatch diagnostic before preview/export starts.
+fn parse_print_cleanup_settings(
+    controls: &print_preparation_view::Controls,
+    backing: RasterBackground,
+) -> Result<print_cleanup::Settings, String> {
+    let width = |entry: &gtk::Entry, name: &str| -> Result<u32, String> {
+        entry
+            .text()
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| format!("Enter a whole-pixel {name} from 0 to 256."))
+    };
+    let treatment = match controls.gap_strategy.selected() {
+        1 => print_cleanup::GapTreatment::FillBackground,
+        2 => print_cleanup::GapTreatment::FillCustom,
+        3 => print_cleanup::GapTreatment::GrowGap,
+        _ => print_cleanup::GapTreatment::FillAverage,
+    };
+    let gap = width(&controls.min_gap, "minimum gap width")?;
+    let background_fill_rgb = match backing {
+        RasterBackground::OpaqueBlack => [0, 0, 0],
+        RasterBackground::OpaqueWhite => [255, 255, 255],
+        RasterBackground::Transparent
+            if gap > 0 && treatment == print_cleanup::GapTreatment::FillBackground =>
+        {
+            print_preparation_view::parse_hex_color(controls.background_fill.text().as_str())?
+        }
+        RasterBackground::Transparent => controls.background_fill_rgb.get(),
+    };
+    let custom_fill_rgb = if gap > 0 && treatment == print_cleanup::GapTreatment::FillCustom {
+        print_preparation_view::parse_hex_color(controls.custom_fill.text().as_str())?
+    } else {
+        controls.custom_fill_rgb.get()
+    };
+    let settings = print_cleanup::Settings {
+        remove_below_px: width(&controls.remove_below, "isolated-feature removal cutoff")?,
+        minimum_feature_px: width(&controls.min_feature, "minimum feature width")?,
+        minimum_gap_px: gap,
+        gap_treatment: treatment,
+        background_fill_rgb,
+        custom_fill_rgb,
+    };
+    settings.validate()?;
+    Ok(settings)
 }
 
 /// Maps one authoritative model to the PNG dialog's stable background option position.
@@ -23156,6 +23291,2378 @@ fn export_format_for_path(path: &Path) -> Result<ExportFormat, String> {
         Some(extension) if extension.eq_ignore_ascii_case("svg") => Ok(ExportFormat::Svg),
         _ => Err("export.format: choose a .png or .svg filename".to_owned()),
     }
+}
+
+/// Opens or reuses the one modeless PNG options surface for the live workspace.
+///
+/// The caller may supply a previously selected PNG path; destination-free inspector review
+/// keeps the existing options window open until the user chooses Export.
+fn open_print_preparation_surface(
+    state: &Rc<RefCell<AppState>>,
+    path: Option<PathBuf>,
+    expanded: bool,
+) {
+    if state.borrow().document_presets.busy()
+        || state.borrow().pending_export
+        || !state
+            .borrow()
+            .workspace
+            .as_ref()
+            .is_some_and(Workspace::can_save)
+    {
+        return;
+    }
+    let existing = state
+        .borrow()
+        .print_preparation_surface
+        .as_ref()
+        .map(|surface| {
+            (
+                surface.workspace_generation,
+                surface.epoch,
+                surface.controls.window.clone(),
+            )
+        });
+    if let Some((generation, epoch, window)) = existing {
+        let current_generation = state.borrow().workspace_generation;
+        if generation == current_generation {
+            if let Some(surface) = state
+                .borrow_mut()
+                .print_preparation_surface
+                .as_mut()
+                .filter(|surface| surface.epoch == epoch)
+            {
+                if path.is_some() {
+                    surface.path = path;
+                }
+                if expanded {
+                    surface.controls.review_expander.set_expanded(true);
+                }
+            }
+            window.present();
+            sync_ui(&mut state.borrow_mut());
+            return;
+        }
+        detach_print_preparation_surface(state, epoch, true);
+    }
+
+    let (canvas, model, settings, workspace_generation, parent) = {
+        let app = state.borrow();
+        let Some(workspace) = app.workspace.as_ref() else {
+            return;
+        };
+        (
+            workspace.document().canvas().clone(),
+            workspace.document().channel_model(),
+            workspace.document().print_preparation().clone(),
+            app.workspace_generation,
+            app.window.clone().upcast::<gtk::Window>(),
+        )
+    };
+    let Some(epoch) = state
+        .borrow()
+        .print_preparation_surface_epoch
+        .checked_add(1)
+    else {
+        show_error(
+            &mut state.borrow_mut(),
+            "Print review window identity is exhausted.".into(),
+        );
+        return;
+    };
+    state.borrow_mut().print_preparation_surface_epoch = epoch;
+    let controls = match print_preparation_view::Controls::new(&parent, &canvas, model, &settings) {
+        Ok(controls) => controls,
+        Err(error) => {
+            show_error(&mut state.borrow_mut(), error);
+            return;
+        }
+    };
+    let window = controls.window.clone();
+    {
+        let mut app = state.borrow_mut();
+        app.print_preparation_surface = Some(print_preparation_view::Surface::new(
+            epoch,
+            workspace_generation,
+            controls,
+            path,
+            expanded,
+            settings,
+        ));
+    }
+    connect_print_preparation_surface(state, epoch);
+    sync_ui(&mut state.borrow_mut());
+    window.present();
+}
+
+/// Connects one surface epoch's controls without retaining the app through GTK signal cycles.
+fn connect_print_preparation_surface(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let Some(surface) = state
+        .borrow()
+        .print_preparation_surface
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+        .map(|surface| print_preparation_controls_handles(&surface.controls))
+    else {
+        return;
+    };
+    let weak = Rc::downgrade(state);
+    surface.review_button.connect_clicked(move |_| {
+        if let Some(state) = weak.upgrade()
+            && let Some(surface) = state
+                .borrow()
+                .print_preparation_surface
+                .as_ref()
+                .filter(|surface| surface.epoch == epoch)
+        {
+            surface.controls.review_expander.set_expanded(true);
+        }
+    });
+    let weak = Rc::downgrade(state);
+    surface.close.connect_clicked(move |_| {
+        if let Some(state) = weak.upgrade() {
+            detach_print_preparation_surface(&state, epoch, true);
+        }
+    });
+    let weak = Rc::downgrade(state);
+    surface.window.connect_close_request(move |_| {
+        if let Some(state) = weak.upgrade() {
+            detach_print_preparation_surface(&state, epoch, false);
+        }
+        glib::Propagation::Proceed
+    });
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface.export.connect_clicked(move |_| {
+        if !syncing.get()
+            && let Some(state) = weak.upgrade()
+        {
+            request_png_export_from_surface(&state, epoch);
+        }
+    });
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface.prepare_toggle.connect_toggled(move |_| {
+        if !syncing.get()
+            && let Some(state) = weak.upgrade()
+        {
+            print_preparation_selection_changed(&state, epoch);
+        }
+    });
+    for (entry, is_width) in [
+        (surface.box_width.clone(), true),
+        (surface.box_height.clone(), false),
+    ] {
+        let syncing = Rc::clone(&surface.syncing);
+        let weak = Rc::downgrade(state);
+        entry.connect_changed(move |entry| {
+            if !syncing.get()
+                && let Some(state) = weak.upgrade()
+            {
+                update_print_box_dimension(&state, epoch, is_width, entry.text().as_str());
+                print_preparation_selection_changed(&state, epoch);
+            }
+        });
+    }
+    for entry in [
+        surface.target_dpi.clone(),
+        surface.min_feature.clone(),
+        surface.remove_below.clone(),
+        surface.min_gap.clone(),
+        surface.background_fill.clone(),
+        surface.custom_fill.clone(),
+    ] {
+        let syncing = Rc::clone(&surface.syncing);
+        let weak = Rc::downgrade(state);
+        entry.connect_changed(move |_| {
+            if !syncing.get()
+                && let Some(state) = weak.upgrade()
+            {
+                print_preparation_selection_changed(&state, epoch);
+            }
+        });
+    }
+    for (entry, color, swatch) in [
+        (
+            surface.background_fill.clone(),
+            Rc::clone(&surface.background_fill_rgb),
+            surface.background_swatch.clone(),
+        ),
+        (
+            surface.custom_fill.clone(),
+            Rc::clone(&surface.custom_fill_rgb),
+            surface.custom_swatch.clone(),
+        ),
+    ] {
+        entry.connect_changed(move |entry| {
+            if let Ok(rgb) = print_preparation_view::parse_hex_color(entry.text().as_str()) {
+                color.set(rgb);
+                swatch.queue_draw();
+            }
+        });
+    }
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface.gap_strategy.connect_selected_notify(move |_| {
+        if !syncing.get()
+            && let Some(state) = weak.upgrade()
+        {
+            print_preparation_selection_changed(&state, epoch);
+        }
+    });
+    let weak = Rc::downgrade(state);
+    surface.use_garment_color.connect_clicked(move |_| {
+        if let Some(state) = weak.upgrade() {
+            let copied = state
+                .borrow()
+                .print_preparation_surface
+                .as_ref()
+                .filter(|surface| surface.epoch == epoch)
+                .map(|surface| {
+                    (
+                        surface.controls.background_fill.clone(),
+                        surface.controls.garment_rgb.get(),
+                    )
+                });
+            if let Some((entry, [red, green, blue])) = copied {
+                entry.set_text(&format!("#{red:02X}{green:02X}{blue:02X}"));
+            }
+        }
+    });
+    let weak = Rc::downgrade(state);
+    surface.use_custom_garment_color.connect_clicked(move |_| {
+        if let Some(state) = weak.upgrade() {
+            let copied = state
+                .borrow()
+                .print_preparation_surface
+                .as_ref()
+                .filter(|surface| surface.epoch == epoch)
+                .map(|surface| {
+                    (
+                        surface.controls.custom_fill.clone(),
+                        surface.controls.garment_rgb.get(),
+                    )
+                });
+            if let Some((entry, [red, green, blue])) = copied {
+                entry.set_text(&format!("#{red:02X}{green:02X}{blue:02X}"));
+            }
+        }
+    });
+    let controls_weak = Rc::downgrade(state);
+    for (entry, changed_field) in [
+        (surface.physical_width.clone(), 0),
+        (surface.physical_height.clone(), 1),
+        (surface.positive_width.clone(), 2),
+        (surface.negative_gap.clone(), 3),
+    ] {
+        let syncing = Rc::clone(&surface.syncing);
+        let weak = controls_weak.clone();
+        entry.connect_changed(move |_| {
+            if !syncing.get()
+                && let Some(state) = weak.upgrade()
+            {
+                mark_print_intent_draft_changed(&state, epoch, changed_field);
+            }
+        });
+    }
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface.apply.connect_clicked(move |_| {
+        if !syncing.get()
+            && let Some(state) = weak.upgrade()
+        {
+            apply_print_intent_draft(&state, epoch);
+        }
+    });
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface.unit.connect_selected_notify(move |unit| {
+        if !syncing.get()
+            && let Some(state) = weak.upgrade()
+        {
+            change_print_intent_unit(&state, epoch, unit.selected());
+        }
+    });
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface.box_unit.connect_selected_notify(move |unit| {
+        if !syncing.get()
+            && let Some(state) = weak.upgrade()
+        {
+            change_print_box_unit(&state, epoch, unit.selected());
+        }
+    });
+    let weak = Rc::downgrade(state);
+    surface.options_paned.connect_position_notify(move |_| {
+        if let Some(state) = weak.upgrade() {
+            resize_print_preview_if_fitting(&state, epoch);
+        }
+    });
+    install_print_preview_fit_tracking(&surface.options_paned, Rc::downgrade(state), epoch);
+    for selector in [
+        surface.options.background(),
+        surface.options.antialiasing(),
+        surface.options.scale(),
+    ] {
+        let syncing = Rc::clone(&surface.syncing);
+        let weak = Rc::downgrade(state);
+        selector.connect_selected_notify(move |_| {
+            if !syncing.get()
+                && let Some(state) = weak.upgrade()
+            {
+                print_preparation_selection_changed(&state, epoch);
+            }
+        });
+    }
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface
+        .preview_backdrop
+        .connect_selected_notify(move |backdrop| {
+            if !syncing.get()
+                && let Some(state) = weak.upgrade()
+            {
+                select_print_preview_backdrop(&state, epoch, backdrop.selected());
+            }
+        });
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface.category.connect_selected_notify(move |category| {
+        if !syncing.get()
+            && let Some(state) = weak.upgrade()
+        {
+            select_print_finding_category(&state, epoch, category.selected());
+        }
+    });
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface.options.dimensions().connect_changed(move |_| {
+        if !syncing.get()
+            && let Some(state) = weak.upgrade()
+        {
+            print_preparation_selection_changed(&state, epoch);
+        }
+    });
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface.highlight.connect_toggled(move |_| {
+        if !syncing.get()
+            && let Some(state) = weak.upgrade()
+        {
+            refresh_selected_print_finding(&state, epoch);
+        }
+    });
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface.previous_page.connect_clicked(move |_| {
+        if !syncing.get()
+            && let Some(state) = weak.upgrade()
+        {
+            change_print_finding_page(&state, epoch, false);
+        }
+    });
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface.next_page.connect_clicked(move |_| {
+        if !syncing.get()
+            && let Some(state) = weak.upgrade()
+        {
+            change_print_finding_page(&state, epoch, true);
+        }
+    });
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface.findings.connect_row_selected(move |_, row| {
+        if !syncing.get()
+            && let (Some(state), Some(row)) = (weak.upgrade(), row)
+        {
+            select_print_finding(&state, epoch, row.index());
+        }
+    });
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface.zoom_to_location.connect_clicked(move |_| {
+        if !syncing.get()
+            && let Some(state) = weak.upgrade()
+        {
+            zoom_to_selected_print_finding(&state, epoch);
+        }
+    });
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface.fit_view.connect_clicked(move |_| {
+        if !syncing.get()
+            && let Some(state) = weak.upgrade()
+        {
+            fit_print_review_view(&state, epoch);
+        }
+    });
+    for (button, zoom) in [
+        (surface.preview_zoom_out.clone(), Some(0.5)),
+        (surface.preview_actual_size.clone(), Some(1.0)),
+        (surface.preview_zoom_in.clone(), Some(2.0)),
+        (surface.preview_fit.clone(), None),
+    ] {
+        let weak = Rc::downgrade(state);
+        button.connect_clicked(move |_| {
+            if let Some(state) = weak.upgrade() {
+                set_print_png_preview_zoom(&state, epoch, zoom);
+            }
+        });
+    }
+    let syncing = Rc::clone(&surface.syncing);
+    let weak = Rc::downgrade(state);
+    surface.garment_color.connect_changed(move |entry| {
+        if !syncing.get()
+            && let Some(state) = weak.upgrade()
+        {
+            update_print_garment_color(&state, epoch, entry.text().as_str());
+        }
+    });
+}
+
+/// Returns cloned widget handles so callback wiring never borrows `AppState` across connect calls.
+fn print_preparation_controls_handles(
+    controls: &print_preparation_view::Controls,
+) -> print_preparation_view::Controls {
+    print_preparation_view::Controls {
+        options: controls.options.clone(),
+        options_paned: controls.options_paned.clone(),
+        window: controls.window.clone(),
+        review_button: controls.review_button.clone(),
+        review_expander: controls.review_expander.clone(),
+        prepare_toggle: controls.prepare_toggle.clone(),
+        box_settings: controls.box_settings.clone(),
+        box_width_label: controls.box_width_label.clone(),
+        box_width: controls.box_width.clone(),
+        box_height_label: controls.box_height_label.clone(),
+        box_height: controls.box_height.clone(),
+        box_unit: controls.box_unit.clone(),
+        target_dpi: controls.target_dpi.clone(),
+        box_message: controls.box_message.clone(),
+        correction_settings: controls.correction_settings.clone(),
+        min_feature: controls.min_feature.clone(),
+        remove_below: controls.remove_below.clone(),
+        min_gap: controls.min_gap.clone(),
+        gap_strategy: controls.gap_strategy.clone(),
+        gap_colors: controls.gap_colors.clone(),
+        background_color_row: controls.background_color_row.clone(),
+        custom_color_row: controls.custom_color_row.clone(),
+        background_fill: controls.background_fill.clone(),
+        background_swatch: controls.background_swatch.clone(),
+        use_garment_color: controls.use_garment_color.clone(),
+        custom_fill: controls.custom_fill.clone(),
+        use_custom_garment_color: controls.use_custom_garment_color.clone(),
+        custom_swatch: controls.custom_swatch.clone(),
+        unit: controls.unit.clone(),
+        physical_width: controls.physical_width.clone(),
+        physical_height: controls.physical_height.clone(),
+        positive_width: controls.positive_width.clone(),
+        negative_gap: controls.negative_gap.clone(),
+        apply: controls.apply.clone(),
+        intent_message: controls.intent_message.clone(),
+        applied_summary: controls.applied_summary.clone(),
+        status: controls.status.clone(),
+        target_summary: controls.target_summary.clone(),
+        width_status: controls.width_status.clone(),
+        category: controls.category.clone(),
+        findings: controls.findings.clone(),
+        previous_page: controls.previous_page.clone(),
+        next_page: controls.next_page.clone(),
+        page_summary: controls.page_summary.clone(),
+        highlight: controls.highlight.clone(),
+        zoom_to_location: controls.zoom_to_location.clone(),
+        fit_view: controls.fit_view.clone(),
+        preview_zoom_out: controls.preview_zoom_out.clone(),
+        preview_actual_size: controls.preview_actual_size.clone(),
+        preview_zoom_in: controls.preview_zoom_in.clone(),
+        preview_fit: controls.preview_fit.clone(),
+        preview_backdrop: controls.preview_backdrop.clone(),
+        garment_color: controls.garment_color.clone(),
+        garment_swatch: controls.garment_swatch.clone(),
+        garment_message: controls.garment_message.clone(),
+        export_backing_summary: controls.export_backing_summary.clone(),
+        canvas_scroll: controls.canvas_scroll.clone(),
+        raster_picture: controls.raster_picture.clone(),
+        highlight_picture: controls.highlight_picture.clone(),
+        backdrop_painter: controls.backdrop_painter.clone(),
+        export: controls.export.clone(),
+        close: controls.close.clone(),
+        syncing: Rc::clone(&controls.syncing),
+        selection: Cell::new(controls.selection.get()),
+        selected_unit: Cell::new(controls.selected_unit.get()),
+        selected_backdrop: Rc::clone(&controls.selected_backdrop),
+        garment_rgb: Rc::clone(&controls.garment_rgb),
+        background_fill_rgb: Rc::clone(&controls.background_fill_rgb),
+        custom_fill_rgb: Rc::clone(&controls.custom_fill_rgb),
+        current_preview_rgb: Rc::clone(&controls.current_preview_rgb),
+    }
+}
+
+/// Detaches one surface only when its monotonic epoch still owns application state.
+fn detach_print_preparation_surface(state: &Rc<RefCell<AppState>>, epoch: u64, close_window: bool) {
+    let window = {
+        let mut app = state.borrow_mut();
+        if app
+            .print_preparation_surface
+            .as_ref()
+            .is_none_or(|surface| surface.epoch != epoch)
+        {
+            return;
+        }
+        let surface = app
+            .print_preparation_surface
+            .take()
+            .expect("checked surface");
+        reconcile_print_png_preview_intent(&mut app, None);
+        app.print_preparation.close();
+        let retired = {
+            let AppState {
+                pending_png_export_surface_epoch,
+                pending_png_export_chooser,
+                ..
+            } = &mut *app;
+            retire_deferred_png_chooser(
+                epoch,
+                pending_png_export_surface_epoch,
+                pending_png_export_chooser,
+            )
+        };
+        if retired {
+            app.pending_file_chooser = false;
+        }
+        surface.controls.window.clone()
+    };
+    sync_ui(&mut state.borrow_mut());
+    if close_window {
+        window.close();
+    }
+}
+
+/// Releases chooser lifecycle ownership only for the window epoch that opened it.
+fn retire_deferred_png_chooser(
+    epoch: u64,
+    owner_epoch: &mut Option<u64>,
+    pending_png_chooser: &mut bool,
+) -> bool {
+    if *owner_epoch != Some(epoch) {
+        return false;
+    }
+    *owner_epoch = None;
+    *pending_png_chooser = false;
+    true
+}
+
+/// Projects current applied intent, target, lifecycle state, and backing into inspector and PNG UI.
+/// Projects export-local PNG controls into renderer selection and the visible sizing summary.
+///
+/// The document supplies only initial values and canvas dimensions; the print-box draft remains
+/// canonical millimetres in this surface. This updates GTK state without mutating project history.
+fn sync_print_preparation_surface(state: &mut AppState) {
+    let settings = state
+        .workspace
+        .as_ref()
+        .map(|workspace| workspace.document().print_preparation().clone())
+        .unwrap_or_default();
+    state.shell.print_preparation_review().set_sensitive(
+        state.workspace.as_ref().is_some_and(Workspace::can_save)
+            && !lifecycle_is_busy(state)
+            && !state.document_presets.busy(),
+    );
+    let Some(workspace) = state.workspace.as_ref() else {
+        let status = "Preview not rendered";
+        state.shell.print_preparation_summary().set_label(
+            &print_preparation_view::inspector_summary(&settings, status),
+        );
+        return;
+    };
+    let canvas = workspace.document().canvas().clone();
+    let model = workspace.document().channel_model();
+    let workspace_generation = state.workspace_generation;
+    let document_settings = workspace.document().print_preparation().clone();
+    let apply_available = Workspace::can_save(workspace)
+        && !lifecycle_is_busy(state)
+        && !state.pending_file_chooser
+        && !state.pending_export;
+    let selection = state
+        .print_preparation_surface
+        .as_ref()
+        .filter(|surface| surface.workspace_generation == workspace_generation)
+        .map(|surface| {
+            let prepared = surface.controls.prepare_toggle.is_active();
+            let transparent_backing = surface.controls.options.background().selected() == 1
+                || (surface.controls.options.background().selected() == 0
+                    && RasterBackground::default_for_model(model) == RasterBackground::Transparent);
+            surface.controls.box_settings.set_visible(prepared);
+            surface.controls.box_message.set_visible(prepared);
+            surface.controls.correction_settings.set_visible(prepared);
+            surface.controls.gap_colors.set_visible(
+                prepared
+                    && (surface.controls.gap_strategy.selected() == 2
+                        || (surface.controls.gap_strategy.selected() == 1 && transparent_backing)),
+            );
+            surface.controls.background_color_row.set_visible(
+                prepared && surface.controls.gap_strategy.selected() == 1 && transparent_backing,
+            );
+            surface
+                .controls
+                .custom_color_row
+                .set_visible(prepared && surface.controls.gap_strategy.selected() == 2);
+            surface.controls.options.scale().set_sensitive(!prepared);
+            if prepared {
+                surface.controls.options.dimensions().set_sensitive(false);
+            }
+            let sizing = if prepared {
+                let fit = (|| {
+                    let (maximum_width_mm, maximum_height_mm) =
+                        surface.box_dimensions.get().dimensions_for_fit_mm()?;
+                    let target_dpi = surface
+                        .controls
+                        .target_dpi
+                        .text()
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| "Enter a positive print resolution in DPI.".to_owned())?;
+                    png_export_size::fit_print_box(
+                        &canvas,
+                        maximum_width_mm,
+                        maximum_height_mm,
+                        target_dpi,
+                    )
+                })();
+                match fit {
+                    Ok(fit) => {
+                        let (width_mm, height_mm) = fit.physical_size_mm();
+                        let box_draft = surface.box_dimensions.get();
+                        let unit = box_draft.unit();
+                        let summary = (|| -> Result<String, String> {
+                            let (maximum_width, maximum_height) =
+                                box_draft.dimensions_for_fit_mm()?;
+                            Ok(format!(
+                                "Prepared PNG: {} × {} px · {} × {} {} fit inside {} × {} {} at {} DPI",
+                                fit.target().width(),
+                                fit.target().height(),
+                                box_draft.format_mm(width_mm)?,
+                                box_draft.format_mm(height_mm)?,
+                                unit.abbreviation(),
+                                box_draft.format_mm(maximum_width)?,
+                                box_draft.format_mm(maximum_height)?,
+                                unit.abbreviation(),
+                                fit.target_dpi()
+                            ))
+                        })();
+                        match summary {
+                            Ok(summary) => {
+                                surface.controls.options.size_summary().set_label(&summary);
+                                surface.controls.options.size_error().set_visible(false);
+                                Ok((fit.target(), Some(fit.pixels_per_metre())))
+                            }
+                            Err(error) => {
+                                surface
+                                    .controls
+                                    .options
+                                    .size_summary()
+                                    .set_label("Prepared PNG dimensions unavailable");
+                                surface.controls.options.size_error().set_label(&error);
+                                surface.controls.options.size_error().set_visible(true);
+                                Err(error)
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        surface
+                            .controls
+                            .options
+                            .size_summary()
+                            .set_label("Prepared PNG dimensions unavailable");
+                        surface.controls.options.size_error().set_label(&error);
+                        surface.controls.options.size_error().set_visible(true);
+                        Err(error)
+                    }
+                }
+            } else {
+                sync_png_export_size(&surface.controls.options, &surface.controls.export, &canvas)
+                    .map(|target| (target, None))
+            };
+            let background = match surface.controls.options.background().selected() {
+                1 => print_preparation::BackgroundChoice::Explicit(RasterBackground::Transparent),
+                2 => print_preparation::BackgroundChoice::Explicit(RasterBackground::OpaqueBlack),
+                3 => print_preparation::BackgroundChoice::Explicit(RasterBackground::OpaqueWhite),
+                _ => print_preparation::BackgroundChoice::Automatic,
+            };
+            let selected = sizing.and_then(|(target, pixels_per_metre)| {
+                let cleanup = if prepared {
+                    parse_print_cleanup_settings(&surface.controls, background.resolve(model))?
+                } else {
+                    print_cleanup::Settings::default()
+                };
+                Ok(print_preparation::OutputSelection {
+                    target,
+                    prepare_for_print: prepared,
+                    pixels_per_metre,
+                    cleanup,
+                    antialiasing: if surface.controls.options.antialiasing().selected() == 1 {
+                        RasterAntialiasing::Off
+                    } else {
+                        RasterAntialiasing::On
+                    },
+                    background,
+                })
+            });
+            if let Err(error) = &selected {
+                surface.controls.options.size_error().set_label(error);
+                surface.controls.options.size_error().set_visible(true);
+            }
+            selected
+        });
+    match selection
+        .as_ref()
+        .and_then(|selection| selection.as_ref().ok())
+    {
+        Some(selection) => state.print_preparation.select(*selection),
+        None if state.print_preparation_surface.is_some() => state.print_preparation.invalidate(),
+        None => {}
+    }
+    let live_preview_authority = print_preparation_live_authority(state);
+    let desired_preview = state
+        .print_preparation_surface
+        .as_ref()
+        .filter(|surface| surface.workspace_generation == workspace_generation)
+        .and_then(|surface| {
+            Some((
+                surface.epoch,
+                live_preview_authority?,
+                *selection.as_ref()?.as_ref().ok()?,
+            ))
+        });
+    reconcile_print_png_preview_intent(state, desired_preview);
+    let status = if selection.as_ref().is_some_and(Result::is_err) {
+        "Enter valid PNG dimensions to show the preview"
+    } else {
+        state
+            .print_preparation_surface
+            .as_ref()
+            .map_or("Preview not rendered", |surface| {
+                print_png_preview_status_text(surface.preview_status)
+            })
+    };
+    state
+        .shell
+        .print_preparation_summary()
+        .set_label(&print_preparation_view::inspector_summary(
+            &document_settings,
+            status,
+        ));
+    let width_status = state.print_preparation.accepted().map_or_else(
+        || "Width checks: Not checked".to_owned(),
+        |pair| print_preparation_view::width_status_summary(pair.report()),
+    );
+    let status_text = status.to_owned();
+    let pending_file_chooser = state.pending_file_chooser;
+    let pending_export = state.pending_export;
+    if let Some(surface) = state
+        .print_preparation_surface
+        .as_mut()
+        .filter(|surface| surface.workspace_generation == workspace_generation)
+    {
+        if let Some(Ok(selection)) = selection.as_ref() {
+            surface.controls.selection.set(*selection);
+            surface
+                .controls
+                .current_preview_rgb
+                .set(print_preparation_view::automatic_preview_rgb(model));
+            surface.controls.backdrop_painter.queue_draw();
+            surface.controls.export_backing_summary.set_label(
+                &print_preparation_view::export_backing_summary(selection.background, model),
+            );
+            let target_summary = if selection.prepare_for_print {
+                format!(
+                    "Prepared output: {} × {} pixels",
+                    selection.target.width(),
+                    selection.target.height()
+                )
+            } else {
+                print_preparation_view::target_summary(selection.target, &document_settings)
+            };
+            surface.controls.target_summary.set_label(&target_summary);
+        } else {
+            surface
+                .controls
+                .target_summary
+                .set_label("Final output target is unavailable until PNG dimensions are valid.");
+        }
+        surface
+            .controls
+            .applied_summary
+            .set_label(&print_preparation_view::inspector_summary(
+                &document_settings,
+                &status_text,
+            ));
+        surface.controls.status.set_label(&status_text);
+        surface.controls.width_status.set_label(&width_status);
+        if !surface.draft_dirty {
+            let unit = surface.controls.selected_unit.get();
+            if let Ok(draft) =
+                print_preparation_view::IntentDraft::from_settings(&document_settings, unit)
+            {
+                surface.draft_base_settings = document_settings.clone();
+                surface.draft_changed_fields = [false; 4];
+                surface.controls.project(|| {
+                    surface.controls.physical_width.set_text(&draft.width);
+                    surface.controls.physical_height.set_text(&draft.height);
+                    surface
+                        .controls
+                        .positive_width
+                        .set_text(&draft.positive_width);
+                    surface.controls.negative_gap.set_text(&draft.negative_gap);
+                    surface.controls.apply.set_sensitive(false);
+                });
+            }
+        } else {
+            let changed = surface.draft_changed_fields;
+            let mut draft = print_preparation_view::IntentDraft {
+                unit: surface.controls.selected_unit.get(),
+                width: surface.controls.physical_width.text().to_string(),
+                height: surface.controls.physical_height.text().to_string(),
+                positive_width: surface.controls.positive_width.text().to_string(),
+                negative_gap: surface.controls.negative_gap.text().to_string(),
+            };
+            if draft.rebase_untouched(&document_settings, changed).is_ok() {
+                surface.draft_base_settings = document_settings.clone();
+                surface.controls.project(|| {
+                    if !changed[0] {
+                        surface.controls.physical_width.set_text(&draft.width);
+                    }
+                    if !changed[1] {
+                        surface.controls.physical_height.set_text(&draft.height);
+                    }
+                    if !changed[2] {
+                        surface
+                            .controls
+                            .positive_width
+                            .set_text(&draft.positive_width);
+                    }
+                    if !changed[3] {
+                        surface.controls.negative_gap.set_text(&draft.negative_gap);
+                    }
+                });
+            }
+        }
+        let valid_output = selection.as_ref().is_some_and(Result::is_ok);
+        surface.controls.project(|| {
+            surface
+                .controls
+                .export
+                .set_sensitive(valid_output && !pending_export && !pending_file_chooser);
+            surface
+                .controls
+                .apply
+                .set_sensitive(surface.draft_dirty && apply_available);
+            surface.controls.garment_color.set_sensitive(
+                surface.controls.selected_backdrop.get()
+                    == print_preparation_view::PreviewBackdrop::Garment,
+            );
+            surface.controls.garment_swatch.set_sensitive(
+                surface.controls.selected_backdrop.get()
+                    == print_preparation_view::PreviewBackdrop::Garment,
+            );
+        });
+        surface.controls.status.set_label(&status_text);
+        let available = surface.raster_texture.is_some();
+        let target = surface.controls.selection.get().target;
+        surface
+            .controls
+            .preview_zoom_out
+            .set_sensitive(available && print_preparation_view::can_show_exact_zoom(target, 0.5));
+        surface
+            .controls
+            .preview_actual_size
+            .set_sensitive(available && print_preparation_view::can_show_exact_zoom(target, 1.0));
+        surface
+            .controls
+            .preview_zoom_in
+            .set_sensitive(available && print_preparation_view::can_show_exact_zoom(target, 2.0));
+        surface.controls.preview_fit.set_sensitive(available);
+    }
+}
+
+/// Names the exact PNG preview lifecycle without treating old detector output as advice.
+fn print_png_preview_status_text(status: print_preparation_view::PreviewStatus) -> &'static str {
+    match status {
+        print_preparation_view::PreviewStatus::NotRendered => "Preview not rendered",
+        print_preparation_view::PreviewStatus::Rendering => "Rendering preview…",
+        print_preparation_view::PreviewStatus::Current => "Current PNG preview",
+        print_preparation_view::PreviewStatus::OutOfDate => "Updating PNG preview…",
+        print_preparation_view::PreviewStatus::Failed => "Preview unavailable · see error log",
+    }
+}
+
+/// Projects at most one accessible findings page and one current pair into retained GTK textures.
+#[allow(dead_code)] // The accepted G2a report projector is no longer on the visible PNG workflow.
+fn sync_print_findings_projection(state: &mut AppState) {
+    let AppState {
+        application_model,
+        print_preparation_surface,
+        ..
+    } = state;
+    let Some(surface) = print_preparation_surface.as_mut() else {
+        return;
+    };
+    let Some(pair) = application_model.print_preparation.accepted() else {
+        let had_projection = surface.findings_projection_key.take().is_some();
+        surface.selected_record = None;
+        surface.raster_texture = None;
+        surface.highlight_texture = None;
+        surface.display_identity = None;
+        surface.highlight_selection_identity = None;
+        surface.selected_bounds_key = None;
+        surface.selected_bounds = None;
+        surface.selected_bounds_key = None;
+        surface.selected_bounds = None;
+        if !had_projection {
+            return;
+        }
+        let controls = &surface.controls;
+        controls.project(|| {
+            if had_projection {
+                clear_finding_rows(&controls.findings);
+                controls
+                    .page_summary
+                    .set_label("Findings appear after Check.");
+            }
+            controls.previous_page.set_sensitive(false);
+            controls.next_page.set_sensitive(false);
+            controls.findings.set_sensitive(false);
+            controls.zoom_to_location.set_sensitive(false);
+            controls.fit_view.set_sensitive(false);
+            controls.highlight.set_sensitive(false);
+            controls
+                .raster_picture
+                .set_paintable(None::<&gtk::gdk::Paintable>);
+            controls
+                .highlight_picture
+                .set_paintable(None::<&gtk::gdk::Paintable>);
+            controls.raster_picture.set_size_request(-1, -1);
+            controls.highlight_picture.set_size_request(-1, -1);
+            controls.backdrop_painter.set_size_request(-1, -1);
+        });
+        return;
+    };
+    let report = pair.report();
+    let target = report.identity.target();
+    let identity = report.identity.transparent_raster_identity().to_owned();
+    let pair_bytes = print_preparation::retained_bytes(pair).unwrap_or(u64::MAX);
+    let image_bytes = print_preparation_view::display_bytes(target).unwrap_or(u64::MAX);
+    let image_allowed = image_bytes <= print_preparation_view::MAX_REVIEW_DISPLAY_BYTES
+        && pair_bytes
+            .checked_add(image_bytes)
+            .is_some_and(|bytes| bytes <= print_preparation_view::MAX_REVIEW_TOTAL_BYTES);
+    let raster_changed = surface.display_identity.as_deref() != Some(identity.as_str());
+    if raster_changed {
+        surface.raster_texture = None;
+        surface.highlight_texture = None;
+        surface.display_identity = None;
+        surface.highlight_selection_identity = None;
+        surface.selected_bounds_key = None;
+        surface.selected_bounds = None;
+        surface.selected_bounds_key = None;
+        surface.selected_bounds = None;
+        surface
+            .controls
+            .raster_picture
+            .set_paintable(None::<&gtk::gdk::Paintable>);
+        surface
+            .controls
+            .highlight_picture
+            .set_paintable(None::<&gtk::gdk::Paintable>);
+        surface.controls.raster_picture.set_size_request(-1, -1);
+        surface.controls.highlight_picture.set_size_request(-1, -1);
+        surface.controls.backdrop_painter.set_size_request(-1, -1);
+        surface.display_identity = Some(identity);
+        if image_allowed {
+            match texture_from_surface(pair.raster()) {
+                Ok(texture) => surface.raster_texture = Some(texture),
+                Err(error) => surface.controls.status.set_label(&format!(
+                    "Current advisory · raster display unavailable: {error}"
+                )),
+            }
+        }
+    }
+    let display_warning = if !image_allowed {
+        Some("Current advisory · raster display exceeds the review memory budget.".to_owned())
+    } else if surface.raster_texture.is_none() {
+        Some("Current advisory · raster display unavailable.".to_owned())
+    } else {
+        None
+    };
+    let category = surface.category_filter;
+    let total = category.record_count(report);
+    let pages = total
+        .div_ceil(print_preparation_view::FINDINGS_PER_PAGE)
+        .max(1);
+    surface.page = surface.page.min(pages.saturating_sub(1));
+    let page_start = surface
+        .page
+        .saturating_mul(print_preparation_view::FINDINGS_PER_PAGE);
+    let page_end = total.min(page_start.saturating_add(print_preparation_view::FINDINGS_PER_PAGE));
+    if surface
+        .selected_record
+        .is_none_or(|index| index < page_start || index >= page_end)
+    {
+        surface.selected_record = (page_start < page_end).then_some(page_start);
+        surface.highlight_selection_identity = None;
+        surface.selected_bounds_key = None;
+        surface.selected_bounds = None;
+        surface.selected_bounds_key = None;
+        surface.selected_bounds = None;
+    }
+    let projection_key = (report.identity.clone(), category, surface.page);
+    let projection_changed = surface.findings_projection_key.as_ref() != Some(&projection_key);
+    if projection_changed {
+        surface.highlight_selection_identity = None;
+        surface.selected_bounds_key = None;
+        surface.selected_bounds = None;
+        surface.selected_bounds_key = None;
+        surface.selected_bounds = None;
+        surface.findings_projection_key = Some(projection_key);
+    }
+    let selected_local = surface
+        .selected_record
+        .and_then(|index| index.checked_sub(page_start))
+        .filter(|index| *index < page_end.saturating_sub(page_start));
+    let page_label = if total == 0 {
+        format!("{} · no records", category.label())
+    } else {
+        format!(
+            "{} · {}–{} of {} · page {} of {}",
+            category.label(),
+            page_start + 1,
+            page_end,
+            total,
+            surface.page + 1,
+            pages
+        )
+    };
+    let mut rows = Vec::new();
+    if projection_changed {
+        rows.reserve(page_end.saturating_sub(page_start));
+        for index in page_start..page_end {
+            let Some(record) = category.record_at(report, index) else {
+                continue;
+            };
+            rows.push(match record {
+                print_preparation_view::FindingRecord::Support(component) => {
+                    print_preparation_view::support_row(component, category)
+                }
+                print_preparation_view::FindingRecord::Candidate(candidate) => {
+                    print_preparation_view::candidate_row(candidate)
+                }
+            });
+        }
+    }
+    let preview_texture = surface.raster_texture.clone();
+    let controls = &surface.controls;
+    controls.project(|| {
+        if projection_changed {
+            clear_finding_rows(&controls.findings);
+            for text in rows {
+                let row = gtk::ListBoxRow::new();
+                let label = gtk::Label::new(Some(&text));
+                label.set_xalign(0.0);
+                label.set_wrap(true);
+                label.set_margin_top(3);
+                label.set_margin_bottom(3);
+                row.set_child(Some(&label));
+                controls.findings.append(&row);
+            }
+        }
+        controls.page_summary.set_label(&page_label);
+        controls
+            .previous_page
+            .set_sensitive(total > 0 && surface.page > 0);
+        controls
+            .next_page
+            .set_sensitive(total > 0 && surface.page + 1 < pages);
+        controls.findings.set_sensitive(total > 0);
+        controls
+            .fit_view
+            .set_sensitive(surface.raster_texture.is_some());
+        if raster_changed {
+            controls.raster_picture.set_paintable(
+                preview_texture
+                    .as_ref()
+                    .map(|texture| texture.upcast_ref::<gtk::gdk::Paintable>()),
+            );
+        }
+        if projection_changed {
+            if let Some(local) = selected_local {
+                if let Some(row) = controls.findings.row_at_index(local as i32) {
+                    controls.findings.select_row(Some(&row));
+                }
+            } else {
+                controls.findings.unselect_all();
+            }
+        }
+    });
+    if let Some(warning) = display_warning {
+        controls.status.set_label(&warning);
+    } else {
+        controls.status.set_label(&print_preparation_status_text(
+            &application_model.print_preparation,
+        ));
+    }
+    project_selected_print_highlight(surface, pair, pair_bytes, image_bytes);
+}
+
+/// Removes only the current bounded page of GTK list rows.
+#[allow(dead_code)] // Retained with the inactive G2a report projector.
+fn clear_finding_rows(list: &gtk::ListBox) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+}
+
+/// Retains a selected exact-run overlay only when its separate and aggregate display budgets fit.
+fn project_selected_print_highlight(
+    surface: &mut print_preparation_view::Surface,
+    pair: &toniator_engine::print_preflight::PreflightRasterReport,
+    pair_bytes: u64,
+    image_bytes: u64,
+) {
+    let Some(index) = surface.selected_record else {
+        surface.highlight_texture = None;
+        surface.highlight_selection_identity = None;
+        surface.selected_bounds_key = None;
+        surface.selected_bounds = None;
+        surface
+            .controls
+            .highlight_picture
+            .set_paintable(None::<&gtk::gdk::Paintable>);
+        surface.controls.zoom_to_location.set_sensitive(false);
+        surface.controls.highlight.set_sensitive(false);
+        return;
+    };
+    let bounds_key = (
+        pair.report().identity.clone(),
+        surface.category_filter,
+        index,
+    );
+    let bounds = if surface.selected_bounds_key.as_ref() == Some(&bounds_key) {
+        surface.selected_bounds
+    } else {
+        let bounds = print_preparation_view::record_bounds(
+            pair.report(),
+            pair.raster(),
+            surface.category_filter,
+            index,
+        )
+        .ok()
+        .flatten();
+        surface.selected_bounds_key = Some(bounds_key);
+        surface.selected_bounds = bounds;
+        bounds
+    };
+    surface
+        .controls
+        .zoom_to_location
+        .set_sensitive(bounds.is_some());
+    surface.controls.highlight.set_sensitive(bounds.is_some());
+    if !surface.controls.highlight.is_active() || bounds.is_none() {
+        surface.highlight_texture = None;
+        surface.highlight_selection_identity = None;
+        surface
+            .controls
+            .highlight_picture
+            .set_paintable(None::<&gtk::gdk::Paintable>);
+        return;
+    }
+    let overlay_bytes =
+        print_preparation_view::display_bytes(pair.report().identity.target()).unwrap_or(u64::MAX);
+    if overlay_bytes > print_preparation_view::MAX_REVIEW_DISPLAY_BYTES
+        || pair_bytes
+            .checked_add(image_bytes)
+            .and_then(|bytes| bytes.checked_add(overlay_bytes))
+            .is_none_or(|bytes| bytes > print_preparation_view::MAX_REVIEW_TOTAL_BYTES)
+    {
+        surface.highlight_texture = None;
+        surface.highlight_selection_identity = None;
+        surface
+            .controls
+            .highlight_picture
+            .set_paintable(None::<&gtk::gdk::Paintable>);
+        surface
+            .controls
+            .status
+            .set_label("Current advisory · highlight exceeds the review memory budget.");
+        return;
+    }
+    let selection_identity = (surface.category_filter, index);
+    if surface.highlight_selection_identity == Some(selection_identity)
+        && let Some(texture) = surface.highlight_texture.as_ref()
+    {
+        surface
+            .controls
+            .highlight_picture
+            .set_paintable(Some(texture));
+        return;
+    }
+    surface.highlight_texture = None;
+    surface.highlight_selection_identity = None;
+    surface
+        .controls
+        .highlight_picture
+        .set_paintable(None::<&gtk::gdk::Paintable>);
+    match print_preparation_view::highlight_rgba(pair, surface.category_filter, index).and_then(
+        |rgba| {
+            print_preparation_view::texture_from_rgba(
+                pair.raster().width(),
+                pair.raster().height(),
+                rgba,
+            )
+        },
+    ) {
+        Ok(texture) => {
+            surface.highlight_texture = Some(texture.clone());
+            surface.highlight_selection_identity = Some(selection_identity);
+            surface
+                .controls
+                .highlight_picture
+                .set_paintable(Some(&texture));
+        }
+        Err(error) => {
+            surface.highlight_texture = None;
+            surface.highlight_selection_identity = None;
+            surface.selected_bounds_key = None;
+            surface.selected_bounds = None;
+            surface
+                .controls
+                .highlight_picture
+                .set_paintable(None::<&gtk::gdk::Paintable>);
+            surface.controls.status.set_label(&format!(
+                "Current advisory · selected highlights unavailable: {error}"
+            ));
+        }
+    }
+}
+
+/// Formats the controller lifecycle without implying physical safety or a pass result.
+#[allow(dead_code)] // Internal G2a report lifecycle remains independent of the prepared preview.
+fn print_preparation_status_text(controller: &print_preparation::Controller) -> String {
+    match controller.status() {
+        print_preparation::CheckStatus::NotChecked => "Not checked".into(),
+        print_preparation::CheckStatus::Running => "Running".into(),
+        print_preparation::CheckStatus::CurrentAdvisory => "Current advisory".into(),
+        print_preparation::CheckStatus::OutOfDate => "Out of date".into(),
+        print_preparation::CheckStatus::Cancelled => "Cancelled".into(),
+        print_preparation::CheckStatus::Unavailable => controller.unavailable_reason().map_or_else(
+            || "Unavailable".to_owned(),
+            |reason| format!("Unavailable · {reason}"),
+        ),
+    }
+}
+
+/// Starts an explicit fresh check from current live document, source, frame, and widget intent.
+#[allow(dead_code)] // The PNG dialog now renders exact prepared pixels instead of advisory checks.
+fn request_print_preparation_check(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let job = {
+        let mut app = state.borrow_mut();
+        if app.pending_file_chooser || app.pending_export {
+            return;
+        }
+        let Some(surface) = app
+            .print_preparation_surface
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        let Some(workspace) = app
+            .workspace
+            .as_ref()
+            .filter(|workspace| Workspace::can_save(workspace))
+        else {
+            return;
+        };
+        let capture = capture_still_export(
+            workspace,
+            app.endpoint.frame(workspace.document()),
+            app.generation,
+            app.workspace_generation,
+        );
+        let selection = surface.controls.selection.get();
+        app.print_preparation.request(capture, selection)
+    };
+    if let Some(job) = job {
+        launch_print_preparation_job(state, job);
+    }
+    sync_ui(&mut state.borrow_mut());
+}
+
+/// Invalidates immediately after a changed PNG options control and projects the new target.
+fn print_preparation_selection_changed(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    if state
+        .borrow()
+        .print_preparation_surface
+        .as_ref()
+        .is_none_or(|surface| surface.epoch != epoch)
+    {
+        return;
+    }
+    sync_ui(&mut state.borrow_mut());
+}
+
+/// Cancels stale work immediately and debounces only a changed, valid final-pixel identity.
+fn reconcile_print_png_preview_intent(
+    state: &mut AppState,
+    desired: Option<(
+        u64,
+        print_preparation::LiveAuthority,
+        print_preparation::OutputSelection,
+    )>,
+) {
+    let Some(ticket) = state.print_png_preview_intent.reconcile(desired) else {
+        return;
+    };
+    if let Some(timer) = state.print_png_preview_debounce.take() {
+        timer.remove();
+    }
+    if let Some(surface) = state.print_preparation_surface.as_mut() {
+        surface.invalidate_preview();
+        if desired.is_some() {
+            surface.preview_status = print_preparation_view::PreviewStatus::OutOfDate;
+        }
+    }
+    if desired.is_none() {
+        return;
+    }
+    let weak = state.print_png_preview_self.clone();
+    state.print_png_preview_debounce = Some(glib::timeout_add_local_once(
+        Duration::from_millis(150),
+        move || {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            let ready = {
+                let mut app = state.borrow_mut();
+                if app.print_png_preview_intent.ticket != ticket {
+                    return;
+                }
+                app.print_png_preview_debounce = None;
+                app.print_png_preview_intent.timer_elapsed(ticket)
+            };
+            if ready {
+                start_pending_print_png_preview(&state);
+            }
+        },
+    ));
+}
+
+/// Starts the newest debounced capture only after the app-level worker slot and chooser are free.
+fn start_pending_print_png_preview(state: &Rc<RefCell<AppState>>) {
+    let epoch = {
+        let mut app = state.borrow_mut();
+        if app.print_png_preview_worker.is_some() || app.pending_file_chooser || app.pending_export
+        {
+            return;
+        }
+        let Some((epoch, authority, selection)) = app.print_png_preview_intent.desired else {
+            return;
+        };
+        if print_preparation_live_authority(&app) != Some(authority)
+            || app
+                .print_preparation_surface
+                .as_ref()
+                .is_none_or(|surface| {
+                    surface.epoch != epoch || surface.controls.selection.get() != selection
+                })
+        {
+            sync_ui(&mut app);
+            return;
+        }
+        app.print_png_preview_intent
+            .take_ready(false)
+            .map(|(epoch, _, _)| epoch)
+    };
+    if let Some(epoch) = epoch {
+        request_print_png_preview(state, epoch);
+    }
+}
+
+/// Defers a ready request to the next GTK idle turn after a chooser or export lock releases.
+fn queue_ready_print_png_preview(state: &mut AppState) {
+    if !state.print_png_preview_intent.ready
+        || state.print_png_preview_worker.is_some()
+        || state.pending_file_chooser
+        || state.pending_export
+        || state.print_png_preview_start_queued
+    {
+        return;
+    }
+    state.print_png_preview_start_queued = true;
+    let weak = state.print_png_preview_self.clone();
+    glib::idle_add_local_once(move || {
+        if let Some(state) = weak.upgrade() {
+            state.borrow_mut().print_png_preview_start_queued = false;
+            start_pending_print_png_preview(&state);
+        }
+    });
+}
+
+/// Starts a fresh final-raster preview without depending on advisory detector completion.
+///
+/// The captured session, source, frame, output intent, and surface generation
+/// travel together to the worker. A later edit or option change cancels and
+/// retires its result before GTK can display obsolete pixels.
+fn request_print_png_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let (capture, selection, authority) = {
+        let app = state.borrow();
+        if app.pending_file_chooser || app.pending_export {
+            return;
+        }
+        let Some(surface) = app
+            .print_preparation_surface
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        let Some(workspace) = app
+            .workspace
+            .as_ref()
+            .filter(|workspace| Workspace::can_save(workspace))
+        else {
+            return;
+        };
+        let capture = capture_still_export(
+            workspace,
+            app.endpoint.frame(workspace.document()),
+            app.generation,
+            app.workspace_generation,
+        );
+        let Some(authority) = print_preparation_live_authority(&app) else {
+            return;
+        };
+        (capture, surface.controls.selection.get(), authority)
+    };
+    let bytes = print_preparation_view::display_bytes(selection.target).unwrap_or(u64::MAX);
+    let (request_id, cancelled) = {
+        let mut app = state.borrow_mut();
+        if app.print_png_preview_worker.is_some() {
+            return;
+        }
+        let Some(surface) = app
+            .print_preparation_surface
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        surface.invalidate_preview();
+        if bytes > print_preparation_view::MAX_PREPARED_PREVIEW_BYTES {
+            surface.preview_status = print_preparation_view::PreviewStatus::Failed;
+            eprintln!("print preparation: selected PNG exceeds the preview memory budget");
+            sync_ui(&mut app);
+            return;
+        }
+        let Some(id) = surface.preview_request_id.checked_add(1) else {
+            surface.preview_status = print_preparation_view::PreviewStatus::Failed;
+            eprintln!("print preparation: preview request identity exhausted");
+            sync_ui(&mut app);
+            return;
+        };
+        surface.preview_request_id = id;
+        surface.preview_authority = Some(authority);
+        surface.preview_selection = Some(selection);
+        surface.preview_status = print_preparation_view::PreviewStatus::Rendering;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        surface.preview_cancel = Some(cancelled.clone());
+        app.print_png_preview_worker = Some((epoch, id, cancelled.clone()));
+        (id, cancelled)
+    };
+    sync_ui(&mut state.borrow_mut());
+    let sender = state.borrow().event_sender.clone();
+    thread::spawn(move || {
+        let settings = ExportSettings {
+            format: ExportFormat::Png,
+            background: selection.background_for(&capture.session),
+            antialiasing: selection.antialiasing,
+            output_target: Some(selection.target),
+            prepare_for_print: selection.prepare_for_print,
+            pixels_per_metre: selection.pixels_per_metre,
+            cleanup: selection.cleanup,
+        };
+        let result = render_captured_png_surface(&capture, settings, &cancelled);
+        let _ = sender.send_blocking(AppEvent::PrintPngPreview {
+            epoch,
+            request_id,
+            authority,
+            selection,
+            result: Box::new(result),
+        });
+    });
+}
+
+/// Publishes one latest captured preview texture after exact live-authority checks.
+fn complete_print_png_preview(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    request_id: u64,
+    authority: print_preparation::LiveAuthority,
+    selection: print_preparation::OutputSelection,
+    result: Result<RasterSurface, String>,
+) {
+    let mut app = state.borrow_mut();
+    if !app
+        .print_png_preview_worker
+        .as_ref()
+        .is_some_and(|(active_epoch, active_id, _)| {
+            *active_epoch == epoch && *active_id == request_id
+        })
+    {
+        return;
+    }
+    app.print_png_preview_worker = None;
+    let live = print_preparation_live_authority(&app);
+    if let Some(surface) = app
+        .print_preparation_surface
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+        && surface.preview_request_id == request_id
+        && surface.preview_authority == Some(authority)
+        && surface.preview_selection == Some(selection)
+        && live == Some(authority)
+        && surface.controls.selection.get() == selection
+    {
+        surface.preview_cancel = None;
+        match result.and_then(|raster| texture_from_surface(&raster)) {
+            Ok(texture) => {
+                surface.raster_texture = Some(texture.clone());
+                surface.preview_status = print_preparation_view::PreviewStatus::Current;
+                project_print_png_preview_zoom(surface);
+            }
+            Err(error) => {
+                eprintln!("print preparation preview: {error}");
+                surface.preview_status = print_preparation_view::PreviewStatus::Failed;
+            }
+        }
+    }
+    sync_ui(&mut app);
+    drop(app);
+    start_pending_print_png_preview(state);
+}
+
+/// Projects Fit or an exact output-pixel scale into the scrollable preview canvas.
+///
+/// Fit uses the current preview allocation and records it for resize tracking; exact zoom retains
+/// output-pixel scale and leaves panning to the scrollbars. This only changes GTK presentation.
+fn project_print_png_preview_zoom(surface: &print_preparation_view::Surface) {
+    let target = surface.controls.selection.get().target;
+    let factor = surface
+        .preview_zoom
+        .filter(|scale| print_preparation_view::can_show_exact_zoom(target, *scale));
+    let (width, height) = match factor {
+        Some(scale) => print_preparation_view::preview_dimensions(target, scale),
+        None => print_preparation_view::fitted_preview_dimensions(
+            target,
+            surface.controls.canvas_scroll.width(),
+            surface.controls.canvas_scroll.height(),
+        ),
+    };
+    if factor.is_none() {
+        surface.fit_allocation.set((
+            surface.controls.canvas_scroll.width(),
+            surface.controls.canvas_scroll.height(),
+        ));
+    }
+    if let Some(texture) = &surface.raster_texture {
+        let paintable = prepared_paintable::PreparedPaintable::new(
+            texture.clone(),
+            factor.is_some_and(|scale| scale >= 1.0),
+        );
+        surface
+            .controls
+            .raster_picture
+            .set_paintable(Some(&paintable));
+    }
+    surface
+        .controls
+        .raster_picture
+        .set_size_request(width, height);
+    surface
+        .controls
+        .backdrop_painter
+        .set_size_request(width, height);
+}
+
+/// Changes only preview magnification; scrollbars provide direct spatial panning.
+fn set_print_png_preview_zoom(state: &Rc<RefCell<AppState>>, epoch: u64, zoom: Option<f64>) {
+    let mut app = state.borrow_mut();
+    let Some(surface) = app
+        .print_preparation_surface
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    else {
+        return;
+    };
+    if surface.raster_texture.is_none() {
+        return;
+    }
+    if zoom.is_some_and(|factor| {
+        !print_preparation_view::can_show_exact_zoom(
+            surface.controls.selection.get().target,
+            factor,
+        )
+    }) {
+        return;
+    }
+    surface.preview_zoom = zoom;
+    project_print_png_preview_zoom(surface);
+}
+
+/// Changes only the viewer backdrop; the transparent raster and report identity remain current.
+fn select_print_preview_backdrop(state: &Rc<RefCell<AppState>>, epoch: u64, position: u32) {
+    if let Some(surface) = state
+        .borrow()
+        .print_preparation_surface
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.controls.selected_backdrop.set(
+            print_preparation_view::PreviewBackdrop::from_position(position),
+        );
+        surface.controls.backdrop_painter.queue_draw();
+    }
+    sync_ui(&mut state.borrow_mut());
+}
+
+/// Changes the bounded report projection while preserving the current finding filter across staleness.
+fn select_print_finding_category(state: &Rc<RefCell<AppState>>, epoch: u64, position: u32) {
+    if let Some(surface) = state
+        .borrow_mut()
+        .print_preparation_surface
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.category_filter = print_preparation_view::FindingCategory::from_position(position);
+        surface.page = 0;
+        surface.selected_record = None;
+        surface.highlight_texture = None;
+        surface.highlight_selection_identity = None;
+        surface.selected_bounds_key = None;
+        surface.selected_bounds = None;
+        surface
+            .controls
+            .highlight_picture
+            .set_paintable(None::<&gtk::gdk::Paintable>);
+    }
+    sync_ui(&mut state.borrow_mut());
+}
+
+/// Marks entry edits as an unapplied draft without changing project history or current analysis.
+fn mark_print_intent_draft_changed(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    changed_field: usize,
+) {
+    let mut app = state.borrow_mut();
+    let can_apply = app.workspace.as_ref().is_some_and(Workspace::can_save)
+        && !lifecycle_is_busy(&app)
+        && !app.pending_file_chooser
+        && !app.pending_export;
+    if let Some(surface) = app
+        .print_preparation_surface
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.draft_dirty = true;
+        if let Some(changed) = surface.draft_changed_fields.get_mut(changed_field) {
+            *changed = true;
+        }
+        surface.controls.intent_message.set_label("");
+        surface.controls.intent_message.set_visible(false);
+        surface.controls.apply.set_sensitive(can_apply);
+    }
+}
+
+/// Converts all four valid draft fields between display units without accumulating conversion drift.
+fn change_print_intent_unit(state: &Rc<RefCell<AppState>>, epoch: u64, position: u32) {
+    let mut app = state.borrow_mut();
+    let Some(surface) = app
+        .print_preparation_surface
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    else {
+        return;
+    };
+    let new_unit = print_preparation_view::EntryUnit::from_position(position);
+    let old_unit = surface.controls.selected_unit.get();
+    if new_unit == old_unit {
+        return;
+    }
+    let current = print_preparation_view::IntentDraft {
+        unit: old_unit,
+        width: surface.controls.physical_width.text().to_string(),
+        height: surface.controls.physical_height.text().to_string(),
+        positive_width: surface.controls.positive_width.text().to_string(),
+        negative_gap: surface.controls.negative_gap.text().to_string(),
+    };
+    let canonical = current.parse_over(&surface.draft_base_settings, surface.draft_changed_fields);
+    let Ok(canonical) = canonical else {
+        surface.controls.project(|| {
+            surface.controls.unit.set_selected(match old_unit {
+                print_preparation_view::EntryUnit::Millimetres => 0,
+                print_preparation_view::EntryUnit::Inches => 1,
+            });
+            surface
+                .controls
+                .intent_message
+                .set_label("Correct the draft before changing units.");
+            surface.controls.intent_message.set_visible(true);
+        });
+        return;
+    };
+    let Ok(draft) = print_preparation_view::IntentDraft::from_settings(&canonical, new_unit) else {
+        return;
+    };
+    surface.draft_base_settings = canonical.clone();
+    surface.controls.selected_unit.set(new_unit);
+    surface.controls.project(|| {
+        surface.controls.physical_width.set_text(&draft.width);
+        surface.controls.physical_height.set_text(&draft.height);
+        surface
+            .controls
+            .positive_width
+            .set_text(&draft.positive_width);
+        surface.controls.negative_gap.set_text(&draft.negative_gap);
+        surface.controls.intent_message.set_label("");
+        surface.controls.intent_message.set_visible(false);
+    });
+}
+
+/// Updates one export-local maximum dimension while retaining its canonical millimetre value.
+///
+/// Invalid intermediate entry text remains visible and marks the selected output unavailable;
+/// this draft never mutates project settings or history.
+fn update_print_box_dimension(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    is_width: bool,
+    value: &str,
+) {
+    let mut app = state.borrow_mut();
+    let Some(surface) = app
+        .print_preparation_surface
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    else {
+        return;
+    };
+    let mut draft = surface.box_dimensions.get();
+    if is_width {
+        let _ = draft.update_width(value);
+    } else {
+        let _ = draft.update_height(value);
+    }
+    surface.box_dimensions.set(draft);
+}
+
+/// Projects a selected print-box unit from the retained millimetre draft.
+///
+/// Visible text and accessible labels follow the selector. The existing preview selection stays
+/// identical because the export-local physical limits remain canonical millimetres.
+fn change_print_box_unit(state: &Rc<RefCell<AppState>>, epoch: u64, position: u32) {
+    let changed = {
+        let mut app = state.borrow_mut();
+        let Some(surface) = app
+            .print_preparation_surface
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        let previous = surface.box_dimensions.get();
+        let new_unit = print_preparation_view::EntryUnit::from_position(position);
+        if new_unit == previous.unit() {
+            return;
+        }
+        let mut draft = previous;
+        match draft.change_unit(new_unit) {
+            Ok((width, height)) => {
+                surface.box_dimensions.set(draft);
+                surface.controls.project(|| {
+                    surface.controls.box_unit.set_selected(new_unit.position());
+                    surface.controls.box_width.set_text(&width);
+                    surface.controls.box_height.set_text(&height);
+                    set_print_box_unit_labels(&surface.controls, new_unit);
+                    surface.controls.options.size_error().set_label("");
+                    surface.controls.options.size_error().set_visible(false);
+                });
+                true
+            }
+            Err(error) => {
+                surface.controls.project(|| {
+                    surface
+                        .controls
+                        .box_unit
+                        .set_selected(previous.unit().position());
+                    surface.controls.options.size_error().set_label(&error);
+                    surface.controls.options.size_error().set_visible(true);
+                });
+                false
+            }
+        }
+    };
+    if changed {
+        sync_ui(&mut state.borrow_mut());
+    }
+}
+
+/// Keeps the visible and accessible width/height labels aligned with the print-box unit.
+fn set_print_box_unit_labels(
+    controls: &print_preparation_view::Controls,
+    unit: print_preparation_view::EntryUnit,
+) {
+    controls
+        .box_width_label
+        .set_label(&format!("Maximum print _width ({})", unit.abbreviation()));
+    controls
+        .box_height_label
+        .set_label(&format!("Maximum print _height ({})", unit.abbreviation()));
+    let width_name = format!("Maximum print box width in {}", unit.name());
+    let height_name = format!("Maximum print box height in {}", unit.name());
+    controls
+        .box_width
+        .update_property(&[gtk::accessible::Property::Label(&width_name)]);
+    controls
+        .box_height
+        .update_property(&[gtk::accessible::Property::Label(&height_name)]);
+}
+
+/// Reprojects the exact raster scale when the settings/preview divider changes in Fit mode.
+fn resize_print_preview_if_fitting(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let mut app = state.borrow_mut();
+    if let Some(surface) = app
+        .print_preparation_surface
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+        && surface.preview_zoom.is_none()
+        && surface.raster_texture.is_some()
+    {
+        project_print_png_preview_zoom(surface);
+    }
+}
+
+/// Tracks realized preview allocations so Fit follows divider moves and window resizes.
+///
+/// The callback performs only a bounded size comparison each frame and reprojects the existing
+/// raster only when its viewport changes. It never starts rendering or changes document/output state.
+fn install_print_preview_fit_tracking(
+    paned: &gtk::Paned,
+    state: std::rc::Weak<RefCell<AppState>>,
+    epoch: u64,
+) {
+    paned.add_tick_callback(move |_, _| {
+        let Some(state) = state.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        let mut app = state.borrow_mut();
+        let Some(surface) = app
+            .print_preparation_surface
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return glib::ControlFlow::Break;
+        };
+        if surface.preview_zoom.is_none() && surface.raster_texture.is_some() {
+            let allocation = (
+                surface.controls.canvas_scroll.width(),
+                surface.controls.canvas_scroll.height(),
+            );
+            if allocation.0 > 0 && allocation.1 > 0 && surface.fit_allocation.get() != allocation {
+                surface.fit_allocation.set(allocation);
+                project_print_png_preview_zoom(surface);
+            }
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
+/// Applies one complete validated physical-intent draft through reversible history authority.
+fn apply_print_intent_draft(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let parsed = {
+        let app = state.borrow();
+        let Some(surface) = app
+            .print_preparation_surface
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        print_preparation_view::IntentDraft {
+            unit: surface.controls.selected_unit.get(),
+            width: surface.controls.physical_width.text().to_string(),
+            height: surface.controls.physical_height.text().to_string(),
+            positive_width: surface.controls.positive_width.text().to_string(),
+            negative_gap: surface.controls.negative_gap.text().to_string(),
+        }
+        .parse_over(&surface.draft_base_settings, surface.draft_changed_fields)
+    };
+    let settings = match parsed {
+        Ok(settings) => settings,
+        Err(error) => {
+            if let Some(surface) = state
+                .borrow()
+                .print_preparation_surface
+                .as_ref()
+                .filter(|surface| surface.epoch == epoch)
+            {
+                surface.controls.intent_message.set_label(&error);
+                surface.controls.intent_message.set_visible(true);
+            }
+            return;
+        }
+    };
+    if state.borrow().pending_file_chooser || state.borrow().pending_export {
+        return;
+    }
+    match apply_print_preparation_settings(state, settings.clone()) {
+        Ok(changed) => {
+            if let Some(surface) = state
+                .borrow_mut()
+                .print_preparation_surface
+                .as_mut()
+                .filter(|surface| surface.epoch == epoch)
+            {
+                surface.draft_dirty = false;
+                surface.draft_base_settings = settings.clone();
+                surface.draft_changed_fields = [false; 4];
+                let unit = surface.controls.selected_unit.get();
+                if let Ok(draft) =
+                    print_preparation_view::IntentDraft::from_settings(&settings, unit)
+                {
+                    surface.controls.project(|| {
+                        surface.controls.physical_width.set_text(&draft.width);
+                        surface.controls.physical_height.set_text(&draft.height);
+                        surface
+                            .controls
+                            .positive_width
+                            .set_text(&draft.positive_width);
+                        surface.controls.negative_gap.set_text(&draft.negative_gap);
+                        surface.controls.apply.set_sensitive(false);
+                        surface.controls.intent_message.set_label(if changed {
+                            "Applied to project history. Undo can restore the previous settings."
+                        } else {
+                            "These settings already match the applied project values."
+                        });
+                        surface.controls.intent_message.set_visible(true);
+                    });
+                }
+            }
+            sync_ui(&mut state.borrow_mut());
+        }
+        Err(error) => {
+            if let Some(surface) = state
+                .borrow()
+                .print_preparation_surface
+                .as_ref()
+                .filter(|surface| surface.epoch == epoch)
+            {
+                surface.controls.intent_message.set_label(&error);
+                surface.controls.intent_message.set_visible(true);
+            }
+        }
+    }
+}
+
+/// Captures final PNG session, source, frame, target, backing, and antialiasing at Export activation.
+fn request_png_export_from_surface(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let (capture, selection, path) = {
+        let app = state.borrow();
+        if app.pending_export || app.pending_file_chooser {
+            return;
+        }
+        let Some(surface) = app
+            .print_preparation_surface
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        let Some(workspace) = app
+            .workspace
+            .as_ref()
+            .filter(|workspace| Workspace::can_save(workspace))
+        else {
+            return;
+        };
+        let selection = surface.controls.selection.get();
+        let capture = capture_still_export(
+            workspace,
+            app.endpoint.frame(workspace.document()),
+            app.generation,
+            app.workspace_generation,
+        );
+        (capture, selection, surface.path.clone())
+    };
+    if let Some(path) = path {
+        start_png_export(state, path, capture, selection);
+    } else {
+        choose_deferred_png_destination(state, epoch, capture, selection);
+    }
+}
+
+/// Opens the PNG-only destination chooser with the final Export capture frozen on its owner surface.
+fn choose_deferred_png_destination(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    capture: print_preparation::ExportCapture,
+    selection: print_preparation::OutputSelection,
+) {
+    let initial_name = {
+        let mut app = state.borrow_mut();
+        let Some(surface) = app
+            .print_preparation_surface
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        surface.pending_capture = Some(capture.clone());
+        surface.pending_selection = Some(selection);
+        app.pending_png_export_chooser = true;
+        app.pending_png_export_surface_epoch = Some(epoch);
+        app.pending_file_chooser = true;
+        let filename = app.workspace.as_ref().map_or_else(
+            || "Untitled.png".to_owned(),
+            |workspace| suggested_export_filename(workspace, ExportFormat::Png),
+        );
+        sync_ui(&mut app);
+        filename
+    };
+    let dialog = gtk::FileDialog::new();
+    dialog.set_title("Export PNG image");
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some("PNG image"));
+    filter.add_mime_type("image/png");
+    filter.add_pattern("*.png");
+    let filters = gio::ListStore::new::<gtk::FileFilter>();
+    filters.append(&filter);
+    dialog.set_filters(Some(&filters));
+    dialog.set_initial_name(Some(&initial_name));
+    let weak = Rc::downgrade(state);
+    let window = state.borrow().window.clone();
+    dialog.save(Some(&window), None::<&gio::Cancellable>, move |result| {
+        let Some(state) = weak.upgrade() else {
+            return;
+        };
+        let (current, frozen) = {
+            let mut app = state.borrow_mut();
+            if app.pending_png_export_surface_epoch != Some(epoch) {
+                return;
+            }
+            app.pending_file_chooser = false;
+            app.pending_png_export_chooser = false;
+            app.pending_png_export_surface_epoch = None;
+            let frozen = app
+                .print_preparation_surface
+                .as_mut()
+                .filter(|surface| surface.epoch == epoch)
+                .and_then(|surface| {
+                    let capture = surface.pending_capture.take()?;
+                    let selection = surface.pending_selection.take()?;
+                    Some((capture, selection))
+                });
+            let current = app
+                .print_preparation_surface
+                .as_ref()
+                .is_some_and(|surface| {
+                    surface.epoch == epoch
+                        && surface.workspace_generation == app.workspace_generation
+                });
+            sync_ui(&mut app);
+            (current, frozen)
+        };
+        if !current {
+            return;
+        }
+        match (result, frozen) {
+            (Ok(file), Some((capture, selection))) => {
+                let destination = file
+                    .path()
+                    .ok_or_else(|| "Choose a local PNG destination.".to_owned())
+                    .and_then(png_destination_path);
+                match destination {
+                    Ok(path) => start_png_export(&state, path, capture, selection),
+                    Err(error) if selection.prepare_for_print => {
+                        eprintln!("print preparation chooser: {error}");
+                        set_inspector_status(
+                            &mut state.borrow_mut(),
+                            "Print PNG destination unavailable; see error log.",
+                        );
+                    }
+                    Err(error) => show_error(&mut state.borrow_mut(), error),
+                }
+            }
+            (Err(error), Some((_, selection))) if !error.matches(gio::IOErrorEnum::Cancelled) => {
+                if selection.prepare_for_print {
+                    eprintln!("print preparation chooser: {error}");
+                    set_inspector_status(
+                        &mut state.borrow_mut(),
+                        "Print PNG destination unavailable; see error log.",
+                    );
+                } else {
+                    show_error(
+                        &mut state.borrow_mut(),
+                        format!("Couldn’t choose a PNG destination: {error}"),
+                    );
+                }
+            }
+            _ => {}
+        }
+        if let Some(surface) = state
+            .borrow()
+            .print_preparation_surface
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        {
+            surface.controls.window.present();
+        }
+    });
+}
+
+/// Resolves the PNG-only chooser suffix while preserving explicit incompatible suffix errors.
+///
+/// # Errors
+/// Returns an error when an explicit filename extension is not `.png`.
+fn png_destination_path(mut path: PathBuf) -> Result<PathBuf, String> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        None => {
+            path.set_extension("png");
+        }
+        Some(extension) if extension.eq_ignore_ascii_case("png") => {}
+        Some(_) => return Err("Choose a .png filename for this PNG export.".into()),
+    }
+    Ok(path)
+}
+
+/// Starts the ordinary captured PNG renderer; optional findings never gate export.
+fn start_png_export(
+    state: &Rc<RefCell<AppState>>,
+    path: PathBuf,
+    capture: print_preparation::ExportCapture,
+    selection: print_preparation::OutputSelection,
+) {
+    let settings = ExportSettings {
+        format: ExportFormat::Png,
+        prepare_for_print: selection.prepare_for_print,
+        pixels_per_metre: selection.pixels_per_metre,
+        cleanup: selection.cleanup,
+        background: selection.background_for(&capture.session),
+        antialiasing: selection.antialiasing,
+        output_target: Some(selection.target),
+    };
+    start_export(state, path, settings, capture);
+}
+
+/// Projects the viewer-only backdrop choice and explicit garment display color.
+fn update_print_garment_color(state: &Rc<RefCell<AppState>>, epoch: u64, value: &str) {
+    if let Some(surface) = state
+        .borrow()
+        .print_preparation_surface
+        .as_ref()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        match print_preparation_view::parse_hex_color(value) {
+            Ok(color) => {
+                surface.controls.garment_rgb.set(color);
+                surface.controls.garment_message.set_label("");
+                surface.controls.garment_message.set_visible(false);
+                surface.controls.garment_swatch.queue_draw();
+                surface.controls.backdrop_painter.queue_draw();
+            }
+            Err(error) => {
+                surface.controls.garment_message.set_label(&error);
+                surface.controls.garment_message.set_visible(true);
+            }
+        }
+    }
+}
+
+/// Changes the page without retaining a report-sized category index vector.
+fn change_print_finding_page(state: &Rc<RefCell<AppState>>, epoch: u64, next: bool) {
+    if let Some(surface) = state
+        .borrow_mut()
+        .print_preparation_surface
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        if next {
+            surface.page = surface.page.saturating_add(1);
+        } else {
+            surface.page = surface.page.saturating_sub(1);
+        }
+        surface.selected_record = None;
+        surface.selected_bounds_key = None;
+        surface.selected_bounds = None;
+    }
+    sync_ui(&mut state.borrow_mut());
+}
+
+/// Selects one visible list row through its bounded page offset.
+fn select_print_finding(state: &Rc<RefCell<AppState>>, epoch: u64, row: i32) {
+    if row < 0 {
+        return;
+    }
+    if let Some(surface) = state
+        .borrow_mut()
+        .print_preparation_surface
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        surface.selected_record = surface
+            .page
+            .checked_mul(print_preparation_view::FINDINGS_PER_PAGE)
+            .and_then(|first| first.checked_add(row as usize));
+        surface.highlight_selection_identity = None;
+        surface.selected_bounds_key = None;
+        surface.selected_bounds = None;
+    }
+    refresh_selected_print_finding(state, epoch);
+}
+
+/// Refreshes the selected exact-run overlay using the current report and final raster pair.
+fn refresh_selected_print_finding(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let mut app = state.borrow_mut();
+    let AppState {
+        application_model,
+        print_preparation_surface,
+        ..
+    } = &mut *app;
+    let Some(pair) = application_model.print_preparation.accepted() else {
+        if let Some(surface) = print_preparation_surface
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch)
+        {
+            surface.highlight_texture = None;
+            surface.highlight_selection_identity = None;
+            surface.selected_bounds_key = None;
+            surface.selected_bounds = None;
+            surface
+                .controls
+                .highlight_picture
+                .set_paintable(None::<&gtk::gdk::Paintable>);
+            surface.controls.zoom_to_location.set_sensitive(false);
+        }
+        return;
+    };
+    let pair_bytes = print_preparation::retained_bytes(pair).unwrap_or(u64::MAX);
+    let image_bytes =
+        print_preparation_view::display_bytes(pair.report().identity.target()).unwrap_or(u64::MAX);
+    if let Some(surface) = print_preparation_surface
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    {
+        project_selected_print_highlight(surface, pair, pair_bytes, image_bytes);
+    }
+}
+
+/// Centers and magnifies the selected source-owned pixel bounds within the bounded canvas view.
+fn zoom_to_selected_print_finding(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let projection = {
+        let app = state.borrow();
+        let Some(surface) = app
+            .print_preparation_surface
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        let Some(pair) = app.print_preparation.accepted() else {
+            return;
+        };
+        let Some(index) = surface.selected_record else {
+            return;
+        };
+        let Ok(Some(bounds)) = print_preparation_view::record_bounds(
+            pair.report(),
+            pair.raster(),
+            surface.category_filter,
+            index,
+        ) else {
+            return;
+        };
+        (
+            surface.controls.canvas_scroll.clone(),
+            surface.controls.raster_picture.clone(),
+            surface.controls.highlight_picture.clone(),
+            surface.controls.backdrop_painter.clone(),
+            pair.report().identity.target(),
+            bounds,
+        )
+    };
+    let (scroll, raster_picture, highlight_picture, backdrop, target, bounds) = projection;
+    let viewport_width = f64::from(scroll.width().max(1));
+    let viewport_height = f64::from(scroll.height().max(1));
+    let bounds_width = f64::from(bounds.x1_exclusive.saturating_sub(bounds.x0).max(1));
+    let bounds_height = f64::from(bounds.y1_exclusive.saturating_sub(bounds.y0).max(1));
+    let factor = (viewport_width / (bounds_width * 2.5))
+        .min(viewport_height / (bounds_height * 2.5))
+        .clamp(1.0, 6.0);
+    let (scaled_width, scaled_height) = print_preparation_view::preview_dimensions(target, factor);
+    raster_picture.set_size_request(scaled_width, scaled_height);
+    highlight_picture.set_size_request(scaled_width, scaled_height);
+    backdrop.set_size_request(scaled_width, scaled_height);
+    glib::idle_add_local_once(move || {
+        let x_center = f64::from(bounds.x0 + bounds.x1_exclusive) / 2.0;
+        let y_center = f64::from(bounds.y0 + bounds.y1_exclusive) / 2.0;
+        let horizontal = scroll.hadjustment();
+        let vertical = scroll.vadjustment();
+        let horizontal_max = (horizontal.upper() - horizontal.page_size()).max(horizontal.lower());
+        let vertical_max = (vertical.upper() - vertical.page_size()).max(vertical.lower());
+        horizontal.set_value(
+            (x_center / f64::from(target.width()) * horizontal.upper()
+                - horizontal.page_size() / 2.0)
+                .clamp(horizontal.lower(), horizontal_max),
+        );
+        vertical.set_value(
+            (y_center / f64::from(target.height()) * vertical.upper() - vertical.page_size() / 2.0)
+                .clamp(vertical.lower(), vertical_max),
+        );
+    });
+}
+
+/// Fits both transparent raster layers inside the review viewport and resets the scroll origin.
+fn fit_print_review_view(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let projection = {
+        let app = state.borrow();
+        let Some(surface) = app
+            .print_preparation_surface
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+        else {
+            return;
+        };
+        let Some(pair) = app.print_preparation.accepted() else {
+            return;
+        };
+        (
+            surface.controls.canvas_scroll.clone(),
+            surface.controls.raster_picture.clone(),
+            surface.controls.highlight_picture.clone(),
+            surface.controls.backdrop_painter.clone(),
+            pair.report().identity.target(),
+        )
+    };
+    let (scroll, raster_picture, highlight_picture, backdrop, target) = projection;
+    let (width, height) =
+        print_preparation_view::fitted_preview_dimensions(target, scroll.width(), scroll.height());
+    raster_picture.set_size_request(width, height);
+    highlight_picture.set_size_request(width, height);
+    backdrop.set_size_request(width, height);
+    glib::idle_add_local_once(move || {
+        scroll.hadjustment().set_value(scroll.hadjustment().lower());
+        scroll.vadjustment().set_value(scroll.vadjustment().lower());
+    });
 }
 
 /// Parses optional explicit PNG dimensions through the shared final-consumer safety limits.
@@ -23395,11 +25902,13 @@ fn start_export(
     state.borrow_mut().still_export_cancel = Some(cancelled.clone());
     state.borrow_mut().still_export_progress = Some(progress);
     thread::spawn(move || {
+        let prepare_for_print = settings.prepare_for_print;
         let result = export_captured_frame_cancellable(capture, path, settings, &cancelled);
         let _ = event_sender.send_blocking(AppEvent::Export {
             generation,
             workspace_generation,
             format,
+            prepare_for_print,
             result,
         });
     });
@@ -23446,6 +25955,22 @@ fn export_captured_frame_cancellable(
     settings: ExportSettings,
     cancelled: &AtomicBool,
 ) -> Result<(), String> {
+    if settings.format == ExportFormat::Png {
+        let surface = render_captured_png_surface(&capture, settings, cancelled)?;
+        if cancelled.load(Ordering::Acquire) {
+            return Err("Export cancelled.".into());
+        }
+        let output = match settings.pixels_per_metre {
+            Some(ppm) => encode_png_with_density(&surface, ppm),
+            None => encode_png(&surface),
+        }
+        .map_err(|error| error.to_string())?;
+        if cancelled.load(Ordering::Acquire) {
+            return Err("Export cancelled.".into());
+        }
+        return fs::write(&path, output)
+            .map_err(|error| format!("output.write: could not write {}: {error}", path.display()));
+    }
     let mut media = toniator_engine::open_source_media(
         &capture.sources,
         toniator_engine::MediaTools::default(),
@@ -23492,6 +26017,66 @@ fn export_captured_frame_cancellable(
         .map_err(|error| format!("output.write: could not write {}: {error}", path.display()))
 }
 
+/// Renders one captured final PNG target for both the exact preview and encoded export.
+///
+/// Garment preparation always rasterizes the transparent composition first,
+/// thresholds its alpha, then applies the captured PNG backing. Ordinary PNG
+/// export keeps the engine's existing direct backing path.
+///
+/// # Errors
+/// Returns source, evaluation, cancellation, allocation, or raster diagnostics.
+fn render_captured_png_surface(
+    capture: &print_preparation::ExportCapture,
+    settings: ExportSettings,
+    cancelled: &AtomicBool,
+) -> Result<RasterSurface, String> {
+    let mut media = toniator_engine::open_source_media(
+        &capture.sources,
+        toniator_engine::MediaTools::default(),
+        &|| cancelled.load(Ordering::Acquire),
+    )
+    .map_err(|error| error.to_string())?;
+    let request = toniator_engine::frame_evaluation_request(
+        &capture.session,
+        &mut media,
+        capture.frame,
+        &|| cancelled.load(Ordering::Acquire),
+    )
+    .map_err(|error| error.to_string())?
+    .for_output(
+        if settings.prepare_for_print {
+            RasterBackground::Transparent
+        } else {
+            settings.background
+        },
+        settings.output_target,
+        settings.antialiasing,
+    );
+    let result = toniator_engine::evaluate_cancellable_with_limits(
+        request,
+        EvaluationLimits::default(),
+        cancelled,
+    )
+    .map_err(|error| match error {
+        toniator_engine::EvaluationRunError::Evaluation(error) => error.to_string(),
+        toniator_engine::EvaluationRunError::Cancelled => "Export cancelled.".into(),
+    })?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("Export cancelled.".into());
+    }
+    if settings.prepare_for_print {
+        let binary = print_preparation::prepare_binary_alpha(
+            result.raster(),
+            RasterBackground::Transparent,
+            cancelled,
+        )?;
+        let corrected = print_cleanup::apply(&binary, settings.cleanup, cancelled)?;
+        print_preparation::prepare_binary_alpha(&corrected, settings.background, cancelled)
+    } else {
+        Ok(result.raster().clone())
+    }
+}
+
 /// Starts one explicit optional preflight request against the chooser-time live capture.
 ///
 /// G2a has no visible Review action; the future G2b control calls this internal
@@ -23529,6 +26114,7 @@ fn complete_print_preparation_check(
         let live = print_preparation_live_authority(&app);
         app.print_preparation.complete(completion, live)
     };
+    sync_ui(&mut state.borrow_mut());
     if let Some(job) = next {
         launch_print_preparation_job(state, job);
     }
@@ -23572,6 +26158,13 @@ fn export_snapshot(
 /// pending quit request. Stale results never replace the workspace or populate Recent Files.
 fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
     match event {
+        AppEvent::PrintPngPreview {
+            epoch,
+            request_id,
+            authority,
+            selection,
+            result,
+        } => complete_print_png_preview(state, epoch, request_id, authority, selection, *result),
         AppEvent::PrintPreparation(completion) => {
             complete_print_preparation_check(state, completion)
         }
@@ -23648,6 +26241,7 @@ fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
             generation,
             workspace_generation,
             format,
+            prepare_for_print,
             result,
         } => {
             if state.borrow().generation != generation
@@ -23679,6 +26273,10 @@ fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
                     );
                 }
                 Err(_) if cancelled => set_inspector_status(&mut app_state, "Export cancelled."),
+                Err(error) if prepare_for_print => {
+                    eprintln!("print preparation export: {error}");
+                    set_inspector_status(&mut app_state, "Print PNG export failed; see error log.");
+                }
                 Err(error) => show_error(
                     &mut app_state,
                     format!("Couldn’t export this artwork: {error}"),
@@ -24066,11 +26664,23 @@ fn handle_advanced_preview_completion(
 /// bound to the replaced document. The next editor launch starts with fresh
 /// runtime-only selection/draft state and cannot target destroyed widgets.
 fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
-    let (model, pattern_editor_window, advanced_settings_window, pattern_wizard_window) = {
+    let (
+        model,
+        pattern_editor_window,
+        advanced_settings_window,
+        pattern_wizard_window,
+        print_preparation_window,
+    ) = {
         let mut state = state.borrow_mut();
         state.scatter_memory = scatter_memory::Memory::default();
         state.print_preparation.close();
+        let print_preparation_window = state
+            .print_preparation_surface
+            .take()
+            .map(|surface| surface.controls.window.clone());
         state.pending_file_chooser = false;
+        state.pending_png_export_chooser = false;
+        state.pending_png_export_surface_epoch = None;
         state.workspace_generation = state.workspace_generation.saturating_add(1);
         state.preview_coordinator.clear_submission();
         sync_main_preview_pending(&state);
@@ -24103,6 +26713,7 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
             pattern_editor_window,
             advanced_settings_window,
             pattern_wizard_window,
+            print_preparation_window,
         )
     };
     // The close-request callback borrows AppState, so the detached editor may
@@ -24114,6 +26725,9 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
         window.close();
     }
     if let Some(window) = pattern_wizard_window {
+        window.close();
+    }
+    if let Some(window) = print_preparation_window {
         window.close();
     }
     sync_model_selector(state, model);
@@ -24172,11 +26786,17 @@ fn sync_model_selector(state: &Rc<RefCell<AppState>>, model: PreviewModel) {
 /// Cancellation prevents late main-preview publication; detached GTK editors close after the
 /// AppState borrow ends so their callbacks cannot reenter a mutable borrow.
 fn clear_workspace(state: &Rc<RefCell<AppState>>) {
-    let (pattern_editor_window, pattern_wizard_window, advanced_window) = {
+    let (pattern_editor_window, pattern_wizard_window, advanced_window, print_preparation_window) = {
         let mut state = state.borrow_mut();
         state.scatter_memory = scatter_memory::Memory::default();
         state.print_preparation.close();
+        let print_preparation_window = state
+            .print_preparation_surface
+            .take()
+            .map(|surface| surface.controls.window.clone());
         state.pending_file_chooser = false;
+        state.pending_png_export_chooser = false;
+        state.pending_png_export_surface_epoch = None;
         state.generation = state.generation.saturating_add(1);
         state.workspace_generation = state.workspace_generation.saturating_add(1);
         state.preview_coordinator.clear_submission();
@@ -24225,6 +26845,7 @@ fn clear_workspace(state: &Rc<RefCell<AppState>>) {
             pattern_editor_window,
             pattern_wizard_window,
             advanced_window,
+            print_preparation_window,
         )
     };
     if let Some(window) = pattern_editor_window {
@@ -24234,6 +26855,9 @@ fn clear_workspace(state: &Rc<RefCell<AppState>>) {
         window.close();
     }
     if let Some(window) = advanced_window {
+        window.close();
+    }
+    if let Some(window) = print_preparation_window {
         window.close();
     }
 }
@@ -24723,14 +27347,15 @@ fn print_preparation_live_authority(state: &AppState) -> Option<print_preparatio
 
 /// Projects immutable application state into persistent GTK widgets.
 ///
-/// The projection updates enabled state, labels, and presentation only; it
-/// never changes workspace/history/scheduler authority or starts I/O.
+/// The projection updates labels and enabled state; changed PNG pixel identity schedules
+/// a debounced, cancellable exact preview without changing workspace or document authority.
 fn sync_ui(state: &mut AppState) {
     if let Some(workspace) = state.workspace.as_ref() {
         state.endpoint = state.endpoint.for_document(workspace.document());
     }
     let live = print_preparation_live_authority(state);
     state.print_preparation.reconcile(live);
+    sync_print_preparation_surface(state);
     let policy = ui_policy(
         state.workspace.as_ref(),
         main_document_edits_blocked(state),
@@ -24822,10 +27447,96 @@ fn sync_ui(state: &mut AppState) {
     apply_main_view_presentation(state);
     document_presets::sync_controls(state);
     sync_endpoint_controls(state);
+    queue_ready_print_png_preview(state);
 }
 
 #[cfg(test)]
 mod tests {
+    /// Coalesces rapid valid edits into the latest timer and holds it behind one busy worker.
+    ///
+    /// # Panics
+    /// Panics if an obsolete timer or busy slot admits a stale preview intent.
+    #[test]
+    fn print_preview_intent_rapid_changes_keep_one_latest_pending() {
+        let mut intent = PrintPreviewIntent::<u8>::default();
+        let first = intent.reconcile(Some(1)).unwrap();
+        let second = intent.reconcile(Some(2)).unwrap();
+        let third = intent.reconcile(Some(3)).unwrap();
+        assert!(!intent.timer_elapsed(first));
+        assert!(!intent.timer_elapsed(second));
+        assert!(intent.timer_elapsed(third));
+        assert_eq!(intent.take_ready(true), None);
+        assert_eq!(intent.take_ready(false), Some(3));
+        assert_eq!(intent.take_ready(false), None);
+    }
+
+    /// Replaces a cancelled running request after its slot retires without admitting the old one.
+    ///
+    /// # Panics
+    /// Panics if completion consumes pending intent while the worker is still occupied.
+    #[test]
+    fn print_preview_intent_cancelled_worker_restarts_latest_after_completion() {
+        let mut intent = PrintPreviewIntent::<u8>::default();
+        let first = intent.reconcile(Some(1)).unwrap();
+        assert!(intent.timer_elapsed(first));
+        assert_eq!(intent.take_ready(false), Some(1));
+        let replacement = intent.reconcile(Some(2)).unwrap();
+        assert!(intent.timer_elapsed(replacement));
+        assert_eq!(intent.take_ready(true), None);
+        assert_eq!(intent.take_ready(false), Some(2));
+    }
+
+    /// Rejects closed-epoch and invalid-form timers while allowing a reopened valid epoch.
+    ///
+    /// # Panics
+    /// Panics if stale close/reopen work becomes ready or invalid input launches a worker.
+    #[test]
+    fn print_preview_intent_close_reopen_and_invalid_form_reject_stale_timers() {
+        let mut intent = PrintPreviewIntent::<(u8, u8)>::default();
+        let closing = intent.reconcile(Some((1, 7))).unwrap();
+        intent.reconcile(None);
+        assert!(!intent.timer_elapsed(closing));
+        let reopened = intent.reconcile(Some((2, 7))).unwrap();
+        assert!(intent.timer_elapsed(reopened));
+        assert_eq!(intent.take_ready(false), Some((2, 7)));
+        intent.reconcile(None);
+        assert_eq!(intent.take_ready(false), None);
+    }
+
+    /// Leaves a failed attempted identity idle until a genuinely changed pixel identity arrives.
+    ///
+    /// # Panics
+    /// Panics if unrelated sync repeats a consumed render request.
+    #[test]
+    fn print_preview_intent_failure_does_not_retry_without_new_dirty_request() {
+        let mut intent = PrintPreviewIntent::<u8>::default();
+        let attempted = intent.reconcile(Some(4)).unwrap();
+        assert!(intent.timer_elapsed(attempted));
+        assert_eq!(intent.take_ready(false), Some(4));
+        assert_eq!(intent.reconcile(Some(4)), None);
+        assert_eq!(intent.take_ready(false), None);
+        let changed = intent.reconcile(Some(5)).unwrap();
+        assert!(intent.timer_elapsed(changed));
+        assert_eq!(intent.take_ready(false), Some(5));
+    }
+
+    /// Retiring one deferred chooser releases its lifecycle lock without clearing a newer owner.
+    #[test]
+    fn deferred_png_chooser_retirement_is_surface_epoch_scoped() {
+        let mut owner = Some(9);
+        let mut pending_png = true;
+        assert!(!retire_deferred_png_chooser(
+            8,
+            &mut owner,
+            &mut pending_png,
+        ));
+        assert_eq!(owner, Some(9));
+        assert!(pending_png);
+        assert!(retire_deferred_png_chooser(9, &mut owner, &mut pending_png,));
+        assert_eq!(owner, None);
+        assert!(!pending_png);
+    }
+
     /// Assigns All-scope Feature size through effective-channel authority, preserving Undo.
     ///
     /// # Panics
@@ -25095,6 +27806,9 @@ mod tests {
                 output.clone(),
                 ExportSettings {
                     format: ExportFormat::Png,
+                    prepare_for_print: false,
+                    pixels_per_metre: None,
+                    cleanup: print_cleanup::Settings::default(),
                     background: toniator_engine::RasterBackground::Transparent,
                     output_target: None,
                     antialiasing: toniator_engine::RasterAntialiasing::On,
@@ -26785,9 +29499,15 @@ mod tests {
             target,
             antialiasing: RasterAntialiasing::On,
             background: print_preparation::BackgroundChoice::Automatic,
+            prepare_for_print: false,
+            pixels_per_metre: None,
+            cleanup: print_cleanup::Settings::default(),
         };
         let settings = ExportSettings {
             format: ExportFormat::Png,
+            prepare_for_print: false,
+            pixels_per_metre: None,
+            cleanup: print_cleanup::Settings::default(),
             background: choice.background_for(&capture.session),
             antialiasing: choice.antialiasing,
             output_target: Some(choice.target),
@@ -26906,6 +29626,79 @@ mod tests {
         );
     }
 
+    /// Verifies both immutable inputs encode exactly the captured prepared preview pixels.
+    ///
+    /// Transparent and opaque backing preserve the fixed binary-alpha invariant;
+    /// the physical density is metadata, not a second resize. Native artifacts
+    /// remain under this revision's validation directory for RGB/alpha inspection.
+    #[test]
+    fn garment_prepared_native_exports_match_exact_preview_both_inputs() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/validation/garment-binary-alpha-20261007/exports");
+        fs::create_dir_all(&directory).unwrap();
+        for (name, target) in [
+            (
+                "raster-sample.png",
+                OutputRasterTarget::new(256, 256).unwrap(),
+            ),
+            (
+                "vector-sample.svg",
+                OutputRasterTarget::new(256, 176).unwrap(),
+            ),
+        ] {
+            let workspace = load_workspace(&asset(name)).unwrap();
+            let frame = workspace.document().project_timing().frame_range().start();
+            let capture = capture_still_export(&workspace, frame, 1, 1);
+            for (label, background) in [
+                ("transparent", RasterBackground::Transparent),
+                ("white", RasterBackground::OpaqueWhite),
+            ] {
+                let settings = ExportSettings {
+                    format: ExportFormat::Png,
+                    background,
+                    antialiasing: RasterAntialiasing::On,
+                    output_target: Some(target),
+                    prepare_for_print: true,
+                    pixels_per_metre: Some(11_811),
+                    cleanup: print_cleanup::Settings::default(),
+                };
+                let expected =
+                    render_captured_png_surface(&capture, settings, &AtomicBool::new(false))
+                        .unwrap();
+                let stem = name.rsplit_once('.').unwrap().0;
+                let path = directory.join(format!("{stem}-{label}-prepared.png"));
+                export_captured_frame_cancellable(
+                    capture.clone(),
+                    path.clone(),
+                    settings,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+                let bytes = fs::read(&path).unwrap();
+                let mut decoder = png::Decoder::new(std::io::Cursor::new(&bytes));
+                decoder.set_transformations(png::Transformations::IDENTITY);
+                let mut reader = decoder.read_info().unwrap();
+                let density = reader.info().pixel_dims.unwrap();
+                assert_eq!(
+                    (density.xppu, density.yppu, density.unit),
+                    (11_811, 11_811, png::Unit::Meter)
+                );
+                let mut decoded = vec![0; reader.output_buffer_size().unwrap()];
+                let info = reader.next_frame(&mut decoded).unwrap();
+                assert_eq!((info.width, info.height), (target.width(), target.height()));
+                assert_eq!(&decoded[..info.buffer_size()], expected.pixels());
+                assert!(
+                    decoded
+                        .chunks_exact(4)
+                        .all(|pixel| pixel[3] == 0 || pixel[3] == 255)
+                );
+                if background != RasterBackground::Transparent {
+                    assert!(decoded.chunks_exact(4).all(|pixel| pixel[3] == 255));
+                }
+            }
+        }
+    }
+
     /// Persists and exports both immutable stage inputs through app-owned boundaries.
     ///
     /// This portal-independent witness writes only the active Stage 19B
@@ -26944,6 +29737,9 @@ mod tests {
                 png.clone(),
                 ExportSettings {
                     format: ExportFormat::Png,
+                    prepare_for_print: false,
+                    pixels_per_metre: None,
+                    cleanup: print_cleanup::Settings::default(),
                     background: RasterBackground::Transparent,
                     antialiasing: RasterAntialiasing::On,
                     output_target: Some(
@@ -26964,6 +29760,9 @@ mod tests {
                 svg.clone(),
                 ExportSettings {
                     format: ExportFormat::Svg,
+                    prepare_for_print: false,
+                    pixels_per_metre: None,
+                    cleanup: print_cleanup::Settings::default(),
                     background: RasterBackground::Transparent,
                     antialiasing: RasterAntialiasing::On,
                     output_target: None,
@@ -27583,6 +30382,9 @@ mod tests {
                     png.clone(),
                     ExportSettings {
                         format: ExportFormat::Png,
+                        prepare_for_print: false,
+                        pixels_per_metre: None,
+                        cleanup: print_cleanup::Settings::default(),
                         background: RasterBackground::Transparent,
                         antialiasing: RasterAntialiasing::Off,
                         output_target: Some(target),
@@ -27601,6 +30403,9 @@ mod tests {
                         aa_on.clone(),
                         ExportSettings {
                             format: ExportFormat::Png,
+                            prepare_for_print: false,
+                            pixels_per_metre: None,
+                            cleanup: print_cleanup::Settings::default(),
                             background: RasterBackground::Transparent,
                             antialiasing: RasterAntialiasing::On,
                             output_target: Some(target),
@@ -27618,6 +30423,9 @@ mod tests {
                     svg.clone(),
                     ExportSettings {
                         format: ExportFormat::Svg,
+                        prepare_for_print: false,
+                        pixels_per_metre: None,
+                        cleanup: print_cleanup::Settings::default(),
                         background: RasterBackground::Transparent,
                         antialiasing: RasterAntialiasing::On,
                         output_target: None,
@@ -27639,6 +30447,9 @@ mod tests {
             directory.join("missing-parent/output.png"),
             ExportSettings {
                 format: ExportFormat::Png,
+                prepare_for_print: false,
+                pixels_per_metre: None,
+                cleanup: print_cleanup::Settings::default(),
                 background: RasterBackground::Transparent,
                 antialiasing: RasterAntialiasing::On,
                 output_target: None,
@@ -27660,6 +30471,9 @@ mod tests {
             default_png.clone(),
             ExportSettings {
                 format: ExportFormat::Png,
+                prepare_for_print: false,
+                pixels_per_metre: None,
+                cleanup: print_cleanup::Settings::default(),
                 background: RasterBackground::OpaqueBlack,
                 antialiasing: RasterAntialiasing::On,
                 output_target: None,
@@ -32731,6 +35545,9 @@ mod tests {
                 output_directory.join(&png_name),
                 ExportSettings {
                     format: ExportFormat::Png,
+                    prepare_for_print: false,
+                    pixels_per_metre: None,
+                    cleanup: print_cleanup::Settings::default(),
                     background: RasterBackground::Transparent,
                     antialiasing: RasterAntialiasing::On,
                     output_target: Some(target),
@@ -32746,6 +35563,9 @@ mod tests {
                 output_directory.join(&svg_name),
                 ExportSettings {
                     format: ExportFormat::Svg,
+                    prepare_for_print: false,
+                    pixels_per_metre: None,
+                    cleanup: print_cleanup::Settings::default(),
                     background: RasterBackground::Transparent,
                     antialiasing: RasterAntialiasing::On,
                     output_target: None,

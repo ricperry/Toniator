@@ -6,6 +6,14 @@ use toniator_engine::{EvaluationCompletion, EvaluationProgress};
 /// Carries worker results without granting workers GTK or document authority.
 #[allow(clippy::large_enum_variant)] // Save events deliberately own one authoritative document snapshot.
 pub(crate) enum AppEvent {
+    /// Delivers one exact captured PNG preview independently of advisory analysis.
+    PrintPngPreview {
+        epoch: u64,
+        request_id: u64,
+        authority: crate::print_preparation::LiveAuthority,
+        selection: crate::print_preparation::OutputSelection,
+        result: Box<Result<toniator_engine::RasterSurface, String>>,
+    },
     /// Completes one optional print-preparation check for main-thread freshness admission.
     PrintPreparation(crate::print_preparation::CheckCompletion),
     /// Reports full-document construction validity for one private wizard revision.
@@ -50,6 +58,7 @@ pub(crate) enum AppEvent {
         generation: u64,
         workspace_generation: u64,
         format: ExportFormat,
+        prepare_for_print: bool,
         result: Result<(), String>,
     },
     /// Delivers the scheduler's newest candidate for main-context acceptance.

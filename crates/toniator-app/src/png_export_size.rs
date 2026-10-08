@@ -54,6 +54,150 @@ impl VideoOutputSize {
     }
 }
 
+/// Carries a checked print-fit raster and its requested-DPI physical readout.
+///
+/// The source canvas remains the authority for artwork aspect. The secondary axis uses nearest
+/// whole-pixel rounding after the limiting axis is floored to its maximum.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PrintFit {
+    target: OutputRasterTarget,
+    target_dpi: f64,
+    pixels_per_metre: u32,
+    physical_width_mm: f64,
+    physical_height_mm: f64,
+}
+
+impl PrintFit {
+    /// Returns final pixel dimensions admitted by the shared renderer budget.
+    pub(crate) fn target(self) -> OutputRasterTarget {
+        self.target
+    }
+
+    /// Returns the requested density before conversion to PNG's integer pixels-per-metre value.
+    pub(crate) fn target_dpi(self) -> f64 {
+        self.target_dpi
+    }
+
+    /// Returns the equal horizontal and vertical density encoded in PNG pixels per metre.
+    pub(crate) fn pixels_per_metre(self) -> u32 {
+        self.pixels_per_metre
+    }
+
+    /// Returns the fitted physical width and height derived from final pixels and requested DPI.
+    pub(crate) fn physical_size_mm(self) -> (f64, f64) {
+        (self.physical_width_mm, self.physical_height_mm)
+    }
+}
+
+/// Fits an authoritative canvas aspect inside a maximum physical box at one requested DPI.
+///
+/// Width and height are millimetres. Pixel bounds are floored from the requested DPI, with a small
+/// floating-point tolerance for values that represent an exact whole-pixel bound. The limiting
+/// axis uses its maximum whole-pixel bound, while the other axis rounds to the nearest pixel and
+/// clamps to its own bound. This retains the source aspect to normal pixel-rounding accuracy
+/// without stretching the artwork. The returned physical size follows the requested DPI; the
+/// integer pixels-per-metre value is rounded separately for PNG metadata and may differ slightly.
+///
+/// # Errors
+/// Rejects nonintegral or invalid source dimensions, nonpositive or unrepresentable DPI/metadata,
+/// nonpositive or subpixel physical bounds, unrepresentable output dimensions, and renderer-budget
+/// violations.
+pub(crate) fn fit_print_box(
+    canvas: &CanvasSpec,
+    width_mm: f64,
+    height_mm: f64,
+    target_dpi: f64,
+) -> Result<PrintFit, String> {
+    let valid_source_dimension = |value: f64| {
+        value.is_finite() && value > 0.0 && value.fract() == 0.0 && value <= f64::from(u32::MAX)
+    };
+    if !valid_source_dimension(canvas.width) || !valid_source_dimension(canvas.height) {
+        return Err("The document must have positive whole pixel dimensions.".to_owned());
+    }
+    if !width_mm.is_finite() || width_mm <= 0.0 || !height_mm.is_finite() || height_mm <= 0.0 {
+        return Err("Print width and height must be positive finite millimetres.".to_owned());
+    }
+    if !target_dpi.is_finite() || target_dpi <= 0.0 {
+        return Err("Print resolution must be a positive finite DPI value.".to_owned());
+    }
+
+    // PNG pHYs stores integer pixels per metre. The pixel dimensions follow the requested DPI;
+    // pHYs is rounded separately because the chunk cannot store every possible DPI exactly.
+    let encoded_ppm = (target_dpi * (5000.0 / 127.0)).round();
+    if !encoded_ppm.is_finite() || encoded_ppm < 1.0 || encoded_ppm > f64::from(u32::MAX) {
+        return Err("Print resolution is outside the supported PNG metadata range.".to_owned());
+    }
+    let pixels_per_metre = encoded_ppm as u32;
+    let maximum_width = print_pixel_limit(width_mm, target_dpi)?;
+    let maximum_height = print_pixel_limit(height_mm, target_dpi)?;
+
+    let source_width = canvas.width as u32;
+    let source_height = canvas.height as u32;
+    let width_scale = maximum_width / f64::from(source_width);
+    let height_scale = maximum_height / f64::from(source_height);
+    let (width, height) = if width_scale <= height_scale {
+        (
+            maximum_width,
+            (maximum_width / f64::from(source_width) * f64::from(source_height))
+                .round()
+                .min(maximum_height),
+        )
+    } else {
+        (
+            (maximum_height / f64::from(source_height) * f64::from(source_width))
+                .round()
+                .min(maximum_width),
+            maximum_height,
+        )
+    };
+    let checked_dimension = |value: f64| {
+        if value.is_finite() && value >= 1.0 && value <= f64::from(u32::MAX) {
+            Ok(value as u32)
+        } else {
+            Err("The fitted print dimensions are outside the supported pixel range.".to_owned())
+        }
+    };
+    let width = checked_dimension(width)?;
+    let height = checked_dimension(height)?;
+    let target = OutputRasterTarget::new(width, height)
+        .map_err(|_| "This print image exceeds the renderer pixel budget.".to_owned())?;
+
+    Ok(PrintFit {
+        target,
+        target_dpi,
+        pixels_per_metre,
+        physical_width_mm: f64::from(width) * 25.4 / target_dpi,
+        physical_height_mm: f64::from(height) * 25.4 / target_dpi,
+    })
+}
+
+/// Floors one millimetre bound into pixels at the requested DPI.
+///
+/// A scale-relative few-ULP tolerance restores exact whole-pixel cases such as 50.8 mm at 300 DPI
+/// when binary floating-point arithmetic lands just below the mathematical integer.
+///
+/// # Errors
+/// Rejects nonfinite or subpixel pixel bounds.
+fn print_pixel_limit(size_mm: f64, target_dpi: f64) -> Result<f64, String> {
+    let pixels = size_mm * target_dpi / 25.4;
+    if !pixels.is_finite() {
+        return Err(
+            "The fitted print dimensions are outside the supported pixel range.".to_owned(),
+        );
+    }
+    let nearest = pixels.round();
+    let tolerance = 8.0 * f64::EPSILON * pixels.abs().max(1.0);
+    let limit = if (pixels - nearest).abs() <= tolerance {
+        nearest
+    } else {
+        pixels.floor()
+    };
+    if limit < 1.0 {
+        return Err("The print box must allow at least one pixel on each axis.".to_owned());
+    }
+    Ok(limit)
+}
+
 /// Returns the selected temporal-size position for the normal 1x default.
 ///
 /// # Panics
@@ -196,6 +340,127 @@ fn native_dimensions(canvas: &CanvasSpec, choice: SizeChoice) -> Result<(u64, u6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds a valid document canvas with the requested test aspect.
+    ///
+    /// # Panics
+    /// This helper does not panic.
+    fn canvas(width: f64, height: f64) -> CanvasSpec {
+        CanvasSpec { width, height }
+    }
+
+    /// Proves common print boxes use requested-DPI pixels and preserve source aspect.
+    ///
+    /// # Panics
+    /// Panics if expected physical limits, output dimensions, or encoded metadata density change.
+    #[test]
+    fn print_fit_preserves_aspect_inside_square_landscape_and_portrait_boxes() {
+        let square = fit_print_box(&canvas(1000.0, 1000.0), 50.8, 50.8, 300.0).unwrap();
+        assert_eq!(square.pixels_per_metre(), 11_811);
+        assert_eq!(
+            (square.target().width(), square.target().height()),
+            (600, 600)
+        );
+        assert!(square.physical_size_mm().0 <= 50.8);
+        assert!(square.physical_size_mm().1 <= 50.8);
+
+        let landscape = fit_print_box(&canvas(1600.0, 900.0), 304.8, 152.4, 300.0).unwrap();
+        assert_eq!(
+            (landscape.target().width(), landscape.target().height()),
+            (3200, 1800)
+        );
+        assert!(landscape.physical_size_mm().0 <= 304.8);
+        assert!(landscape.physical_size_mm().1 <= 152.4);
+        assert!(
+            (f64::from(landscape.target().width()) / f64::from(landscape.target().height())
+                - 1600.0 / 900.0)
+                .abs()
+                < 0.001
+        );
+
+        let portrait = fit_print_box(&canvas(900.0, 1600.0), 152.4, 304.8, 300.0).unwrap();
+        assert_eq!(
+            (portrait.target().width(), portrait.target().height()),
+            (1800, 3200)
+        );
+        assert!(portrait.physical_size_mm().0 <= 152.4);
+        assert!(portrait.physical_size_mm().1 <= 304.8);
+    }
+
+    /// Proves larger boxes stay within bounds and inch equivalents use the millimetre API.
+    ///
+    /// # Panics
+    /// Panics if aspect stretches, requested-DPI dimensions change, or physical readouts disagree.
+    #[test]
+    fn print_fit_treats_physical_dimensions_as_maximum_bounds() {
+        let fit = fit_print_box(&canvas(100.0, 50.0), 50.8, 50.8, 300.0).unwrap();
+        assert_eq!((fit.target().width(), fit.target().height()), (600, 300));
+        assert!(fit.physical_size_mm().0 <= 50.8);
+        assert!(fit.physical_size_mm().1 <= 50.8);
+        assert!(
+            (f64::from(fit.target().width()) / f64::from(fit.target().height()) - 2.0).abs() < 0.01
+        );
+
+        // Two by one inches expressed as millimetres, then bounded at 300 DPI.
+        let inch_equivalent = fit_print_box(&canvas(2.0, 1.0), 50.8, 25.4, 300.0).unwrap();
+        assert_eq!(inch_equivalent.target_dpi(), 300.0);
+        assert_eq!(inch_equivalent.pixels_per_metre(), 11_811);
+        assert_eq!(
+            (
+                inch_equivalent.target().width(),
+                inch_equivalent.target().height()
+            ),
+            (600, 300)
+        );
+        let actual_mm = inch_equivalent.physical_size_mm();
+        assert_eq!(
+            actual_mm.0,
+            f64::from(inch_equivalent.target().width()) * 25.4 / 300.0
+        );
+        assert_eq!(
+            actual_mm.1,
+            f64::from(inch_equivalent.target().height()) * 25.4 / 300.0
+        );
+        assert!(actual_mm.0 <= 50.8);
+        assert!(actual_mm.1 <= 25.4);
+
+        let fractional = fit_print_box(&canvas(100.0, 50.0), 25.4, 12.7, 72.5).unwrap();
+        assert_eq!(fractional.target_dpi(), 72.5);
+        assert_eq!(
+            (fractional.target().width(), fractional.target().height()),
+            (72, 36)
+        );
+    }
+
+    /// Proves invalid, subpixel, overflowing, and over-budget print fits are rejected.
+    ///
+    /// # Panics
+    /// Panics if invalid input reaches a renderer target or if a bounded valid fit is rejected.
+    #[test]
+    fn print_fit_rejects_invalid_tiny_overflow_and_renderer_budget_inputs() {
+        for invalid_canvas in [
+            canvas(0.0, 100.0),
+            canvas(100.5, 100.0),
+            canvas(f64::INFINITY, 1.0),
+        ] {
+            assert!(fit_print_box(&invalid_canvas, 50.8, 25.4, 300.0).is_err());
+        }
+        for (width_mm, height_mm, dpi) in [
+            (0.0, 25.4, 300.0),
+            (f64::NAN, 25.4, 300.0),
+            (50.8, f64::INFINITY, 300.0),
+            (50.8, 25.4, 0.0),
+            (50.8, 25.4, f64::INFINITY),
+            (50.8, 25.4, f64::MAX),
+            (0.01, 0.01, 300.0),
+            (f64::MAX, f64::MAX, 300.0),
+            (1.0e12, 1.0e12, 300.0),
+        ] {
+            assert!(fit_print_box(&canvas(100.0, 50.0), width_mm, height_mm, dpi).is_err());
+        }
+        assert!(fit_print_box(&canvas(1_000_000.0, 1.0), 100.0, 0.1, 300.0).is_err());
+        assert!(fit_print_box(&canvas(1000.0, 1000.0), 3000.0, 3000.0, 300.0).is_err());
+    }
 
     /// Proves the PNG selector keeps its native, scaled, custom, and shared-budget mappings.
     ///

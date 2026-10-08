@@ -4200,6 +4200,66 @@ pub fn encode_png(surface: &RasterSurface) -> Result<Vec<u8>, RenderError> {
     Ok(output)
 }
 
+/// Encodes straight RGBA with an explicit PNG pixels-per-metre density for print sizing.
+///
+/// Pixel dimensions remain those of the surface; the pHYs chunk records one
+/// rounded integer density on both axes and does not resample artwork.
+///
+/// # Errors
+/// Returns an encoder diagnostic without publishing partial PNG bytes.
+pub fn encode_png_with_density(
+    surface: &RasterSurface,
+    pixels_per_metre: u32,
+) -> Result<Vec<u8>, RenderError> {
+    if pixels_per_metre == 0 {
+        return Err(RenderError::new(
+            "png.density",
+            "pixels per metre must be positive",
+        ));
+    }
+    let mut output = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut output, surface.width(), surface.height());
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_pixel_dims(Some(png::PixelDimensions {
+            xppu: pixels_per_metre,
+            yppu: pixels_per_metre,
+            unit: png::Unit::Meter,
+        }));
+        let mut writer = encoder
+            .write_header()
+            .map_err(|_| RenderError::new("png.encode", "could not write PNG header"))?;
+        writer
+            .write_image_data(surface.pixels())
+            .map_err(|_| RenderError::new("png.encode", "could not encode RasterSurface"))?;
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+mod print_density_tests {
+    use super::*;
+
+    /// Verifies that pHYs records rounded metric density without changing exact RGBA samples.
+    #[test]
+    fn png_density_round_trip_keeps_native_pixels() {
+        let surface = RasterSurface::new(2, 1, vec![10, 20, 30, 0, 40, 50, 60, 255]).unwrap();
+        let encoded = encode_png_with_density(&surface, 11_811).unwrap();
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(encoded));
+        decoder.set_transformations(png::Transformations::IDENTITY);
+        let mut reader = decoder.read_info().unwrap();
+        let density = reader.info().pixel_dims.unwrap();
+        assert_eq!(
+            (density.xppu, density.yppu, density.unit),
+            (11_811, 11_811, png::Unit::Meter)
+        );
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut pixels).unwrap();
+        assert_eq!(&pixels[..info.buffer_size()], surface.pixels());
+    }
+}
+
 /// Converts canonical linear RGB to sRGB at a presentation/output boundary.
 pub fn linear_to_srgb(value: f64) -> f64 {
     let value = value.clamp(0.0, 1.0);
