@@ -479,9 +479,9 @@ an entry does not authorize a later stage or change an accepted contract.
 
 ## TON-018 — Calibrate RGB and CMYK advanced settings for source-tone fidelity
 
-- Status: In progress as of 2026-10-11; not user-accepted, checkpointed, or
-  released. Preserve the accepted but uncommitted TON-013–17 work and the
-  extensive dirty worktree.
+- Status: In progress as of 2026-10-11. Included with the accepted TON-013–17
+  repairs in the published 0.4.1 prerelease at checkpoint `f3605cd`.
+  TON-018 itself is not accepted as complete; the remaining work below stays open.
 - Current behavior: Production stores one calibration per finished structural
   Pattern revision, persists it with the Pattern and in applied projects and
   Document Presets, reuses it for artwork, Feature size, whole-Pattern rotation,
