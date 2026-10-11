@@ -5,7 +5,7 @@ use toniator_geometry::{
     Bounds, FamilySite, FamilySiteId, FamilySiteProvenance, FamilySiteSet, NominalCellBasis,
     Point2, RegionTreatment, RegionTreatmentLimits, RegionTreatmentRequest, SiteScope, Vector2,
     VoronoiRegionLimits, VoronoiRegionRequest, build_voronoi_regions_cancellable,
-    treat_region_requests_cancellable,
+    treat_region_requests_cancellable, voronoi_region_references,
 };
 
 /// Builds a finite random-provenance family whose order remains authoritative to the adapter.
@@ -100,6 +100,51 @@ fn guard_family_produces_canonical_center_region() {
         }])
     );
     assert_eq!(diagnostics.site_groups, 9);
+}
+
+/// Resolves a canonical cell owner by its validated family ordinal and rejects absent or foreign IDs.
+///
+/// # Panics
+/// Panics if the reference changes or a mismatched family is accepted after direct lookup.
+#[test]
+fn voronoi_reference_uses_exact_owner_ordinal_and_identity() {
+    let family = guarded_lattice();
+    let (regions, _) = build_voronoi_regions_cancellable(
+        &family,
+        request(),
+        VoronoiRegionLimits::default(),
+        || false,
+    )
+    .expect("guard lattice covers center");
+    let references = voronoi_region_references(&family, &regions).expect("owner resolves");
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0].1, Point2::new(0.0, 0.0));
+    assert_eq!(
+        voronoi_region_references(&sites(&[(0.0, 0.0)]), &regions)
+            .expect_err("missing ordinal rejects")
+            .path(),
+        "region.treatment.identity.reference"
+    );
+    let foreign = FamilySiteSet::new(
+        "foreign-family".into(),
+        PatternMechanismId(10),
+        family
+            .sites()
+            .iter()
+            .cloned()
+            .map(|mut site| {
+                site.id.mechanism_id = PatternMechanismId(10);
+                site
+            })
+            .collect(),
+    )
+    .expect("foreign family retains valid ordinals");
+    assert_eq!(
+        voronoi_region_references(&foreign, &regions)
+            .expect_err("foreign owner rejects")
+            .path(),
+        "region.treatment.identity.reference"
+    );
 }
 
 /// Proves an ordinary Voronoi cell uses one positive-region UniformOffset to double radius at fill two.

@@ -22,9 +22,19 @@ enum Edit {
 
 type ParseEdit = fn(&str) -> Result<Edit, String>;
 
-/// Carries a validated configuration or temporal command through the existing history boundaries.
+const HEX_HELP: &str = "Enter #RRGGBB or #RRGGBBAA; eight digits include Alpha. Sets solid paint for the selected Start or End frame. Alpha stays independent from channel Opacity.";
+const ALPHA_HELP: &str = "Sets transparency of the selected frame's solid paint: 0 is transparent and 1 is opaque. This differs from sampled source Alpha and from channel Opacity.";
+const COLOR_PICKER_HELP: &str = "Choose the solid color assigned to the selected Start or End frame. This changes paint, not the source component used for Fill or site weighting.";
+const TRANSITION_HELP: &str = "Choose how color changes from Start to End: Colors blends their colors and Alpha. Hue rotation turns Start around the hue wheel; Alpha stays separate.";
+const HUE_HELP: &str = "Sets the hue turn from Start through End. 360 degrees is one full turn; larger values add turns, negative values reverse direction, and 0 leaves hue unchanged.";
+const INTERPOLATION_HELP: &str = "Controls the pace of the color change from Start to End. Linear is steady; Hold keeps Start until End; other choices ease the change.";
+
+/// Carries one validated paint edit through the existing Start or End history boundary.
+///
+/// Start configurations are boxed because grouped document color authority is much larger than
+/// the temporal command variant; the active history APIs remain the only publication authority.
 enum Change {
-    Start(toniator_domain::DocumentConfiguration),
+    Start(Box<toniator_domain::DocumentConfiguration>),
     End(TemporalCommand),
 }
 
@@ -105,6 +115,7 @@ fn prepare(document: &Document, channels: &[ChannelId], edit: Edit) -> Result<Ch
             }
             return document
                 .edit_start_colors_configuration(&colors)
+                .map(Box::new)
                 .map(Change::Start)
                 .map_err(|error| error.to_string());
         }
@@ -303,13 +314,29 @@ fn hue(text: &str) -> Result<Edit, String> {
         .map_err(|_| "Enter a finite angle in degrees.".into())
 }
 
-/// Appends a visible label related to its native interactive widget.
-fn labeled(parent: &gtk::Box, name: &str, widget: &impl IsA<gtk::Widget>) {
+/// Relates a visible field label to its control and exposes one help string on both hover targets.
+///
+/// The accessible name remains the existing product label and GTK mnemonic; this helper adds only
+/// descriptor-aligned help and the explicit label relation.
+fn labeled_help(label: &gtk::Label, control: &gtk::Widget, name: &str, help: &str) {
+    label.set_tooltip_text(Some(help));
+    label.update_property(&[gtk::accessible::Property::Description(help)]);
+    control.set_tooltip_text(Some(help));
+    control.update_property(&[
+        gtk::accessible::Property::Label(name),
+        gtk::accessible::Property::Description(help),
+    ]);
+    control.update_relation(&[gtk::accessible::Relation::LabelledBy(&[label.upcast_ref()])]);
+}
+
+/// Appends one visible, mnemonic field label with shared tooltip and accessible help.
+fn labeled(parent: &gtk::Box, name: &str, widget: &impl IsA<gtk::Widget>, help: &str) {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let label = gtk::Label::new(Some(name));
     label.set_xalign(0.0);
     label.set_hexpand(true);
     label.set_mnemonic_widget(Some(widget));
+    labeled_help(&label, widget.as_ref(), name, help);
     row.append(&label);
     row.append(widget);
     parent.append(&row);
@@ -360,7 +387,9 @@ impl Controls {
     }
 
     /// Builds the ordinary Color editor inside the selected channel's Advanced settings.
-    /// The surrounding endpoint toggle selects the edit destination; controls never duplicate it.
+    ///
+    /// Field help distinguishes solid paint, sampled source Alpha, and channel Opacity. The
+    /// surrounding endpoint toggle selects the edit destination; controls never duplicate it.
     pub(super) fn new(
         context: AdvancedCommitContext,
         parent: &gtk::Box,
@@ -376,7 +405,7 @@ impl Controls {
             "HEX",
             if at_start { start_hex } else { end_hex },
         );
-        color.widget.set_tooltip_text(Some("Enter #RRGGBB or #RRGGBBAA. Eight digits include alpha. Assigns color to the frame selected below the canvas."));
+        color.widget.set_tooltip_text(Some(HEX_HELP));
         let alpha = Entry::new(
             &context,
             &[channel],
@@ -385,9 +414,7 @@ impl Controls {
             if at_start { start_alpha } else { end_alpha },
         );
         alpha.widget.set_input_purpose(gtk::InputPurpose::Number);
-        alpha
-            .widget
-            .set_tooltip_text(Some("Paint strength: 0 is transparent; 1 is opaque."));
+        alpha.widget.set_tooltip_text(Some(ALPHA_HELP));
         let frame = gtk::Frame::new(Some("Color"));
         frame.update_property(&[gtk::accessible::Property::Label("Color")]);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -403,25 +430,37 @@ impl Controls {
             .modal(true)
             .build();
         let picker = gtk::ColorDialogButton::new(Some(dialog));
-        picker.update_property(&[gtk::accessible::Property::Label("Choose color")]);
-        picker.set_tooltip_text(Some("Choose a color for the selected frame."));
+        picker.update_property(&[
+            gtk::accessible::Property::Label("Choose color"),
+            gtk::accessible::Property::Description(COLOR_PICKER_HELP),
+        ]);
+        picker.set_tooltip_text(Some(COLOR_PICKER_HELP));
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         row.append(&picker);
         let hex_label = gtk::Label::new(Some("HEX"));
         hex_label.set_mnemonic_widget(Some(&color.widget));
+        labeled_help(&hex_label, color.widget.upcast_ref(), "HEX", HEX_HELP);
         row.append(&hex_label);
         row.append(&color.widget);
         content.append(&row);
-        labeled(&content, "Alpha", &alpha.widget);
+        labeled(&content, "Alpha", &alpha.widget, ALPHA_HELP);
         let interpolation = gtk::Expander::new(Some("Color interpolation"));
-        interpolation.update_property(&[gtk::accessible::Property::Label("Color interpolation")]);
+        interpolation.set_tooltip_text(Some(
+            "Contains the Start-to-End solid-color transition, hue rotation, and frame-range interpolation settings.",
+        ));
+        interpolation.update_property(&[
+            gtk::accessible::Property::Label("Color interpolation"),
+            gtk::accessible::Property::Description(
+                "Contains the Start-to-End solid-color transition, hue rotation, and frame-range interpolation settings.",
+            ),
+        ]);
         let options = gtk::Box::new(gtk::Orientation::Vertical, 6);
         let mode = accessible_string_dropdown(&["Colors", "Hue rotation"]);
-        labeled(&options, "Transition", &mode);
+        labeled(&options, "Transition", &mode, TRANSITION_HELP);
         let hue = Entry::new(&context, &[channel], &guard, "Hue degrees", hue);
         hue.widget.set_input_purpose(gtk::InputPurpose::Number);
         let hue_row = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        labeled(&hue_row, "Hue degrees", &hue.widget);
+        labeled(&hue_row, "Hue degrees", &hue.widget, HUE_HELP);
         options.append(&hue_row);
         let easing = accessible_string_dropdown(
             &temporal_edit::EASINGS
@@ -429,7 +468,7 @@ impl Controls {
                 .map(|(name, _)| *name)
                 .collect::<Vec<_>>(),
         );
-        labeled(&options, "Interpolation", &easing);
+        labeled(&options, "Interpolation", &easing, INTERPOLATION_HELP);
         interpolation.set_child(Some(&options));
         interpolation.set_visible(!at_start);
         content.append(&interpolation);

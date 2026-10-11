@@ -18,7 +18,7 @@ use toniator_domain::{
     DocumentSession, HalftoneChannelModel, MarkGeometryResponse, PatternDefinition,
     PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
     PatternOutputLayerId, PatternOutputSettings, SourceComponent, SourcePlacement, SourceReference,
-    SourceReferenceId, ValidationError,
+    SourceReferenceId, SavedCalibration, ValidationError,
 };
 use toniator_engine::export::video::{VideoCodec, VideoExportOptions};
 use toniator_engine::{
@@ -643,14 +643,21 @@ fn build_document(
         .collect::<Vec<_>>();
     session.apply(&DocumentCommand::ReplaceChannelTopology { model, topology })?;
     if let Some(opacity) = opacity.filter(|value| *value != 1.0) {
-        for channel_id in channel_ids {
+        for &channel_id in &channel_ids {
             session.apply(&DocumentCommand::SetOpacity {
                 channel_id,
                 opacity,
             })?;
         }
     }
-    Ok(session.snapshot())
+    let mut document = session.snapshot();
+    if density_aspect == 1.0 && guard_steps == 2 {
+        for channel_id in channel_ids {
+            let artifact = SavedCalibration::built_in_straight(&document, channel_id)?;
+            document = document.with_saved_calibration(channel_id, artifact)?;
+        }
+    }
+    Ok(document)
 }
 
 /// Evaluates one current document or direct source and writes its requested consumer output.

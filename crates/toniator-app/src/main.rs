@@ -11,6 +11,7 @@ mod advanced_temporal;
 mod app_events;
 mod application_model;
 mod automation;
+mod calibration_preparation;
 #[cfg(test)]
 use toniator_engine::evaluate_with_limits;
 mod components;
@@ -21,10 +22,12 @@ mod paint_editor;
 mod personal_pattern_management;
 mod png_export_size;
 mod prepared_paintable;
+mod preview_backdrop;
 mod preview_coordinator;
 mod print_cleanup;
 mod print_preparation;
 mod print_preparation_view;
+mod process_memory;
 mod scatter_memory;
 mod sequence_import;
 mod source_notice;
@@ -74,9 +77,10 @@ use toniator_domain::DensityMetric2D;
 use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureAttachment,
     AuthoredStructureDraft, AuthoredStructureId, AuthoredStructureKind, AuthoredStructureUse,
-    CanvasSpec, ChannelId, ChannelPaint, ChannelTopologyTemplate, ColorComponent, ColorValue,
-    DensityEditedField, Document, DocumentCommand, DocumentHistory, DocumentSession,
-    HalftoneChannelModel, LegacyMappingFieldEdit, MarkGeometryFieldEdit, MarkOrientationKind,
+    CalibrationBinding, CanvasSpec, ChannelId, ChannelPaint, ChannelTopologyTemplate,
+    ColorComponent, ColorValue, DensityEditedField, Document, DocumentCommand, DocumentHistory,
+    DocumentResponseFieldEdit, DocumentResponseSettings, DocumentSession, HalftoneChannelModel,
+    LegacyMappingFieldEdit, MarkDensityMode, MarkGeometryFieldEdit, MarkOrientationKind,
     MarkPrototype, ModeledMappingFieldEdit, PaintKind, PatternCapabilityProjection,
     PatternCapabilityScope, PatternDefinitionBundleEdit, PatternDefinitionEdit,
     PatternDefinitionId, PatternDefinitionRecipe, PatternFamilyCapabilityProjection,
@@ -88,7 +92,7 @@ use toniator_domain::{
     PersonalAuthoredResourceKind, PresetMetadata, PropertyCurrentValue, PropertyCurrentValueKind,
     PropertyDescriptor, PropertyEnumChoice, PropertyFieldId, PropertyInheritance,
     PropertyReferenceConstraint, PropertyReferenceValue, PropertyTarget, PropertyValueKind,
-    RandomCharacterKind, RegionGeometryFieldEdit, SiteUseFilter, SiteUseFilterKind,
+    RandomCharacterKind, RegionGeometryFieldEdit, Revision, SiteUseFilter, SiteUseFilterKind,
     SourceComponent, SourceMappingComponent, SourceReference, SourceReferenceId,
     TranslationEditedAxis, VariantTransitionDraft, VariantTransitionField,
     VariantTransitionFieldUpdate, VariantTransitionValue,
@@ -1010,6 +1014,11 @@ struct Actions {
 struct PatternEditorSurface {
     purpose: PatternEditorPurpose,
     parent: PatternEditorParent,
+    /// Identifies the Workspace root captured when this modal draft opens.
+    initial_workspace_generation: u64,
+    initial_workspace_revision: Revision,
+    /// Retains one pending guarded Workspace Apply; dropping the modal cancels it.
+    calibration_task: Option<PatternEditorCalibrationTask>,
     window: gtk::Window,
     status: gtk::Label,
     picture: gtk::Picture,
@@ -1053,6 +1062,9 @@ impl Drop for PatternEditorSurface {
     fn drop(&mut self) {
         self.preview_bridge_stop.store(true, Ordering::Release);
         self.draft.borrow().scheduler.cancel_and_clear();
+        if let Some(task) = self.calibration_task.take() {
+            task.cancelled.store(true, Ordering::Release);
+        }
         if let Some(bridge) = self
             .preview_bridge
             .take()
@@ -1064,6 +1076,21 @@ impl Drop for PatternEditorSurface {
             worker.cancel();
         }
     }
+}
+
+/// Retains one exact private Pattern Editor candidate while its changed bindings are measured.
+///
+/// The GTK owner accepts the result only for the captured Workspace generation/root and editor
+/// epoch/document/revision. Dropping or superseding the modal sets the worker cancellation token.
+struct PatternEditorCalibrationTask {
+    id: calibration_preparation::TaskId,
+    workspace_generation: u64,
+    base_document: Document,
+    base_revision: Revision,
+    editor_epoch: u64,
+    candidate_document: Document,
+    candidate_revision: Revision,
+    cancelled: Arc<AtomicBool>,
 }
 
 /// Identifies the one authored resource and descriptor purpose exposed by a private editor.
@@ -1423,6 +1450,14 @@ const WIZARD_NEUTRAL_SOURCE_EDGE_PX: u32 = 100;
 const WIZARD_PREVIEW_CANVAS_LONGEST_EDGE: f64 = WIZARD_NEUTRAL_SOURCE_EDGE_PX as f64;
 /// Fixes the private Wizard output target without changing export dimensions.
 const WIZARD_PREVIEW_TARGET_PX: u32 = 256;
+/// Explains the normal neutral light-to-dark Wizard sample in artist language.
+const WIZARD_PREVIEW_DESCRIPTION: &str = "A neutral light-to-dark sample shows how your pattern responds to tone. Apply it to see the result on your artwork.";
+/// Describes neutral mark sizing when artwork weighting controls point density.
+const WIZARD_WEIGHTED_MARKS_PREVIEW_DESCRIPTION: &str = "Artwork weighting controls mark density. This structural preview uses neutral uniform mark sizing.";
+/// Describes why strict visible-mark separation keeps Variable sizing in the neutral preview.
+const WIZARD_STRICT_MARK_MARGIN_PREVIEW_DESCRIPTION: &str = "Artwork weighting controls mark density. This structural preview uses neutral sizing. Visible Mark Margin forbids overlap, so this pattern uses Variable sizing instead of automatic Uniform calibration.";
+/// Describes preview-only overlays and the artwork scale used after applying the Pattern.
+const WIZARD_PREVIEW_PICTURE_DESCRIPTION: &str = "Black shows the pattern. Blue 1pt lines show every guide or the underlying parametric curve. Orange 1px indicators show actual point sites. These preview aids are not exported. Your artwork and full Feature size are used after Apply.";
 /// Sets the neutral preview's repeated-geometry baseline for Feature size 1.0.
 const WIZARD_PREVIEW_BASE_DENSITY: f64 = 8.0;
 /// Sets the lower structural baseline used when a preview must derive a connection graph.
@@ -1592,13 +1627,35 @@ struct AdvancedSettingsSurface {
     bindings: Vec<advanced_temporal::Binding>,
     paint_editors: Vec<paint_editor::Controls>,
     batch_editors: Vec<advanced_batches::Controls>,
+    batch_region_sampling: Option<advanced_batches::RegionSamplingControl>,
+    mark_density_controls: Vec<advanced_batches::MarkDensityControl>,
+    fill_mask_disclosures: Vec<advanced_batches::FillMaskDisclosure>,
+    fine_adjustments: Vec<advanced_batches::FineAdjustmentDisclosure>,
     refreshing: Rc<Cell<bool>>,
     target: InspectorTarget,
     picture: gtk::Picture,
     status: gtk::Label,
+    recalibrate: gtk::Button,
+    apply: gtk::Button,
+    calibration_task: Option<AdvancedCalibrationTask>,
     scheduler: Arc<EvaluationScheduler>,
     preview_submission: Option<u64>,
     preview_bridge_stop: Arc<AtomicBool>,
+}
+
+/// Retains one exact private Advanced Settings calibration request on the GTK thread.
+///
+/// The worker receives only the immutable candidate and cancellation token. This guard accepts a
+/// result only for the original modal epoch, base workspace, draft revision, and exact document.
+struct AdvancedCalibrationTask {
+    id: calibration_preparation::TaskId,
+    epoch: u64,
+    workspace_generation: u64,
+    base_document: Document,
+    base_revision: Revision,
+    candidate_document: Document,
+    candidate_revision: Revision,
+    cancelled: Arc<AtomicBool>,
 }
 
 /// Holds one modal Pattern Wizard clone and its independent canonical preview route.
@@ -1613,6 +1670,7 @@ struct PatternWizardSurface {
     window: gtk::Window,
     draft: Rc<RefCell<DocumentHistory>>,
     initial_document: Document,
+    initial_workspace_revision: Revision,
     target: InspectorTarget,
     candidate: Option<String>,
     captured_library_root: Option<PathBuf>,
@@ -1626,6 +1684,7 @@ struct PatternWizardSurface {
     page_scroll: gtk::ScrolledWindow,
     preview_source: WizardPreviewSource,
     picture: gtk::Picture,
+    preview_description: gtk::Label,
     spinner: gtk::Spinner,
     preview_status: gtk::Label,
     status: gtk::Label,
@@ -1658,6 +1717,66 @@ struct PatternWizardSurface {
     preview_bridge: Option<thread::JoinHandle<()>>,
     invoking_edit: gtk::Button,
     gallery: gtk::FlowBox,
+    calibration_task: Option<WizardCalibrationTask>,
+}
+
+/// Retains one terminal Wizard calibration and its private publication candidate.
+struct WizardCalibrationTask {
+    id: calibration_preparation::TaskId,
+    epoch: u64,
+    workspace_generation: u64,
+    base_document: Document,
+    base_revision: Revision,
+    candidate_document: Document,
+    candidate_revision: Revision,
+    cancelled: Arc<AtomicBool>,
+    publication: WizardCalibrationPublication,
+}
+
+/// Selects which already captured private candidate consumes one accepted calibration result.
+///
+/// Large owned history snapshots stay boxed so this short-lived routing tag remains compact.
+enum WizardCalibrationPublication {
+    DraftApply,
+    GalleryApply {
+        target: InspectorTarget,
+        candidate_id: String,
+        captured_document: Box<Document>,
+        draft: Box<DocumentHistory>,
+    },
+    PatternSave {
+        draft: Box<PatternSaveDraft>,
+        action: PatternSaveAction,
+        name: String,
+        dialog: gtk::Window,
+        status: gtk::Label,
+        actions: gtk::Box,
+    },
+}
+
+/// Retains a structural inspector command until its matching calibration set is ready to publish.
+struct PendingInspectorCalibration {
+    id: calibration_preparation::TaskId,
+    workspace_generation: u64,
+    base_document: Document,
+    base_revision: Revision,
+    draft: DocumentHistory,
+    candidate_document: Document,
+    candidate_revision: Revision,
+    descriptor: Option<PropertyDescriptor>,
+    focus: Option<InspectorFocusIdentity>,
+    cancelled: Arc<AtomicBool>,
+}
+
+/// Captures one private structural edit and its exact publication metadata before measurement.
+struct InspectorCalibrationRequest {
+    base_document: Document,
+    base_revision: Revision,
+    workspace_generation: u64,
+    draft: DocumentHistory,
+    channel_ids: Vec<ChannelId>,
+    descriptor: Option<PropertyDescriptor>,
+    focus: Option<InspectorFocusIdentity>,
 }
 
 impl Drop for PatternWizardSurface {
@@ -1668,6 +1787,9 @@ impl Drop for PatternWizardSurface {
     fn drop(&mut self) {
         self.preview_bridge_stop.store(true, Ordering::Release);
         self.scheduler.cancel_and_clear();
+        if let Some(task) = self.calibration_task.take() {
+            task.cancelled.store(true, Ordering::Release);
+        }
         if let Some(bridge) = self
             .preview_bridge
             .take()
@@ -1739,6 +1861,13 @@ struct PatternLibrarySurface {
 struct PatternSaveDraft {
     epoch: u64,
     recipe: PatternDefinitionRecipe,
+    calibration_document: Document,
+    calibration_channel: Option<ChannelId>,
+    saved_calibration: Option<toniator_domain::SavedCalibration>,
+    workspace_generation: u64,
+    base_document: Document,
+    base_revision: Revision,
+    candidate_revision: Revision,
     candidate: Option<String>,
     origin: Option<PresetOrigin>,
     current_name: Option<String>,
@@ -1819,12 +1948,35 @@ enum WizardRoutePage {
     Review,
 }
 
-/// Names the one visible wizard surface state for button-sensitivity projection.
+/// Names the one visible wizard surface state for action and button-sensitivity projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WizardNavigationPage {
     Gallery,
     Route(WizardRoutePage),
     Review,
+}
+
+/// Projects the wizard action refresh owner from the visible surface before considering route history.
+///
+/// Gallery presentation owns catalog-derived Apply and Review vocabulary while visible. Hidden
+/// galleries defer to the current route; an absent route keeps the existing Review action fallback.
+fn wizard_action_refresh_page(
+    gallery_visible: bool,
+    route: &[WizardRoutePage],
+    route_index: usize,
+) -> WizardNavigationPage {
+    if gallery_visible {
+        WizardNavigationPage::Gallery
+    } else if route.is_empty() {
+        WizardNavigationPage::Review
+    } else {
+        WizardNavigationPage::Route(
+            route
+                .get(route_index)
+                .copied()
+                .unwrap_or(WizardRoutePage::Review),
+        )
+    }
 }
 
 /// Carries the enabled state of private wizard navigation controls for one visible page.
@@ -1904,7 +2056,7 @@ fn append_wizard_step_introduction(page: &gtk::Box, current: WizardRoutePage) {
         ),
         WizardRoutePage::FamilySettings => (
             2,
-            "Choose the guide arrangement, dispersion algorithm, or parametric curve and adjust its options. Next, choose placement, shapes, and connections.",
+            "Choose the guide arrangement, dispersion algorithm, or parametric curve and adjust its options. Next, choose what the pattern draws.",
         ),
         WizardRoutePage::SiteGeneration => (
             3,
@@ -1980,6 +2132,7 @@ fn wizard_page_for_descriptor(
         OutputSiteUseFilterKind | OutputSiteUseFilterReference => WizardRoutePage::SiteUse,
         MarkMinimumFill
         | MarkMaximumFill
+        | MarkSizeScale
         | VisibleMarkMargin
         | OutputPrototype
         | OutputAuthoredClosedShape
@@ -2033,6 +2186,7 @@ fn wizard_page_for_descriptor(
         | AlongParametricInterval
         | AlongParametricPhase => WizardRoutePage::ParametricForm,
         RandomCharacter
+        | RandomNominalSpacing
         | RandomEvenMinimumCenterDistance
         | RandomClusterDensity
         | RandomClusterSpread
@@ -2284,11 +2438,11 @@ fn wizard_control_section_presentation(
         ),
         WizardControlSection::OutputAppearance => (
             "Drawing options",
-            "Adjust only the controls that apply to the selected construction method. A zero minimum can intentionally hide marks or stroke portions without breaking the underlying guide or path.",
+            "Adjust structural drawing options for the selected construction method. Mark size, fill response, and region sampling stay in Advanced Settings.",
         ),
         WizardControlSection::SourceResponse => (
             "Artwork response",
-            "Choose how artwork values affect placement, fill, thickness, or region size. A zero minimum can intentionally hide marks or stroke portions without breaking the underlying guide or path.",
+            "Pattern structure controls placement and drawn geometry here. Artwork response values stay in Advanced Settings.",
         ),
         WizardControlSection::PatternPlacement => (
             "Size and placement",
@@ -3495,6 +3649,33 @@ enum AdvancedOutputStructuralKind {
     Regions,
 }
 
+/// Names the geometric output kind behind a current capability-derived response target.
+///
+/// These headings disambiguate otherwise identical coverage endpoint labels in mixed-output
+/// Advanced settings; they do not infer applicability or change the descriptor command route.
+fn advanced_output_group_name(kind: AdvancedOutputStructuralKind) -> &'static str {
+    match kind {
+        AdvancedOutputStructuralKind::Marks => "Marks",
+        AdvancedOutputStructuralKind::GuidePaths
+        | AdvancedOutputStructuralKind::CurveMotifPaths
+        | AdvancedOutputStructuralKind::ConnectionPaths
+        | AdvancedOutputStructuralKind::MazeWalls => "Lines",
+        AdvancedOutputStructuralKind::Regions => "Regions",
+    }
+}
+
+/// Resolves one response target's visible group name from the current capability projection.
+///
+/// `None` means the target is not a current channel output, so callers keep it in its existing
+/// channel-level group instead of guessing from a field name or recipe identity.
+fn advanced_response_output_group_name(
+    document: &Document,
+    target: PropertyTarget,
+) -> Option<&'static str> {
+    let anchor = advanced_output_anchor(document, target)?;
+    Some(advanced_output_group_name(anchor.structural_kind))
+}
+
 /// Classifies descriptor targets at the stable granularity usable after selected-copy ID renewal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AdvancedDescriptorTargetKind {
@@ -3617,6 +3798,10 @@ struct AppState {
     options_controls: gtk::Box,
     advanced_controls: gtk::Box,
     inspector_status: gtk::Label,
+    cancel_pattern_calibration: gtk::Button,
+    process_memory_status: gtk::Label,
+    next_calibration_task: u64,
+    pending_inspector_calibration: Option<PendingInspectorCalibration>,
     descriptor_components: BTreeMap<String, DescriptorComponent>,
     main_output_groups: BTreeMap<PatternOutputLayerId, (gtk::Frame, gtk::Box)>,
     inspector_runtime: InspectorRuntime,
@@ -4069,6 +4254,14 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     preview_progress.set_visible(false);
     selector.update_property(&[gtk::accessible::Property::Label("Color model")]);
     let inspector_status = shell.inspector_status();
+    let cancel_pattern_calibration = shell.cancel_pattern_calibration();
+    let process_memory_status = shell.process_memory_status();
+    process_memory_status.update_property(&[
+        gtk::accessible::Property::Label("Memory usage"),
+        gtk::accessible::Property::Description(
+            "Approximate whole-process resident memory and process-session peak. Includes Toniator caches and undo history; excludes child processes and GPU allocations.",
+        ),
+    ]);
     let inspector_catalog = shell.inspector_catalog();
     let recipe_family = shell.recipe_family();
     let recipe_sites = shell.recipe_sites();
@@ -4224,6 +4417,10 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         options_controls,
         advanced_controls,
         inspector_status,
+        cancel_pattern_calibration,
+        process_memory_status,
+        next_calibration_task: 0,
+        pending_inspector_calibration: None,
         descriptor_components: BTreeMap::new(),
         main_output_groups: BTreeMap::new(),
         inspector_runtime: InspectorRuntime::default(),
@@ -4273,7 +4470,13 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         preview_bridge_stop: Arc::new(AtomicBool::new(false)),
         _theme_bridge: theme_bridge,
     }));
+    let cancel_state = Rc::clone(&state);
+    state
+        .borrow()
+        .cancel_pattern_calibration
+        .connect_clicked(move |_| cancel_inspector_calibration(&cancel_state));
     state.borrow_mut().print_png_preview_self = Rc::downgrade(&state);
+    start_process_memory_updates(&state);
     if let Some(notice) = state.borrow().catalog_notice.as_deref() {
         state
             .borrow()
@@ -5732,7 +5935,6 @@ fn inline_inspector_values(
                             | PropertyFieldId::TranslationX
                             | PropertyFieldId::TranslationY
                             | PropertyFieldId::ShapeRotationDegrees
-                            | PropertyFieldId::Opacity
                             | PropertyFieldId::Visibility
                     )
                     && (is_active(&value.descriptor)
@@ -5740,7 +5942,6 @@ fn inline_inspector_values(
                             value.descriptor.field,
                             PropertyFieldId::TranslationX
                                 | PropertyFieldId::TranslationY
-                                | PropertyFieldId::Opacity
                                 | PropertyFieldId::Visibility
                         )))
                     || (matches!(value.descriptor.target, PropertyTarget::ChannelOutput(id, _) if id == channel_id)
@@ -5763,13 +5964,7 @@ fn inline_inspector_values(
         for field in [
             PropertyFieldId::TranslationX,
             PropertyFieldId::TranslationY,
-            PropertyFieldId::MarkMinimumFill,
-            PropertyFieldId::MarkMaximumFill,
-            PropertyFieldId::ConnectedMinimumThickness,
-            PropertyFieldId::ConnectedMaximumThickness,
             PropertyFieldId::CurveResponseBias,
-            PropertyFieldId::RegionMinimumFill,
-            PropertyFieldId::RegionMaximumFill,
         ] {
             let Ok(batch) = document.channel_scalar_batch(field) else {
                 continue;
@@ -5789,18 +5984,44 @@ fn inline_inspector_values(
     values
 }
 
-/// Identifies output response controls edited beside the normal Pattern controls.
-/// These remain distinct domain fields, even when their visible labels share fill terminology.
+/// Identifies structural stroke alignment retained beside the normal Pattern controls.
+/// Channel size and sampling response fields belong to Advanced and never enter this sidebar.
 fn inline_response_field(field: PropertyFieldId) -> bool {
+    field == PropertyFieldId::CurveResponseBias
+}
+
+/// Identifies current channel response settings owned by the Advanced Fill response group.
+fn advanced_channel_response_field(field: PropertyFieldId) -> bool {
     matches!(
         field,
         PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
             | PropertyFieldId::ConnectedMinimumThickness
             | PropertyFieldId::ConnectedMaximumThickness
-            | PropertyFieldId::CurveResponseBias
+            | PropertyFieldId::RegionSampling
             | PropertyFieldId::RegionMinimumFill
             | PropertyFieldId::RegionMaximumFill
+    )
+}
+
+/// Returns a channel identity only for channel-owned descriptors.
+fn property_target_channel_id(target: PropertyTarget) -> Option<ChannelId> {
+    match target {
+        PropertyTarget::Channel(channel) | PropertyTarget::ChannelOutput(channel, _) => {
+            Some(channel)
+        }
+        _ => None,
+    }
+}
+
+/// Identifies only source-map gain and bias controls disclosed under Fine adjustments.
+fn advanced_fine_adjustment_field(field: PropertyFieldId) -> bool {
+    matches!(
+        field,
+        PropertyFieldId::ModeledMappingGain
+            | PropertyFieldId::ModeledMappingBias
+            | PropertyFieldId::ArtworkWeightMappingGain
+            | PropertyFieldId::ArtworkWeightMappingBias
     )
 }
 
@@ -6047,12 +6268,14 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::RotationDegrees => "Rotation".into(),
         PropertyFieldId::TranslationX => "X offset".into(),
         PropertyFieldId::TranslationY => "Y offset".into(),
-        PropertyFieldId::MarkMinimumFill => "Minimum fill".into(),
-        PropertyFieldId::MarkMaximumFill => "Coverage".into(),
-        // Connected values use the same domain-built inspector command boundary as mark fills.
-        PropertyFieldId::ConnectedMinimumThickness => "Minimum thickness".into(),
-        PropertyFieldId::ConnectedMaximumThickness => "Maximum thickness".into(),
-        PropertyFieldId::CurveResponseBias => "Curve response bias".into(),
+        PropertyFieldId::MarkMinimumFill
+        | PropertyFieldId::ConnectedMinimumThickness
+        | PropertyFieldId::RegionMinimumFill => "Minimum coverage".into(),
+        PropertyFieldId::MarkMaximumFill
+        | PropertyFieldId::ConnectedMaximumThickness
+        | PropertyFieldId::RegionMaximumFill => "Maximum coverage".into(),
+        PropertyFieldId::MarkSizeScale => "Uniform mark size scale".into(),
+        PropertyFieldId::CurveResponseBias => "Stroke alignment".into(),
         PropertyFieldId::ShapeRotationDegrees => "Shape rotation".into(),
         PropertyFieldId::LegacyMappingComponent | PropertyFieldId::ModeledMappingComponent => {
             "Fill response source".into()
@@ -6099,8 +6322,9 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::AlongGuideIntervalMultiplier => "Point spacing".into(),
         PropertyFieldId::AlongGuidePhase => "Point offset".into(),
         PropertyFieldId::RandomCharacter => "Scatter style".into(),
+        PropertyFieldId::RandomNominalSpacing => "Pattern point spacing".into(),
         PropertyFieldId::RandomEvenMinimumCenterDistance => "Minimum point spacing".into(),
-        PropertyFieldId::RandomClusterDensity => "Cluster centers per 100 points".into(),
+        PropertyFieldId::RandomClusterDensity => "Cluster frequency".into(),
         PropertyFieldId::RandomClusterSpread => "Cluster spread".into(),
         PropertyFieldId::RandomClusterStrength => "Cluster pull".into(),
         PropertyFieldId::RandomStratifiedJitter => "Cell jitter".into(),
@@ -6140,9 +6364,7 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::ConnectionSeed => "Line variation".into(),
         PropertyFieldId::MazeSeed => "Maze variation".into(),
         PropertyFieldId::RegionResizeAlgorithm => "Area resizing".into(),
-        PropertyFieldId::RegionSampling => "Artwork sampling".into(),
-        PropertyFieldId::RegionMinimumFill => "Minimum region fill".into(),
-        PropertyFieldId::RegionMaximumFill => "Region coverage".into(),
+        PropertyFieldId::RegionSampling => "Region sampling".into(),
         PropertyFieldId::CurveMotifMirrorAlternateRows => "Mirror alternate rows".into(),
         PropertyFieldId::CurveMotifAlternateRowPhase => "Alternate row offset".into(),
         PropertyFieldId::ParametricShape => "Spiral shape".into(),
@@ -6247,65 +6469,68 @@ fn inspector_field_guidance(field: PropertyFieldId) -> &'static str {
         PropertyFieldId::TranslationY => {
             "Moves the pattern up or down without changing its spacing."
         }
-        PropertyFieldId::MarkMinimumFill => {
-            "Sets the smallest marks. Increase it to keep more dots visible in faint parts of the sample; 0 lets them disappear."
+        PropertyFieldId::MarkMinimumFill
+        | PropertyFieldId::ConnectedMinimumThickness
+        | PropertyFieldId::RegionMinimumFill => {
+            "Sets requested geometric coverage at the weakest mapped channel response. 0 means no pattern area is occupied; 1 means full coverage. Coverage is separate from paint Alpha and channel Opacity. Toniator automatically measures and saves a response for this Pattern structure. If the request is unreachable within its measured size range, coverage saturates at the nearest reachable value."
         }
-        PropertyFieldId::MarkMaximumFill => {
-            "Sets the largest marks. Increase it for heavier coverage in the strongest parts of the sample; 1 uses the shape’s full size."
+        PropertyFieldId::MarkMaximumFill
+        | PropertyFieldId::ConnectedMaximumThickness
+        | PropertyFieldId::RegionMaximumFill => {
+            "Sets requested geometric coverage at the strongest mapped channel response. 0 means no pattern area is occupied; 1 means full coverage. Coverage is separate from paint Alpha and channel Opacity. Toniator automatically measures and saves a response for this Pattern structure. If the request is unreachable within its measured size range, coverage saturates at the nearest reachable value."
         }
-        PropertyFieldId::ConnectedMinimumThickness => {
-            "Sets the thinnest parts of the lines. Increase it to keep faint sections visible; 0 lets them disappear."
-        }
-        PropertyFieldId::ConnectedMaximumThickness => {
-            "Sets the thickest parts of the lines. Increase it for bolder strokes; decrease it for more space between them."
+        PropertyFieldId::MarkSizeScale => {
+            "Scales the automatically measured uniform mark size. 1 keeps that size; values below 1 make smaller marks, and values above 1 make larger marks."
         }
         PropertyFieldId::CurveResponseBias => {
-            "Biases visible stroke response toward the left or right normal of the curve’s authored start-to-end direction. 0 is centered; this never changes guides, points, or connections."
+            "Moves the visible line stroke across its path. 0 centers it; moving to either end places the path at one edge of the stroke. The path, guides, and connection points stay fixed."
         }
         PropertyFieldId::ShapeRotationDegrees => {
             "Rotates each repeated mark around its own center."
         }
         PropertyFieldId::LegacyMappingComponent | PropertyFieldId::ModeledMappingComponent => {
-            "Chooses the artwork component that controls this output, such as luminance, alpha, or a color channel."
+            "Chooses the artwork component that controls this source response, such as luminance, source alpha, or one color channel. Source alpha is the artwork's transparency; solid-color Alpha and channel Opacity are separate settings."
         }
         PropertyFieldId::LegacyMappingPlacement | PropertyFieldId::ModeledMappingPlacement => {
-            "Chooses how the source artwork is fitted to the pattern canvas before it is sampled."
+            "Chooses how the source artwork is fitted to the pattern canvas before its component is sampled."
         }
         PropertyFieldId::ModeledMappingInverted => {
             "Reverses the source response so low values act like high values and high values act like low values."
         }
         PropertyFieldId::ModeledMappingGain => {
-            "Multiplies the source response before it controls the output."
+            "Multiplies the mapped source response before it controls the output. 1 leaves it unchanged; higher values raise it and may clip more samples at the upper end."
         }
         PropertyFieldId::ModeledMappingBias => {
-            "Adds an offset to the source response before it controls the output."
+            "Adds an offset to the mapped source response before it controls the output. 0 leaves it unchanged; positive values raise responses and negative values lower them."
         }
         PropertyFieldId::ModeledMappingBlackPoint
         | PropertyFieldId::ArtworkWeightMappingBlackPoint => {
-            "Maps this artwork response to black. Must stay below White point."
+            "Sets the source-response level mapped to 0 before output use. Lower source values clamp to 0; keep this below White point."
         }
         PropertyFieldId::ModeledMappingWhitePoint
         | PropertyFieldId::ArtworkWeightMappingWhitePoint => {
-            "Maps this artwork response to white. Must stay above Black point."
+            "Sets the source-response level mapped to 1 before output use. Higher source values clamp to 1; keep this above Black point."
         }
         PropertyFieldId::ModeledMappingGamma | PropertyFieldId::ArtworkWeightMappingGamma => {
-            "Adjusts midtones after black and white points. 1 is unchanged; higher values brighten the response. Must be greater than 0."
+            "Shapes mapped source midtones after Black and White points. 1 leaves them unchanged; values above 1 raise intermediate response values. This changes source tone, not geometric area."
         }
         PropertyFieldId::ModeledMappingContrast | PropertyFieldId::ArtworkWeightMappingContrast => {
-            "Adjusts contrast around the middle response. 1 is unchanged; 0 gives a uniform middle response."
+            "Changes mapped-source contrast around the midpoint. 1 leaves contrast unchanged; values above 1 increase separation from the midpoint, values between 0 and 1 soften it, and 0 maps every value to the midpoint."
         }
         PropertyFieldId::ModeledMappingCutoff => {
-            "Hides output where the final sampled response is below this value, even with a positive minimum fill or thickness. 0 disables suppression."
+            "Suppresses source-driven output where the final mapped response is below this threshold, even when a minimum size is positive. 0 disables suppression."
         }
         PropertyFieldId::Paint => {
-            "Chooses whether the channel uses one solid color or colors sampled from the artwork."
+            "Chooses whether this channel uses one solid color or sampled artwork colors. This selects paint; it does not choose the source component that controls Fill or weighting."
         }
         PropertyFieldId::ColorRed => "Sets the red amount in the channel’s solid color.",
         PropertyFieldId::ColorGreen => "Sets the green amount in the channel’s solid color.",
         PropertyFieldId::ColorBlue => "Sets the blue amount in the channel’s solid color.",
-        PropertyFieldId::ColorAlpha => "Sets the transparency of the channel’s solid color.",
+        PropertyFieldId::ColorAlpha => {
+            "Sets transparency in the solid channel color: 0 is transparent and 1 is opaque. This differs from sampled source Alpha and from overall channel Opacity."
+        }
         PropertyFieldId::Opacity => {
-            "Sets the overall visibility of this channel without changing its geometry."
+            "Sets the overall visibility of this channel without changing its geometry. It is separate from solid-color Alpha and from sampled source Alpha."
         }
         PropertyFieldId::Visibility => "Shows or hides this channel.",
         PropertyFieldId::DefinitionSelection => "Chooses the pattern design used by this channel.",
@@ -6376,11 +6601,14 @@ fn inspector_field_guidance(field: PropertyFieldId) -> &'static str {
         PropertyFieldId::RandomCharacter => {
             "Random leaves irregular gaps. Poisson disk creates even random spacing without clumps. Jittered cells place one point per cell. Clustered gathers points into visible groups."
         }
+        PropertyFieldId::RandomNominalSpacing => {
+            "Sets the authored distance behind scatter density. Random and Clustered offer points per unit area from this spacing; Jittered places one point per cell. Feature size scales it without changing the saved Pattern."
+        }
         PropertyFieldId::RandomEvenMinimumCenterDistance => {
             "Keeps point centers at least this far apart. Increase it for a more open scatter; decrease it to allow tighter packing. Large gaps may leave room for fewer points."
         }
         PropertyFieldId::RandomClusterDensity => {
-            "Sets how many cluster centers are created per 100 points. Lower values form a few strong islands; higher values form more, smaller groups."
+            "Sets cluster-center frequency relative to the Pattern’s spatial point density. Lower values form fewer strong islands; higher values form more, smaller groups."
         }
         PropertyFieldId::RandomClusterSpread => {
             "Controls the width of each group. Increase it for broad, loose clusters; decrease it for tight bunches."
@@ -6398,28 +6626,28 @@ fn inspector_field_guidance(field: PropertyFieldId) -> &'static str {
             "Controls initial point placement. Uniform ignores the artwork when placing points. Follow artwork favors stronger parts of the channel’s artwork response. Clustered still creates groups; relaxation moves those points afterward."
         }
         PropertyFieldId::ArtworkWeightMappingComponent => {
-            "Chooses the artwork component that attracts or repels randomly distributed points."
+            "Chooses the source component used for site weighting. Source Alpha is artwork transparency; it differs from solid-color Alpha and channel Opacity."
         }
         PropertyFieldId::ArtworkWeightMappingPlacement => {
-            "Chooses how the artwork is fitted before its point-density influence is sampled."
+            "Chooses how the artwork is fitted before its site-weighting influence is sampled."
         }
         PropertyFieldId::ArtworkWeightMappingInverted => {
-            "Reverses which artwork values attract more points."
+            "Reverses which mapped artwork values favor more site placement or density."
         }
         PropertyFieldId::ArtworkWeightMappingGain => {
-            "Multiplies the artwork’s influence on site density."
+            "Multiplies the mapped source response used for site weighting. 1 leaves it unchanged; higher values raise it before the weighting strength is applied."
         }
         PropertyFieldId::ArtworkWeightMappingBias => {
-            "Offsets the artwork’s influence on site density."
+            "Adds an offset to the mapped source response used for site weighting. 0 leaves it unchanged; positive values raise responses and negative values lower them."
         }
         PropertyFieldId::ArtworkWeightStrength => {
-            "Controls how much the artwork guides point placement. 0 ignores it; increase the value to gather more points where the artwork response is stronger."
+            "Controls how much mapped artwork response changes site placement or density. 0 ignores artwork weighting and keeps the pattern's own distribution; 1 uses the full weighted response."
         }
         PropertyFieldId::ArtworkWeightMappingCutoff => {
-            "Suppresses weighting samples below this value before applying the weighting curve and strength. 0 disables suppression."
+            "Sets source responses below which site weighting is suppressed before its response curve and strength. 0 disables suppression."
         }
         PropertyFieldId::ArtworkWeightResponse => {
-            "Chooses how artwork values are translated into point-density influence."
+            "Linear uses mapped source values directly. Soft contrast pushes weak values lower and strong values higher with a smooth transition."
         }
         PropertyFieldId::RandomExclusion => {
             "Chooses whether random points keep a minimum spacing or stay far enough inside the visible artwork."
@@ -6518,16 +6746,10 @@ fn inspector_field_guidance(field: PropertyFieldId) -> &'static str {
             "Slides points along the formula-drawn curve without changing their spacing."
         }
         PropertyFieldId::RegionResizeAlgorithm => {
-            "Chooses whether each region scales around its center or moves its edges inward and outward evenly."
+            "Scale grows or shrinks each cell around its anchor. Even inset or outset moves that cell's boundary inward or outward; it changes the cell itself, not the gaps between cells."
         }
         PropertyFieldId::RegionSampling => {
-            "Point sampling uses one spot in the artwork. Area average blends the tones across the whole region, giving a more representative response for large cells."
-        }
-        PropertyFieldId::RegionMinimumFill => {
-            "Sets the smallest filled regions. Increase it to keep more area visible in faint parts of the sample; 0 allows regions to disappear."
-        }
-        PropertyFieldId::RegionMaximumFill => {
-            "Sets the largest filled regions. Increase it for fuller cells; decrease it for wider gaps between them."
+            "Reference point takes one artwork sample at the cell's sample point. Area average blends artwork across the original cell and usually takes longer."
         }
     }
 }
@@ -6564,6 +6786,48 @@ fn inspector_field_detail(descriptor: &PropertyDescriptor) -> String {
         }
     }
     guidance
+}
+
+/// Composes Advanced help from shared field meaning, descriptor bounds, and response role.
+///
+/// Domain descriptors remain the authority for availability and valid values. This presentation
+/// distinguishes source tone, optional point weighting, and channel response within Advanced.
+fn advanced_field_help(field: PropertyFieldId, descriptor: Option<&PropertyDescriptor>) -> String {
+    let mut help = descriptor.map_or_else(
+        || inspector_field_guidance(field).to_owned(),
+        inspector_field_detail,
+    );
+    match source_consumer_group(field) {
+        Some("Fill response") => help.push_str(
+            " Controls how mapped source tones affect the amount this channel draws. Point weighting has separate controls.",
+        ),
+        Some("Source weighting") => help.push_str(
+            " Source weighting settings stay stored when the pattern does not use them. They are separate from Fill response.",
+        ),
+        _ => {}
+    }
+    help
+}
+
+/// Applies one field's stable visible identity, hover help, and accessible description.
+///
+/// The visible label remains the sole product name and keyboard mnemonic. The same descriptor-
+/// derived help is exposed on both label and control; this changes presentation metadata only.
+fn set_advanced_control_help(
+    control: &gtk::Widget,
+    label: &gtk::Label,
+    field: PropertyFieldId,
+    help: &str,
+) {
+    let name = inspector_field_label(field);
+    control.set_tooltip_text(Some(help));
+    control.update_property(&[
+        gtk::accessible::Property::Label(&name),
+        gtk::accessible::Property::Description(help),
+    ]);
+    relate_descriptor_label(control, label);
+    label.set_tooltip_text(Some(help));
+    label.update_property(&[gtk::accessible::Property::Description(help)]);
 }
 
 /// Returns the static artist-facing label for one typed selector choice.
@@ -7456,6 +7720,7 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
     let (
         draft,
         initial_document,
+        initial_workspace_revision,
         sources,
         presentation,
         target,
@@ -7474,6 +7739,7 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
         (
             Rc::new(RefCell::new(DocumentHistory::new_draft(&workspace.history))),
             workspace.document().clone(),
+            workspace.history.revision(),
             workspace.sources.clone(),
             workspace.source_presentation.clone(),
             app_state.inspector_runtime.target,
@@ -7500,12 +7766,17 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
     breadcrumb.set_label(&wizard_breadcrumb(target, None));
     let status = shell.status();
     let picture = shell.preview();
+    let preview_description = shell.preview_description();
+    preview_description.set_label(WIZARD_PREVIEW_DESCRIPTION);
+    preview_description.update_property(&[
+        gtk::accessible::Property::Label("Pattern preview guidance"),
+        gtk::accessible::Property::Description(WIZARD_PREVIEW_DESCRIPTION),
+    ]);
     let guide_overlay = wizard_guides::Overlay::new(shell.guide_overlay(), shell.guide_legend());
-    let preview_description = "Black shows the pattern. Blue 1pt lines show every guide or the underlying parametric curve. Orange 1px indicators show actual point sites. These preview aids are not exported. Your artwork and full Feature size are used after Apply.";
-    picture.set_tooltip_text(Some(preview_description));
+    picture.set_tooltip_text(Some(WIZARD_PREVIEW_PICTURE_DESCRIPTION));
     picture.update_property(&[
         gtk::accessible::Property::Label("Pattern preview"),
-        gtk::accessible::Property::Description(preview_description),
+        gtk::accessible::Property::Description(WIZARD_PREVIEW_PICTURE_DESCRIPTION),
     ]);
     let spinner = shell.spinner();
     let gallery_panel = shell.gallery_panel();
@@ -7618,6 +7889,7 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
         window: window.clone(),
         draft,
         initial_document,
+        initial_workspace_revision,
         target,
         candidate: None,
         captured_library_root,
@@ -7631,6 +7903,7 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
         page_scroll,
         preview_source,
         picture,
+        preview_description,
         spinner,
         preview_status: shell.preview_status(),
         status,
@@ -7663,6 +7936,7 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
         preview_bridge: Some(preview_bridge),
         invoking_edit,
         gallery: gallery.clone(),
+        calibration_task: None,
     });
     let current_pattern_card = gtk::ToggleButton::with_label("Current Pattern");
     current_pattern_card.set_active(true);
@@ -7995,6 +8269,31 @@ fn wizard_card_is_current_candidate(card_id: &str, candidate: Option<&str>) -> b
     candidate == Some(card_id)
 }
 
+/// Describes gallery marker state without claiming that a Pattern is materialized in the private draft.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WizardGalleryCardSelection<'a> {
+    /// Create new is active and no gallery card is selected.
+    NewPattern,
+    /// The existing document Pattern is selected.
+    CurrentPattern,
+    /// The named catalog card is selected.
+    Candidate(&'a str),
+}
+
+/// Projects card markers with an explicit catalog candidate taking priority over Create new state.
+fn wizard_gallery_card_selection(
+    starting_new: bool,
+    candidate: Option<&str>,
+) -> WizardGalleryCardSelection<'_> {
+    if let Some(candidate) = candidate {
+        WizardGalleryCardSelection::Candidate(candidate)
+    } else if starting_new {
+        WizardGalleryCardSelection::NewPattern
+    } else {
+        WizardGalleryCardSelection::CurrentPattern
+    }
+}
+
 /// Updates visible and accessible candidate markers without changing any private draft content.
 fn update_wizard_candidate_cards(
     cards: &BTreeMap<String, gtk::ToggleButton>,
@@ -8160,8 +8459,10 @@ fn synthetic_catalog_thumbnail_request(
     Some(EvaluationRequest::with_preview_target(
         projection.document_evaluation_snapshot(),
         source,
-        toniator_engine::PreviewRasterTarget::new(100, 100).ok()?,
-    ))
+        toniator_engine::PreviewRasterTarget::new(100, 100)
+            .ok()?
+            .with_background(preview_backdrop::raster_background_for_document(projection.document())),
+    ).for_structural_preview())
 }
 
 /// Returns whether a personal Pattern name is free in the current combined
@@ -9052,13 +9353,30 @@ fn capture_pattern_save_draft(
     epoch: u64,
 ) -> Result<PatternSaveDraft, String> {
     let app_state = state.borrow();
+    let workspace = app_state
+        .workspace
+        .as_ref()
+        .ok_or_else(|| "The workspace is no longer open.".to_owned())?;
     let surface = app_state
         .pattern_wizard
         .as_ref()
         .filter(|surface| surface.epoch == epoch)
         .ok_or_else(|| "The Pattern Wizard is no longer open.".to_owned())?;
-    let document = surface.draft.borrow().document().clone();
+    let candidate = surface.draft.borrow();
+    let document = candidate.document().clone();
+    let candidate_revision = candidate.revision();
+    if workspace.document() != &surface.initial_document
+        || workspace.history.revision() != surface.initial_workspace_revision
+    {
+        return Err("The artwork changed while the Pattern Wizard was open.".to_owned());
+    }
     let (_, recipe, _) = wizard_route_for_document(&document, surface.target)?;
+    let calibration_channel = match surface.target {
+        InspectorTarget::Channel(channel) => Some(channel),
+        InspectorTarget::DocumentAll => authoritative_channel_ids(&document).into_iter().next(),
+    };
+    let saved_calibration = calibration_channel
+        .and_then(|channel| document.saved_calibration_for(channel).ok().flatten().cloned());
     let origin = surface
         .candidate
         .as_deref()
@@ -9077,12 +9395,47 @@ fn capture_pattern_save_draft(
     Ok(PatternSaveDraft {
         epoch,
         recipe,
+        calibration_document: document,
+        calibration_channel,
+        saved_calibration,
+        workspace_generation: app_state.workspace_generation,
+        base_document: surface.initial_document.clone(),
+        base_revision: surface.initial_workspace_revision,
+        candidate_revision,
         candidate: surface.candidate.clone(),
         origin,
         current_name,
         captured_root: surface.captured_library_root.clone(),
         captured_fingerprint,
     })
+}
+
+/// Confirms the exact workspace, wizard draft, and save dialog that authorized a Pattern write.
+///
+/// A personal-library operation remains private to the captured draft. A new wizard, changed
+/// recipe, changed base revision, or dismissed dialog cannot redirect its file publication.
+fn pattern_save_capture_is_current(
+    state: &Rc<RefCell<AppState>>,
+    draft: &PatternSaveDraft,
+    dialog: &gtk::Window,
+) -> bool {
+    let app = state.borrow();
+    app.workspace_generation == draft.workspace_generation
+        && app.workspace.as_ref().is_some_and(|workspace| {
+            workspace.document() == &draft.base_document
+                && workspace.history.revision() == draft.base_revision
+        })
+        && app
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == draft.epoch)
+            .is_some_and(|surface| {
+                dialog.is_visible()
+                    && surface.initial_document == draft.base_document
+                    && surface.candidate == draft.candidate
+                    && surface.draft.borrow().document() == &draft.calibration_document
+                    && surface.draft.borrow().revision() == draft.candidate_revision
+            })
 }
 
 /// Builds one personal preset-v4 record from the private wizard recipe while
@@ -9094,6 +9447,7 @@ fn personal_preset_from_save_draft(
 ) -> toniator_domain::PresetRecord {
     let family = wizard_family_label(draft.recipe.family_kind());
     toniator_domain::PresetRecord {
+        saved_calibration: draft.saved_calibration.clone(),
         metadata: PresetMetadata {
             id,
             name: name.to_owned(),
@@ -9306,8 +9660,11 @@ fn confirm_save_pattern_changes(
     confirmation.present();
 }
 
-/// Publishes one explicit Save Pattern action from the private wizard and
-/// refreshes the shared catalog without changing the current document.
+/// Writes one explicit Save Pattern action from its captured private wizard draft.
+///
+/// The workspace generation, exact document/revision, wizard candidate, and live dialog are
+/// rechecked before calibration or file publication. The operation changes only the captured
+/// personal-library record and refreshes the catalog; it never changes main document history.
 fn save_wizard_pattern(
     state: &Rc<RefCell<AppState>>,
     draft: PatternSaveDraft,
@@ -9320,6 +9677,10 @@ fn save_wizard_pattern(
     let requested_name = requested_name.trim();
     if requested_name.is_empty() || requested_name.chars().any(char::is_control) {
         status.set_label("Pattern name must contain printable text.");
+        return;
+    }
+    if !pattern_save_capture_is_current(state, &draft, dialog) {
+        status.set_label("The artwork or Pattern draft changed. Reopen Save Pattern and try again.");
         return;
     }
     let mut name = requested_name.to_owned();
@@ -9404,6 +9765,100 @@ fn save_wizard_pattern(
             (fresh_personal_pattern_id(&catalog), None)
         }
     };
+    let mut draft = draft;
+    if draft.saved_calibration.is_none() {
+        let Some(channel_id) = draft.calibration_channel else {
+            status.set_label("This Pattern has no channel to calibrate.");
+            return;
+        };
+        match draft
+            .calibration_document
+            .saved_calibration_for(channel_id)
+            .map_err(|error| error.to_string())
+        {
+            Ok(Some(artifact)) => draft.saved_calibration = Some(artifact.clone()),
+            Ok(None) => {
+                let channels = vec![channel_id];
+                let (task_id, cancelled) = match start_calibration_preparation(
+                    state,
+                    &draft.calibration_document,
+                    &channels,
+                    false,
+                    false,
+                ) {
+                    Ok(task) => task,
+                    Err(error) => {
+                        status.set_label(&error);
+                        return;
+                    }
+                };
+                let installed = {
+                    let mut app = state.borrow_mut();
+                    let current_root = app.workspace_generation == draft.workspace_generation
+                        && app.workspace.as_ref().is_some_and(|workspace| {
+                            workspace.document() == &draft.base_document
+                                && workspace.history.revision() == draft.base_revision
+                        });
+                    if !current_root {
+                        false
+                    } else if let Some(surface) = app
+                        .pattern_wizard
+                        .as_mut()
+                        .filter(|surface| {
+                            surface.epoch == draft.epoch
+                                && surface.calibration_task.is_none()
+                                && surface.initial_document == draft.base_document
+                                && surface.candidate == draft.candidate
+                                && dialog.is_visible()
+                        })
+                    {
+                        let current_draft = surface.draft.borrow();
+                        if current_draft.document() != &draft.calibration_document
+                            || current_draft.revision() != draft.candidate_revision
+                        {
+                            false
+                        } else {
+                            drop(current_draft);
+                            surface.calibration_task = Some(WizardCalibrationTask {
+                                id: task_id,
+                                epoch: draft.epoch,
+                                workspace_generation: draft.workspace_generation,
+                                base_document: draft.base_document.clone(),
+                                base_revision: draft.base_revision,
+                                candidate_document: draft.calibration_document.clone(),
+                                candidate_revision: draft.candidate_revision,
+                                cancelled: Arc::clone(&cancelled),
+                                publication: WizardCalibrationPublication::PatternSave {
+                                    draft: Box::new(draft.clone()),
+                                    action,
+                                    name: name.clone(),
+                                    dialog: dialog.clone(),
+                                    status: status.clone(),
+                                    actions: actions.clone(),
+                                },
+                            });
+                            set_wizard_calibration_pending(surface, true);
+                            true
+                        }
+                    } else {
+                        false
+                    }
+                };
+                if !installed {
+                    cancelled.store(true, Ordering::Release);
+                    status.set_label("The Pattern or artwork changed; reopen Save Pattern and try again.");
+                    return;
+                }
+                set_pattern_save_actions_pending(actions, true);
+                status.set_label("Measuring Pattern for the personal library…");
+                return;
+            }
+            Err(error) => {
+                status.set_label(&format!("Couldn’t check Pattern calibration: {error}"));
+                return;
+            }
+        }
+    }
     let saved_id = id.clone();
     let preset = personal_preset_from_save_draft(&draft, id, &name);
     let result = operation_library
@@ -9454,6 +9909,45 @@ fn save_wizard_pattern(
             );
         }
         Err(error) => status.set_label(&format!("Couldn’t save Pattern: {error}")),
+    }
+}
+
+/// Keeps the Save Pattern Cancel action available while disabling writes during calibration.
+fn set_pattern_save_actions_pending(actions: &gtk::Box, pending: bool) {
+    let mut child = actions.first_child();
+    let mut first = true;
+    while let Some(widget) = child {
+        widget.set_sensitive(first || !pending);
+        first = false;
+        child = widget.next_sibling();
+    }
+}
+
+/// Cancels a pending library calibration when its owning Save Pattern dialog closes.
+fn cancel_pattern_save_calibration(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let task = {
+        let mut app = state.borrow_mut();
+        app.pattern_wizard
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch)
+            .and_then(|surface| {
+                surface
+                    .calibration_task
+                    .as_ref()
+                    .is_some_and(|task| {
+                        matches!(
+                            &task.publication,
+                            WizardCalibrationPublication::PatternSave { draft, .. }
+                                if draft.epoch == epoch
+                        )
+                    })
+                    .then(|| surface.calibration_task.take())
+                    .flatten()
+            })
+    };
+    if let Some(task) = task {
+        task.cancelled.store(true, Ordering::Release);
+        resume_wizard_after_calibration(state, epoch);
     }
 }
 
@@ -9599,17 +10093,22 @@ fn open_pattern_save_dialog(state: &Rc<RefCell<AppState>>, epoch: u64) {
     content.append(&status);
     content.append(&actions);
     dialog.set_child(Some(&content));
+    let state_for_close = Rc::clone(state);
+    dialog.connect_close_request(move |_| {
+        cancel_pattern_save_calibration(&state_for_close, epoch);
+        glib::Propagation::Proceed
+    });
     let dialog_for_cancel = dialog.clone();
     cancel.connect_clicked(move |_| dialog_for_cancel.close());
     gtk::prelude::GtkWindowExt::set_focus(&dialog, Some(&name));
     dialog.present();
 }
 
-/// Materializes one selected catalog record in the captured private draft and opens Review or Edit.
+/// Materializes one selected catalog record in the captured private draft for Customize or Review.
 ///
 /// The target is the value captured at modal open, never the current sidebar selection. Failure
 /// leaves the previous private draft intact and visible; successful materialization schedules only
-/// the wizard scheduler and does not publish main history.
+/// the wizard preview and does not publish main history.
 fn use_wizard_preset(state: &Rc<RefCell<AppState>>, epoch: u64, id: &str, edit: bool) {
     if let Err(error) = reset_wizard_private_draft(state, epoch) {
         set_wizard_input_error(state, epoch, &error);
@@ -9625,14 +10124,7 @@ fn use_wizard_preset(state: &Rc<RefCell<AppState>>, epoch: u64, id: &str, edit: 
             return;
         };
         let mut draft = surface.draft.borrow_mut();
-        match surface.target {
-            InspectorTarget::DocumentAll => {
-                app_state.catalog.apply_to_document_base(&mut draft, id)
-            }
-            InspectorTarget::Channel(channel_id) => app_state
-                .catalog
-                .apply_to_selected(&mut draft, channel_id, id),
-        }
+        apply_catalog_pattern_candidate(&mut draft, &app_state.catalog, surface.target, id)
     };
     match result {
         Ok(_) => {
@@ -10139,7 +10631,15 @@ fn source_consumer_group(field: PropertyFieldId) -> Option<&'static str> {
         | PropertyFieldId::ModeledMappingWhitePoint
         | PropertyFieldId::ModeledMappingGamma
         | PropertyFieldId::ModeledMappingContrast
-        | PropertyFieldId::ModeledMappingCutoff => Some("Fill response"),
+        | PropertyFieldId::ModeledMappingCutoff
+        | PropertyFieldId::MarkMinimumFill
+        | PropertyFieldId::MarkMaximumFill
+        | PropertyFieldId::MarkSizeScale
+        | PropertyFieldId::ConnectedMinimumThickness
+        | PropertyFieldId::ConnectedMaximumThickness
+        | PropertyFieldId::RegionSampling
+        | PropertyFieldId::RegionMinimumFill
+        | PropertyFieldId::RegionMaximumFill => Some("Fill response"),
         PropertyFieldId::ArtworkWeightMappingComponent
         | PropertyFieldId::ArtworkWeightMappingPlacement
         | PropertyFieldId::ArtworkWeightMappingInverted
@@ -10154,6 +10654,111 @@ fn source_consumer_group(field: PropertyFieldId) -> Option<&'static str> {
         | PropertyFieldId::ArtworkWeightResponse => Some("Source weighting"),
         _ => None,
     }
+}
+
+/// Resolves weighted Mark outputs for one channel through current structure and domain density authority.
+///
+/// Structural eligibility comes from the selected effective definition; effective mode, scale, and
+/// strict-margin reason come from `Document::effective_mark_density`.
+fn weighted_mark_density_states(
+    document: &Document,
+    channel: ChannelId,
+) -> Vec<(PatternOutputLayerId, toniator_domain::EffectiveMarkDensity)> {
+    let Ok(effective) = document.effective_channel_pattern(channel) else {
+        return Vec::new();
+    };
+    let Some(bundle) = document
+        .pattern_definition_bundles()
+        .iter()
+        .find(|bundle| bundle.definition.id == effective.definition_id)
+    else {
+        return Vec::new();
+    };
+    if !toniator_domain::definition_uses_artwork_weighted_density(&bundle.definition) {
+        return Vec::new();
+    }
+    effective
+        .output_settings
+        .iter()
+        .filter(|output| matches!(output.response, PatternGeometryResponse::Marks(_)))
+        .filter_map(|output| {
+            document
+                .effective_mark_density(channel, output.output_layer_id)
+                .ok()
+                .map(|density| (output.output_layer_id, density))
+        })
+        .collect()
+}
+
+/// Shows Variable bounds for ordinary marks or weighted Marks whose effective mode is Variable.
+fn channel_mark_range_visible(document: &Document, channel: ChannelId) -> bool {
+    let Ok(effective) = document.effective_channel_pattern(channel) else {
+        return false;
+    };
+    let has_marks = effective
+        .output_settings
+        .iter()
+        .any(|output| matches!(output.response, PatternGeometryResponse::Marks(_)));
+    if !has_marks {
+        return false;
+    }
+    let weighted = !weighted_mark_density_states(document, channel).is_empty();
+    if !weighted {
+        return true;
+    }
+    weighted_mark_density_states(document, channel)
+        .iter()
+        .any(|(_, density)| density.mode == MarkDensityMode::Variable)
+}
+
+/// Shows calibrated size scale only for a currently Uniform weighted Mark output.
+fn channel_mark_scale_visible(document: &Document, channel: ChannelId) -> bool {
+    weighted_mark_density_states(document, channel)
+        .iter()
+        .any(|(_, density)| density.mode == MarkDensityMode::Uniform)
+}
+
+/// Reports whether Uniform weighted Marks have their independent Fill tone mask switched off.
+fn channel_fill_mask_inactive(document: &Document, channel: ChannelId) -> bool {
+    if !channel_mark_scale_visible(document, channel) {
+        return false;
+    }
+    selected_property_values(document, channel)
+        .iter()
+        .find(|value| value.descriptor.field == PropertyFieldId::ModeledMappingCutoff)
+        .is_some_and(|value| value.value == PropertyCurrentValueKind::FiniteF64(0.0))
+}
+
+/// Keeps response controls visible when any compatible ALL channel still uses that field.
+fn all_response_field_visible(document: &Document, field: PropertyFieldId) -> bool {
+    let channels = authoritative_channel_ids(document);
+    match field {
+        PropertyFieldId::MarkMinimumFill | PropertyFieldId::MarkMaximumFill => channels
+            .iter()
+            .any(|channel| channel_mark_range_visible(document, *channel)),
+        PropertyFieldId::MarkSizeScale => channels
+            .iter()
+            .any(|channel| channel_mark_scale_visible(document, *channel)),
+        _ => true,
+    }
+}
+
+/// Disables only mapped Fill controls while an eligible Uniform Mark mask cutoff is zero.
+fn is_fill_tone_mapping_field(field: PropertyFieldId) -> bool {
+    matches!(
+        field,
+        PropertyFieldId::LegacyMappingComponent
+            | PropertyFieldId::LegacyMappingPlacement
+            | PropertyFieldId::ModeledMappingComponent
+            | PropertyFieldId::ModeledMappingPlacement
+            | PropertyFieldId::ModeledMappingInverted
+            | PropertyFieldId::ModeledMappingGain
+            | PropertyFieldId::ModeledMappingBias
+            | PropertyFieldId::ModeledMappingBlackPoint
+            | PropertyFieldId::ModeledMappingWhitePoint
+            | PropertyFieldId::ModeledMappingGamma
+            | PropertyFieldId::ModeledMappingContrast
+    )
 }
 
 /// Returns active recipe values for the captured scope, excluding channel-owned source consumers.
@@ -10211,26 +10816,34 @@ fn wizard_route_for_document(
     Ok((projection, recipe, route))
 }
 
-/// Updates private-history affordances and Next/Review vocabulary from the current route state.
+/// Updates private-history affordances unless the visible gallery owns its catalog-derived action vocabulary.
 fn refresh_wizard_action_controls(surface: &PatternWizardSurface) {
-    if surface.route.is_empty() {
-        surface.back.set_visible(false);
-        surface.review.set_visible(false);
-        surface.undo.set_visible(false);
-        surface.redo.set_visible(false);
-        surface.edit.set_visible(true);
-        surface.new.set_visible(true);
-        surface.apply.set_visible(true);
-        surface.apply.set_label("_Review Pattern");
-        let description = "Review this Pattern before applying it to your document.";
-        surface.apply.set_tooltip_text(Some(description));
-        surface.apply.update_property(&[
-            gtk::accessible::Property::Label("Review Pattern"),
-            gtk::accessible::Property::Description(description),
-        ]);
-        surface.apply.set_sensitive(surface.candidate.is_some());
-        return;
-    }
+    let current = match wizard_action_refresh_page(
+        surface.gallery_panel.is_visible(),
+        &surface.route,
+        surface.route_index,
+    ) {
+        WizardNavigationPage::Gallery => return,
+        WizardNavigationPage::Review => {
+            surface.back.set_visible(false);
+            surface.review.set_visible(false);
+            surface.undo.set_visible(false);
+            surface.redo.set_visible(false);
+            surface.edit.set_visible(true);
+            surface.new.set_visible(true);
+            surface.apply.set_visible(true);
+            surface.apply.set_label("_Review Pattern");
+            let description = "Review this Pattern before applying it to your document.";
+            surface.apply.set_tooltip_text(Some(description));
+            surface.apply.update_property(&[
+                gtk::accessible::Property::Label("Review Pattern"),
+                gtk::accessible::Property::Description(description),
+            ]);
+            surface.apply.set_sensitive(surface.candidate.is_some());
+            return;
+        }
+        WizardNavigationPage::Route(page) => page,
+    };
     surface.back.set_visible(true);
     surface.review.set_visible(true);
     surface.undo.set_visible(true);
@@ -10242,11 +10855,6 @@ fn refresh_wizard_action_controls(surface: &PatternWizardSurface) {
     let can_redo = surface.draft.borrow().can_redo();
     surface.undo.set_sensitive(can_undo);
     surface.redo.set_sensitive(can_redo);
-    let current = surface
-        .route
-        .get(surface.route_index)
-        .copied()
-        .unwrap_or(WizardRoutePage::Review);
     surface
         .apply
         .set_visible(current == WizardRoutePage::Review);
@@ -10355,6 +10963,30 @@ fn refresh_wizard_route(state: &Rc<RefCell<AppState>>, epoch: u64) -> Result<(),
     Ok(())
 }
 
+/// Names the channels affected by applying a Pattern to the wizard's captured target.
+///
+/// DocumentBase disclosure follows authoritative channel order; named-channel disclosure resolves
+/// the captured real channel identity. This reads only the supplied document and changes no state.
+fn wizard_gallery_channel_disclosure(document: &Document, target: InspectorTarget) -> String {
+    match target {
+        InspectorTarget::DocumentAll => {
+            let names = authoritative_channel_ids(document)
+                .into_iter()
+                .map(|channel| channel_display_name(document, channel))
+                .collect::<Vec<_>>();
+            if names.is_empty() {
+                "Affected channels: none are available.".to_owned()
+            } else {
+                format!("Affected channels: {}.", names.join(", "))
+            }
+        }
+        InspectorTarget::Channel(channel) => format!(
+            "Affected channel: {} only.",
+            channel_display_name(document, channel)
+        ),
+    }
+}
+
 /// Shows the neutral Gallery page without discarding the private draft or its last successful preview.
 fn show_wizard_gallery_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
     invalidate_pending_wizard_dropdown_action(state, epoch);
@@ -10366,6 +10998,7 @@ fn show_wizard_gallery_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
         candidate,
         catalog,
         target,
+        initial_document,
         cards,
         current_pattern,
         back,
@@ -10394,6 +11027,7 @@ fn show_wizard_gallery_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
             surface.candidate.clone(),
             app_state.catalog.clone(),
             surface.target,
+            surface.initial_document.clone(),
             surface.gallery_cards.clone(),
             surface.current_pattern_card.clone(),
             surface.back.clone(),
@@ -10440,33 +11074,73 @@ fn show_wizard_gallery_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
         actions.reorder_child_after(&new, Some(&edit));
         actions.reorder_child_after(&apply, Some(&new));
     }
-    if starting_new {
-        current_pattern.set_active(false);
-        for card in cards.values() {
-            card.set_active(false);
+    match wizard_gallery_card_selection(starting_new, candidate.as_deref()) {
+        WizardGalleryCardSelection::NewPattern => {
+            current_pattern.set_active(false);
+            current_pattern.remove_css_class("toniator-wizard-card-current");
+            for card in cards.values() {
+                card.set_active(false);
+                card.remove_css_class("toniator-wizard-card-current");
+            }
         }
-    } else {
-        update_wizard_candidate_cards(&cards, &current_pattern, candidate.as_deref());
+        WizardGalleryCardSelection::CurrentPattern => {
+            update_wizard_candidate_cards(&cards, &current_pattern, None);
+        }
+        WizardGalleryCardSelection::Candidate(candidate) => {
+            update_wizard_candidate_cards(&cards, &current_pattern, Some(candidate));
+        }
     }
     if let Some(entry) = candidate.as_deref().and_then(|id| catalog.find(id)) {
+        let direct_apply = entry.origin == PresetOrigin::BuiltIn;
+        let label = if direct_apply {
+            "_Apply Pattern"
+        } else {
+            "_Review Pattern"
+        };
+        let description = if direct_apply {
+            "Apply the selected Pattern to the listed channels. You can undo this change."
+        } else {
+            "Review this saved Pattern before applying it to your document."
+        };
+        apply.set_label(label);
+        apply.set_tooltip_text(Some(description));
+        apply.update_property(&[
+            gtk::accessible::Property::Label(label.trim_start_matches('_')),
+            gtk::accessible::Property::Description(description),
+        ]);
         breadcrumb.set_label(&wizard_breadcrumb(
             target,
             Some(wizard_family_label(entry.preset.recipe.family_kind())),
         ));
-        status.set_label(&match candidate_admission {
-            Ok(()) => format!(
-                "{} is selected. Review Pattern opens the final check; Apply Pattern then changes your artwork.",
-                entry.preset.metadata.name
-            ),
-            Err(error) => format!(
-                "{} is selected. Customize remains available. Review Pattern is unavailable: {error}",
-                entry.preset.metadata.name
-            ),
-        });
+        let selected_message = if direct_apply {
+            let disclosure = wizard_gallery_channel_disclosure(&initial_document, target);
+            match candidate_admission {
+                Ok(()) => format!(
+                    "{} is selected. {disclosure} Apply Pattern applies it now; Customize walks through its layout and drawing settings.",
+                    entry.preset.metadata.name,
+                ),
+                Err(error) => format!(
+                    "{} is selected. {disclosure} Apply Pattern is unavailable: {error}. Customize remains available.",
+                    entry.preset.metadata.name,
+                ),
+            }
+        } else {
+            match candidate_admission {
+                Ok(()) => format!(
+                    "{} is selected. Review Pattern opens the final check; Apply Pattern then changes your artwork. Customize remains available.",
+                    entry.preset.metadata.name,
+                ),
+                Err(error) => format!(
+                    "{} is selected. Customize remains available. Review Pattern is unavailable: {error}",
+                    entry.preset.metadata.name,
+                ),
+            }
+        };
+        status.set_label(&selected_message);
     } else {
         breadcrumb.set_label(&wizard_breadcrumb(target, None));
         status.set_label(
-            "Current Pattern is selected. Customize it, or Create new to choose a fresh layout.",
+            "Current Pattern is selected. Select a Pattern to apply or review it; Customize opens its settings and Create new starts a fresh layout.",
         );
     }
     submit_wizard_preview(state, epoch);
@@ -10958,16 +11632,9 @@ fn show_wizard_review_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
             .iter()
             .position(|page| *page == WizardRoutePage::Review)
             .unwrap_or(surface.route_index);
-        refresh_wizard_action_controls(surface);
-    }
-    if let Some(surface) = state
-        .borrow()
-        .pattern_wizard
-        .as_ref()
-        .filter(|surface| surface.epoch == epoch)
-    {
         surface.gallery_panel.set_visible(false);
         surface.page_panel.set_visible(true);
+        refresh_wizard_action_controls(surface);
     }
     let (page, breadcrumb, status, back, review, apply, target, document, dirty) = {
         let app_state = state.borrow();
@@ -11996,7 +12663,7 @@ fn append_wizard_numeric_control(
     );
 }
 
-/// Builds the shared continuous response-bias slider from descriptor-authoritative vocabulary.
+/// Builds the shared continuous stroke-alignment slider from descriptor-authoritative vocabulary.
 ///
 /// The range is the domain's normalized `-1..=1` contract. GTK owns only presentation and input;
 /// callers still route each requested value through their typed document-command boundary.
@@ -12007,9 +12674,9 @@ fn curve_response_bias_scale(value: f64, label: &str, description: &str) -> gtk:
     scale.set_digits(2);
     scale.set_hexpand(true);
     scale.set_width_request(240);
-    scale.add_mark(-1.0, gtk::PositionType::Bottom, Some("Left"));
+    scale.add_mark(-1.0, gtk::PositionType::Bottom, Some("One side"));
     scale.add_mark(0.0, gtk::PositionType::Bottom, Some("Centered"));
-    scale.add_mark(1.0, gtk::PositionType::Bottom, Some("Right"));
+    scale.add_mark(1.0, gtk::PositionType::Bottom, Some("Other side"));
     scale.set_tooltip_text(Some(description));
     scale.update_property(&[
         gtk::accessible::Property::Label(label),
@@ -12018,7 +12685,7 @@ fn curve_response_bias_scale(value: f64, label: &str, description: &str) -> gtk:
     scale
 }
 
-/// Appends the output-level curve-response bias slider to a wizard Rendering card.
+/// Appends the output-level stroke-alignment slider to a wizard Rendering card.
 ///
 /// Each GTK value request is validated and recorded by the private wizard history. The control
 /// never changes guide, site, or connection topology and does not invent a second bias model.
@@ -14588,13 +15255,8 @@ fn submit_wizard_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
                 .set_label(&format!("Pattern preview unavailable: {error}"));
             return;
         };
-        let target = toniator_engine::PreviewRasterTarget::new(
-            WIZARD_PREVIEW_TARGET_PX,
-            WIZARD_PREVIEW_TARGET_PX,
-        )
-        .expect("fixed Pattern Wizard preview target is valid");
         surface.preview_session = None;
-        let preview = if surface.gallery_panel.is_visible() {
+        let session = if surface.gallery_panel.is_visible() {
             wizard_candidate_preview_session(
                 &surface.initial_document,
                 surface.target,
@@ -14604,7 +15266,11 @@ fn submit_wizard_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
         } else {
             wizard_preview_session(surface.draft.borrow().document(), surface.target)
         };
-        let session = match preview {
+        let density_guidance = session.as_ref().ok().and_then(|session| {
+            wizard_weighted_mark_preview_guidance(session.document(), surface.target)
+        });
+        set_wizard_preview_guidance(surface, density_guidance);
+        let session = match session {
             Ok(session) => session,
             Err(error) => {
                 surface
@@ -14613,8 +15279,15 @@ fn submit_wizard_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
                 return;
             }
         };
+        let target = toniator_engine::PreviewRasterTarget::new(
+            WIZARD_PREVIEW_TARGET_PX,
+            WIZARD_PREVIEW_TARGET_PX,
+        )
+        .expect("fixed Pattern Wizard preview target is valid")
+        .with_background(preview_backdrop::raster_background_for_document(session.document()));
         let snapshot = session.document_evaluation_snapshot();
-        let request = EvaluationRequest::with_preview_target(snapshot, source.clone(), target);
+        let request = EvaluationRequest::with_preview_target(snapshot, source.clone(), target)
+            .for_structural_preview();
         match surface.scheduler.submit(request) {
             Ok(ticket) => {
                 surface.preview_submission = Some(ticket.value());
@@ -14634,6 +15307,28 @@ fn submit_wizard_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
     };
 }
 
+/// Updates visible and accessible guidance for the neutral structural preview.
+///
+/// Weighted Marks describe artwork-driven density, and strict Visible Mark Margin explains why
+/// Uniform sizing is unavailable. The document remains outside this presentation helper.
+fn set_wizard_preview_guidance(surface: &PatternWizardSurface, guidance: Option<&str>) {
+    let guidance = guidance.unwrap_or(WIZARD_PREVIEW_DESCRIPTION);
+    surface.preview_description.set_label(guidance);
+    surface.preview_description.set_tooltip_text(Some(guidance));
+    surface
+        .preview_description
+        .update_property(&[gtk::accessible::Property::Description(guidance)]);
+    let picture_description = format!("{WIZARD_PREVIEW_PICTURE_DESCRIPTION} {guidance}");
+    surface
+        .picture
+        .set_tooltip_text(Some(picture_description.as_str()));
+    surface
+        .picture
+        .update_property(&[gtk::accessible::Property::Description(
+            picture_description.as_str(),
+        )]);
+}
+
 /// Previews a gallery candidate in a disposable history without editing the wizard or artwork.
 ///
 /// The catalog and captured channel target remain authoritative. Gallery samples always start
@@ -14648,19 +15343,104 @@ fn wizard_candidate_preview_session(
     catalog: &LayeredPresetCatalog,
     candidate: Option<&str>,
 ) -> Result<DocumentSession, String> {
+    let document = wizard_candidate_document(initial_document, target, catalog, candidate)?;
+    wizard_preview_session(&document, target)
+}
+
+/// Applies one gallery candidate to a disposable document before neutral preview projection.
+///
+/// The captured artwork remains authoritative; no candidate or preview state is published to the
+/// wizard history or main workspace.
+///
+/// # Errors
+/// Returns catalog or document construction diagnostics without changing the captured document.
+fn wizard_candidate_document(
+    initial_document: &Document,
+    target: InspectorTarget,
+    catalog: &LayeredPresetCatalog,
+    candidate: Option<&str>,
+) -> Result<Document, String> {
     let mut preview = DocumentHistory::new(
         DocumentSession::new(initial_document.clone()).map_err(|error| error.to_string())?,
     );
     if let Some(id) = candidate {
-        match target {
-            InspectorTarget::DocumentAll => catalog.apply_to_document_base(&mut preview, id),
-            InspectorTarget::Channel(channel) => {
-                catalog.apply_to_selected(&mut preview, channel, id)
+        apply_catalog_pattern_candidate(&mut preview, catalog, target, id)?;
+    }
+    Ok(preview.document().clone())
+}
+
+/// Applies one catalog recipe while reusing only a companion bound to a concrete receiving channel.
+///
+/// CoverCanvas recipes can materialize different finite geometry for the captured document. The
+/// catalog remains strict for ordinary callers; this disposable app path probes materialization
+/// without a companion, then attaches the catalog measurement only when exact binding equality
+/// proves it applies to a receiver. Incompatible companions stay absent for later preparation.
+///
+/// # Errors
+/// Returns catalog lookup, target reconstruction, command, validation, or history errors without
+/// partially changing the caller's history.
+fn apply_catalog_pattern_candidate(
+    history: &mut DocumentHistory,
+    catalog: &LayeredPresetCatalog,
+    target: InspectorTarget,
+    id: &str,
+) -> Result<(), String> {
+    let entry = catalog
+        .find(id)
+        .ok_or_else(|| format!("preset ID `{id}` is not present in this catalog"))?;
+    let recipe = entry.preset.recipe.clone();
+    let command = match target {
+        InspectorTarget::DocumentAll => {
+            let base = history.document().pattern_settings().clone();
+            let base_definition = history
+                .document()
+                .pattern_definition_bundles()
+                .iter()
+                .find(|bundle| bundle.id == base.definition_id)
+                .map(|bundle| bundle.definition.clone())
+                .ok_or_else(|| {
+                    "document base definition is not present in this document".to_owned()
+                })?;
+            DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
+                base,
+                base_definition,
+                recipe,
             }
         }
-        .map_err(|error| error.to_string())?;
-    }
-    wizard_preview_session(preview.document(), target)
+        InspectorTarget::Channel(channel_id) => {
+            let base = history.document().pattern_settings().clone();
+            let base_definition = history
+                .document()
+                .pattern_definition_for(channel_id)
+                .cloned()
+                .ok_or_else(|| "channel is not present in this document".to_owned())?;
+            DocumentCommand::ReplaceChannelPatternDefinitionOverrideRecipe {
+                base,
+                channel_id,
+                base_definition,
+                recipe,
+            }
+        }
+    };
+
+    let mut probe = DocumentHistory::new_draft(history);
+    probe.apply(&command).map_err(|error| error.to_string())?;
+    let receivers = match target {
+        InspectorTarget::DocumentAll => authoritative_channel_ids(probe.document()),
+        InspectorTarget::Channel(channel_id) => vec![channel_id],
+    };
+    let compatible_companion = entry.preset.saved_calibration.as_ref().filter(|artifact| {
+        receivers.iter().copied().any(|channel_id| {
+            CalibrationBinding::for_channel(probe.document(), channel_id)
+                .ok()
+                .as_ref()
+                == Some(artifact.binding())
+        })
+    });
+    history
+        .apply_pattern_with_saved_calibration(&command, compatible_companion)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Builds the neutral one-channel preview projection without mutating a wizard or main draft.
@@ -14934,9 +15714,19 @@ fn scale_wizard_preview_guide_structure(
 /// or either history. The projection keeps one channel visible. RGB/CMYK use solid black, while
 /// SourceColorAlpha retains its required sampled-source paint. A capability-derived neutral preview
 /// scale applies to every channel, including hidden channels evaluated by the shared engine. Density
-/// follows Feature size without clamping, and no recipe or draft value changes. Bounded canvas and
-/// raster extents, plus evaluation cancellation, bound presentation work; the canonical evaluator
-/// reports any actual construction limit.
+/// follows Feature size without clamping. Only the disposable clone resets ALL and named channel
+/// response ranges to 0–1 and region sampling to area average; structural stroke alignment and
+/// region resizing remain unchanged, while compatible initialized End values are retained. The
+/// source document remains untouched.
+///
+/// Bounded canvas and raster extents, plus evaluation cancellation, bound
+/// presentation work; the canonical evaluator reports any actual construction
+/// limit.
+///
+/// The disposable clone resets ALL and named response values to domain defaults: Variable ranges
+/// are 0–1, region sampling is Area average, density mode is Contextual, and uniform size scale is
+/// `1`. Artwork weighting and strict non-overlap remain structural inputs; the source document and
+/// its initialized End values remain untouched.
 fn wizard_preview_document(
     document: &Document,
     target: InspectorTarget,
@@ -14970,6 +15760,12 @@ fn wizard_preview_document(
     let mut projection = DocumentHistory::new(
         DocumentSession::new(preview_document.clone()).map_err(|error| error.to_string())?,
     );
+    advanced_defaults::apply(
+        &mut projection,
+        temporal_preview::Endpoint::Start,
+        InspectorTarget::DocumentAll,
+    )
+    .map_err(|error| format!("Could not neutralize the Pattern preview response: {error}"))?;
     if target == InspectorTarget::DocumentAll {
         let instance = projection
             .document()
@@ -15025,20 +15821,6 @@ fn wizard_preview_document(
                     edited_axis: TranslationEditedAxis::Y,
                     value: 0.0,
                 })
-                .map_err(|error| error.to_string())?;
-        }
-        let output_deltas = projection
-            .document()
-            .channel_pattern_instance(visible)
-            .map(|instance| instance.output_response_deltas.clone())
-            .unwrap_or_default();
-        for delta in output_deltas {
-            let command = projection
-                .document()
-                .reset_channel_output_response_delta(visible, delta.output_layer_id)
-                .map_err(|error| error.to_string())?;
-            projection
-                .apply(&command)
                 .map_err(|error| error.to_string())?;
         }
     }
@@ -15127,7 +15909,69 @@ fn wizard_preview_document(
             .apply(&density_command)
             .map_err(|error| error.to_string())?;
     }
-    Ok(projection.session().snapshot())
+    let project_timing = document.project_timing().clone();
+    let projected = projection
+        .session()
+        .snapshot()
+        .clone()
+        .with_temporal_authority(project_timing.clone(), Vec::new())
+        .map_err(|error| error.to_string())?;
+    match projected
+        .clone()
+        .with_temporal_authority(project_timing, document.temporal_end_overrides().to_vec())
+    {
+        Ok(with_end) => Ok(with_end),
+        // A selected-copy pattern reset can remove End descriptors that no longer apply. The
+        // source still owns those values; the disposable projection keeps timing but drops stale
+        // preview-only references rather than rejecting the sample.
+        Err(_) => Ok(projected),
+    }
+}
+
+/// Chooses truthful preview guidance from the selected structural Pattern.
+///
+/// ALL uses its document-base definition; a named channel uses its effective definition. Guidance
+/// does not inspect or modify response values, which the disposable preview neutralizes.
+fn wizard_weighted_mark_preview_guidance(
+    document: &Document,
+    target: InspectorTarget,
+) -> Option<&'static str> {
+    let definition_id = match target {
+        InspectorTarget::DocumentAll => document.pattern_settings().definition_id,
+        InspectorTarget::Channel(channel_id) => {
+            document
+                .effective_channel_pattern(channel_id)
+                .ok()?
+                .definition_id
+        }
+    };
+    let bundle = document
+        .pattern_definition_bundles()
+        .iter()
+        .find(|bundle| bundle.definition.id == definition_id)?;
+    let weighted_marks =
+        toniator_domain::definition_uses_artwork_weighted_density(&bundle.definition)
+            && bundle
+                .output_settings
+                .iter()
+                .any(|output| matches!(&output.response, PatternGeometryResponse::Marks(_)));
+    if !weighted_marks {
+        return None;
+    }
+    let strict_margin = bundle.definition.mechanisms.iter().any(|mechanism| {
+        matches!(
+            mechanism,
+            PatternMechanism::SiteExclusion {
+                policy: toniator_domain::SiteExclusionPolicy::VisibleMarkMargin { .. },
+                ..
+            }
+        )
+    });
+    Some(if strict_margin {
+        WIZARD_STRICT_MARK_MARGIN_PREVIEW_DESCRIPTION
+    } else {
+        WIZARD_WEIGHTED_MARKS_PREVIEW_DESCRIPTION
+    })
 }
 
 /// Bridges scheduler progress through the captured wizard epoch without installing texture state.
@@ -15191,6 +16035,7 @@ fn handle_wizard_preview_completion(
             .and_then(|result| texture_from_surface(result.raster()).ok())
         {
             Some(texture) => {
+                update_preview_picture_backdrop(&surface.picture,preview_session.document());
                 surface.picture.set_paintable(Some(&texture));
                 if let Some(result) = completion.result() {
                     let document = preview_session.document();
@@ -15227,53 +16072,44 @@ fn handle_wizard_preview_completion(
             );
         }
     }
-    if surface.route.get(surface.route_index) == Some(&WizardRoutePage::Review) {
-        surface.status.set_label(
-            &surface
-                .validation
-                .message(surface.draft.borrow().revision().0),
-        );
-    }
 }
 
-/// Applies exactly one valid changed wizard history squash to its captured main-workspace target.
+/// Applies one selected gallery Pattern directly or publishes a customized wizard draft.
+///
+/// Gallery publication uses the selected catalog identity and target captured by the modal; custom
+/// publication remains gated by Review and the draft's validation authority. Both paths publish at
+/// most one undoable main-history transition and leave rejected drafts private.
 fn apply_pattern_wizard(state: &Rc<RefCell<AppState>>, epoch: u64) {
     if !commit_wizard_pending_text_inputs(state, epoch) {
         return;
     }
-    let preset_shortcut = state
-        .borrow()
-        .pattern_wizard
-        .as_ref()
-        .filter(|surface| {
-            surface.epoch == epoch
-                && wizard_direct_preset_apply_admission(
+    let gallery_state = {
+        let app_state = state.borrow();
+        app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+            .map(|surface| {
+                let candidate = surface.candidate.clone();
+                let candidate_is_builtin = candidate
+                    .as_deref()
+                    .and_then(|id| app_state.catalog.find(id))
+                    .is_some_and(|entry| entry.origin == PresetOrigin::BuiltIn);
+                (
                     surface.gallery_panel.is_visible(),
-                    surface.candidate.as_deref(),
+                    candidate,
+                    candidate_is_builtin,
                 )
-        })
-        .and_then(|surface| surface.candidate.clone());
-    if let Some(id) = preset_shortcut {
-        let admission = {
-            let app_state = state.borrow();
-            app_state
-                .pattern_wizard
-                .as_ref()
-                .filter(|surface| surface.epoch == epoch)
-                .map(|surface| {
-                    wizard_gallery_candidate_apply_admission(&app_state.catalog, surface)
-                })
-        };
-        if let Some(Err(error)) = admission {
-            if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
-                surface
-                    .status
-                    .set_label(&format!("Couldn’t apply the selected Pattern: {error}"));
-                surface.apply.grab_focus();
-            }
-            return;
+            })
+    };
+    if let Some((true, candidate, candidate_is_builtin)) = gallery_state {
+        if wizard_direct_builtin_apply_admission(true, candidate.as_deref(), candidate_is_builtin)
+            && let Some(id) = candidate.as_deref()
+        {
+            apply_selected_gallery_pattern(state, epoch, id);
+        } else if let Some(id) = candidate.as_deref() {
+            use_wizard_preset(state, epoch, id, false);
         }
-        use_wizard_preset(state, epoch, &id, false);
         return;
     }
     let draft = {
@@ -15321,6 +16157,24 @@ fn apply_pattern_wizard(state: &Rc<RefCell<AppState>>, epoch: u64) {
         }
         Rc::clone(&surface.draft)
     };
+    let candidate_document = draft.borrow().document().clone();
+    let candidate_revision = draft.borrow().revision();
+    match start_wizard_calibration_if_needed(
+        state,
+        epoch,
+        candidate_document,
+        candidate_revision,
+        WizardCalibrationPublication::DraftApply,
+    ) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+                surface.status.set_label(&format!("Couldn’t prepare Pattern calibration: {error}"));
+            }
+            return;
+        }
+    }
     let result = {
         let mut app_state = state.borrow_mut();
         let Some(workspace) = app_state.workspace.as_mut() else {
@@ -15373,6 +16227,144 @@ fn apply_pattern_wizard(state: &Rc<RefCell<AppState>>, epoch: u64) {
     }
 }
 
+/// Applies one admitted gallery candidate to the wizard's captured target and closes the modal.
+///
+/// Gallery admission and target identity come from the live modal epoch. The catalog publishes
+/// through main history as one validated draft squash; success refreshes preview and scatter memory,
+/// while every rejection leaves the wizard open and main history unchanged.
+fn apply_selected_gallery_pattern(state: &Rc<RefCell<AppState>>, epoch: u64, id: &str) {
+    let (target, captured_document, admission) = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch && surface.gallery_panel.is_visible())
+            .filter(|surface| surface.candidate.as_deref() == Some(id))
+        else {
+            return;
+        };
+        (
+            surface.target,
+            surface.initial_document.clone(),
+            wizard_gallery_candidate_apply_admission(&app_state.catalog, surface),
+        )
+    };
+    if let Err(error) = admission {
+        if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+            surface
+                .status
+                .set_label(&format!("Couldn’t apply the selected Pattern: {error}"));
+            surface.apply.grab_focus();
+        }
+        return;
+    }
+    let candidate_draft = {
+        let app = state.borrow();
+        let Some(workspace) = app.workspace.as_ref() else {
+            if let Some(surface) = app.pattern_wizard.as_ref() {
+                surface.status.set_label("The workspace is no longer open.");
+            }
+            return;
+        };
+        build_wizard_gallery_candidate_draft(
+            &workspace.history,
+            &app.catalog,
+            target,
+            id,
+            &captured_document,
+        )
+    };
+    match candidate_draft {
+        Ok(draft) => {
+            let candidate_document = draft.document().clone();
+            let candidate_revision = draft.revision();
+            match start_wizard_calibration_if_needed(
+                state,
+                epoch,
+                candidate_document,
+                candidate_revision,
+                WizardCalibrationPublication::GalleryApply {
+                    target,
+                    candidate_id: id.to_owned(),
+                    captured_document: Box::new(captured_document.clone()),
+                    draft: Box::new(draft),
+                },
+            ) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+                        surface.status.set_label(&format!("Couldn’t prepare Pattern calibration: {error}"));
+                    }
+                    return;
+                }
+            }
+        }
+        Err(error) => {
+            if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+                surface.status.set_label(&format!("Couldn’t apply the selected Pattern: {error}"));
+            }
+            return;
+        }
+    }
+    let result = {
+        let mut app_state = state.borrow_mut();
+        let catalog = app_state.catalog.clone();
+        app_state.workspace.as_mut().map_or_else(
+            || Err("The workspace is no longer open.".to_owned()),
+            |workspace| {
+                apply_wizard_gallery_candidate_directly(
+                    &mut workspace.history,
+                    &catalog,
+                    target,
+                    id,
+                    &captured_document,
+                )
+            },
+        )
+    };
+    match result {
+        Ok(()) => {
+            let mut app_state = state.borrow_mut();
+            let applied_document = app_state
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.document().clone());
+            let scatter_memory = app_state
+                .pattern_wizard
+                .as_mut()
+                .filter(|surface| surface.epoch == epoch)
+                .map(|surface| {
+                    if let Some(document) = applied_document.as_ref() {
+                        surface.scatter_memory.observe(document, surface.target);
+                    }
+                    surface.scatter_memory.clone()
+                });
+            if let Some(scatter_memory) = scatter_memory {
+                app_state.scatter_memory = scatter_memory;
+            }
+            set_preview_pending(&mut app_state);
+            set_inspector_status(
+                &mut app_state,
+                "Pattern applied directly as one undoable change.",
+            );
+            sync_ui(&mut app_state);
+            drop(app_state);
+            close_pattern_wizard(state, epoch);
+            rebuild_inspector(state);
+            schedule_main_preview_submission(state);
+        }
+        Err(error) => {
+            if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+                surface
+                    .status
+                    .set_label(&format!("Couldn’t apply the selected Pattern: {error}"));
+                surface.apply.grab_focus();
+            }
+        }
+    }
+}
+
 /// Validates terminal publication without changing either the private or main history.
 ///
 /// # Errors
@@ -15401,13 +16393,17 @@ fn wizard_apply_admission(
     Ok(())
 }
 
-/// Returns whether the visible Presets card may use its direct immutable-preset Apply shortcut.
+/// Returns whether the visible built-in gallery card may use direct Pattern Apply.
 ///
 /// Route history is deliberately irrelevant: Previous may reveal Presets after a fixed-card route
-/// has already been constructed. Current Pattern has no catalog identity and therefore remains
-/// unavailable to this shortcut.
-fn wizard_direct_preset_apply_admission(presets_visible: bool, candidate: Option<&str>) -> bool {
-    presets_visible && candidate.is_some()
+/// has already been constructed. Personal Patterns retain Review, and Current Pattern has no
+/// selected catalog identity for this action.
+fn wizard_direct_builtin_apply_admission(
+    gallery_visible: bool,
+    candidate: Option<&str>,
+    candidate_is_builtin: bool,
+) -> bool {
+    gallery_visible && candidate.is_some() && candidate_is_builtin
 }
 
 /// Probes a gallery Pattern against the captured target and model before enabling direct Apply.
@@ -15431,19 +16427,77 @@ fn wizard_gallery_candidate_apply_admission(
     let session = DocumentSession::new(surface.initial_document.clone())
         .map_err(|error| error.to_string())?;
     let mut probe = DocumentHistory::new(session);
-    match surface.target {
-        InspectorTarget::DocumentAll => catalog
-            .apply_to_document_base(&mut probe, candidate)
-            .map_err(|error| error.to_string())?,
-        InspectorTarget::Channel(channel_id) => catalog
-            .apply_to_selected(&mut probe, channel_id, candidate)
-            .map_err(|error| error.to_string())?,
-    };
+    apply_catalog_pattern_candidate(&mut probe, catalog, surface.target, candidate)?;
     validate_wizard_review_recipe(probe.document(), surface.target)?;
     if !wizard_apply_enabled(probe.document(), &surface.initial_document) {
         return Err("this Pattern already matches the captured target".to_owned());
     }
     Ok(())
+}
+
+/// Publishes a selected catalog Pattern against one captured document and target as one history step.
+///
+/// The gallery candidate is materialized on a private draft, then checked against the same
+/// reconstruction and changed-document contract as Review Apply. A stale capture or rejected
+/// candidate leaves authoritative history and its undo/redo stacks unchanged.
+///
+/// # Errors
+///
+/// Returns stale-target, catalog, reconstruction, no-op, validation, or history-publication
+/// diagnostics without partially changing the main history.
+fn apply_wizard_gallery_candidate_directly(
+    history: &mut DocumentHistory,
+    catalog: &LayeredPresetCatalog,
+    target: InspectorTarget,
+    candidate: &str,
+    captured_document: &Document,
+) -> Result<(), String> {
+    let draft = build_wizard_gallery_candidate_draft(
+        history,
+        catalog,
+        target,
+        candidate,
+        captured_document,
+    )?;
+    history
+        .squash_draft(&draft)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Builds a validated catalog candidate on a disposable private history rooted at the captured document.
+///
+/// The returned history remains private until the caller either attaches its complete saved
+/// calibration set and squashes once or uses the established direct publication helper.
+///
+/// # Errors
+/// Returns built-in admission, stale-root, catalog, reconstruction, no-op, or validation diagnostics.
+fn build_wizard_gallery_candidate_draft(
+    history: &DocumentHistory,
+    catalog: &LayeredPresetCatalog,
+    target: InspectorTarget,
+    candidate: &str,
+    captured_document: &Document,
+) -> Result<DocumentHistory, String> {
+    if !catalog
+        .find(candidate)
+        .is_some_and(|entry| entry.origin == PresetOrigin::BuiltIn)
+    {
+        return Err("Direct Apply is available only for built-in Patterns.".to_owned());
+    }
+    if history.document() != captured_document {
+        return Err(
+            "The artwork changed while the Pattern Wizard was open. Close and reopen it before applying a Pattern."
+                .to_owned(),
+        );
+    }
+    let mut draft = DocumentHistory::new_draft(history);
+    apply_catalog_pattern_candidate(&mut draft, catalog, target, candidate)?;
+    validate_wizard_review_recipe(draft.document(), target)?;
+    if !wizard_apply_enabled(draft.document(), captured_document) {
+        return Err("this Pattern already matches the captured target".to_owned());
+    }
+    Ok(draft)
 }
 
 /// Requests disposal of the private wizard, confirming only when its cloned history changed.
@@ -15673,10 +16727,10 @@ fn advanced_settings_values(
                     | PropertyFieldId::ColorAlpha
                     | PropertyFieldId::MarkMinimumFill
                     | PropertyFieldId::MarkMaximumFill
+                    | PropertyFieldId::MarkSizeScale
                     | PropertyFieldId::ConnectedMinimumThickness
                     | PropertyFieldId::ConnectedMaximumThickness
                     | PropertyFieldId::CurveResponseBias
-                    | PropertyFieldId::RegionResizeAlgorithm
                     | PropertyFieldId::RegionSampling
                     | PropertyFieldId::RegionMinimumFill
                     | PropertyFieldId::RegionMaximumFill
@@ -15688,10 +16742,10 @@ fn advanced_settings_values(
                         field,
                         PropertyFieldId::MarkMinimumFill
                             | PropertyFieldId::MarkMaximumFill
+                            | PropertyFieldId::MarkSizeScale
                             | PropertyFieldId::ConnectedMinimumThickness
                             | PropertyFieldId::ConnectedMaximumThickness
                             | PropertyFieldId::CurveResponseBias
-                            | PropertyFieldId::RegionResizeAlgorithm
                             | PropertyFieldId::RegionSampling
                             | PropertyFieldId::RegionMinimumFill
                             | PropertyFieldId::RegionMaximumFill
@@ -15993,6 +17047,7 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
     let shell = components::ToniatorAdvancedSettingsShell::new();
     let status = shell.status();
     let picture = shell.preview();
+    update_preview_picture_backdrop(&picture, draft.borrow().document());
     let controls = shell.controls();
 
     let reset = shell.reset();
@@ -16008,6 +17063,17 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
     reset.update_property(&[gtk::accessible::Property::Description(reset_description)]);
     let state_for_reset = state.clone();
     reset.connect_clicked(move |button| advanced_defaults::reset(&state_for_reset, epoch, button));
+
+    let recalibrate = shell.recalibrate();
+    let recalibrate_description =
+        "Measure this Pattern’s current structural binding again in the private draft. Apply keeps the result; Cancel discards it.";
+    recalibrate.set_tooltip_text(Some(recalibrate_description));
+    recalibrate.update_property(&[
+        gtk::accessible::Property::Label("Recalibrate Pattern"),
+        gtk::accessible::Property::Description(recalibrate_description),
+    ]);
+    let state_for_recalibrate = Rc::clone(state);
+    recalibrate.connect_clicked(move |_| start_advanced_recalibration(&state_for_recalibrate, epoch));
 
     let source_heading = gtk::Label::new(Some("Source"));
     source_heading.set_xalign(0.0);
@@ -16104,10 +17170,17 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
         bindings: Vec::new(),
         paint_editors: Vec::new(),
         batch_editors: Vec::new(),
+        batch_region_sampling: None,
+        mark_density_controls: Vec::new(),
+        fill_mask_disclosures: Vec::new(),
+        fine_adjustments: Vec::new(),
         refreshing: Rc::new(Cell::new(false)),
         target,
         picture,
         status,
+        recalibrate,
+        apply: apply.clone(),
+        calibration_task: None,
         scheduler,
         preview_submission: None,
         preview_bridge_stop,
@@ -16138,6 +17211,9 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
         };
         if let Some(surface) = surface {
             surface.preview_bridge_stop.store(true, Ordering::Release);
+            if let Some(task) = surface.calibration_task {
+                task.cancelled.store(true, Ordering::Release);
+            }
         }
         sync_ui(&mut state_for_close.borrow_mut());
         glib::Propagation::Proceed
@@ -16149,11 +17225,9 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
 
 /// Builds one private Advanced Settings control from an authoritative descriptor/value pair.
 ///
-/// A non-obvious field receives a visible wrapped helper label under its field
-/// name so assistive technology and keyboard users receive the explanation
-/// without relying on hover-only tooltips. The helper only presents the
-/// descriptor's established semantics; it never changes draft command or
-/// property authority.
+/// Each interactive field receives descriptor-derived hover and accessible help on its control and
+/// visible label. No persistent explanatory row is added; descriptor applicability, bounds, and
+/// commands remain authoritative.
 /// Reset buttons use the same visible field vocabulary for their accessible names.
 ///
 /// # Panics
@@ -16166,27 +17240,16 @@ fn advanced_descriptor_row(
     current: PropertyCurrentValue,
 ) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    if let Some(description) = advanced_descriptor_description(current.descriptor.field) {
-        row.set_tooltip_text(Some(description));
-        row.update_property(&[gtk::accessible::Property::Description(description)]);
-    }
+    let help = advanced_field_help(current.descriptor.field, Some(&current.descriptor));
     let label_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
     label_box.set_hexpand(true);
     let label = gtk::Label::new(Some(&inspector_field_label(current.descriptor.field)));
     label.set_xalign(0.0);
     label.set_hexpand(true);
     label.set_wrap(true);
+    label.set_tooltip_text(Some(&help));
+    label.update_property(&[gtk::accessible::Property::Description(&help)]);
     label_box.append(&label);
-    if let Some(description) = advanced_descriptor_description(current.descriptor.field) {
-        let helper = gtk::Label::new(Some(description));
-        helper.add_css_class("dim-label");
-        helper.set_xalign(0.0);
-        helper.set_hexpand(true);
-        helper.set_wrap(true);
-        helper.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        helper.set_justify(gtk::Justification::Left);
-        label_box.append(&helper);
-    }
     row.append(&label_box);
     let Some(locator) =
         advanced_descriptor_locator(draft.borrow().document(), target, &current.descriptor)
@@ -16217,7 +17280,14 @@ fn advanced_descriptor_row(
         target,
         refreshing,
     };
-    match current.value.clone() {
+    let interactive = matches!(
+        &current.value,
+        PropertyCurrentValueKind::FiniteF64(_)
+            | PropertyCurrentValueKind::U32(_)
+            | PropertyCurrentValueKind::Boolean(_)
+            | PropertyCurrentValueKind::EnumChoice(_)
+    );
+    let control = match current.value.clone() {
         PropertyCurrentValueKind::FiniteF64(value) => {
             let entry = gtk::Entry::new();
             entry.set_width_chars(12);
@@ -16240,6 +17310,7 @@ fn advanced_descriptor_row(
             focus.connect_leave(move |_| commit_for_leave(&entry_for_leave));
             entry.add_controller(focus);
             row.append(&entry);
+            entry.upcast::<gtk::Widget>()
         }
         PropertyCurrentValueKind::U32(value) => {
             let entry = gtk::Entry::new();
@@ -16263,6 +17334,7 @@ fn advanced_descriptor_row(
             focus.connect_leave(move |_| commit_for_leave(&entry_for_leave));
             entry.add_controller(focus);
             row.append(&entry);
+            entry.upcast::<gtk::Widget>()
         }
         PropertyCurrentValueKind::Boolean(value) => {
             let toggle = gtk::Switch::new();
@@ -16274,6 +17346,7 @@ fn advanced_descriptor_row(
                 glib::Propagation::Proceed
             });
             row.append(&toggle);
+            toggle.upcast::<gtk::Widget>()
         }
         PropertyCurrentValueKind::EnumChoice(value) => {
             let choices = descriptor.choices.to_vec();
@@ -16297,12 +17370,19 @@ fn advanced_descriptor_row(
                 }
             });
             row.append(&dropdown);
+            dropdown.upcast::<gtk::Widget>()
         }
         _ => {
             let value = gtk::Label::new(Some(&current_display(&current.value)));
             value.set_xalign(1.0);
+            value.set_tooltip_text(Some(&help));
+            value.update_property(&[gtk::accessible::Property::Description(&help)]);
             row.append(&value);
+            value.upcast::<gtk::Widget>()
         }
+    };
+    if interactive {
+        set_advanced_control_help(&control, &label, current.descriptor.field, &help);
     }
     if current.descriptor.reset_capable {
         let reset = gtk::Button::with_label("Reset to inherit");
@@ -16320,31 +17400,6 @@ fn advanced_descriptor_row(
         row.append(&reset);
     }
     row
-}
-
-/// Returns the persistent accessible explanatory text needed by one non-obvious Advanced Settings control.
-///
-/// This text clarifies the established connected-stroke response without
-/// changing descriptor authority, numeric bounds, evaluation, or command
-/// behavior. Fields without a special clarification retain the generic
-/// descriptor presentation. Callers render a returned value as a visible
-/// helper label as well as optional tooltip text.
-fn advanced_descriptor_description(field: PropertyFieldId) -> Option<&'static str> {
-    match field {
-        PropertyFieldId::ArtworkWeightMappingComponent => Some(
-            "Chooses the source component for pattern weighting, independently of Fill response source. This channel setting survives pattern changes.",
-        ),
-        PropertyFieldId::RegionSampling => Some(
-            "Reference point takes one source sample at the cell site. Area average tests each decoded pixel footprint and includes its full value only at 50% or greater coverage; it is slower.",
-        ),
-        PropertyFieldId::ConnectedMinimumThickness => Some(
-            "Lower bound of source-driven stroke width; setting it to zero only removes strokes where sampled ink is zero.",
-        ),
-        PropertyFieldId::CurveResponseBias => Some(
-            "Moves visible curve width toward the left or right normal of authored travel. Centered keeps equal width on both sides without changing guide topology.",
-        ),
-        _ => None,
-    }
 }
 
 impl AdvancedCommitContext {
@@ -16512,6 +17567,95 @@ impl AdvancedCommitContext {
     }
 }
 
+/// Re-measures the captured Advanced target and retains results only in its private draft.
+///
+/// Manual Recalibrate is the only path that forces an otherwise reusable exact binding. It blocks
+/// edits in this modal while a worker measures the captured candidate and workspace root.
+fn start_advanced_recalibration(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let capture = {
+        let app = state.borrow();
+        let Some(surface) = app
+            .advanced_settings
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch && surface.calibration_task.is_none())
+        else {
+            return;
+        };
+        let Some(workspace) = app.workspace.as_ref() else {
+            surface.status.set_label("The workspace is no longer open.");
+            return;
+        };
+        let candidate = surface.draft.borrow();
+        let channel_ids = match surface.target {
+            InspectorTarget::Channel(channel) => vec![channel],
+            InspectorTarget::DocumentAll => authoritative_channel_ids(candidate.document()),
+        };
+        if channel_ids.is_empty() {
+            surface.status.set_label("There is no Pattern to recalibrate.");
+            return;
+        }
+        (
+            candidate.document().clone(),
+            candidate.revision(),
+            workspace.document().clone(),
+            workspace.history.revision(),
+            app.workspace_generation,
+            channel_ids,
+            matches!(surface.target, InspectorTarget::DocumentAll),
+        )
+    };
+    let (candidate_document, candidate_revision, base_document, base_revision, generation, channels, force_baseline) = capture;
+    let (id, cancelled) = match start_calibration_preparation(state, &candidate_document, &channels, true, force_baseline) {
+        Ok(task) => task,
+        Err(error) => {
+            if let Some(surface) = state.borrow().advanced_settings.as_ref() {
+                surface.status.set_label(&error);
+            }
+            return;
+        }
+    };
+    let installed = {
+        let mut app = state.borrow_mut();
+        let current_base = app.workspace.as_ref().is_some_and(|workspace| {
+            workspace.document() == &base_document && workspace.history.revision() == base_revision
+        });
+        if app.workspace_generation != generation || !current_base {
+            false
+        } else if let Some(surface) = app
+            .advanced_settings
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch && surface.calibration_task.is_none())
+        {
+            let draft = surface.draft.borrow();
+            if draft.document() != &candidate_document || draft.revision() != candidate_revision {
+                false
+            } else {
+                drop(draft);
+                surface.calibration_task = Some(AdvancedCalibrationTask {
+                    id,
+                    epoch,
+                    workspace_generation: generation,
+                    base_document,
+                    base_revision,
+                    candidate_document,
+                    candidate_revision,
+                    cancelled: Arc::clone(&cancelled),
+                });
+                surface.fields.set_sensitive(false);
+                surface.recalibrate.set_sensitive(false);
+                surface.apply.set_sensitive(false);
+                surface.status.set_label("Recalibrating Pattern…");
+                true
+            }
+        } else {
+            false
+        }
+    };
+    if !installed {
+        cancelled.store(true, Ordering::Release);
+    }
+}
+
 /// Submits the current Advanced Settings draft to its bounded cancelable private scheduler.
 ///
 /// The fixed target and source proxy preserve bounded preview work. A newer edit cancels and
@@ -16525,6 +17669,7 @@ fn submit_advanced_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
     else {
         return;
     };
+    update_preview_picture_backdrop(&surface.picture, surface.draft.borrow().document());
     let AdvancedPreviewSource::Ready { source, .. } = &surface.preview_source else {
         surface.status.set_label(&match &surface.preview_source {
             AdvancedPreviewSource::Pending => "Preparing source frame…".to_owned(),
@@ -16536,7 +17681,7 @@ fn submit_advanced_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
         return;
     };
     let target = match toniator_engine::PreviewRasterTarget::new(420, 240) {
-        Ok(target) => target,
+        Ok(target) => target.with_background(preview_backdrop::raster_background_for_document(surface.draft.borrow().document())),
         Err(error) => {
             surface.status.set_label(&error.to_string());
             return;
@@ -17066,9 +18211,10 @@ fn open_wizard_new_guide_editor(
 /// Opens one reusable authored-path editor from a standalone or wizard private-history owner.
 ///
 /// The selected launch carries typed document references only. A Wizard launch derives its child
-/// history directly from the current wizard draft, while the established standalone launch derives
-/// from main history; neither path can write a personal-library record. Both preview the captured
-/// workspace endpoint using real artwork, independently of the Wizard's neutral source preview.
+/// history directly from the current wizard draft and uses a disposable neutral response projection;
+/// the Workspace launch retains actual response intent. Both previews bypass saved-calibration use,
+/// and neither path writes a personal library record. Both use the captured real source frame and
+/// preserve the Picture's model backdrop.
 fn open_pattern_editor_with_launch(
     state: &Rc<RefCell<AppState>>,
     purpose: PatternEditorPurpose,
@@ -17099,11 +18245,12 @@ fn open_pattern_editor_with_launch(
         window.present();
         return;
     }
-    let (parent, draft, endpoint, epoch) = {
+    let (parent, draft, endpoint, epoch, initial_workspace_generation, initial_workspace_revision) = {
         let mut app_state = state.borrow_mut();
         // The nested editor previews real artwork even when the Wizard's own preview is neutral.
         let endpoint = app_state.endpoint;
-        let (document, sources, history, parent_window) = {
+        let initial_workspace_generation = app_state.workspace_generation;
+        let (document, sources, history, parent_window, initial_workspace_revision) = {
             let Some(workspace) = app_state.workspace.as_ref() else {
                 return;
             };
@@ -17165,7 +18312,13 @@ fn open_pattern_editor_with_launch(
                     return;
                 }
             }
-            (document, workspace.sources.clone(), history, parent_window)
+            (
+                document,
+                workspace.sources.clone(),
+                history,
+                parent_window,
+                workspace.history.revision(),
+            )
         };
         app_state.draft_epoch = app_state.draft_epoch.saturating_add(1);
         let epoch = app_state.draft_epoch;
@@ -17198,20 +18351,24 @@ fn open_pattern_editor_with_launch(
             })),
             endpoint,
             epoch,
+            initial_workspace_generation,
+            initial_workspace_revision,
         )
     };
     let event_sender = state.borrow().event_sender.clone();
-    let source_worker =
-        match temporal_preview::Worker::new_for_pattern_editor(event_sender.clone(), epoch) {
-            Ok(worker) => worker,
-            Err(error) => {
-                set_inspector_status(
-                    &mut state.borrow_mut(),
-                    format!("Couldn’t start the Pattern Editor source preview: {error}"),
-                );
-                return;
-            }
-        };
+    let source_worker = match temporal_preview::Worker::new_for_structural_pattern_editor(
+        event_sender.clone(),
+        epoch,
+    ) {
+        Ok(worker) => worker,
+        Err(error) => {
+            set_inspector_status(
+                &mut state.borrow_mut(),
+                format!("Couldn’t start the Pattern Editor source preview: {error}"),
+            );
+            return;
+        }
+    };
     let preview_bridge_stop = Arc::new(AtomicBool::new(false));
     let preview_bridge = match temporal_preview::start_pattern_editor_preview_bridge(
         Arc::clone(&draft.borrow().scheduler),
@@ -17238,7 +18395,16 @@ fn open_pattern_editor_with_launch(
         .build();
     let shell = components::ToniatorPatternEditorShell::new();
     let status = shell.status();
+    status.set_tooltip_text(Some(match &launch.parent {
+        PatternEditorParent::Workspace => {
+            "This structure preview retains the current artwork and response settings but skips saved calibration and Uniform coverage thinning. Apply prepares calibrated response and thinning."
+        }
+        PatternEditorParent::Wizard { .. } => {
+            "This structure preview uses neutral response settings and skips saved calibration and Uniform coverage thinning. Apply prepares calibrated response and thinning."
+        }
+    }));
     let picture = shell.picture();
+    update_preview_picture_backdrop(&picture, draft.borrow().history.document());
     let preview_spinner = shell.spinner();
     preview_spinner.update_property(&[gtk::accessible::Property::Label("Preview updating")]);
     picture.set_can_shrink(true);
@@ -17798,6 +18964,9 @@ fn open_pattern_editor_with_launch(
     state.borrow_mut().pattern_editor = Some(PatternEditorSurface {
         purpose,
         parent: launch.parent,
+        initial_workspace_generation,
+        initial_workspace_revision,
+        calibration_task: None,
         window: window.clone(),
         status,
         picture,
@@ -18656,9 +19825,9 @@ fn rebuild_pattern_editor(state: &Rc<RefCell<AppState>>) {
     };
     window.set_title(Some(&format!("{} — {name}", purpose.title())));
     status.set_label(if dirty {
-        "Unsaved changes. Updating preview…"
+        "Unsaved changes. Updating structure preview…"
     } else {
-        "Preview updated."
+        "Structure preview ready · calibrated response and Uniform thinning update on Apply."
     });
     {
         let app_state = state.borrow();
@@ -18678,9 +19847,9 @@ fn rebuild_pattern_editor(state: &Rc<RefCell<AppState>>) {
             "Current pattern: {}",
             draft_pattern_summary(&values, purpose)
         ));
-        surface
-            .apply
-            .set_sensitive(draft.borrow().geometry_editor.apply_ready(dirty));
+        surface.apply.set_sensitive(
+            surface.calibration_task.is_none() && draft.borrow().geometry_editor.apply_ready(dirty),
+        );
         let (
             coordinate,
             can_make_curve,
@@ -19319,6 +20488,20 @@ fn apply_pattern_editor_draft(state: &Rc<RefCell<AppState>>) {
         };
         (Rc::clone(&surface.draft), surface.parent.clone())
     };
+    if matches!(&parent, PatternEditorParent::Workspace) {
+        match begin_pattern_editor_calibration(state) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                if let Some(surface) = state.borrow().pattern_editor.as_ref() {
+                    surface
+                        .status
+                        .set_label(&format!("Couldn’t prepare these Pattern changes: {error}"));
+                }
+                return;
+            }
+        }
+    }
     let result = match &parent {
         PatternEditorParent::Workspace => {
             let mut app_state = state.borrow_mut();
@@ -19393,6 +20576,110 @@ fn apply_pattern_editor_draft(state: &Rc<RefCell<AppState>>) {
             }
         }
     }
+}
+
+/// Starts one guarded calibration only for Workspace editor drafts with changed bindings.
+///
+/// Existing exact companions are reused by the preparation helper. The worker receives the
+/// immutable private candidate, while the modal retains the Workspace root and candidate guards.
+///
+/// # Errors
+/// Returns a current-root, candidate-analysis, task-start, or stale-install diagnostic without publishing.
+fn begin_pattern_editor_calibration(state: &Rc<RefCell<AppState>>) -> Result<bool, String> {
+    let (
+        workspace_generation,
+        base_document,
+        base_revision,
+        editor_epoch,
+        candidate_document,
+        candidate_revision,
+        channel_ids,
+    ) = {
+        let app = state.borrow();
+        let Some(surface) = app.pattern_editor.as_ref() else {
+            return Err("The Pattern Editor is no longer available.".to_owned());
+        };
+        if surface.calibration_task.is_some() {
+            return Err("Pattern calibration is already preparing this edit.".to_owned());
+        }
+        if !matches!(&surface.parent, PatternEditorParent::Workspace) {
+            return Ok(false);
+        }
+        let draft = surface.draft.borrow();
+        let base_document = draft.initial_document.clone();
+        let candidate_document = draft.history.document().clone();
+        let channel_ids =
+            calibration_preparation::changed_channels(&base_document, &candidate_document)
+                .map_err(|error| error.to_string())?;
+        let plan = calibration_preparation::plan_to_prepare(
+            &candidate_document,
+            &channel_ids,
+            false,
+            false,
+        )
+        .map_err(|error| error.to_string())?;
+        if plan.is_empty() {
+            return Ok(false);
+        }
+        let root_matches = app.workspace_generation == surface.initial_workspace_generation
+            && app.workspace.as_ref().is_some_and(|workspace| {
+                workspace.document() == &base_document
+                    && workspace.history.revision() == surface.initial_workspace_revision
+            });
+        if !root_matches {
+            return Err("The artwork changed while this Pattern Editor was open.".to_owned());
+        }
+        (
+            surface.initial_workspace_generation,
+            base_document,
+            surface.initial_workspace_revision,
+            draft.epoch,
+            candidate_document,
+            draft.history.revision(),
+            channel_ids,
+        )
+    };
+    let (id, cancelled) =
+        start_calibration_preparation(state, &candidate_document, &channel_ids, false, false)?;
+    let installed = {
+        let mut app = state.borrow_mut();
+        let root_matches = app.workspace_generation == workspace_generation
+            && app.workspace.as_ref().is_some_and(|workspace| {
+                workspace.document() == &base_document
+                    && workspace.history.revision() == base_revision
+            });
+        let editor = app.pattern_editor.as_mut().filter(|surface| {
+            matches!(&surface.parent, PatternEditorParent::Workspace)
+                && surface.initial_workspace_generation == workspace_generation
+                && surface.initial_workspace_revision == base_revision
+                && surface.calibration_task.is_none()
+                && surface.draft.borrow().epoch == editor_epoch
+                && surface.draft.borrow().history.document() == &candidate_document
+                && surface.draft.borrow().history.revision() == candidate_revision
+        });
+        if root_matches && let Some(surface) = editor {
+            surface.calibration_task = Some(PatternEditorCalibrationTask {
+                id,
+                workspace_generation,
+                base_document,
+                base_revision,
+                editor_epoch,
+                candidate_document,
+                candidate_revision,
+                cancelled: Arc::clone(&cancelled),
+            });
+            surface.apply.set_sensitive(false);
+            surface.status.set_label("Preparing Pattern calibration…");
+            true
+        } else {
+            false
+        }
+    };
+    if !installed {
+        cancelled.store(true, Ordering::Release);
+        return Err("The Pattern Editor changed before calibration could start.".to_owned());
+    }
+    Ok(true)
 }
 
 /// Assigns one accepted ALL nested curve edit across compatible slots as one private history entry.
@@ -20163,22 +21450,78 @@ fn apply_draft_history_navigation(state: &Rc<RefCell<AppState>>, redo: bool) {
 ///
 /// The worker materializes the captured endpoint through the shared engine frame boundary before
 /// the private scheduler sees the request. This preserves the original draft history and keeps
-/// encoded video or image-sequence bytes out of the evaluator's still-source constructor.
+/// encoded video or image-sequence bytes out of the evaluator's still-source constructor. A
+/// Wizard-owned guide editor submits a disposable neutral structural projection; a Workspace-owned
+/// editor retains its actual response intent while the worker bypasses calibration.
 fn submit_draft_preview(state: &Rc<RefCell<AppState>>) {
-    {
+    let captured = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state.pattern_editor.as_ref() else {
+            return;
+        };
+        let draft = surface.draft.borrow();
+        let parent = surface.parent.clone();
+        let document = draft.history.document().clone();
+        let preview_session = match &parent {
+            PatternEditorParent::Workspace => Ok(draft.history.session().clone()),
+            PatternEditorParent::Wizard { epoch, .. } => {
+                let target = app_state
+                    .pattern_wizard
+                    .as_ref()
+                    .filter(|wizard| wizard.epoch == *epoch)
+                    .map(|wizard| wizard.target)
+                    .ok_or_else(|| "The Pattern Wizard preview is no longer available.".to_owned());
+                target.and_then(|target| wizard_preview_session(&document, target))
+            }
+        };
+        match preview_session {
+            Ok(session) => Ok((
+                app_state.workspace_generation,
+                draft.history.session().revision(),
+                draft.epoch,
+                surface.endpoint.frame(&document),
+                draft.sources.clone(),
+                session,
+                document,
+            )),
+            Err(error) => Err(error),
+        }
+    };
+    let (workspace_generation, revision, epoch, frame, sources, preview_session, document) =
+        match captured {
+            Ok(capture) => capture,
+            Err(error) => {
+                let status = state
+                    .borrow()
+                    .pattern_editor
+                    .as_ref()
+                    .map(|surface| surface.status.clone());
+                if let Some(status) = status {
+                    status.set_label(&format!("Pattern preview unavailable: {error}"));
+                }
+                return;
+            }
+        };
+    let target = toniator_engine::PreviewRasterTarget::new(512, 512)
+        .expect("fixed preview target is valid")
+        .with_background(preview_backdrop::raster_background_for_document(&document));
+    let (status, spinner) = {
         let mut app_state = state.borrow_mut();
-        let workspace_generation = app_state.workspace_generation;
         let Some(surface) = app_state.pattern_editor.as_mut() else {
             return;
         };
         let mut draft = surface.draft.borrow_mut();
-        let target = toniator_engine::PreviewRasterTarget::new(512, 512)
-            .expect("fixed preview target is valid");
+        if draft.history.document() != &document
+            || draft.history.revision() != revision
+            || draft.epoch != epoch
+        {
+            return;
+        }
         let key = temporal_preview::RequestKey {
             workspace: workspace_generation,
-            revision: draft.history.session().revision().0,
-            epoch: draft.epoch,
-            frame: surface.endpoint.frame(draft.history.document()),
+            revision: revision.0,
+            epoch,
+            frame,
         };
         let Some(source_worker) = surface.source_worker.as_mut() else {
             return;
@@ -20186,16 +21529,12 @@ fn submit_draft_preview(state: &Rc<RefCell<AppState>>) {
         draft.scheduler.cancel_pending();
         draft.preview_submission = None;
         draft.media_preview_key = Some(key);
-        source_worker.submit(
-            key,
-            draft.history.session().clone(),
-            draft.sources.clone(),
-            target,
-        );
-        surface.status.set_label("Preparing preview source…");
-        surface.preview_spinner.set_visible(true);
-        surface.preview_spinner.start();
-    }
+        source_worker.submit(key, preview_session, sources, target);
+        (surface.status.clone(), surface.preview_spinner.clone())
+    };
+    status.set_label("Preparing preview source…");
+    spinner.set_visible(true);
+    spinner.start();
     emit_draft_automation_state(&mut state.borrow_mut(), "draft_preview_submitted", None);
 }
 
@@ -20206,6 +21545,12 @@ fn request_draft_discard(state: &Rc<RefCell<AppState>>) {
         let Some(surface) = app_state.pattern_editor.as_ref() else {
             return;
         };
+        if let Some(task) = surface.calibration_task.as_ref() {
+            task.cancelled.store(true, Ordering::Release);
+            surface
+                .status
+                .set_label("Canceling Pattern calibration; confirm discard to close.");
+        }
         (surface.draft.borrow().is_dirty(), surface.window.clone())
     };
     if !dirty {
@@ -20361,8 +21706,10 @@ fn commit_numeric_descriptor_control(
 
 /// Reports whether an ordinary numeric edit already equals main document authority.
 ///
-/// This suppresses the focus-leave duplicate immediately following an Enter
-/// commit, so one completed gesture creates at most one history transition.
+/// Equal effective values suppress the focus-leave duplicate following Enter. For ALL Start
+/// scalar edits, the document baseline must also already record the same value; otherwise the
+/// explicit shared-intent update still needs to publish even when effective values are unchanged.
+/// End edits and named-channel edits retain their existing authority boundaries.
 fn main_numeric_input_matches_current(
     state: &Rc<RefCell<AppState>>,
     descriptor: &PropertyDescriptor,
@@ -20386,7 +21733,13 @@ fn main_numeric_input_matches_current(
         && let InspectorInput::FiniteF64(next) = input
         && let Ok(batch) = display.channel_scalar_batch(descriptor.field)
     {
-        return batch.values.iter().all(|value| value.value == *next);
+        return batch.values.iter().all(|value| value.value == *next)
+            && main_all_scalar_same_value_intent_is_recorded(
+                state.endpoint,
+                workspace.document(),
+                descriptor.field,
+                *next,
+            );
     }
     inline_inspector_values(&display, state.inspector_runtime.target)
         .into_iter()
@@ -20400,13 +21753,66 @@ fn main_numeric_input_matches_current(
         })
 }
 
+/// Checks whether equal-valued ALL scalar input already records its Start-frame intent.
+///
+/// The five persistent Appearance fields use the document-owned baseline only at Start; other
+/// animatable fields and End-frame overrides have no such baseline authority. This predicate is
+/// used only after every effective channel value is known to equal the submitted value.
+fn main_all_scalar_same_value_intent_is_recorded(
+    endpoint: temporal_preview::Endpoint,
+    document: &Document,
+    field: PropertyFieldId,
+    next: f64,
+) -> bool {
+    if endpoint == temporal_preview::Endpoint::End || !main_start_appearance_baseline_field(field) {
+        return true;
+    }
+    let baseline = document.appearance_baseline();
+    match field {
+        PropertyFieldId::Density => baseline.density == Some(next),
+        PropertyFieldId::DensityAspect => baseline.density_aspect == Some(next),
+        PropertyFieldId::RotationDegrees => baseline.pattern_rotation_degrees == Some(next),
+        PropertyFieldId::TranslationX => baseline.translation_x == Some(next),
+        PropertyFieldId::TranslationY => baseline.translation_y == Some(next),
+        _ => true,
+    }
+}
+
+/// Identifies fields whose ALL Start assignments update persistent Appearance intent.
+///
+/// This classification gates untouched focus-leave commits only; other scalar fields, named
+/// channels, and End edits keep their existing blur behavior.
+fn main_start_appearance_baseline_field(field: PropertyFieldId) -> bool {
+    matches!(
+        field,
+        PropertyFieldId::Density
+            | PropertyFieldId::DensityAspect
+            | PropertyFieldId::RotationDegrees
+            | PropertyFieldId::TranslationX
+            | PropertyFieldId::TranslationY
+    )
+}
+
+/// Consumes a text-change marker to decide whether focus leave represents an edit.
+///
+/// Ordinary controls preserve their existing commit-on-leave behavior. Baseline-backed ALL Start
+/// controls commit on leave only after a user change since the entry was constructed; Enter remains
+/// an independent explicit commit path.
+fn main_numeric_focus_leave_should_commit(
+    track_start_baseline_edits: bool,
+    edited_since_construction: &Cell<bool>,
+) -> bool {
+    !track_start_baseline_edits || edited_since_construction.replace(false)
+}
+
 /// Renders one descriptor/value control for the channel inspector or Pattern
 /// Editor while preserving the immutable descriptor/value authority boundary.
 ///
 /// Numeric entries use the shared completed-edit commit helper; immediate widgets
 /// route existing typed commands. Invalid drafts and domain errors remain
 /// frontend-only, while successful commands flow through history and scheduler
-/// handling. No widget value is independently persisted or evaluated.
+/// handling. Baseline-backed ALL Start entries suppress untouched focus-leave commits, while
+/// Enter remains explicit. No widget value is independently persisted or evaluated.
 fn append_descriptor_control(
     state: &Rc<RefCell<AppState>>,
     current: PropertyCurrentValue,
@@ -20446,6 +21852,9 @@ fn append_descriptor_control(
     labels.append(&detail);
     let descriptor = current.descriptor.clone();
     let all_scalar = main_all_scalar(state.borrow().inspector_runtime.target, &descriptor);
+    let track_start_baseline_edits = all_scalar
+        && endpoint == temporal_preview::Endpoint::Start
+        && main_start_appearance_baseline_field(descriptor.field);
     let focus_for_dice = focus.clone();
     let control: gtk::Widget = match (&descriptor.value_kind, &current.value) {
         (PropertyValueKind::Boolean, PropertyCurrentValueKind::Boolean(active)) => {
@@ -20601,6 +22010,19 @@ fn append_descriptor_control(
             } else {
                 let control = gtk::Entry::new();
                 control.set_text(&displayed_text);
+                let edited_since_construction = Rc::new(Cell::new(false));
+                if track_start_baseline_edits {
+                    let edited = Rc::clone(&edited_since_construction);
+                    let state_for_change = Rc::clone(state);
+                    control.connect_changed(move |_| {
+                        let Ok(app_state) = state_for_change.try_borrow() else {
+                            return;
+                        };
+                        if !app_state.syncing_inspector {
+                            edited.set(true);
+                        }
+                    });
+                }
                 control.set_input_purpose(gtk::InputPurpose::Number);
                 control.set_width_chars(8);
                 control.set_tooltip_text(Some(&inspector_field_detail(&descriptor)));
@@ -20608,7 +22030,11 @@ fn append_descriptor_control(
                 let state_for_callback = Rc::clone(state);
                 let descriptor_for_callback = descriptor.clone();
                 let focus_for_callback = focus.clone();
+                let edited_for_activate = Rc::clone(&edited_since_construction);
                 control.connect_activate(move |control| {
+                    if track_start_baseline_edits {
+                        edited_for_activate.set(false);
+                    }
                     commit_numeric_descriptor_control(
                         &state_for_callback,
                         descriptor_for_callback.clone(),
@@ -20622,10 +22048,17 @@ fn append_descriptor_control(
                 let state_for_leave = Rc::clone(state);
                 let descriptor_for_leave = descriptor.clone();
                 let focus_for_leave = focus.clone();
+                let edited_for_leave = Rc::clone(&edited_since_construction);
                 focus_controller.connect_leave(move |controller| {
                     let Some(control) = controller.widget().and_downcast::<gtk::Entry>() else {
                         return;
                     };
+                    if !main_numeric_focus_leave_should_commit(
+                        track_start_baseline_edits,
+                        &edited_for_leave,
+                    ) {
+                        return;
+                    }
                     commit_numeric_descriptor_control(
                         &state_for_leave,
                         descriptor_for_leave.clone(),
@@ -20973,6 +22406,31 @@ fn set_inspector_status(state: &mut AppState, message: impl Into<String>) {
     }
 }
 
+/// Refreshes the passive process-memory estimate on a low-frequency GTK timer.
+///
+/// The label is presentation only: it does not own document state, input, focus, or live-region
+/// announcements. Linux procfs supplies whole-process current RSS and lifetime high-water values;
+/// unavailable counters remain explicit.
+fn start_process_memory_updates(state: &Rc<RefCell<AppState>>) {
+    update_process_memory_status(state);
+    let state = Rc::downgrade(state);
+    glib::timeout_add_local(Duration::from_secs(2), move || {
+        let Some(state) = state.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        update_process_memory_status(&state);
+        glib::ControlFlow::Continue
+    });
+}
+
+/// Updates the passive status value without creating an interactive or live-region control.
+fn update_process_memory_status(state: &Rc<RefCell<AppState>>) {
+    let app_state = state.borrow();
+    app_state
+        .process_memory_status
+        .set_label(&process_memory::format(process_memory::read()));
+}
+
 fn reference_choices(
     state: &Rc<RefCell<AppState>>,
     descriptor: &PropertyDescriptor,
@@ -21244,11 +22702,12 @@ const fn page_after_preview_error(has_accepted_preview: bool) -> Page {
     }
 }
 
-/// Applies one already-typed inspector or Pattern Editor command through the
-/// sole mutable document authority. Accepted edits schedule the existing
-/// preview path; rejected or no-op edits preserve history, document, and the
-/// last successful preview. A deliberate shared edit automatically returns to
-/// selected-channel copy-on-edit after its one dispatch.
+/// Applies one typed inspector command through the sole mutable document authority.
+///
+/// A changed complete calibration binding stays in a private draft until its exact missing
+/// companion set is ready, then publishes with the command as one undo transition. Ordinary
+/// edits outside that binding publish through the existing command path without measuring.
+/// Rejected or no-op edits preserve history and the last successful preview.
 fn apply_inspector_command(
     state: &Rc<RefCell<AppState>>,
     command: &DocumentCommand,
@@ -21257,6 +22716,69 @@ fn apply_inspector_command(
     focus: Option<InspectorFocusIdentity>,
 ) -> bool {
     let state_handle = Rc::clone(state);
+    let candidate = {
+        let mut app_state = state.borrow_mut();
+        if main_document_edits_blocked(&app_state) {
+            return false;
+        }
+        let Some(workspace) = app_state.workspace.as_ref() else {
+            return false;
+        };
+        let base_document = workspace.document().clone();
+        let base_revision = workspace.history.revision();
+        let workspace_generation = app_state.workspace_generation;
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        if let Err(error) = draft.apply(command) {
+            app_state.inspector_runtime.focus = focus_after_command_attempt(
+                app_state.inspector_runtime.focus.clone(),
+                focus.clone(),
+                false,
+            );
+            set_inspector_status(&mut app_state, error.to_string());
+            return false;
+        }
+        let channels =
+            match calibration_preparation::changed_channels(&base_document, draft.document()) {
+                Ok(channels) => channels,
+                Err(error) => {
+                    set_inspector_status(&mut app_state, error.to_string());
+                    return false;
+                }
+            };
+        match calibration_preparation::plan_to_prepare(
+            draft.document(),
+            &channels,
+            false,
+            false,
+        ) {
+            Ok(plan) if !plan.is_empty() => Some((
+                base_document,
+                base_revision,
+                workspace_generation,
+                draft,
+                channels,
+            )),
+            Ok(_) => None,
+            Err(error) => {
+                set_inspector_status(&mut app_state, error.to_string());
+                return false;
+            }
+        }
+    };
+    if let Some((base_document, base_revision, workspace_generation, draft, channels)) = candidate {
+        return queue_inspector_calibration(
+            state,
+            InspectorCalibrationRequest {
+                base_document,
+                base_revision,
+                workspace_generation,
+                draft,
+                channel_ids: channels,
+                descriptor: accepted_descriptor.cloned(),
+                focus,
+            },
+        );
+    }
     let mut app_state = state.borrow_mut();
     if main_document_edits_blocked(&app_state) {
         return false;
@@ -21294,11 +22816,85 @@ fn apply_inspector_command(
     }
 }
 
+/// Retains one command candidate while changed structural bindings are measured off the GTK thread.
+///
+/// The command stays private until all exact missing companions arrive. Cancellation, worker
+/// failure, a replaced workspace, or a revision mismatch leaves main history unchanged.
+fn queue_inspector_calibration(
+    state: &Rc<RefCell<AppState>>,
+    request: InspectorCalibrationRequest,
+) -> bool {
+    let candidate_document = request.draft.document().clone();
+    let candidate_revision = request.draft.revision();
+    let (id, cancelled) = match start_calibration_preparation(
+        state,
+        &candidate_document,
+        &request.channel_ids,
+        false,
+        false,
+    ) {
+        Ok(task) => task,
+        Err(error) => {
+            set_inspector_status(&mut state.borrow_mut(), error);
+            return false;
+        }
+    };
+    let installed = {
+        let mut app = state.borrow_mut();
+        let current = app.workspace_generation == request.workspace_generation
+            && app.workspace.as_ref().is_some_and(|workspace| {
+                workspace.document() == &request.base_document
+                    && workspace.history.revision() == request.base_revision
+            });
+        if !current || app.pending_inspector_calibration.is_some() {
+            false
+        } else {
+            app.pending_inspector_calibration = Some(PendingInspectorCalibration {
+                id,
+                workspace_generation: request.workspace_generation,
+                base_document: request.base_document,
+                base_revision: request.base_revision,
+                draft: request.draft,
+                candidate_document,
+                candidate_revision,
+                descriptor: request.descriptor,
+                focus: request.focus,
+                cancelled: Arc::clone(&cancelled),
+            });
+            set_inspector_status(&mut app, "Preparing Pattern calibration…");
+            sync_ui(&mut app);
+            true
+        }
+    };
+    if !installed {
+        cancelled.store(true, Ordering::Release);
+    }
+    installed
+}
+
+/// Cancels the current main-inspector candidate and restores ordinary workspace input immediately.
+///
+/// The late worker event has no retained publication owner after `take`, so it cannot publish the
+/// canceled private candidate even if the fitter reaches its next cancellation check afterward.
+fn cancel_inspector_calibration(state: &Rc<RefCell<AppState>>) {
+    let mut app = state.borrow_mut();
+    let Some(pending) = app.pending_inspector_calibration.take() else {
+        return;
+    };
+    pending.cancelled.store(true, Ordering::Release);
+    set_inspector_status(
+        &mut app,
+        "Pattern calibration cancelled. No edit was applied.",
+    );
+    sync_ui(&mut app);
+}
+
 /// Applies one ALL-channel seed propagation as a single authoritative history entry.
 ///
 /// The domain maps the base descriptor to compatible seed slots in channel-specific definition
-/// copies. GTK only clears its draft, retains focus, and schedules the ordinary preview after the
-/// grouped operation succeeds.
+/// copies. A changed calibration binding remains in a private history until its missing companions
+/// are prepared, then the grouped edit publishes through one main undo entry. GTK clears its draft,
+/// retains focus, and schedules the ordinary preview after the operation succeeds.
 fn apply_all_pattern_seed(
     state: &Rc<RefCell<AppState>>,
     descriptor: &PropertyDescriptor,
@@ -21306,6 +22902,69 @@ fn apply_all_pattern_seed(
     focus: InspectorFocusIdentity,
 ) -> bool {
     let state_handle = Rc::clone(state);
+    let candidate = {
+        let mut app_state = state.borrow_mut();
+        if main_document_edits_blocked(&app_state) {
+            return false;
+        }
+        let Some(workspace) = app_state.workspace.as_ref() else {
+            return false;
+        };
+        let base_document = workspace.document().clone();
+        let base_revision = workspace.history.revision();
+        let workspace_generation = app_state.workspace_generation;
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        if let Err(error) = draft.set_all_pattern_seed(descriptor, seed) {
+            app_state.inspector_runtime.focus = focus_after_command_attempt(
+                app_state.inspector_runtime.focus.clone(),
+                Some(focus.clone()),
+                false,
+            );
+            set_inspector_status(&mut app_state, error.to_string());
+            return false;
+        }
+        let channels =
+            match calibration_preparation::changed_channels(&base_document, draft.document()) {
+                Ok(channels) => channels,
+                Err(error) => {
+                    set_inspector_status(&mut app_state, error.to_string());
+                    return false;
+                }
+            };
+        match calibration_preparation::plan_to_prepare(
+            draft.document(),
+            &channels,
+            false,
+            false,
+        ) {
+            Ok(plan) if !plan.is_empty() => Some((
+                base_document,
+                base_revision,
+                workspace_generation,
+                draft,
+                channels,
+            )),
+            Ok(_) => None,
+            Err(error) => {
+                set_inspector_status(&mut app_state, error.to_string());
+                return false;
+            }
+        }
+    };
+    if let Some((base_document, base_revision, workspace_generation, draft, channels)) = candidate {
+        return queue_inspector_calibration(
+            state,
+            InspectorCalibrationRequest {
+                base_document,
+                base_revision,
+                workspace_generation,
+                draft,
+                channel_ids: channels,
+                descriptor: Some(descriptor.clone()),
+                focus: Some(focus),
+            },
+        );
+    }
     let mut app_state = state.borrow_mut();
     if main_document_edits_blocked(&app_state) {
         return false;
@@ -21631,6 +23290,18 @@ fn reset_command_for_descriptor(
         (PropertyTarget::Channel(channel_id), PropertyFieldId::DefinitionSelection) => {
             Ok(DocumentCommand::ResetChannelPatternDefinitionOverride { base, channel_id })
         }
+        (
+            PropertyTarget::ChannelOutput(channel_id, output_layer_id),
+            PropertyFieldId::MarkMinimumFill
+            | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::ConnectedMinimumThickness
+            | PropertyFieldId::ConnectedMaximumThickness
+            | PropertyFieldId::RegionMinimumFill
+            | PropertyFieldId::RegionMaximumFill
+            | PropertyFieldId::RegionSampling,
+        ) => document
+            .reset_channel_response_field(channel_id, output_layer_id, descriptor.field)
+            .map_err(|error| error.to_string()),
         (PropertyTarget::ChannelOutput(channel_id, output_layer_id), _) => document
             .reset_channel_output_response_delta(channel_id, output_layer_id)
             .map_err(|error| error.to_string()),
@@ -22538,6 +24209,10 @@ fn structural_command_for_input(
             mechanism_id: mechanism_id()?,
             seed: count(input)?,
         },
+        PropertyFieldId::RandomNominalSpacing => PatternDefinitionEdit::SetRandomNominalSpacing {
+            mechanism_id: mechanism_id()?,
+            nominal_spacing: number(input)?,
+        },
         PropertyFieldId::RandomEvenMinimumCenterDistance => {
             PatternDefinitionEdit::SetRandomEvenMinimumCenterDistance {
                 mechanism_id: mechanism_id()?,
@@ -22849,6 +24524,7 @@ fn lifecycle_is_busy(state: &AppState) -> bool {
         || state.pending_load
         || state.pending_save
         || state.pending_export
+        || state.pending_inspector_calibration.is_some()
         || state.lifecycle_prompt
         || state.window_close.deferred
 }
@@ -22865,6 +24541,55 @@ fn main_document_edits_blocked(state: &AppState) -> bool {
         || state.lifecycle_prompt
         || state.window_close.deferred
         || state.document_presets.blocks_edits()
+        || state.pending_inspector_calibration.is_some()
+}
+
+/// Starts one immutable saved-calibration worker and returns its GTK-owned cancellation guard.
+///
+/// The worker receives only a cloned candidate, bounded channel list, cancellation flag, and event
+/// sender. It cannot reach workspace history, widgets, library paths, or savepoint authority.
+///
+/// # Errors
+/// Returns task-identity exhaustion or an operating-system thread-spawn diagnostic.
+fn start_calibration_preparation(
+    state: &Rc<RefCell<AppState>>,
+    candidate: &Document,
+    channel_ids: &[ChannelId],
+    force: bool,
+    force_baseline: bool,
+) -> Result<(calibration_preparation::TaskId, Arc<AtomicBool>), String> {
+    let (id, sender) = {
+        let mut app = state.borrow_mut();
+        app.next_calibration_task = app
+            .next_calibration_task
+            .checked_add(1)
+            .ok_or_else(|| "Calibration task identity is exhausted.".to_owned())?;
+        (
+            calibration_preparation::TaskId(app.next_calibration_task),
+            app.event_sender.clone(),
+        )
+    };
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = Arc::clone(&cancelled);
+    let candidate = candidate.clone();
+    let channel_ids = channel_ids.to_vec();
+    thread::Builder::new()
+        .name(format!("toniator-calibration-{}", id.0))
+        .spawn(move || {
+            let result = calibration_preparation::prepare(
+                &candidate,
+                &channel_ids,
+                force,
+                force_baseline,
+                &worker_cancelled,
+            );
+            let _ = sender.send_blocking(AppEvent::CalibrationPrepared {
+                id,
+                result: Box::new(result),
+            });
+        })
+        .map_err(|error| format!("Couldn’t start Pattern calibration: {error}"))?;
+    Ok((id, cancelled))
 }
 
 fn request_window_close(
@@ -23165,25 +24890,36 @@ fn sync_png_export_size(
     options: &components::ToniatorPngExportOptions,
     export: &gtk::Button,
     canvas: &CanvasSpec,
-) -> Result<OutputRasterTarget, String> {
+) -> Result<OutputRasterTarget, png_export_size::OutputSizeError> {
     options
         .dimensions()
         .set_sensitive(options.scale().selected() == 4);
-    match png_export_size::target(
+    match png_export_size::requested_png_dimensions(
         canvas,
         options.scale().selected(),
         options.dimensions().text().as_str(),
     ) {
-        Ok(target) => {
-            options.size_summary().set_label(&format!(
-                "PNG: {} × {} pixels",
-                target.width(),
-                target.height()
-            ));
-            options.size_error().set_label("");
-            options.size_error().set_visible(false);
-            export.set_sensitive(true);
-            Ok(target)
+        Ok(dimensions) => match dimensions.target() {
+            Ok(target) => {
+                options.size_summary().set_label(&format!(
+                    "PNG: {} × {} pixels",
+                    target.width(),
+                    target.height()
+                ));
+                options.size_error().set_label("");
+                options.size_error().set_visible(false);
+                export.set_sensitive(true);
+                Ok(target)
+            }
+            Err(error) => {
+                options
+                    .size_summary()
+                    .set_label(&png_export_size::requested_png_summary(dimensions));
+                options.size_error().set_label(error.message());
+                options.size_error().set_visible(true);
+                export.set_sensitive(false);
+                Err(error)
+            }
         }
         Err(error) => {
             options
@@ -23192,7 +24928,7 @@ fn sync_png_export_size(
             options.size_error().set_label(&error);
             options.size_error().set_visible(true);
             export.set_sensitive(false);
-            Err(error)
+            Err(png_export_size::OutputSizeError::Invalid(error))
         }
     }
 }
@@ -23923,7 +25659,7 @@ fn sync_print_preparation_surface(state: &mut AppState) {
                         .trim()
                         .parse::<f64>()
                         .map_err(|_| "Enter a positive print resolution in DPI.".to_owned())?;
-                    png_export_size::fit_print_box(
+                    png_export_size::fit_print_box_dimensions(
                         &canvas,
                         maximum_width_mm,
                         maximum_height_mm,
@@ -23932,6 +25668,7 @@ fn sync_print_preparation_surface(state: &mut AppState) {
                 })();
                 match fit {
                     Ok(fit) => {
+                        let dimensions = fit.dimensions();
                         let (width_mm, height_mm) = fit.physical_size_mm();
                         let box_draft = surface.box_dimensions.get();
                         let unit = box_draft.unit();
@@ -23939,9 +25676,8 @@ fn sync_print_preparation_surface(state: &mut AppState) {
                             let (maximum_width, maximum_height) =
                                 box_draft.dimensions_for_fit_mm()?;
                             Ok(format!(
-                                "Prepared PNG: {} × {} px · {} × {} {} fit inside {} × {} {} at {} DPI",
-                                fit.target().width(),
-                                fit.target().height(),
+                                "Prepared PNG: {} · {} × {} {} fit inside {} × {} {} at {} DPI",
+                                dimensions.summary(),
                                 box_draft.format_mm(width_mm)?,
                                 box_draft.format_mm(height_mm)?,
                                 unit.abbreviation(),
@@ -23952,10 +25688,19 @@ fn sync_print_preparation_surface(state: &mut AppState) {
                             ))
                         })();
                         match summary {
-                            Ok(summary) => {
-                                surface.controls.options.size_summary().set_label(&summary);
-                                surface.controls.options.size_error().set_visible(false);
-                                Ok((fit.target(), Some(fit.pixels_per_metre())))
+                            Ok(summary) => match fit.target() {
+                                Ok(target) => {
+                                    surface.controls.options.size_summary().set_label(&summary);
+                                    surface.controls.options.size_error().set_visible(false);
+                                    Ok((target, Some(fit.pixels_per_metre())))
+                                }
+                                Err(_) => {
+                                    let error = fit.render_limit_message();
+                                    surface.controls.options.size_summary().set_label(&summary);
+                                    surface.controls.options.size_error().set_label(&error);
+                                    surface.controls.options.size_error().set_visible(true);
+                                    Err(png_export_size::OutputSizeError::RendererLimit(error))
+                                }
                             }
                             Err(error) => {
                                 surface
@@ -23965,7 +25710,7 @@ fn sync_print_preparation_surface(state: &mut AppState) {
                                     .set_label("Prepared PNG dimensions unavailable");
                                 surface.controls.options.size_error().set_label(&error);
                                 surface.controls.options.size_error().set_visible(true);
-                                Err(error)
+                                Err(png_export_size::OutputSizeError::Invalid(error))
                             }
                         }
                     }
@@ -23977,7 +25722,7 @@ fn sync_print_preparation_surface(state: &mut AppState) {
                             .set_label("Prepared PNG dimensions unavailable");
                         surface.controls.options.size_error().set_label(&error);
                         surface.controls.options.size_error().set_visible(true);
-                        Err(error)
+                        Err(png_export_size::OutputSizeError::Invalid(error))
                     }
                 }
             } else {
@@ -24010,7 +25755,11 @@ fn sync_print_preparation_surface(state: &mut AppState) {
                 })
             });
             if let Err(error) = &selected {
-                surface.controls.options.size_error().set_label(error);
+                surface
+                    .controls
+                    .options
+                    .size_error()
+                    .set_label(error.message());
                 surface.controls.options.size_error().set_visible(true);
             }
             selected
@@ -24036,22 +25785,25 @@ fn sync_print_preparation_surface(state: &mut AppState) {
             ))
         });
     reconcile_print_png_preview_intent(state, desired_preview);
-    let status = if selection.as_ref().is_some_and(Result::is_err) {
-        "Enter valid PNG dimensions to show the preview"
-    } else {
-        state
+    let status = match selection.as_ref().and_then(|selection| selection.as_ref().err()) {
+        Some(error) => error
+            .preview_status()
+            .unwrap_or("Enter valid PNG dimensions to show the preview")
+            .to_owned(),
+        None => state
             .print_preparation_surface
             .as_ref()
-            .map_or("Preview not rendered", |surface| {
-                print_png_preview_status_text(surface.preview_status)
-            })
+            .map_or_else(
+                || "Preview not rendered".to_owned(),
+                |surface| print_png_preview_status_text(surface.preview_status).to_owned(),
+            ),
     };
     state
         .shell
         .print_preparation_summary()
         .set_label(&print_preparation_view::inspector_summary(
             &document_settings,
-            status,
+            &status,
         ));
     let width_status = state.print_preparation.accepted().map_or_else(
         || "Width checks: Not checked".to_owned(),
@@ -24086,10 +25838,15 @@ fn sync_print_preparation_surface(state: &mut AppState) {
             };
             surface.controls.target_summary.set_label(&target_summary);
         } else {
-            surface
-                .controls
-                .target_summary
-                .set_label("Final output target is unavailable until PNG dimensions are valid.");
+            let target_status = selection
+                .as_ref()
+                .and_then(|selection| selection.as_ref().err())
+                .filter(|error| error.is_render_limit())
+                .map_or_else(
+                    || "Final output target is unavailable until PNG dimensions are valid.".to_owned(),
+                    |error| error.message().to_owned(),
+                );
+            surface.controls.target_summary.set_label(&target_status);
         }
         surface
             .controls
@@ -25669,7 +27426,18 @@ fn fit_print_review_view(state: &Rc<RefCell<AppState>>, epoch: u64) {
 ///
 /// # Errors
 /// Returns malformed integer/dimension or shared renderer output-budget diagnostics.
+#[cfg(test)]
 fn parse_output_target(value: &str) -> Result<Option<OutputRasterTarget>, String> {
+    parse_output_dimensions(value)?
+        .map(|(width, height)| OutputRasterTarget::new(width, height).map_err(|error| error.to_string()))
+        .transpose()
+}
+
+/// Parses optional positive whole PNG dimensions before applying the renderer's pixel budget.
+///
+/// # Errors
+/// Returns a field-specific diagnostic for a malformed dimension string or nonpositive axis.
+fn parse_output_dimensions(value: &str) -> Result<Option<(u32, u32)>, String> {
     let value = value.trim();
     if value.is_empty() {
         return Ok(None);
@@ -25684,9 +27452,10 @@ fn parse_output_target(value: &str) -> Result<Option<OutputRasterTarget>, String
     let height = height
         .parse::<u32>()
         .map_err(|_| "export.dimensions: height must be a positive integer".to_owned())?;
-    OutputRasterTarget::new(width, height)
-        .map(Some)
-        .map_err(|error| error.to_string())
+    if width == 0 || height == 0 {
+        return Err("export.dimensions: width and height must be positive".to_owned());
+    }
+    Ok(Some((width, height)))
 }
 
 fn suggested_filename(workspace: &Workspace) -> String {
@@ -26314,6 +28083,835 @@ fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
         AppEvent::WizardPreviewProgress { epoch, progress } => {
             handle_wizard_preview_progress(state, epoch, progress)
         }
+        AppEvent::CalibrationPrepared { id, result } => {
+            handle_calibration_prepared(state, id, *result)
+        }
+    }
+}
+
+/// Routes one asynchronous result to exactly one still-captured private publication owner.
+///
+/// Task IDs are allocated monotonically by the app state. The candidate is accepted only after
+/// its destination-specific workspace, revision, modal epoch, and exact-document guards pass.
+fn handle_calibration_prepared(
+    state: &Rc<RefCell<AppState>>,
+    id: calibration_preparation::TaskId,
+    result: Result<calibration_preparation::PreparedCalibrations, String>,
+) {
+    if state
+        .borrow()
+        .pending_inspector_calibration
+        .as_ref()
+        .is_some_and(|pending| pending.id == id)
+    {
+        handle_inspector_calibration(state, id, result);
+        return;
+    }
+    if state
+        .borrow()
+        .advanced_settings
+        .as_ref()
+        .and_then(|surface| surface.calibration_task.as_ref())
+        .is_some_and(|task| task.id == id)
+    {
+        handle_advanced_calibration(state, id, result);
+        return;
+    }
+    if state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .and_then(|surface| surface.calibration_task.as_ref())
+        .is_some_and(|task| task.id == id)
+    {
+        handle_wizard_calibration(state, id, result);
+        return;
+    }
+    if state
+        .borrow()
+        .pattern_editor
+        .as_ref()
+        .and_then(|surface| surface.calibration_task.as_ref())
+        .is_some_and(|task| task.id == id)
+    {
+        handle_pattern_editor_calibration(state, id, result);
+    }
+}
+
+/// Attaches a complete worker result to one private history without publishing main history.
+///
+/// Each attachment is checked against the current private document and revision. The caller then
+/// squashes that completed draft once, so all requested artifacts and the originating edit share
+/// one main undo entry.
+///
+/// # Errors
+/// Returns the first domain attachment error without accepting a partial main-history transition.
+fn attach_calibrations_to_history(
+    history: &mut DocumentHistory,
+    artifacts: calibration_preparation::PreparedCalibrations,
+) -> Result<(), String> {
+    let mut candidate = DocumentHistory::new_draft(history);
+    for entry in artifacts.active {
+        let base = candidate.document().clone();
+        let revision = candidate.revision();
+        candidate
+            .attach_saved_calibration(&base, revision, entry.channel_id, entry.artifact)
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(artifact) = artifacts.baseline {
+        let base = candidate.document().clone();
+        let revision = candidate.revision();
+        candidate
+            .attach_saved_baseline_calibration(&base, revision, artifact)
+            .map_err(|error| error.to_string())?;
+    }
+    candidate.document().require_saved_calibration_authority()
+        .map_err(|error| error.to_string())?;
+    history
+        .squash_draft(&candidate)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Publishes one measured Pattern Editor candidate after its exact root and modal snapshot match.
+///
+/// All companions attach to the private command draft first. The Workspace receives one squash
+/// only after cancellation, generation, root revision, editor epoch, and candidate identity pass.
+///
+/// # Errors
+/// Returns worker, cancellation, stale-root, stale-candidate, attachment, validation, or history
+/// errors without partially publishing the candidate.
+fn publish_pattern_editor_calibration_result(
+    history: &mut DocumentHistory,
+    draft: &mut DocumentHistory,
+    task: &PatternEditorCalibrationTask,
+    workspace_generation: u64,
+    editor_epoch: u64,
+    result: Result<calibration_preparation::PreparedCalibrations, String>,
+) -> Result<toniator_domain::DraftSquashResult, String> {
+    if task.cancelled.load(Ordering::Acquire) {
+        return Err("Pattern calibration was cancelled. No changes were applied.".to_owned());
+    }
+    if workspace_generation != task.workspace_generation
+        || history.document() != &task.base_document
+        || history.revision() != task.base_revision
+    {
+        return Err(
+            "The artwork changed before Pattern calibration finished; no changes were applied."
+                .to_owned(),
+        );
+    }
+    if editor_epoch != task.editor_epoch
+        || draft.document() != &task.candidate_document
+        || draft.revision() != task.candidate_revision
+    {
+        return Err(
+            "The Pattern Editor changed before calibration finished; no changes were applied."
+                .to_owned(),
+        );
+    }
+    attach_calibrations_to_history(draft, result?)?;
+    history
+        .squash_draft(draft)
+        .map_err(|error| error.to_string())
+}
+
+/// Publishes one inspector result only while its cancellation, Workspace, and private draft guards match.
+///
+/// Attachments first update the private command draft atomically; the main history receives one
+/// squash only after every exact root and candidate check succeeds.
+///
+/// # Errors
+/// Returns the worker diagnostic or a cancellation, stale-root, stale-candidate, or attachment error.
+fn publish_inspector_calibration_result(
+    history: &mut DocumentHistory,
+    pending: &mut PendingInspectorCalibration,
+    workspace_generation: u64,
+    result: Result<calibration_preparation::PreparedCalibrations, String>,
+) -> Result<bool, String> {
+    if pending.cancelled.load(Ordering::Acquire) {
+        return Err("Pattern calibration was cancelled.".to_owned());
+    }
+    let root_matches = workspace_generation == pending.workspace_generation
+        && history.document() == &pending.base_document
+        && history.revision() == pending.base_revision;
+    let candidate_matches = pending.draft.document() == &pending.candidate_document
+        && pending.draft.revision() == pending.candidate_revision;
+    if !root_matches || !candidate_matches {
+        return Err(
+            "The artwork changed before Pattern calibration finished; no edit was applied."
+                .to_owned(),
+        );
+    }
+    let artifacts = result?;
+    attach_calibrations_to_history(&mut pending.draft, artifacts)?;
+    history
+        .squash_draft(&pending.draft)
+        .map(|result| result.unchanged)
+        .map_err(|error| error.to_string())
+}
+
+/// Accepts one structural inspector command only when its measured bindings and root are current.
+///
+/// Failed, canceled, or stale work discards the private candidate. A successful set attaches to
+/// the private command history and publishes through one root-checked squash.
+fn handle_inspector_calibration(
+    state: &Rc<RefCell<AppState>>,
+    id: calibration_preparation::TaskId,
+    result: Result<calibration_preparation::PreparedCalibrations, String>,
+) {
+    let pending = {
+        let mut app = state.borrow_mut();
+        app.pending_inspector_calibration
+            .as_ref()
+            .is_some_and(|pending| pending.id == id)
+            .then(|| app.pending_inspector_calibration.take())
+            .flatten()
+    };
+    let Some(mut pending) = pending else {
+        return;
+    };
+    let mut accepted = false;
+    let message = {
+        let mut app = state.borrow_mut();
+        let workspace_generation = app.workspace_generation;
+        let outcome = app.workspace.as_mut().map_or_else(
+            || Err("The workspace is no longer open.".to_owned()),
+            |workspace| {
+                publish_inspector_calibration_result(
+                    &mut workspace.history,
+                    &mut pending,
+                    workspace_generation,
+                    result,
+                )
+            },
+        );
+        match outcome {
+            Ok(unchanged) => {
+                if let Some(descriptor) = pending.descriptor.as_ref() {
+                    app.inspector_runtime
+                        .drafts
+                        .remove(&inspector_key(descriptor));
+                }
+                app.inspector_runtime.focus = focus_after_command_attempt(
+                    app.inspector_runtime.focus.clone(),
+                    pending.focus,
+                    true,
+                );
+                if !unchanged {
+                    set_preview_pending(&mut app);
+                }
+                accepted = !unchanged;
+                if unchanged {
+                    "Pattern settings already match the document.".to_owned()
+                } else {
+                    "Pattern calibration prepared. Rendering preview…".to_owned()
+                }
+            }
+            Err(error) => {
+                app.inspector_runtime.focus = focus_after_command_attempt(
+                    app.inspector_runtime.focus.clone(),
+                    pending.focus,
+                    false,
+                );
+                error
+            }
+        }
+    };
+    let mut app = state.borrow_mut();
+    set_inspector_status(&mut app, message);
+    sync_ui(&mut app);
+    drop(app);
+    if accepted {
+        rebuild_inspector(state);
+        schedule_main_preview_submission(state);
+    }
+}
+
+/// Accepts one Workspace editor calibration only for its original modal candidate and root.
+///
+/// The private editor history receives all companions before its single guarded squash to main
+/// history. Failure, stale identity, or cancellation leaves the editor open and main history intact.
+fn handle_pattern_editor_calibration(
+    state: &Rc<RefCell<AppState>>,
+    id: calibration_preparation::TaskId,
+    result: Result<calibration_preparation::PreparedCalibrations, String>,
+) {
+    let task = {
+        let mut app = state.borrow_mut();
+        app.pattern_editor.as_mut().and_then(|surface| {
+            surface
+                .calibration_task
+                .as_ref()
+                .is_some_and(|task| task.id == id)
+                .then(|| surface.calibration_task.take())
+                .flatten()
+        })
+    };
+    let Some(task) = task else {
+        return;
+    };
+    let (outcome, status) = {
+        let mut app = state.borrow_mut();
+        let workspace_generation = app.workspace_generation;
+        let AppState {
+            application_model: model,
+            pattern_editor: editor_slot,
+            ..
+        } = &mut *app;
+        match (model.workspace.as_mut(), editor_slot.as_ref()) {
+            (Some(workspace), Some(surface)) => {
+                let mut draft = surface.draft.borrow_mut();
+                let owner_matches = matches!(&surface.parent, PatternEditorParent::Workspace)
+                    && surface.initial_workspace_generation == task.workspace_generation
+                    && surface.initial_workspace_revision == task.base_revision
+                    && draft.initial_document == task.base_document;
+                let outcome = if !owner_matches {
+                    Err("The Pattern Editor changed before calibration finished; no changes were applied."
+                        .to_owned())
+                } else {
+                    let editor_epoch = draft.epoch;
+                    publish_pattern_editor_calibration_result(
+                        &mut workspace.history,
+                        &mut draft.history,
+                        &task,
+                        workspace_generation,
+                        editor_epoch,
+                        result,
+                    )
+                };
+                surface.apply.set_sensitive(true);
+                (outcome, Some(surface.status.clone()))
+            }
+            _ => (
+                Err("The Workspace or Pattern Editor is no longer available.".to_owned()),
+                None,
+            ),
+        }
+    };
+    match outcome {
+        Ok(summary) if summary.unchanged => {
+            if let Some(status) = status {
+                status.set_label("Pattern calibration is ready; no document changes were needed.");
+            }
+        }
+        Ok(_) => {
+            close_pattern_editor_after_terminal(state, NestedEditorTerminal::Apply);
+            let mut app = state.borrow_mut();
+            set_preview_pending(&mut app);
+            set_inspector_status(&mut app, "Pattern changes applied.");
+            emit_automation_state(&mut app, "draft_applied", None);
+            sync_ui(&mut app);
+            drop(app);
+            rebuild_inspector(state);
+            schedule_main_preview_submission(state);
+        }
+        Err(error) => {
+            if let Some(status) = status {
+                status.set_label(&format!("Couldn’t apply these Pattern changes: {error}"));
+            }
+        }
+    }
+}
+
+/// Accepts forced calibration only into the still-current Advanced Settings private draft.
+///
+/// The exact workspace root and draft snapshot are checked before artifacts attach. Apply remains
+/// the sole boundary that can publish this private history into the main document.
+fn handle_advanced_calibration(
+    state: &Rc<RefCell<AppState>>,
+    id: calibration_preparation::TaskId,
+    result: Result<calibration_preparation::PreparedCalibrations, String>,
+) {
+    let task = {
+        let mut app = state.borrow_mut();
+        app.advanced_settings
+            .as_mut()
+            .and_then(|surface| {
+                surface
+                    .calibration_task
+                    .as_ref()
+                    .is_some_and(|task| task.id == id)
+                    .then(|| surface.calibration_task.take())
+                    .flatten()
+            })
+    };
+    let Some(task) = task else {
+        return;
+    };
+    let mut accepted = false;
+    let message = {
+        let mut app = state.borrow_mut();
+        let workspace_current = app.workspace_generation == task.workspace_generation
+            && app.workspace.as_ref().is_some_and(|workspace| {
+                workspace.document() == &task.base_document
+                    && workspace.history.revision() == task.base_revision
+            });
+        let outcome = if task.cancelled.load(Ordering::Acquire) {
+            Err("Pattern recalibration was cancelled.".to_owned())
+        } else if !workspace_current {
+            Err("The artwork changed before Recalibrate finished. No result was kept.".to_owned())
+        } else {
+            let Some(surface) = app.advanced_settings.as_mut().filter(|surface| {
+                surface.epoch == task.epoch
+            }) else {
+                return;
+            };
+            let mut draft = surface.draft.borrow_mut();
+            if draft.document() != &task.candidate_document
+                || draft.revision() != task.candidate_revision
+            {
+                Err("Advanced Settings changed before Recalibrate finished. No result was kept.".to_owned())
+            } else {
+                result.and_then(|artifacts| {
+                    attach_calibrations_to_history(&mut draft, artifacts)?;
+                    Ok(())
+                })
+            }
+        };
+        let Some(surface) = app.advanced_settings.as_mut() else {
+            return;
+        };
+        surface.fields.set_sensitive(true);
+        surface.recalibrate.set_sensitive(true);
+        surface.apply.set_sensitive(true);
+        match outcome {
+            Ok(()) => {
+                accepted = true;
+                surface.status.set_label(
+                    "Pattern recalibrated in this private draft. Apply keeps the result; Cancel discards it.",
+                );
+                String::new()
+            }
+            Err(error) => {
+                surface.status.set_label(&error);
+                error
+            }
+        }
+    };
+    if accepted {
+        let epoch = state.borrow().advanced_settings.as_ref().map(|surface| surface.epoch);
+        if let Some(epoch) = epoch {
+            advanced_temporal::refresh(state, epoch);
+            submit_advanced_preview(state, epoch);
+        }
+    } else if !message.is_empty() {
+        eprintln!("toniator-app: Advanced Recalibrate: {message}");
+    }
+}
+
+/// Starts calibration for changed wizard bindings and blocks private edits until completion.
+///
+/// The worker receives only the complete candidate and channels whose bindings changed. Existing
+/// exact companions are reused; a wizard completion still retains the captured workspace and
+/// modal revision/document guards before it can attach anything.
+///
+/// # Errors
+/// Returns changed-binding reconstruction or worker-start diagnostics without changing history.
+fn start_wizard_calibration_if_needed(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    candidate_document: Document,
+    candidate_revision: Revision,
+    publication: WizardCalibrationPublication,
+) -> Result<bool, String> {
+    let (base_document, base_revision, generation, channel_ids) = {
+        let app = state.borrow();
+        let surface = app
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch && surface.calibration_task.is_none())
+            .ok_or_else(|| "The Pattern Wizard is no longer available.".to_owned())?;
+        let workspace = app
+            .workspace
+            .as_ref()
+            .ok_or_else(|| "The workspace is no longer open.".to_owned())?;
+        let base_document = workspace.document().clone();
+        if surface.initial_document != base_document
+            || workspace.history.revision() != surface.initial_workspace_revision
+        {
+            return Err("The artwork changed while the Pattern Wizard was open.".to_owned());
+        }
+        let base_revision = surface.initial_workspace_revision;
+        let channel_ids = calibration_preparation::changed_channels(
+            &base_document,
+            &candidate_document,
+        )
+        .map_err(|error| error.to_string())?;
+        let plan = calibration_preparation::plan_to_prepare(
+            &candidate_document,
+            &channel_ids,
+            false,
+            false,
+        )
+        .map_err(|error| error.to_string())?;
+        if plan.is_empty() {
+            return Ok(false);
+        }
+        (
+            base_document,
+            base_revision,
+            app.workspace_generation,
+            channel_ids,
+        )
+    };
+    let (id, cancelled) =
+        start_calibration_preparation(state, &candidate_document, &channel_ids, false, false)?;
+    let installed = {
+        let mut app = state.borrow_mut();
+        let root_current = app.workspace_generation == generation
+            && app.workspace.as_ref().is_some_and(|workspace| {
+                workspace.document() == &base_document
+                    && workspace.history.revision() == base_revision
+            });
+        if !root_current {
+            false
+        } else if let Some(surface) = app
+            .pattern_wizard
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch && surface.calibration_task.is_none())
+        {
+            let candidate_current = match &publication {
+                WizardCalibrationPublication::DraftApply => {
+                    surface.draft.borrow().document() == &candidate_document
+                        && surface.draft.borrow().revision() == candidate_revision
+                }
+                WizardCalibrationPublication::GalleryApply {
+                    target,
+                    candidate_id,
+                    captured_document,
+                    draft,
+                } => {
+                    surface.gallery_panel.is_visible()
+                        && surface.target == *target
+                        && surface.candidate.as_deref() == Some(candidate_id)
+                        && surface.initial_document == **captured_document
+                        && draft.document() == &candidate_document
+                        && draft.revision() == candidate_revision
+                }
+                WizardCalibrationPublication::PatternSave { draft, dialog, .. } => {
+                    dialog.is_visible()
+                        && surface.draft.borrow().document() == &draft.calibration_document
+                        && surface.draft.borrow().revision() == draft.candidate_revision
+                        && draft.calibration_document == candidate_document
+                        && draft.candidate_revision == candidate_revision
+                }
+            };
+            if candidate_current {
+                surface.calibration_task = Some(WizardCalibrationTask {
+                    id,
+                    epoch,
+                    workspace_generation: generation,
+                    base_document,
+                    base_revision,
+                    candidate_document,
+                    candidate_revision,
+                    cancelled: Arc::clone(&cancelled),
+                    publication,
+                });
+                set_wizard_calibration_pending(surface, true);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    };
+    if !installed {
+        cancelled.store(true, Ordering::Release);
+    }
+    Ok(installed)
+}
+
+/// Reports Apply measurement and disables wizard editing while retaining Cancel as the recovery path.
+fn set_wizard_calibration_pending(surface: &PatternWizardSurface, pending: bool) {
+    if pending
+        && surface.calibration_task.as_ref().is_some_and(|task| {
+            matches!(
+                &task.publication,
+                WizardCalibrationPublication::DraftApply
+                    | WizardCalibrationPublication::GalleryApply { .. }
+            )
+        })
+    {
+        surface.status.set_label("Measuring Pattern calibration…");
+    }
+    surface.page_panel.set_sensitive(!pending);
+    surface.gallery_panel.set_sensitive(!pending);
+    for button in [
+        &surface.back,
+        &surface.review,
+        &surface.edit,
+        &surface.new,
+        &surface.undo,
+        &surface.redo,
+        &surface.apply,
+    ] {
+        button.set_sensitive(!pending);
+    }
+    surface.cancel.set_sensitive(true);
+}
+
+/// Resumes only the wizard page captured by its current surface after pending work ends.
+fn resume_wizard_after_calibration(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let page = {
+        let mut app = state.borrow_mut();
+        app.pattern_wizard
+            .as_mut()
+            .filter(|surface| surface.epoch == epoch)
+            .map(|surface| {
+                set_wizard_calibration_pending(surface, false);
+            if surface.gallery_panel.is_visible() {
+                WizardNavigationPage::Gallery
+            } else {
+                WizardNavigationPage::Route(
+                    surface
+                        .route
+                        .get(surface.route_index)
+                        .copied()
+                        .unwrap_or(WizardRoutePage::Review),
+                )
+                }
+            })
+    };
+    match page {
+        Some(WizardNavigationPage::Gallery) => show_wizard_gallery_page(state, epoch),
+        Some(WizardNavigationPage::Route(_)) => show_wizard_current_route_page(state, epoch),
+        Some(WizardNavigationPage::Review) => show_wizard_review_page(state, epoch),
+        None => {}
+    }
+}
+
+/// Accepts one wizard result, then publishes only its captured private operation.
+///
+/// Draft Apply, Gallery Apply, and Pattern Save retain distinct authorities. Every path first
+/// checks the original workspace generation, document, revision, wizard epoch, and candidate.
+///
+/// # Errors
+/// Failed worker results remain in their private surface and never mutate the main history or library.
+fn handle_wizard_calibration(
+    state: &Rc<RefCell<AppState>>,
+    id: calibration_preparation::TaskId,
+    result: Result<calibration_preparation::PreparedCalibrations, String>,
+) {
+    let task = {
+        let mut app = state.borrow_mut();
+        app.pattern_wizard
+            .as_mut()
+            .and_then(|surface| {
+                surface
+                    .calibration_task
+                    .as_ref()
+                    .is_some_and(|task| task.id == id)
+                    .then(|| surface.calibration_task.take())
+                    .flatten()
+            })
+    };
+    let Some(task) = task else {
+        return;
+    };
+    let epoch = task.epoch;
+    let current = {
+        let app = state.borrow();
+        let publication_current = app
+            .pattern_wizard
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+            .is_some_and(|surface| match &task.publication {
+                WizardCalibrationPublication::DraftApply => {
+                    surface.draft.borrow().document() == &task.candidate_document
+                        && surface.draft.borrow().revision() == task.candidate_revision
+                }
+                WizardCalibrationPublication::GalleryApply {
+                    target,
+                    candidate_id,
+                    captured_document,
+                    draft,
+                } => {
+                    surface.gallery_panel.is_visible()
+                        && surface.target == *target
+                        && surface.candidate.as_deref() == Some(candidate_id)
+                        && surface.initial_document == **captured_document
+                        && draft.document() == &task.candidate_document
+                        && draft.revision() == task.candidate_revision
+                }
+                WizardCalibrationPublication::PatternSave { draft, dialog, .. } => {
+                    dialog.is_visible()
+                        && surface.initial_document == draft.base_document
+                        && surface.candidate == draft.candidate
+                        && surface.draft.borrow().document() == &task.candidate_document
+                        && surface.draft.borrow().revision() == task.candidate_revision
+                        && draft.calibration_document == task.candidate_document
+                        && draft.candidate_revision == task.candidate_revision
+                }
+            });
+        app.workspace_generation == task.workspace_generation
+            && app.workspace.as_ref().is_some_and(|workspace| {
+                workspace.document() == &task.base_document
+                    && workspace.history.revision() == task.base_revision
+            })
+            && publication_current
+    };
+    let result = if task.cancelled.load(Ordering::Acquire) {
+        Err("Pattern calibration was cancelled.".to_owned())
+    } else if !current {
+        Err("The artwork or Pattern Wizard changed before calibration finished.".to_owned())
+    } else {
+        result
+    };
+    let artifacts = match result {
+        Ok(artifacts) => artifacts,
+        Err(error) => {
+            let is_pattern_save = matches!(
+                &task.publication,
+                WizardCalibrationPublication::PatternSave { .. }
+            );
+            match &task.publication {
+                WizardCalibrationPublication::PatternSave { status, actions, .. } => {
+                    status.set_label(&error);
+                    actions.set_sensitive(true);
+                }
+                WizardCalibrationPublication::GalleryApply { .. } => {
+                    eprintln!("toniator-app: wizard gallery apply calibration: {error}");
+                }
+                WizardCalibrationPublication::DraftApply => {}
+            }
+            resume_wizard_after_calibration(state, epoch);
+            if !is_pattern_save
+                && let Some(surface) = state
+                    .borrow()
+                    .pattern_wizard
+                    .as_ref()
+                    .filter(|surface| surface.epoch == epoch)
+            {
+                surface.status.set_label(&error);
+            }
+            return;
+        }
+    };
+    match task.publication {
+        WizardCalibrationPublication::DraftApply => {
+            let attach = {
+                let mut app = state.borrow_mut();
+                let Some(surface) = app
+                    .pattern_wizard
+                    .as_mut()
+                    .filter(|surface| surface.epoch == epoch)
+                else {
+                    return;
+                };
+                let mut draft = surface.draft.borrow_mut();
+                if draft.document() != &task.candidate_document
+                    || draft.revision() != task.candidate_revision
+                {
+                    Err("The Pattern draft changed before calibration finished.".to_owned())
+                } else {
+                    attach_calibrations_to_history(&mut draft, artifacts)
+                }
+            };
+            if let Some(surface) = state
+                .borrow_mut()
+                .pattern_wizard
+                .as_mut()
+                .filter(|surface| surface.epoch == epoch)
+            {
+                surface.status.set_label(match &attach {
+                    Ok(()) => "Pattern calibration ready. Applying the private draft…",
+                    Err(error) => error,
+                });
+            }
+            if attach.is_ok() {
+                resume_wizard_after_calibration(state, epoch);
+                apply_pattern_wizard(state, epoch);
+            } else {
+                resume_wizard_after_calibration(state, epoch);
+            }
+        }
+        WizardCalibrationPublication::GalleryApply {
+            target,
+            candidate_id,
+            captured_document,
+            mut draft,
+        } => {
+            let attach = if draft.document() == &task.candidate_document
+                && draft.revision() == task.candidate_revision
+            {
+                attach_calibrations_to_history(&mut draft, artifacts)
+            } else {
+                Err("The selected Pattern candidate changed before calibration finished.".to_owned())
+            };
+            let publication = attach.and_then(|()| {
+                let mut app = state.borrow_mut();
+                let workspace = app
+                    .workspace
+                    .as_mut()
+                    .ok_or_else(|| "The workspace is no longer open.".to_owned())?;
+                workspace.history.squash_draft(&draft).map_err(|error| error.to_string())
+            });
+            match publication {
+                Ok(_) => {
+                    let mut app = state.borrow_mut();
+                    let applied_document = app.workspace.as_ref().map(|workspace| workspace.document().clone());
+                    let scatter_memory = app
+                        .pattern_wizard
+                        .as_mut()
+                        .filter(|surface| surface.epoch == epoch)
+                        .map(|surface| {
+                            if let Some(document) = applied_document.as_ref() {
+                                surface.scatter_memory.observe(document, target);
+                            }
+                            surface.scatter_memory.clone()
+                        });
+                    if let Some(scatter_memory) = scatter_memory {
+                        app.scatter_memory = scatter_memory;
+                    }
+                    set_preview_pending(&mut app);
+                    set_inspector_status(&mut app, "Pattern applied directly as one undoable change.");
+                    sync_ui(&mut app);
+                    drop(app);
+                    let _ = candidate_id;
+                    let _ = captured_document;
+                    close_pattern_wizard(state, epoch);
+                    rebuild_inspector(state);
+                    schedule_main_preview_submission(state);
+                }
+                Err(error) => {
+                    if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+                        surface.status.set_label(&format!("Couldn’t apply the selected Pattern: {error}"));
+                    }
+                    resume_wizard_after_calibration(state, epoch);
+                }
+            }
+        }
+        WizardCalibrationPublication::PatternSave {
+            mut draft,
+            action,
+            name,
+            dialog,
+            status,
+            actions,
+        } => {
+            let channel_id = draft.calibration_channel;
+            let artifact = channel_id
+                .and_then(|channel| {
+                    artifacts
+                        .active.into_iter()
+                        .find(|entry| entry.channel_id == channel)
+                        .map(|entry| entry.artifact)
+                        .or_else(|| draft.calibration_document.saved_calibration_for(channel).ok().flatten().cloned())
+                });
+            let Some(artifact) = artifact else {
+                status.set_label("Pattern calibration did not produce a reusable measurement.");
+                actions.set_sensitive(true);
+                resume_wizard_after_calibration(state, epoch);
+                return;
+            };
+            draft.saved_calibration = Some(artifact);
+            actions.set_sensitive(true);
+            resume_wizard_after_calibration(state, epoch);
+            save_wizard_pattern(state, *draft, action, &name, &dialog, &status, &actions);
+        }
     }
 }
 
@@ -26370,7 +28968,8 @@ fn handle_preview_progress(
         .set_tooltip_text(Some(&format!("Rendering preview: {stage}")));
 }
 
-/// Accepts a scheduler completion only for its still-current workspace token.
+/// Accepts a scheduler completion only for its still-current workspace token and prepares its
+/// transparent canonical raster for the document model's viewer-only linear-light backdrop.
 fn handle_preview_completion(
     state: &Rc<RefCell<AppState>>,
     completion: toniator_engine::EvaluationCompletion,
@@ -26486,7 +29085,7 @@ fn handle_draft_media_preview_completion(
         Ok(prepared) => match draft.scheduler.submit(prepared.request) {
             Ok(ticket) => {
                 draft.preview_submission = Some(ticket.value());
-                surface.status.set_label("Updating preview…");
+                surface.status.set_label("Updating structure preview…");
                 surface.preview_spinner.set_visible(true);
                 surface.preview_spinner.start();
             }
@@ -26510,7 +29109,8 @@ fn handle_draft_media_preview_completion(
     }
 }
 
-/// Installs a private draft result only after its private ticket and token pass.
+/// Installs a private draft result only after its private ticket and token pass, then presents the
+/// canonical raster against the draft document's model-specific viewer backdrop.
 fn handle_draft_preview_completion(
     state: &Rc<RefCell<AppState>>,
     epoch: u64,
@@ -26539,8 +29139,11 @@ fn handle_draft_preview_completion(
         Ok(true) => match completion.result() {
             Some(result) => match texture_from_surface(result.raster()) {
                 Ok(texture) => {
+                    update_preview_picture_backdrop(&surface.picture, draft.history.document());
                     surface.picture.set_paintable(Some(&texture));
-                    surface.status.set_label("Pattern preview updated.");
+                    surface.status.set_label(
+                        "Structure preview updated · calibrated response and Uniform thinning update on Apply.",
+                    );
                     drop(draft);
                     drop(app_state);
                     emit_draft_automation_state(
@@ -26553,15 +29156,39 @@ fn handle_draft_preview_completion(
                     .status
                     .set_label("Couldn’t render this pattern. Your last preview is still shown."),
             },
-            None => surface
-                .status
-                .set_label("Couldn’t render this pattern. Your last preview is still shown."),
+            None => {
+                if let Some(error) = completion.error() {
+                    eprintln!("toniator-app: Pattern Editor preview: {error}");
+                }
+                surface
+                    .status
+                    .set_label("Couldn’t render this pattern. Your last preview is still shown.");
+            }
         },
         Ok(false) => {}
-        Err(_) => surface
-            .status
-            .set_label("Couldn’t render this pattern. Your last preview is still shown."),
+        Err(error) => {
+            eprintln!("toniator-app: Pattern Editor preview: {error}");
+            surface
+                .status
+                .set_label("Couldn’t render this pattern. Your last preview is still shown.");
+        }
     }
+}
+
+/// Applies one private preview Picture's model-specific viewer background without changing pixels.
+///
+/// The draft document selects RGB black, CMYK white, or Source color + alpha gray presentation;
+/// evaluation and the native RGBA result remain untouched.
+fn update_preview_picture_backdrop(picture: &gtk::Picture, document: &Document) {
+    picture.add_css_class("toniator-viewer");
+    for model in PreviewModel::ALL {
+        picture.remove_css_class(model.css_class());
+    }
+    let model = document
+        .channel_model()
+        .map(PreviewModel::from_domain)
+        .unwrap_or(PreviewModel::Rgb);
+    picture.add_css_class(model.css_class());
 }
 
 /// Projects current Advanced Settings progress into its modal status and preview tooltip.
@@ -26599,7 +29226,8 @@ fn handle_advanced_preview_progress(
 /// Installs one newest Advanced Settings result after modal-epoch, ticket, and document checks.
 ///
 /// A failed private evaluation preserves the last private texture and remains confined to the
-/// modal. Main preview, main history, and source bytes are never changed by this handler.
+/// modal. Main preview, main history, and source bytes are never changed by this handler; its
+/// successful result changes only the viewer texture's model-aware alpha presentation.
 fn handle_advanced_preview_completion(
     state: &Rc<RefCell<AppState>>,
     epoch: u64,
@@ -26625,6 +29253,10 @@ fn handle_advanced_preview_completion(
         Ok(true) => match completion.result() {
             Some(result) => match texture_from_surface(result.raster()) {
                 Ok(texture) => {
+                    update_preview_picture_backdrop(
+                        &surface.picture,
+                        surface.draft.borrow().document(),
+                    );
                     surface.picture.set_paintable(Some(&texture));
                     surface
                         .picture
@@ -26912,7 +29544,7 @@ fn should_apply_model_change(
     !syncing_model && current_model != selected_model && !loading && has_source_presentation
 }
 
-/// Replaces color roles as one history command, inheriting only the document's base pattern.
+/// Replaces color roles as one history command, inheriting the document Pattern and last-ALL Appearance baseline.
 /// Existing channel overrides/deltas never seed the new model; selecting the current model is a no-op.
 ///
 /// # Errors
@@ -26929,7 +29561,10 @@ fn replace_model_topology(
         return Ok(());
     }
     let topology = document
-        .canonical_channel_topology(model.domain(), ChannelTopologyTemplate::document_base())
+        .canonical_channel_topology_with_appearance_baseline(
+            model.domain(),
+            ChannelTopologyTemplate::document_base(),
+        )
         .map_err(|error| error.to_string())?;
     history
         .apply(&DocumentCommand::ReplaceChannelTopology {
@@ -26987,10 +29622,12 @@ fn submit_current_source(
     Ok(())
 }
 
-/// Accepts a decoded endpoint only while its workspace, revision, frame and request epoch match.
+/// Accepts a decoded endpoint only while its workspace, revision, frame and request epoch match,
+/// then creates a viewer-only source comparison texture using the current document model.
 ///
 /// Matching source pixels accompany the same immutable evaluator input; stale events never
-/// replace the comparison image or submit a scheduler request. History remains untouched.
+/// replace the comparison image or submit a scheduler request. History remains untouched and
+/// SourceColorAlpha source bytes remain transparent over the gray viewer backdrop.
 fn handle_media_preview_completion(
     state: &Rc<RefCell<AppState>>,
     completion: temporal_preview::Completion,
@@ -27011,12 +29648,20 @@ fn handle_media_preview_completion(
     }
     state.media_preview_key = None;
     let result = completion.result.and_then(|prepared| {
+        let model = state
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.document().channel_model())
+            .map(PreviewModel::from_domain)
+            .unwrap_or(PreviewModel::Rgb);
         let display = prepared.source;
+        let mut rgba = display.rgba;
+        preview_backdrop::composite_rgba_in_place(&mut rgba, model)?;
         let texture = gtk::gdk::MemoryTexture::new(
             display.width as i32,
             display.height as i32,
             gtk::gdk::MemoryFormat::R8g8b8a8,
-            &glib::Bytes::from_owned(display.rgba),
+            &glib::Bytes::from_owned(rgba),
             display.width as usize * 4,
         );
         let ticket = state
@@ -27132,7 +29777,8 @@ fn emit_draft_automation_state(state: &mut AppState, event: &str, ticket: Option
 /// Resolves the visible scrolled page and GTK's actual Picture origin into checked raster intent.
 /// Scroll translation and contain centering are presentation facts, never document authority.
 fn main_viewport_target(state: &AppState) -> Option<toniator_engine::PreviewRasterTarget> {
-    let canvas = state.workspace.as_ref()?.document().canvas();
+    let document=state.workspace.as_ref()?.document();
+    let canvas = document.canvas();
     let scroll = &state.viewport_scroll;
     let page = (
         scroll.hadjustment().page_size(),
@@ -27151,7 +29797,7 @@ fn main_viewport_target(state: &AppState) -> Option<toniator_engine::PreviewRast
         (f64::from(origin.x()), f64::from(origin.y())),
         scroll.scale_factor(),
         state.view_state.is_fit(),
-    )
+    ).map(|target|target.with_background(preview_backdrop::raster_background_for_document(document)))
 }
 
 /// Keys last-full fallback pixels by workspace, document revision, and exact temporal frame.
@@ -27406,6 +30052,13 @@ fn sync_ui(state: &mut AppState) {
     state.selector.set_sensitive(policy.selector_enabled);
     state.actions.undo.set_enabled(policy.undo_enabled);
     state.actions.redo.set_enabled(policy.redo_enabled);
+    let calibration_pending = state.pending_inspector_calibration.is_some();
+    state
+        .cancel_pattern_calibration
+        .set_visible(calibration_pending);
+    state
+        .cancel_pattern_calibration
+        .set_sensitive(calibration_pending);
     let startup_visible = state.workspace.is_none();
     if !startup_visible && let Some(window) = state.startup_window.take() {
         window.set_child(gtk::Widget::NONE);
@@ -27952,9 +30605,18 @@ mod tests {
     fn save_pattern_record_is_separate_from_document_apply() {
         let workspace = direct_png_workspace();
         let before = workspace.history.document().clone();
+        let calibration_channel = authoritative_channel_ids(&before).into_iter().next();
         let draft = PatternSaveDraft {
             epoch: 7,
             recipe: PatternDefinitionRecipe::starter_for_family(PatternRecipeFamilyKind::Guides),
+            calibration_document: before.clone(),
+            calibration_channel,
+            saved_calibration: calibration_channel
+                .and_then(|channel| before.saved_calibration_for(channel).ok().flatten().cloned()),
+            workspace_generation: 0,
+            base_document: before.clone(),
+            base_revision: workspace.history.revision(),
+            candidate_revision: workspace.history.revision(),
             candidate: None,
             origin: None,
             current_name: None,
@@ -28665,6 +31327,90 @@ mod tests {
         assert_eq!(draft.revision(), draft_revision);
     }
 
+    /// Publishes one changed binding plus its companion as one guarded Workspace undo entry.
+    ///
+    /// A private shape-orientation edit and the accepted synthetic measurement are attached before
+    /// the main squash. One Undo restores the exact original document and removes the measurement.
+    ///
+    /// # Panics
+    /// Panics if the current candidate is rejected, published more than once, or cannot undo back
+    /// to its exact root without retaining a calibration companion.
+    #[test]
+    fn pattern_editor_calibration_publication_is_one_undo_with_companion() {
+        let mut main = private_draft_main_history();
+        let base_document = main.document().clone();
+        let base_revision = main.revision();
+        let channel_id = authoritative_channel_ids(&base_document)[0];
+        let mut draft = DocumentHistory::new_draft(&main);
+        let command = base_document
+            .set_channel_shape_rotation_for_effective(channel_id, 37.0)
+            .expect("shape orientation changes the structural binding");
+        draft
+            .apply(&command)
+            .expect("private structural edit applies");
+        let candidate_document = draft.document().clone();
+        let candidate_revision = draft.revision();
+        let artifact = toniator_domain::SavedCalibration::new(
+            CalibrationBinding::for_channel(&candidate_document, channel_id)
+                .expect("candidate structural binding reconstructs"),
+            vec![
+                toniator_domain::CalibrationKnot {
+                    input: 0.0,
+                    coverage: 0.0,
+                },
+                toniator_domain::CalibrationKnot {
+                    input: 2.0,
+                    coverage: 0.5,
+                },
+            ],
+            None,
+        )
+        .expect("synthetic companion validates");
+        let task = PatternEditorCalibrationTask {
+            id: calibration_preparation::TaskId(9),
+            workspace_generation: 8,
+            base_document: base_document.clone(),
+            base_revision,
+            editor_epoch: 12,
+            candidate_document: candidate_document.clone(),
+            candidate_revision,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+
+        let summary = publish_pattern_editor_calibration_result(
+            &mut main,
+            &mut draft,
+            &task,
+            8,
+            12,
+            Ok(calibration_preparation::PreparedCalibrations { active: vec![toniator_domain::AttachedCalibration {
+                channel_id,
+                artifact,
+            }], baseline: None }),
+        )
+        .expect("matching worker result publishes one private candidate");
+        assert!(!summary.unchanged);
+        assert_eq!(main.revision().0, base_revision.0 + 1);
+        assert!(main.can_undo());
+        assert!(
+            main.document()
+                .saved_calibration_for(channel_id)
+                .unwrap()
+                .is_some()
+        );
+        let applied = main.document().clone();
+        main.undo()
+            .expect("one undo removes candidate and companion together");
+        assert_eq!(main.document(), &base_document);
+        assert_ne!(main.document(), &applied);
+        assert_eq!(
+            main.document().saved_calibrations(),
+            base_document.saved_calibrations(),
+            "Undo restores the previous calibration set exactly",
+        );
+        assert!(!main.can_undo());
+    }
+
     /// Proves Cancel/drop discards a dirty private draft without touching app-owned main authority.
     #[test]
     fn pattern_editor_cancel_boundary_discards_dirty_draft_without_main_mutation() {
@@ -28685,6 +31431,50 @@ mod tests {
         assert_eq!(main.document(), &main_document);
         assert_eq!(main.revision(), main_revision);
         assert_eq!(main.can_undo(), main_can_undo);
+    }
+
+    /// Rejects a completed inspector worker after cancellation without publishing its structural draft.
+    ///
+    /// # Panics
+    /// Panics if a canceled private candidate changes the Workspace document, revision, or undo state.
+    #[test]
+    fn canceled_inspector_calibration_result_cannot_publish_private_candidate() {
+        let mut main = private_draft_main_history();
+        let base_document = main.document().clone();
+        let base_revision = main.revision();
+        let channel_id = authoritative_channel_ids(&base_document)[0];
+        let command = base_document
+            .set_channel_shape_rotation_for_effective(channel_id, 37.0)
+            .expect("shape rotation changes the structural binding");
+        let mut draft = DocumentHistory::new_draft(&main);
+        draft
+            .apply(&command)
+            .expect("private shape rotation applies");
+        let candidate_document = draft.document().clone();
+        let candidate_revision = draft.revision();
+        assert_ne!(candidate_document, base_document);
+
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let mut pending = PendingInspectorCalibration {
+            id: calibration_preparation::TaskId(1),
+            workspace_generation: 8,
+            base_document: base_document.clone(),
+            base_revision,
+            draft,
+            candidate_document,
+            candidate_revision,
+            descriptor: None,
+            focus: None,
+            cancelled,
+        };
+        let result =
+            publish_inspector_calibration_result(&mut main, &mut pending, 8,
+                Ok(calibration_preparation::PreparedCalibrations { active: Vec::new(), baseline: None }));
+
+        assert_eq!(result, Err("Pattern calibration was cancelled.".to_owned()));
+        assert_eq!(main.document(), &base_document);
+        assert_eq!(main.revision(), base_revision);
+        assert!(!main.can_undo());
     }
 
     /// Proves one nested authored-path child draft isolates Undo/Redo and squashes once to its wizard parent.
@@ -31003,10 +33793,10 @@ mod tests {
         );
     }
 
-    /// Projects artist-facing area and weighting vocabulary without changing domain applicability.
+    /// Projects shared coverage labels/help and visible output groups without changing domain applicability.
     ///
     /// # Panics
-    /// Panics when labels or help lose their distinction between sampling and pattern weighting.
+    /// Panics when coverage terminology, output-kind groups, or sampling and weighting distinctions drift.
     #[test]
     fn stage21a_advanced_region_labels_choices_and_help_are_artist_facing() {
         assert_eq!(
@@ -31015,15 +33805,52 @@ mod tests {
         );
         assert_eq!(
             inspector_field_label(PropertyFieldId::RegionSampling),
-            "Artwork sampling"
+            "Region sampling"
         );
         assert_eq!(
             inspector_field_label(PropertyFieldId::RegionMinimumFill),
-            "Minimum region fill"
+            "Minimum coverage"
         );
         assert_eq!(
             inspector_field_label(PropertyFieldId::RegionMaximumFill),
-            "Region coverage"
+            "Maximum coverage"
+        );
+        for (field, expected) in [
+            (PropertyFieldId::MarkMinimumFill, "Minimum coverage"),
+            (
+                PropertyFieldId::ConnectedMinimumThickness,
+                "Minimum coverage",
+            ),
+            (PropertyFieldId::RegionMinimumFill, "Minimum coverage"),
+            (PropertyFieldId::MarkMaximumFill, "Maximum coverage"),
+            (
+                PropertyFieldId::ConnectedMaximumThickness,
+                "Maximum coverage",
+            ),
+            (PropertyFieldId::RegionMaximumFill, "Maximum coverage"),
+        ] {
+            assert_eq!(inspector_field_label(field), expected);
+            let guidance = inspector_field_guidance(field);
+            assert!(guidance.contains("geometric coverage"));
+            assert!(guidance.contains("automatically measures and saves"));
+            assert!(guidance.contains("saturates at the nearest reachable value"));
+            assert!(guidance.contains("paint Alpha and channel Opacity"));
+        }
+        assert_eq!(
+            inspector_field_label(PropertyFieldId::MarkSizeScale),
+            "Uniform mark size scale"
+        );
+        assert_eq!(
+            advanced_output_group_name(AdvancedOutputStructuralKind::Marks),
+            "Marks"
+        );
+        assert_eq!(
+            advanced_output_group_name(AdvancedOutputStructuralKind::ConnectionPaths),
+            "Lines"
+        );
+        assert_eq!(
+            advanced_output_group_name(AdvancedOutputStructuralKind::Regions),
+            "Regions"
         );
         assert_eq!(
             inspector_field_label(PropertyFieldId::ArtworkWeightMappingComponent),
@@ -31054,15 +33881,9 @@ mod tests {
             "Area average"
         );
         assert!(
-            advanced_descriptor_description(PropertyFieldId::ArtworkWeightMappingComponent)
-                .expect("site weighting has visible helper text")
-                .contains("independently of Fill response source")
+            !advanced_field_help(PropertyFieldId::ArtworkWeightMappingComponent, None).is_empty()
         );
-        assert!(
-            advanced_descriptor_description(PropertyFieldId::RegionSampling)
-                .expect("region sampling has visible helper text")
-                .contains("full value only at 50% or greater coverage")
-        );
+        assert!(!advanced_field_help(PropertyFieldId::RegionSampling, None).is_empty());
     }
 
     /// Verifies Advanced Settings edits remain private through cancel and publish as exactly one
@@ -31383,13 +34204,11 @@ mod tests {
         );
     }
 
-    /// Preserves preview-page and persistent-help metadata without creating GTK widgets.
+    /// Preserves shared output-response guidance and preview-page state without creating GTK widgets.
     ///
-    /// This test fixes the bounded Pattern Editor disclosure contract and the
-    /// connected minimum-thickness helper source. Widget construction renders
-    /// any returned helper as an exposed label; fields with no text retain the
-    /// ordinary compact row. The test has no document, history, preview, error,
-    /// or panic side effects beyond its assertions.
+    /// Domain bounds remain descriptor-derived and inline response controls retain their existing
+    /// inspector hierarchy. The test has no document, history, preview, or panic side effects
+    /// beyond its assertions.
     #[test]
     fn inspector_disclosure_metadata_and_preview_pages_preserve_accepted_content() {
         assert!(is_pattern_editor_advanced_safety_descriptor(
@@ -31409,16 +34228,13 @@ mod tests {
         assert_eq!(page_while_preview_pending(false), Page::Success);
         assert_eq!(page_after_preview_error(true), Page::Success);
         assert_eq!(page_after_preview_error(false), Page::Error);
+        assert!(!inspector_field_guidance(PropertyFieldId::ConnectedMinimumThickness).is_empty());
+        assert!(!inspector_field_guidance(PropertyFieldId::CurveResponseBias).is_empty());
         assert_eq!(
-            advanced_descriptor_description(PropertyFieldId::ConnectedMinimumThickness),
-            Some(
-                "Lower bound of source-driven stroke width; setting it to zero only removes strokes where sampled ink is zero."
-            )
+            inspector_field_label(PropertyFieldId::CurveResponseBias),
+            "Stroke alignment"
         );
-        assert_eq!(
-            advanced_descriptor_description(PropertyFieldId::ConnectedMaximumThickness),
-            None
-        );
+        assert!(!inspector_field_guidance(PropertyFieldId::CurveResponseBias).contains("response"));
     }
 
     /// Keeps queued work artist-visible and preserves stable evaluator diagnostics on failure.
@@ -31572,6 +34388,139 @@ mod tests {
             }
         }
         assert_eq!(workspace.history.revision().0, 0);
+    }
+
+    /// Reuses an exact gallery companion and skips a stale CoverCanvas measurement for fitting.
+    ///
+    /// The strict catalog API continues to reject a 1024-recipe companion on a 900×620 receiver;
+    /// app candidate materialization omits that artifact, then exposes its changed binding for
+    /// preparation. Matching companions remain attached and require no preparation.
+    ///
+    /// # Panics
+    /// Panics if private candidate materialization forwards an incompatible measurement, loses a
+    /// compatible one, or fails to identify the concrete changed binding.
+    #[test]
+    fn wizard_candidate_materialization_reuses_exact_and_skips_mismatched_companions() {
+        let make_companion = |recipe: &PatternDefinitionRecipe| {
+            toniator_domain::SavedCalibration::new(
+                CalibrationBinding::new(recipe.clone(), 1.0, 0.0)
+                    .expect("synthetic recipe binding validates"),
+                vec![
+                    toniator_domain::CalibrationKnot {
+                        input: 0.0,
+                        coverage: 0.0,
+                    },
+                    toniator_domain::CalibrationKnot {
+                        input: 2.0,
+                        coverage: 0.5,
+                    },
+                ],
+                None,
+            )
+            .expect("synthetic finite measurement validates")
+        };
+        let canvas = CanvasSpec {
+            width: 900.0,
+            height: 620.0,
+        };
+        let base = Document::new_default_document(canvas, SourceReference::Unassigned)
+            .expect("synthetic receiver document validates");
+
+        let mut exact_record = PresetRegistry::bundled()
+            .find("one-guide-lines")
+            .expect("exact companion recipe exists")
+            .clone();
+        exact_record.saved_calibration = Some(make_companion(&exact_record.recipe));
+        let exact_registry =
+            PresetRegistry::new(3, vec![exact_record]).expect("exact synthetic registry validates");
+        let exact_catalog = LayeredPresetCatalog::new(&exact_registry, Vec::new())
+            .expect("exact synthetic catalog validates");
+        let mut exact_history = DocumentHistory::new(
+            DocumentSession::new(base.clone()).expect("exact synthetic session validates"),
+        );
+        apply_catalog_pattern_candidate(
+            &mut exact_history,
+            &exact_catalog,
+            InspectorTarget::DocumentAll,
+            "one-guide-lines",
+        )
+        .expect("matching companion applies atomically");
+        let exact_channels = authoritative_channel_ids(exact_history.document());
+        assert!(exact_channels.iter().all(|channel_id| {
+            exact_history
+                .document()
+                .saved_calibration_for(*channel_id)
+                .expect("matching binding is valid")
+                .is_some()
+        }));
+        assert!(
+            calibration_preparation::representatives_to_prepare(
+                exact_history.document(),
+                &exact_channels,
+                false,
+            )
+            .expect("exact companion bindings reconstruct")
+            .is_empty()
+        );
+
+        let mut cover_record = PresetRegistry::bundled()
+            .find("round-spiral-line")
+            .expect("CoverCanvas recipe exists")
+            .clone();
+        let generic_companion = make_companion(&cover_record.recipe);
+        cover_record.saved_calibration = Some(generic_companion.clone());
+        let cover_registry = PresetRegistry::new(3, vec![cover_record])
+            .expect("synthetic CoverCanvas registry validates");
+        let cover_catalog = LayeredPresetCatalog::new(&cover_registry, Vec::new())
+            .expect("synthetic CoverCanvas catalog validates");
+        let mut strict_history = DocumentHistory::new(
+            DocumentSession::new(base.clone()).expect("strict synthetic session validates"),
+        );
+        assert!(
+            cover_catalog
+                .apply_to_document_base(&mut strict_history, "round-spiral-line")
+                .is_err()
+        );
+        assert_eq!(strict_history.document(), &base);
+
+        let mut cover_history = DocumentHistory::new(
+            DocumentSession::new(base.clone()).expect("private synthetic session validates"),
+        );
+        apply_catalog_pattern_candidate(
+            &mut cover_history,
+            &cover_catalog,
+            InspectorTarget::DocumentAll,
+            "round-spiral-line",
+        )
+        .expect("app candidate materialization omits the incompatible companion");
+        let channels = authoritative_channel_ids(cover_history.document());
+        assert!(channels.iter().all(|channel_id| {
+            cover_history
+                .document()
+                .saved_calibration_for(*channel_id)
+                .expect("candidate channel binding is valid")
+                .is_none()
+        }));
+        assert_ne!(
+            CalibrationBinding::for_channel(cover_history.document(), channels[0])
+                .expect("concrete CoverCanvas binding reconstructs"),
+            *generic_companion.binding(),
+        );
+        let changed = calibration_preparation::changed_channels(&base, cover_history.document())
+            .expect("changed bindings reconstruct");
+        let representatives = calibration_preparation::representatives_to_prepare(
+            cover_history.document(),
+            &changed,
+            false,
+        )
+        .expect("missing CoverCanvas companion is selectable for preparation");
+        assert!(!changed.is_empty());
+        assert_eq!(
+            representatives.len(),
+            1,
+            "equivalent bindings share one fit"
+        );
+        assert!(changed.contains(&representatives[0]));
     }
 
     /// Crosses every channel model with private ALL and named wizard materialization safely.
@@ -31908,23 +34857,91 @@ mod tests {
         );
     }
 
-    /// Proves direct preset Apply follows visible Presets state rather than retained route history.
+    /// Proves only a visible built-in gallery candidate receives direct Apply admission.
     ///
     /// # Panics
     ///
-    /// Panics when a selected catalog record cannot use visible Presets Apply after a retained
-    /// route, or Current Pattern accidentally acquires direct-Apply admission.
+    /// Panics when a personal Pattern, absent candidate, or hidden gallery receives direct Apply.
     #[test]
-    fn stage21b_visible_presets_direct_apply_admission_ignores_retained_route() {
-        assert!(wizard_direct_preset_apply_admission(
+    fn stage21b_visible_builtin_gallery_apply_excludes_personal_patterns() {
+        assert!(wizard_direct_builtin_apply_admission(
             true,
-            Some("curve-motif-rows")
+            Some("curve-motif-rows"),
+            true,
         ));
-        assert!(!wizard_direct_preset_apply_admission(true, None));
-        assert!(!wizard_direct_preset_apply_admission(
+        assert!(!wizard_direct_builtin_apply_admission(true, None, true));
+        assert!(!wizard_direct_builtin_apply_admission(
             false,
-            Some("curve-motif-rows")
+            Some("curve-motif-rows"),
+            true,
         ));
+        assert!(!wizard_direct_builtin_apply_admission(
+            true,
+            Some("custom-pattern"),
+            false,
+        ));
+    }
+
+    /// Proves gallery action ownership survives stale route history and preview refreshes.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a visible gallery is projected as a route or Review action, or a hidden gallery
+    /// fails to use its current route or the established empty-route fallback.
+    #[test]
+    fn stage21b_gallery_action_projection_wins_over_route_history() {
+        let route = [
+            WizardRoutePage::PatternFamily,
+            WizardRoutePage::GuideLayout,
+            WizardRoutePage::Review,
+        ];
+
+        assert_eq!(
+            wizard_action_refresh_page(true, &route, 2),
+            WizardNavigationPage::Gallery
+        );
+        assert_eq!(
+            wizard_action_refresh_page(true, &[], 0),
+            WizardNavigationPage::Gallery
+        );
+        assert_eq!(
+            wizard_action_refresh_page(false, &route, 1),
+            WizardNavigationPage::Route(WizardRoutePage::GuideLayout)
+        );
+        assert_eq!(
+            wizard_action_refresh_page(false, &route, usize::MAX),
+            WizardNavigationPage::Route(WizardRoutePage::Review)
+        );
+        assert_eq!(
+            wizard_action_refresh_page(false, &[], 0),
+            WizardNavigationPage::Review
+        );
+    }
+
+    /// Proves gallery disclosure uses the captured target's real channels in document order.
+    ///
+    /// # Panics
+    ///
+    /// Panics when ALL omits or reorders an authoritative channel name, or a named target discloses
+    /// channels other than the selected channel.
+    #[test]
+    fn stage21b_gallery_apply_discloses_captured_affected_channels() {
+        let workspace = direct_png_workspace();
+        let document = workspace.document();
+        let ids = authoritative_channel_ids(document);
+        let names = ids
+            .iter()
+            .map(|channel| channel_display_name(document, *channel))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            wizard_gallery_channel_disclosure(document, InspectorTarget::DocumentAll),
+            format!("Affected channels: {}.", names.join(", "))
+        );
+        let selected = *ids.first().expect("current PNG workspace has a channel");
+        assert_eq!(
+            wizard_gallery_channel_disclosure(document, InspectorTarget::Channel(selected)),
+            format!("Affected channel: {} only.", names[0])
+        );
     }
 
     /// Proves every authoritative field and every currently projected enum choice has product vocabulary.
@@ -32024,6 +35041,32 @@ mod tests {
             "clustered-dispersion-random-links",
             None
         ));
+    }
+
+    /// Proves an explicit gallery candidate keeps its marker after returning from Create new.
+    ///
+    /// # Panics
+    ///
+    /// Panics when Create new clears a selected candidate marker or a no-candidate state marks the
+    /// wrong card.
+    #[test]
+    fn stage21b_gallery_candidate_marker_overrides_create_new_state() {
+        assert_eq!(
+            wizard_gallery_card_selection(true, None),
+            WizardGalleryCardSelection::NewPattern
+        );
+        assert_eq!(
+            wizard_gallery_card_selection(true, Some("one-guide-lines")),
+            WizardGalleryCardSelection::Candidate("one-guide-lines")
+        );
+        assert_eq!(
+            wizard_gallery_card_selection(false, None),
+            WizardGalleryCardSelection::CurrentPattern
+        );
+        assert_eq!(
+            wizard_gallery_card_selection(false, Some("one-guide-lines")),
+            WizardGalleryCardSelection::Candidate("one-guide-lines")
+        );
     }
 
     /// Proves stale delayed dropdown work cannot survive a newer choice or card navigation.
@@ -34743,6 +37786,456 @@ mod tests {
         );
     }
 
+    /// Neutralizes source-weighted Mark size and density intent for either authored fixed size.
+    ///
+    /// Both immutable project sources feed the disposable Wizard preview. The test covers ALL and
+    /// named scopes, checks initialized End authority and authored documents remain unchanged, and
+    /// compares rendered pixels across differing Advanced ranges, modes, and scales.
+    ///
+    /// # Panics
+    /// Panics when weighted Mark placement loses its neutral size, scope, source immutability, or
+    /// initialized temporal authority while either source is evaluated.
+    #[test]
+    fn stage21b_wizard_preview_neutralizes_weighted_mark_response_without_mutating_artwork() {
+        register_resources();
+        for (input, format) in [
+            ("raster-sample.png", SourceFormatHint::Png),
+            ("vector-sample.svg", SourceFormatHint::Svg),
+        ] {
+            let workspace = Workspace::from_direct(
+                Arc::from(fs::read(asset(input)).unwrap_or_else(|error| {
+                    panic!("{input} immutable project source reads: {error}")
+                })),
+                format,
+                input.to_owned(),
+            )
+            .unwrap_or_else(|error| panic!("{input} workspace loads: {error}"));
+            let channel = authoritative_channel_ids(workspace.document())[0];
+            let WizardPreviewSource::Ready { source } = prepare_wizard_preview_source(
+                &workspace.sources,
+                workspace.source_presentation.as_ref(),
+            ) else {
+                panic!("{input} has the bundled neutral Wizard source")
+            };
+            let mut previous_definition = None;
+            let mut previous_pixels = None;
+            for authored_size in [0.35, 1.65] {
+                let mut recipe = PatternDefinitionRecipe::starter_for_family(
+                    PatternRecipeFamilyKind::Dispersion,
+                );
+                let PatternStructureRecipe::RandomSites {
+                    density_modulation, ..
+                } = &mut recipe.structure
+                else {
+                    panic!("the dispersion starter uses random sites")
+                };
+                *density_modulation = SiteDensityModulation::ArtworkWeighted;
+                let recipe = recipe
+                    .with_output_kind(0, PatternRecipeOutputKind::Marks)
+                    .expect("weighted dispersion supports marks");
+                let mut draft = DocumentHistory::new_draft(&workspace.history);
+                apply_wizard_recipe(&mut draft, InspectorTarget::DocumentAll, recipe)
+                    .expect("weighted mark Pattern materializes privately");
+                let base = draft.document().response_settings().clone();
+                let mut settings = base.clone();
+                settings.marks.minimum_fill = authored_size;
+                settings.marks.maximum_fill = authored_size;
+                settings.mark_density_mode = MarkDensityMode::Variable;
+                settings.mark_size_scale = 1.75;
+                draft
+                    .apply(&DocumentCommand::SetAllResponseSettings { base, settings })
+                    .expect("fixed mark size remains valid response authority");
+                for edit in [
+                    toniator_domain::ModeledMappingFieldEdit::Gamma(2.4),
+                    toniator_domain::ModeledMappingFieldEdit::Cutoff(0.25),
+                ] {
+                    draft
+                        .apply(&DocumentCommand::SetModeledMappingField {
+                            channel_id: channel,
+                            edit,
+                        })
+                        .expect("nondefault Fill mask mapping applies to the draft");
+                }
+                for edit in [
+                    toniator_domain::SourceWeightingFieldEdit::Gamma(1.8),
+                    toniator_domain::SourceWeightingFieldEdit::Cutoff(0.15),
+                    toniator_domain::SourceWeightingFieldEdit::Strength(0.7),
+                ] {
+                    draft
+                        .apply(&DocumentCommand::SetSourceWeightingField {
+                            channel_id: channel,
+                            edit,
+                        })
+                        .expect("nondefault Source weighting response applies to the draft");
+                }
+                draft
+                    .apply_temporal(&draft.document().initialize_end_command().unwrap())
+                    .expect("End authority initializes for the fixed response document");
+                let authored = draft.document().clone();
+                assert!(
+                    wizard_weighted_mark_preview_guidance(&authored, InspectorTarget::DocumentAll)
+                        .is_some()
+                );
+                assert!(
+                    wizard_weighted_mark_preview_guidance(
+                        &authored,
+                        InspectorTarget::Channel(channel)
+                    )
+                    .is_some()
+                );
+
+                for target in [
+                    InspectorTarget::DocumentAll,
+                    InspectorTarget::Channel(channel),
+                ] {
+                    let preview = wizard_preview_document(&authored, target)
+                        .unwrap_or_else(|error| panic!("{input} {target:?} preview: {error}"));
+                    let effective = preview
+                        .effective_channel_pattern(channel)
+                        .expect("preview retains the selected weighted channel");
+                    let PatternGeometryResponse::Marks(response) =
+                        &effective.output_settings[0].response
+                    else {
+                        panic!("weighted preview retains its mark output")
+                    };
+                    assert_eq!((response.minimum_fill, response.maximum_fill), (0.0, 1.0));
+                    assert_eq!(
+                        preview.response_settings().mark_density_mode,
+                        MarkDensityMode::Contextual
+                    );
+                    assert_eq!(preview.response_settings().mark_size_scale, 1.0);
+                    assert!(preview.channel_response_overrides().is_empty());
+                    for field in [
+                        PropertyFieldId::ModeledMappingGamma,
+                        PropertyFieldId::ModeledMappingCutoff,
+                        PropertyFieldId::ArtworkWeightMappingGamma,
+                        PropertyFieldId::ArtworkWeightMappingCutoff,
+                        PropertyFieldId::ArtworkWeightStrength,
+                    ] {
+                        let preview_value = selected_property_values(&preview, channel)
+                            .into_iter()
+                            .find(|value| value.descriptor.field == field)
+                            .expect("neutral projection keeps the current mapping descriptor");
+                        assert_eq!(
+                            preview_value.value,
+                            preview
+                                .channel_property_default(channel, field)
+                                .expect("mapping has a domain-owned default"),
+                            "{field:?} uses its domain default in the disposable structural sample"
+                        );
+                    }
+                    assert_eq!(preview.temporal_authority(), authored.temporal_authority());
+                    assert_eq!(
+                        draft.document(),
+                        &authored,
+                        "preview leaves the draft untouched"
+                    );
+                    assert!(toniator_domain::definition_uses_artwork_weighted_density(
+                        preview.pattern_definition_for(channel).unwrap()
+                    ),);
+                    if target == InspectorTarget::DocumentAll {
+                        let definition = preview
+                            .pattern_definition_for(channel)
+                            .expect("ALL preview retains weighted structure");
+                        if let Some(previous) = previous_definition.as_ref() {
+                            assert_eq!(
+                                definition, previous,
+                                "response settings do not change structure"
+                            );
+                        }
+                        previous_definition = Some(definition.clone());
+                        let result = evaluate_with_limits(
+                            EvaluationRequest::with_preview_target(
+                                DocumentSession::new(preview)
+                                    .expect("normalized preview remains session-valid")
+                                    .document_evaluation_snapshot(),
+                                source.clone(),
+                                toniator_engine::PreviewRasterTarget::new(
+                                    WIZARD_PREVIEW_TARGET_PX,
+                                    WIZARD_PREVIEW_TARGET_PX,
+                                )
+                                .expect("neutral target remains valid"),
+                            ),
+                            EvaluationLimits::default(),
+                        )
+                        .unwrap_or_else(|error| {
+                            panic!("{input} neutral weighted preview evaluates: {error}")
+                        });
+                        let pixels = result.raster().pixels().to_vec();
+                        if let Some(previous) = previous_pixels.as_ref() {
+                            assert_eq!(
+                                pixels, *previous,
+                                "authored response does not alter preview pixels"
+                            );
+                        }
+                        previous_pixels = Some(pixels);
+                    }
+                }
+                assert_eq!(
+                    authored.response_settings().marks.minimum_fill,
+                    authored_size,
+                    "the actual Advanced value remains authored"
+                );
+            }
+        }
+    }
+
+    /// Neutralizes ALL and named region responses while preserving their Pattern resize algorithm.
+    ///
+    /// Both immutable source formats exercise the disposable preview. The source document keeps
+    /// its authored range, sampling, selected-copy structure and initialized End authority.
+    ///
+    /// # Panics
+    /// Panics when preview retains authored response values, rewrites region structure, fails to
+    /// evaluate either source, or mutates the authored document.
+    #[test]
+    fn stage21b_wizard_preview_neutralizes_region_response_and_keeps_resize_algorithm() {
+        register_resources();
+        for (input, format) in [
+            ("raster-sample.png", SourceFormatHint::Png),
+            ("vector-sample.svg", SourceFormatHint::Svg),
+        ] {
+            let workspace = Workspace::from_direct(
+                Arc::from(fs::read(asset(input)).unwrap_or_else(|error| {
+                    panic!("{input} immutable project source reads: {error}")
+                })),
+                format,
+                input.to_owned(),
+            )
+            .unwrap_or_else(|error| panic!("{input} workspace loads: {error}"));
+            let mut draft = DocumentHistory::new_draft(&workspace.history);
+            let registry = PresetRegistry::bundled();
+            registry
+                .apply_to_document_base(&mut draft, "grid-voronoi-scale")
+                .expect("ALL region Pattern materializes");
+            let channel = authoritative_channel_ids(draft.document())[0];
+            let base = draft.document().response_settings().clone();
+            let mut settings = base.clone();
+            settings.regions_minimum_fill = 0.25;
+            settings.regions_maximum_fill = 0.8;
+            settings.region_sampling = toniator_domain::RegionSamplingStrategy::ReferencePoint;
+            draft
+                .apply(&DocumentCommand::SetAllResponseSettings { base, settings })
+                .expect("nonneutral ALL region response applies atomically");
+            registry
+                .apply_to_selected(&mut draft, channel, "grid-voronoi-scale")
+                .expect("named region Pattern copy materializes");
+            let effective = draft
+                .document()
+                .effective_channel_pattern(channel)
+                .expect("named selected copy resolves");
+            let output_layer_id = effective.output_settings[0].output_layer_id;
+            let PatternGeometryResponse::Regions(mut region) =
+                effective.output_settings[0].response.clone()
+            else {
+                panic!("region Pattern exposes its region response")
+            };
+            region.algorithm = toniator_domain::RegionResizeAlgorithm::UniformOffset;
+            let command = draft
+                .document()
+                .set_selected_channel_region_response_for_effective(
+                    channel,
+                    output_layer_id,
+                    region,
+                )
+                .expect("named region algorithm remains structural");
+            draft
+                .apply(&command)
+                .expect("named region algorithm applies");
+            let effective = draft
+                .document()
+                .effective_channel_pattern(channel)
+                .expect("selected copy retains region output");
+            let output_layer_id = effective.output_settings[0].output_layer_id;
+            let PatternGeometryResponse::Regions(mut named_response) =
+                effective.output_settings[0].response.clone()
+            else {
+                panic!("selected copy retains its region response")
+            };
+            named_response.minimum_fill = 0.3;
+            named_response.maximum_fill = 0.75;
+            named_response.sampling = toniator_domain::RegionSamplingStrategy::ReferencePoint;
+            let command = draft
+                .document()
+                .set_channel_output_response_for_effective(
+                    channel,
+                    output_layer_id,
+                    PatternGeometryResponse::Regions(named_response),
+                )
+                .expect("named range and sampling form one typed response edit");
+            draft.apply(&command).expect("named response applies");
+            draft
+                .apply_temporal(&draft.document().initialize_end_command().unwrap())
+                .expect("End authority initializes with the region settings");
+            let authored = draft.document().clone();
+            assert_eq!(
+                authored.response_settings().region_sampling,
+                toniator_domain::RegionSamplingStrategy::ReferencePoint
+            );
+            let WizardPreviewSource::Ready { source } = prepare_wizard_preview_source(
+                &workspace.sources,
+                workspace.source_presentation.as_ref(),
+            ) else {
+                panic!("{input} has the bundled neutral Wizard source")
+            };
+
+            for target in [
+                InspectorTarget::DocumentAll,
+                InspectorTarget::Channel(channel),
+            ] {
+                let preview = wizard_preview_document(&authored, target)
+                    .unwrap_or_else(|error| panic!("{input} {target:?} region preview: {error}"));
+                assert_eq!(
+                    preview.response_settings(),
+                    &DocumentResponseSettings::default(),
+                    "{input} {target:?} preview uses domain-owned response defaults"
+                );
+                let effective = preview
+                    .effective_channel_pattern(channel)
+                    .expect("region preview resolves the selected channel");
+                let PatternGeometryResponse::Regions(response) =
+                    &effective.output_settings[0].response
+                else {
+                    panic!("{input} {target:?} keeps its region output")
+                };
+                assert_eq!(
+                    response.algorithm,
+                    if target == InspectorTarget::DocumentAll {
+                        toniator_domain::RegionResizeAlgorithm::Scale
+                    } else {
+                        toniator_domain::RegionResizeAlgorithm::UniformOffset
+                    }
+                );
+                assert_eq!((response.minimum_fill, response.maximum_fill), (0.0, 1.0));
+                assert_eq!(
+                    response.sampling,
+                    toniator_domain::RegionSamplingStrategy::AreaAverage
+                );
+                assert_eq!(
+                    draft.document(),
+                    &authored,
+                    "preview leaves the draft untouched"
+                );
+                assert_eq!(
+                    authored.temporal_authority(),
+                    draft.document().temporal_authority(),
+                    "initialized End values remain authored"
+                );
+                let result = evaluate_with_limits(
+                    EvaluationRequest::with_preview_target(
+                        DocumentSession::new(preview)
+                            .expect("neutral region preview remains session-valid")
+                            .document_evaluation_snapshot(),
+                        source.clone(),
+                        toniator_engine::PreviewRasterTarget::new(
+                            WIZARD_PREVIEW_TARGET_PX,
+                            WIZARD_PREVIEW_TARGET_PX,
+                        )
+                        .expect("fixed neutral target remains valid"),
+                    ),
+                    EvaluationLimits::default(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{input} {target:?} neutral region preview evaluates: {error}")
+                });
+                assert!(
+                    result
+                        .raster()
+                        .pixels()
+                        .chunks_exact(4)
+                        .any(|pixel| pixel[3] != 0),
+                    "{input} {target:?} preview renders visible region alpha"
+                );
+            }
+        }
+    }
+
+    /// Neutralizes path thickness without discarding structural Curve response alignment.
+    ///
+    /// ALL and named preview clones reset the typed thickness response, while the named output
+    /// delta remains authoritative for structural alignment. The initialized document stays intact.
+    ///
+    /// # Panics
+    /// Panics when the preview loses its path output, neutral bounds, authored bias, or source state.
+    #[test]
+    fn stage21b_neutral_wizard_preview_preserves_structural_curve_bias() {
+        let workspace = direct_png_workspace();
+        let mut draft = DocumentHistory::new_draft(&workspace.history);
+        PresetRegistry::bundled()
+            .apply_to_document_base(&mut draft, "clustered-dispersion-random-links")
+            .expect("connection Pattern materializes");
+        let channel = authoritative_channel_ids(draft.document())[0];
+        let effective = draft
+            .document()
+            .effective_channel_pattern(channel)
+            .expect("connected channel resolves");
+        let (output_layer_id, mut response) = effective
+            .output_settings
+            .into_iter()
+            .find_map(|output| match output.response {
+                PatternGeometryResponse::Connected(response) => {
+                    Some((output.output_layer_id, response))
+                }
+                _ => None,
+            })
+            .expect("connection Pattern exposes a path response");
+        response.bias = 0.35;
+        let command = draft
+            .document()
+            .set_channel_output_response_for_effective(
+                channel,
+                output_layer_id,
+                PatternGeometryResponse::Connected(response),
+            )
+            .expect("alignment remains an independent structural edit");
+        draft.apply(&command).expect("structural bias applies");
+        let base = draft.document().response_settings().clone();
+        let mut settings = base.clone();
+        settings.connected_minimum_thickness = 0.2;
+        settings.connected_maximum_thickness = 0.8;
+        settings.regions_minimum_fill = 0.3;
+        settings.regions_maximum_fill = 0.7;
+        settings.region_sampling = toniator_domain::RegionSamplingStrategy::ReferencePoint;
+        draft
+            .apply(&DocumentCommand::SetAllResponseSettings { base, settings })
+            .expect("nonneutral response settings apply");
+        draft
+            .apply_temporal(&draft.document().initialize_end_command().unwrap())
+            .expect("End authority initializes for the path response");
+        let authored = draft.document().clone();
+
+        for target in [
+            InspectorTarget::DocumentAll,
+            InspectorTarget::Channel(channel),
+        ] {
+            let preview = wizard_preview_document(&authored, target)
+                .unwrap_or_else(|error| panic!("{target:?} path preview: {error}"));
+            assert_eq!(
+                preview.response_settings(),
+                &DocumentResponseSettings::default()
+            );
+            let effective = preview
+                .effective_channel_pattern(channel)
+                .expect("path preview resolves the channel");
+            let PatternGeometryResponse::Connected(response) =
+                &effective.output_settings[0].response
+            else {
+                panic!("path preview retains the connection response")
+            };
+            assert_eq!(
+                (response.minimum_thickness, response.maximum_thickness),
+                (0.0, 1.0)
+            );
+            assert_eq!(response.bias, 0.35);
+            assert_eq!(preview.temporal_authority(), authored.temporal_authority());
+            assert_eq!(
+                draft.document(),
+                &authored,
+                "preview leaves authored document unchanged"
+            );
+        }
+    }
+
     /// Proves ALL and named SourceColorAlpha wizard previews retain sampled paint and render.
     ///
     /// Both immutable source formats feed the existing neutral preview evaluator. The source
@@ -35642,7 +39135,11 @@ mod tests {
     /// Preserves ALL replacement delta-reset and exact one-step Undo and Redo publication.
     ///
     /// The test models the wizard’s captured ALL target and confirms the domain-owned replacement
-    /// resets deltas while Undo and Redo restore the exact before/after authoritative documents.
+    /// resets deltas while the direct gallery path publishes one history entry and Undo/Redo restore
+    /// the exact before/after authoritative documents.
+    ///
+    /// # Panics
+    /// Panics if the ALL replacement keeps a reset delta or exact history Undo/Redo differs.
     #[test]
     fn stage21b_wizard_all_apply_resets_deltas_and_round_trips_history() {
         let mut workspace = direct_png_workspace();
@@ -35670,11 +39167,15 @@ mod tests {
                 .is_some()
         );
         let catalog = LayeredPresetCatalog::new(&PresetRegistry::bundled(), Vec::new()).unwrap();
-        let mut draft = DocumentHistory::new_draft(&workspace.history);
-        catalog
-            .apply_to_document_base(&mut draft, "curve-motif-rows")
-            .unwrap();
-        let after = draft.document().clone();
+        apply_wizard_gallery_candidate_directly(
+            &mut workspace.history,
+            &catalog,
+            InspectorTarget::DocumentAll,
+            "curve-motif-rows",
+            &before,
+        )
+        .expect("direct gallery Apply publishes the captured ALL target");
+        let after = workspace.document().clone();
         assert!(
             after
                 .channel_pattern_instance(channel)
@@ -35684,8 +39185,6 @@ mod tests {
                 .is_none(),
             "base recipe replacement resets channel density delta"
         );
-        let result = workspace.history.squash_draft(&draft).unwrap();
-        assert!(!result.unchanged);
         assert_eq!(workspace.document(), &after);
         workspace.history.undo().unwrap();
         assert_eq!(workspace.document(), &before);
@@ -35693,30 +39192,114 @@ mod tests {
         assert_eq!(workspace.document(), &after);
     }
 
-    /// Preserves exact named-channel wizard publication through one private squash and Undo/Redo.
+    /// Preserves direct named-channel gallery publication through one squash and Undo/Redo.
     ///
     /// The captured selected channel receives a recipe override while the base and other channel
-    /// authority remain in the cloned draft until the single main-history transition publishes it.
+    /// authority remain unchanged; one Undo and Redo restore the exact documents.
+    ///
+    /// # Panics
+    /// Panics if named Apply changes the base or another channel, or if exact Undo/Redo differs.
     #[test]
     fn stage21b_wizard_named_apply_round_trips_history_exactly() {
         let mut workspace = direct_png_workspace();
-        let channel = authoritative_channel_ids(workspace.document())[0];
+        let channel_ids = authoritative_channel_ids(workspace.document());
+        let channel = channel_ids[0];
+        let other_channel = channel_ids[1];
         let before = workspace.document().clone();
         let catalog = LayeredPresetCatalog::new(&PresetRegistry::bundled(), Vec::new()).unwrap();
-        let mut draft = DocumentHistory::new_draft(&workspace.history);
-        catalog
-            .apply_to_selected(&mut draft, channel, "one-guide-lines")
-            .expect("named wizard target materializes only in private draft");
-        assert_eq!(workspace.document(), &before);
-        let after = draft.document().clone();
+        apply_wizard_gallery_candidate_directly(
+            &mut workspace.history,
+            &catalog,
+            InspectorTarget::Channel(channel),
+            "one-guide-lines",
+            &before,
+        )
+        .expect("direct gallery Apply publishes the captured named target");
+        let after = workspace.document().clone();
         assert_ne!(after, before);
         assert!(wizard_apply_enabled(&after, &before));
-        assert!(!workspace.history.squash_draft(&draft).unwrap().unchanged);
+        assert_eq!(
+            after.channel_pattern_instance(other_channel),
+            before.channel_pattern_instance(other_channel),
+            "direct named Apply leaves every other channel's pattern authority untouched"
+        );
         assert_eq!(workspace.document(), &after);
         workspace.history.undo().unwrap();
         assert_eq!(workspace.document(), &before);
         workspace.history.redo().unwrap();
         assert_eq!(workspace.document(), &after);
+    }
+
+    /// Rejects personal and stale gallery candidates before changing main history.
+    ///
+    /// Each case preserves the captured/current document and its history revision when direct
+    /// built-in publication is unavailable or no longer needed.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an ineligible gallery candidate changes history or fails to return its expected
+    /// admission diagnostic.
+    #[test]
+    fn stage21b_direct_gallery_apply_rejects_personal_and_stale_candidates() {
+        let registry = PresetRegistry::bundled();
+        let mut personal = registry
+            .find("curve-motif-rows")
+            .expect("built-in Pattern exists for personal copy fixture")
+            .clone();
+        personal.metadata.id = "user-00000000-0000-4000-8000-000000000001".to_owned();
+        personal.metadata.name = "Personal Curve Rows".to_owned();
+        let catalog = LayeredPresetCatalog::new(&registry, vec![personal])
+            .expect("unique valid personal Pattern joins catalog");
+
+        let mut personal_workspace = direct_png_workspace();
+        let personal_before = personal_workspace.document().clone();
+        let personal_revision = personal_workspace.history.revision().0;
+        assert_eq!(
+            apply_wizard_gallery_candidate_directly(
+                &mut personal_workspace.history,
+                &catalog,
+                InspectorTarget::DocumentAll,
+                "user-00000000-0000-4000-8000-000000000001",
+                &personal_before,
+            )
+            .expect_err("personal Pattern keeps Review as its apply path"),
+            "Direct Apply is available only for built-in Patterns."
+        );
+        assert_eq!(personal_workspace.document(), &personal_before);
+        assert_eq!(personal_workspace.history.revision().0, personal_revision);
+
+        let builtins = LayeredPresetCatalog::new(&registry, Vec::new())
+            .expect("bundled gallery catalog validates");
+        let mut stale_workspace = direct_png_workspace();
+        let stale_capture = stale_workspace.document().clone();
+        builtins
+            .apply_to_document_base(&mut stale_workspace.history, "curve-motif-rows")
+            .expect("captured main history changes after modal opens");
+        let stale_current = stale_workspace.document().clone();
+        let stale_revision = stale_workspace.history.revision().0;
+        let stale_error = apply_wizard_gallery_candidate_directly(
+            &mut stale_workspace.history,
+            &builtins,
+            InspectorTarget::DocumentAll,
+            "one-guide-lines",
+            &stale_capture,
+        )
+        .expect_err("stale captured target cannot overwrite newer artwork");
+        assert!(stale_error.contains("artwork changed"));
+        assert_eq!(stale_workspace.document(), &stale_current);
+        assert_eq!(stale_workspace.history.revision().0, stale_revision);
+    }
+
+    /// Keeps exact unchanged-document Apply admission disabled independently of preview state.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an unchanged captured document is admitted for a history publication.
+    #[test]
+    fn stage21b_exact_noop_wizard_document_is_not_applyable() {
+        let workspace = direct_png_workspace();
+        let document = workspace.document();
+        assert!(!wizard_apply_enabled(document, document));
     }
 
     /// Proves captured candidate materialization cannot mutate the main document before Apply.

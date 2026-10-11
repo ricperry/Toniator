@@ -6,6 +6,11 @@ use crate::{CurveError, CurveSegment, Point2, Vector2};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct VertexKey(pub i64, pub i64);
 
+/// The fixed coordinate scale used for existing arrangement keys.
+const VERTEX_LATTICE_SCALE: f64 = 1_000_000_000.0;
+/// The corresponding unit bounds provenance-linked contact welding in each axis.
+pub(crate) const VERTEX_LATTICE_UNIT: f64 = 1.0 / VERTEX_LATTICE_SCALE;
+
 /// Quantizes a finite point onto the stable arrangement lattice.
 ///
 /// # Errors
@@ -18,7 +23,7 @@ pub(crate) fn vertex_key(point: Point2) -> Result<VertexKey, CurveError> {
             "arrangement points must be finite",
         ));
     }
-    let scale = 1_000_000_000.0;
+    let scale = VERTEX_LATTICE_SCALE;
     let x = (point.x * scale).round();
     let y = (point.y * scale).round();
     if !x.is_finite()
@@ -39,8 +44,8 @@ pub(crate) fn vertex_key(point: Point2) -> Result<VertexKey, CurveError> {
 /// Returns a finite lattice-normalized point.
 pub(crate) fn point_for_key(key: VertexKey) -> Point2 {
     Point2::new(
-        key.0 as f64 / 1_000_000_000.0,
-        key.1 as f64 / 1_000_000_000.0,
+        key.0 as f64 / VERTEX_LATTICE_SCALE,
+        key.1 as f64 / VERTEX_LATTICE_SCALE,
     )
 }
 

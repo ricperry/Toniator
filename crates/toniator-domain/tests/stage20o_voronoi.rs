@@ -85,6 +85,7 @@ fn region_recipe_materializes_the_current_default_response() {
         })
     ));
     let record = toniator_domain::PresetRecord {
+        saved_calibration: None,
         metadata: toniator_domain::PresetMetadata {
             id: "ordinary-voronoi".into(),
             name: "Ordinary Voronoi".into(),

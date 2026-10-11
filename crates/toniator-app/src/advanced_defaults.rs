@@ -2,10 +2,10 @@
 
 use super::*;
 
-/// Restores Advanced source, paint, opacity and region interpretation for the requested channels.
-/// Work is prepared on a disposable history and published atomically; other channels, pattern
-/// layout and inline fill bounds remain unchanged. Start edits retain End intent. End color resets
-/// replace hue/RGBA bindings with a canonical color endpoint; static source choices remain shared.
+/// Restores Advanced source, paint, opacity and channel response for the requested scope.
+/// Work is prepared on a disposable history and published atomically; structural Pattern settings
+/// and other channels remain unchanged. Start edits retain End intent; ALL range pairs use the
+/// domain batch boundary, while region sampling and mark-density mode remain typed ALL fields.
 ///
 /// # Errors
 /// Returns stale target, domain validation or endpoint errors without mutating the supplied history.
@@ -19,6 +19,8 @@ pub(super) fn apply(
         InspectorTarget::DocumentAll => authoritative_channel_ids(&display),
         InspectorTarget::Channel(channel) => vec![channel],
     };
+    let all_scope = target == InspectorTarget::DocumentAll;
+    let response_defaults = DocumentResponseSettings::default();
     let mut inputs = Vec::new();
     let mut colors = Vec::new();
     for channel in channels {
@@ -46,7 +48,14 @@ pub(super) fn apply(
             if paint_editor::component(current.descriptor.field).is_some() {
                 continue;
             }
-            let Some(value) = display.channel_property_default(channel, current.descriptor.field)
+            if all_scope
+                && (advanced_channel_response_field(current.descriptor.field)
+                    || current.descriptor.field == PropertyFieldId::MarkSizeScale)
+            {
+                continue;
+            }
+            let Some(value) = response_default(&response_defaults, current.descriptor.field)
+                .or_else(|| display.channel_property_default(channel, current.descriptor.field))
             else {
                 continue;
             };
@@ -62,7 +71,82 @@ pub(super) fn apply(
         }
     }
     let mut pending = DocumentHistory::new_draft(history);
+    if all_scope {
+        let mut response_edits = Vec::new();
+        for (minimum, maximum, minimum_default, maximum_default) in [
+            (
+                PropertyFieldId::MarkMinimumFill,
+                PropertyFieldId::MarkMaximumFill,
+                response_defaults.marks.minimum_fill,
+                response_defaults.marks.maximum_fill,
+            ),
+            (
+                PropertyFieldId::ConnectedMinimumThickness,
+                PropertyFieldId::ConnectedMaximumThickness,
+                response_defaults.connected_minimum_thickness,
+                response_defaults.connected_maximum_thickness,
+            ),
+            (
+                PropertyFieldId::RegionMinimumFill,
+                PropertyFieldId::RegionMaximumFill,
+                response_defaults.regions_minimum_fill,
+                response_defaults.regions_maximum_fill,
+            ),
+        ] {
+            if display.channel_scalar_batch(minimum).is_ok()
+                && display.channel_scalar_batch(maximum).is_ok()
+            {
+                response_edits.extend([(minimum, minimum_default), (maximum, maximum_default)]);
+            }
+        }
+        advanced_batches::apply_fields(&mut pending, endpoint, &response_edits)?;
+        if display
+            .channel_scalar_batch(PropertyFieldId::MarkSizeScale)
+            .is_ok()
+        {
+            advanced_batches::apply_fields(
+                &mut pending,
+                endpoint,
+                &[(
+                    PropertyFieldId::MarkSizeScale,
+                    response_defaults.mark_size_scale,
+                )],
+            )?;
+        }
+        advanced_batches::apply_all_mark_density_mode(
+            &mut pending,
+            response_defaults.mark_density_mode,
+        )?;
+        advanced_batches::apply_region_sampling(&mut pending, response_defaults.region_sampling)?;
+    }
     advanced_temporal::apply_pending_inputs(&mut pending, endpoint, &inputs)?;
+    if !all_scope && let InspectorTarget::Channel(channel) = target {
+        for (output, _) in weighted_mark_density_states(&display, channel) {
+            let current = pending.document();
+            let named_mode = current
+                .channel_response_overrides()
+                .iter()
+                .find(|entry| entry.channel_id == channel && entry.output_layer_id == output)
+                .and_then(|entry| match &entry.response {
+                    toniator_domain::ChannelOutputResponse::Marks { density_mode, .. } => {
+                        *density_mode
+                    }
+                    _ => None,
+                });
+            let current_mode = named_mode.unwrap_or(current.response_settings().mark_density_mode);
+            if current_mode == response_defaults.mark_density_mode {
+                continue;
+            }
+            let command = current
+                .set_channel_mark_density_mode_for_effective(
+                    channel,
+                    output,
+                    response_defaults.mark_density_mode,
+                )
+                .map_err(|error| error.to_string())?;
+            pending.apply(&command).map_err(|error| error.to_string())?;
+        }
+    }
     if !colors.is_empty() {
         match endpoint {
             temporal_preview::Endpoint::Start => {
@@ -97,6 +181,26 @@ pub(super) fn apply(
         .squash_draft(&pending)
         .map(|result| !result.unchanged)
         .map_err(|error| error.to_string())
+}
+
+/// Projects domain-owned response defaults absent from channel-property defaults.
+///
+/// The domain's typed baseline remains the sole authority for range and sampling defaults.
+fn response_default(
+    defaults: &DocumentResponseSettings,
+    field: PropertyFieldId,
+) -> Option<PropertyCurrentValueKind> {
+    let value = match field {
+        PropertyFieldId::MarkMinimumFill => defaults.marks.minimum_fill,
+        PropertyFieldId::MarkMaximumFill => defaults.marks.maximum_fill,
+        PropertyFieldId::MarkSizeScale => defaults.mark_size_scale,
+        PropertyFieldId::ConnectedMinimumThickness => defaults.connected_minimum_thickness,
+        PropertyFieldId::ConnectedMaximumThickness => defaults.connected_maximum_thickness,
+        PropertyFieldId::RegionMinimumFill => defaults.regions_minimum_fill,
+        PropertyFieldId::RegionMaximumFill => defaults.regions_maximum_fill,
+        _ => return None,
+    };
+    Some(PropertyCurrentValueKind::FiniteF64(value))
 }
 
 /// Resets only the live dialog's captured channel scope, then refreshes controls and preview in place.
@@ -136,13 +240,13 @@ pub(super) fn reset(state: &Rc<RefCell<AppState>>, epoch: u64, button: &gtk::But
 mod tests {
     use super::*;
 
-    /// Resets current Advanced region selectors while retaining inline fill intent and other channels.
-    /// Exercises selected-copy locator renewal across two selector edits and atomic Undo.
+    /// Resets named region ranges and sampling while preserving structural resizing and other channels.
+    /// Exercises the response owner, selected-copy scope and atomic Undo boundary.
     ///
     /// # Panics
     /// Panics if reset loses authored bounds, changes another channel or cannot resolve renewed outputs.
     #[test]
-    fn advanced_defaults_region_selectors_preserve_inline_bounds() {
+    fn advanced_defaults_reset_region_response_and_preserve_structure() {
         let document = Document::new_default_document(
             CanvasSpec {
                 width: 100.0,
@@ -162,18 +266,44 @@ mod tests {
             .unwrap()
             .output_settings[0]
             .output_layer_id;
+        let PatternGeometryResponse::Regions(mut structural) = history
+            .document()
+            .effective_channel_pattern(channel)
+            .unwrap()
+            .output_settings[0]
+            .response
+            .clone()
+        else {
+            panic!("the selected Pattern exposes a region response");
+        };
+        structural.algorithm = toniator_domain::RegionResizeAlgorithm::UniformOffset;
         let command = history
             .document()
-            .set_selected_channel_region_response_for_effective(
-                channel,
-                output,
-                toniator_domain::RegionGeometryResponse {
-                    algorithm: toniator_domain::RegionResizeAlgorithm::UniformOffset,
-                    sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
-                    minimum_fill: 0.2,
-                    maximum_fill: 0.8,
-                },
-            )
+            .set_selected_channel_region_response_for_effective(channel, output, structural)
+            .unwrap();
+        history.apply(&command).unwrap();
+        let PatternGeometryResponse::Regions(mut authored_response) = history
+            .document()
+            .effective_channel_pattern(channel)
+            .unwrap()
+            .output_settings[0]
+            .response
+            .clone()
+        else {
+            panic!("the selected Pattern keeps its region response");
+        };
+        authored_response.sampling = toniator_domain::RegionSamplingStrategy::ReferencePoint;
+        authored_response.minimum_fill = 0.2;
+        authored_response.maximum_fill = 0.8;
+        let output = history
+            .document()
+            .effective_channel_pattern(channel)
+            .unwrap()
+            .output_settings[0]
+            .output_layer_id;
+        let command = history
+            .document()
+            .set_selected_channel_region_response_for_effective(channel, output, authored_response)
             .unwrap();
         history.apply(&command).unwrap();
         let before = history.document().clone();
@@ -194,13 +324,13 @@ mod tests {
         };
         assert_eq!(
             response.algorithm,
-            toniator_domain::RegionResizeAlgorithm::Scale
+            toniator_domain::RegionResizeAlgorithm::UniformOffset
         );
         assert_eq!(
             response.sampling,
-            toniator_domain::RegionSamplingStrategy::ReferencePoint
+            toniator_domain::RegionSamplingStrategy::AreaAverage
         );
-        assert_eq!((response.minimum_fill, response.maximum_fill), (0.2, 0.8));
+        assert_eq!((response.minimum_fill, response.maximum_fill), (0.0, 1.0));
         assert_eq!(
             history
                 .document()
@@ -210,6 +340,248 @@ mod tests {
         );
         history.undo().unwrap();
         assert_eq!(history.document(), &before);
+    }
+
+    /// Resets ALL Mark ranges, density mode, and scale after named members have overrides.
+    /// Domain response defaults own the values; paired bounds and field-specific overrides reset atomically.
+    ///
+    /// # Panics
+    /// Panics when a single-output Mark fixture cannot be prepared or reset retains nondefault range intent.
+    #[test]
+    fn advanced_defaults_reset_all_mark_response_clears_named_overrides() {
+        let document = Document::new_default_document(
+            CanvasSpec {
+                width: 100.0,
+                height: 100.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .unwrap();
+        let mut history = DocumentHistory::new(DocumentSession::new(document).unwrap());
+        PresetRegistry::bundled()
+            .apply_to_document_base(&mut history, "round-spiral-marks")
+            .unwrap();
+        let channel = ChannelId(1);
+        let pattern = history
+            .document()
+            .effective_channel_pattern(channel)
+            .unwrap();
+        assert_eq!(pattern.output_settings.len(), 1);
+        let output = pattern.output_settings[0].output_layer_id;
+
+        let base = history.document().clone();
+        let configuration = base
+            .edit_all_channel_start_configuration(&[
+                (PropertyFieldId::MarkMinimumFill, 0.1),
+                (PropertyFieldId::MarkMaximumFill, 1.5),
+                (PropertyFieldId::MarkSizeScale, 1.4),
+            ])
+            .unwrap();
+        history
+            .apply_document_configuration(&base, history.revision(), &configuration)
+            .unwrap();
+        advanced_batches::apply_all_mark_density_mode(
+            &mut history,
+            toniator_domain::MarkDensityMode::Uniform,
+        )
+        .unwrap();
+        history
+            .apply(&DocumentCommand::SetChannelResponse {
+                channel_id: channel,
+                output_layer_id: output,
+                response: toniator_domain::ChannelOutputResponse::Marks {
+                    minimum_fill: Some(0.2),
+                    maximum_fill: Some(1.75),
+                    density_mode: Some(toniator_domain::MarkDensityMode::Variable),
+                    size_scale: Some(1.85),
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            (
+                history.document().response_settings().marks.minimum_fill,
+                history.document().response_settings().marks.maximum_fill,
+            ),
+            (0.1, 1.5)
+        );
+        assert_eq!(
+            history.document().response_settings().mark_density_mode,
+            toniator_domain::MarkDensityMode::Uniform
+        );
+        assert_eq!(history.document().response_settings().mark_size_scale, 1.4);
+        assert_eq!(history.document().channel_response_overrides().len(), 1);
+        assert!(
+            history
+                .document()
+                .channel_scalar_batch(PropertyFieldId::MarkMinimumFill)
+                .is_ok()
+        );
+        assert!(
+            history
+                .document()
+                .channel_scalar_batch(PropertyFieldId::MarkMaximumFill)
+                .is_ok()
+        );
+
+        assert!(
+            apply(
+                &mut history,
+                temporal_preview::Endpoint::Start,
+                InspectorTarget::DocumentAll,
+            )
+            .unwrap()
+        );
+
+        let defaults = DocumentResponseSettings::default();
+        assert_eq!(history.document().response_settings(), &defaults);
+        assert!(history.document().channel_response_overrides().is_empty());
+    }
+
+    /// Restores the named default mode without inheriting an ALL Variable choice or dropping End scale.
+    /// The normal scoped draft resets paired ranges and Start scale, then writes only the typed mode field.
+    ///
+    /// # Panics
+    /// Panics if a weighted Mark response cannot be authored, defaulted atomically, or retain its End easing.
+    #[test]
+    fn advanced_defaults_reset_named_mark_mode_and_preserve_temporal_siblings() {
+        let document = Document::new_default_document(
+            CanvasSpec {
+                width: 100.0,
+                height: 100.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .unwrap();
+        let mut history = DocumentHistory::new(DocumentSession::new(document).unwrap());
+        let mut recipe =
+            PatternDefinitionRecipe::starter_for_family(PatternRecipeFamilyKind::Dispersion);
+        let PatternStructureRecipe::RandomSites {
+            density_modulation, ..
+        } = &mut recipe.structure
+        else {
+            panic!("dispersion uses random placement");
+        };
+        *density_modulation = toniator_domain::SiteDensityModulation::ArtworkWeighted;
+        let recipe = recipe
+            .with_output_kind(0, PatternRecipeOutputKind::Marks)
+            .unwrap();
+        apply_wizard_recipe(&mut history, InspectorTarget::DocumentAll, recipe).unwrap();
+        let channel = ChannelId(1);
+        let pattern = history
+            .document()
+            .effective_channel_pattern(channel)
+            .unwrap();
+        assert_eq!(pattern.output_settings.len(), 1);
+        let output = pattern.output_settings[0].output_layer_id;
+
+        let base = history.document().clone();
+        let configuration = base
+            .edit_all_channel_start_configuration(&[
+                (PropertyFieldId::MarkMinimumFill, 0.1),
+                (PropertyFieldId::MarkMaximumFill, 1.4),
+                (PropertyFieldId::MarkSizeScale, 1.5),
+            ])
+            .unwrap();
+        history
+            .apply_document_configuration(&base, history.revision(), &configuration)
+            .unwrap();
+        advanced_batches::apply_all_mark_density_mode(
+            &mut history,
+            toniator_domain::MarkDensityMode::Variable,
+        )
+        .unwrap();
+        history
+            .apply(&DocumentCommand::SetChannelResponse {
+                channel_id: channel,
+                output_layer_id: output,
+                response: toniator_domain::ChannelOutputResponse::Marks {
+                    minimum_fill: Some(0.2),
+                    maximum_fill: Some(1.7),
+                    density_mode: Some(toniator_domain::MarkDensityMode::Variable),
+                    size_scale: Some(1.8),
+                },
+            })
+            .unwrap();
+        let end = history
+            .document()
+            .edit_effective_end_command(&[toniator_domain::TemporalEndpointEdit {
+                target: PropertyTarget::ChannelOutput(channel, output),
+                field: PropertyFieldId::MarkSizeScale,
+                effective_end: 0.65,
+                easing: toniator_domain::Easing::SmoothStep,
+            }])
+            .unwrap();
+        history.apply_temporal(&end).unwrap();
+        assert!(
+            history
+                .document()
+                .temporal_end_overrides()
+                .iter()
+                .any(|entry| {
+                    matches!(entry, toniator_domain::TemporalEndOverride::Scalar(value)
+                    if value.target == PropertyTarget::ChannelOutput(channel, output)
+                        && value.field == PropertyFieldId::MarkSizeScale
+                        && (value.end - (0.65 - 1.5)).abs() < 1e-10
+                        && value.easing == toniator_domain::Easing::SmoothStep)
+                }),
+            "initialized End scale is present before the reset: {:?}",
+            history.document().temporal_end_overrides()
+        );
+
+        assert!(
+            apply(
+                &mut history,
+                temporal_preview::Endpoint::Start,
+                InspectorTarget::Channel(channel),
+            )
+            .unwrap()
+        );
+
+        assert_eq!(
+            history.document().response_settings().mark_density_mode,
+            toniator_domain::MarkDensityMode::Variable,
+            "named defaults do not change the ALL response choice",
+        );
+        let named = history
+            .document()
+            .channel_response_overrides()
+            .iter()
+            .find(|entry| entry.channel_id == channel && entry.output_layer_id == output)
+            .unwrap();
+        assert_eq!(
+            named.response,
+            toniator_domain::ChannelOutputResponse::Marks {
+                minimum_fill: Some(0.0),
+                maximum_fill: Some(1.0),
+                density_mode: Some(toniator_domain::MarkDensityMode::Contextual),
+                size_scale: Some(1.0),
+            },
+            "named defaults set the mode field explicitly while restoring response siblings",
+        );
+        assert!(
+            history
+                .document()
+                .temporal_end_overrides()
+                .iter()
+                .any(|entry| {
+                    matches!(entry, toniator_domain::TemporalEndOverride::Scalar(value)
+                if value.target == PropertyTarget::ChannelOutput(channel, output)
+                    && value.field == PropertyFieldId::MarkSizeScale
+                    && (value.end - (0.65 - 1.5)).abs() < 1e-10
+                    && value.easing == toniator_domain::Easing::SmoothStep)
+                }),
+            "Start reset retains the existing End scale and easing: {:?}",
+            history.document().temporal_end_overrides()
+        );
+        assert_eq!(
+            history
+                .document()
+                .effective_mark_density(channel, output)
+                .unwrap()
+                .mode,
+            toniator_domain::MarkDensityMode::Uniform,
+            "Contextual named default remains independent from ALL Variable intent",
+        );
     }
 
     /// Verifies named/ALL defaults across model roles, private publication and immutable source kinds.

@@ -11,6 +11,7 @@ pub const ANIMATABLE_SCALAR_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::TranslationY,
     PropertyFieldId::MarkMinimumFill,
     PropertyFieldId::MarkMaximumFill,
+    PropertyFieldId::MarkSizeScale,
     PropertyFieldId::ConnectedMinimumThickness,
     PropertyFieldId::ConnectedMaximumThickness,
     PropertyFieldId::CurveResponseBias,
@@ -111,6 +112,7 @@ pub const fn temporal_capability(
         | PropertyFieldId::Opacity => matches!(target, PropertyTarget::Channel(_)),
         PropertyFieldId::MarkMinimumFill
         | PropertyFieldId::MarkMaximumFill
+        | PropertyFieldId::MarkSizeScale
         | PropertyFieldId::ConnectedMinimumThickness
         | PropertyFieldId::ConnectedMaximumThickness
         | PropertyFieldId::CurveResponseBias
@@ -153,6 +155,7 @@ pub const fn is_animatable_scalar_field(field: PropertyFieldId) -> bool {
             | PropertyFieldId::TranslationY
             | PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::MarkSizeScale
             | PropertyFieldId::ConnectedMinimumThickness
             | PropertyFieldId::ConnectedMaximumThickness
             | PropertyFieldId::CurveResponseBias
@@ -767,12 +770,15 @@ impl Document {
     ///
     /// Each tuple supplies a field and desired effective value. Coupled minimum/maximum fields
     /// may be supplied together and validate only after the complete unpublished batch exists.
-    /// Other fields, source mappings, output definitions, End values and easing remain intact.
+    /// Explicit Appearance and response fields update their matching last-ALL intent in the
+    /// same configuration. Response fields equalize only their matching named member, including
+    /// same-value ALL edits. Other fields, source mappings, output definitions, effective End
+    /// values and easing remain intact.
     /// The returned configuration publishes through the existing stale-aware history boundary.
     ///
     /// # Errors
     /// Rejects empty/duplicate fields, inactive targets, nonfinite arithmetic, invalid bounds or
-    /// coupled responses without mutating Start, End, history, source or project timing.
+    /// coupled responses without mutating Start, End, baseline, history, source or project timing.
     pub fn edit_all_channel_start_configuration(
         &self,
         edits: &[(PropertyFieldId, f64)],
@@ -785,11 +791,70 @@ impl Document {
                 assignments.push((value.target, field, desired_value));
             }
         }
-        self.edit_channel_start_configuration(&assignments)
+        let mut configuration = self.edit_channel_start_configuration(&assignments)?;
+        for &(field, desired_value) in edits {
+            let response_edit = match field {
+                PropertyFieldId::MarkMinimumFill => {
+                    Some(DocumentResponseFieldEdit::MarkMinimumFill(desired_value))
+                }
+                PropertyFieldId::MarkMaximumFill => {
+                    Some(DocumentResponseFieldEdit::MarkMaximumFill(desired_value))
+                }
+                PropertyFieldId::MarkSizeScale => {
+                    Some(DocumentResponseFieldEdit::MarkSizeScale(desired_value))
+                }
+                PropertyFieldId::ConnectedMinimumThickness => Some(
+                    DocumentResponseFieldEdit::ConnectedMinimumThickness(desired_value),
+                ),
+                PropertyFieldId::ConnectedMaximumThickness => Some(
+                    DocumentResponseFieldEdit::ConnectedMaximumThickness(desired_value),
+                ),
+                PropertyFieldId::RegionMinimumFill => {
+                    Some(DocumentResponseFieldEdit::RegionMinimumFill(desired_value))
+                }
+                PropertyFieldId::RegionMaximumFill => {
+                    Some(DocumentResponseFieldEdit::RegionMaximumFill(desired_value))
+                }
+                _ => None,
+            };
+            if let Some(response_edit) = response_edit {
+                response_edit.apply_to(&mut configuration.response_settings);
+                for entry in &mut configuration.channel_response_overrides {
+                    response_edit.clear_named(&mut entry.response);
+                }
+            }
+            match field {
+                PropertyFieldId::Density => {
+                    configuration.appearance_baseline.density = Some(desired_value);
+                }
+                PropertyFieldId::DensityAspect => {
+                    configuration.appearance_baseline.density_aspect = Some(desired_value);
+                }
+                PropertyFieldId::RotationDegrees => {
+                    configuration.appearance_baseline.pattern_rotation_degrees =
+                        Some(desired_value);
+                }
+                PropertyFieldId::TranslationX => {
+                    configuration.appearance_baseline.translation_x = Some(desired_value);
+                }
+                PropertyFieldId::TranslationY => {
+                    configuration.appearance_baseline.translation_y = Some(desired_value);
+                }
+                _ => {}
+            }
+        }
+        configuration
+            .channel_response_overrides
+            .retain(|entry| !entry.response.is_empty());
+        let mut candidate = configuration.bind(self)?;
+        reconcile_end_values(self, &mut candidate, None, false, &[])?;
+        candidate.validate()?;
+        Ok(DocumentConfiguration::capture(&candidate))
     }
 
     /// Assigns effective channel/output Start scalars as one unpublished configuration.
-    /// Coupled bounds validate after all assignments; unrelated fields and End authority remain intact.
+    /// Coupled bounds validate after all assignments; unrelated fields, last-ALL baseline intent,
+    /// and End authority remain intact.
     ///
     /// # Errors
     /// Rejects duplicate/inactive targets, nonfinite values and invalid complete configurations.
@@ -1649,6 +1714,7 @@ fn normalize_effective_end(
             PropertyTarget::ChannelOutput(channel_id, output_layer_id),
             PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::MarkSizeScale
             | PropertyFieldId::ConnectedMinimumThickness
             | PropertyFieldId::ConnectedMaximumThickness
             | PropertyFieldId::CurveResponseBias
@@ -1686,6 +1752,21 @@ fn output_base_scalar(
     output_layer_id: PatternOutputLayerId,
     field: PropertyFieldId,
 ) -> Result<f64, ValidationError> {
+    let settings = &document.response_settings;
+    match field {
+        PropertyFieldId::MarkMinimumFill => return Ok(settings.marks.minimum_fill),
+        PropertyFieldId::MarkMaximumFill => return Ok(settings.marks.maximum_fill),
+        PropertyFieldId::MarkSizeScale => return Ok(settings.mark_size_scale),
+        PropertyFieldId::ConnectedMinimumThickness => {
+            return Ok(settings.connected_minimum_thickness);
+        }
+        PropertyFieldId::ConnectedMaximumThickness => {
+            return Ok(settings.connected_maximum_thickness);
+        }
+        PropertyFieldId::RegionMinimumFill => return Ok(settings.regions_minimum_fill),
+        PropertyFieldId::RegionMaximumFill => return Ok(settings.regions_maximum_fill),
+        _ => {}
+    }
     let effective = document.effective_channel_pattern(channel_id)?;
     let response = document
         .bundle(effective.definition_id)
@@ -1895,6 +1976,25 @@ fn channel_output_scalar_start(
     output_layer_id: PatternOutputLayerId,
     field: PropertyFieldId,
 ) -> Result<f64, ValidationError> {
+    if field == PropertyFieldId::MarkSizeScale {
+        return Ok(document
+            .effective_mark_density(channel_id, output_layer_id)?
+            .size_scale
+            - document.response_settings.mark_size_scale);
+    }
+    if is_response_field(field) && field != PropertyFieldId::CurveResponseBias {
+        let effective = document.effective_channel_pattern(channel_id)?;
+        let response = effective
+            .output_settings
+            .iter()
+            .find(|entry| entry.output_layer_id == output_layer_id)
+            .ok_or(ValidationError::new(
+                "temporal.response.output",
+                "response output is missing",
+            ))?;
+        return Ok(response_scalar(&response.response, field)?
+            - output_base_scalar(document, channel_id, output_layer_id, field)?);
+    }
     let instance = document
         .channel_pattern_instance(channel_id)
         .ok_or_else(|| ValidationError::new("temporal.channel", "temporal channel is missing"))?;
@@ -1947,12 +2047,18 @@ const fn is_response_field(field: PropertyFieldId) -> bool {
         field,
         PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::MarkSizeScale
             | PropertyFieldId::ConnectedMinimumThickness
             | PropertyFieldId::ConnectedMaximumThickness
             | PropertyFieldId::CurveResponseBias
             | PropertyFieldId::RegionMinimumFill
             | PropertyFieldId::RegionMaximumFill
     )
+}
+
+/// Identifies channel-owned artwork response fields, excluding Pattern-owned stroke alignment.
+const fn is_channel_response_field(field: PropertyFieldId) -> bool {
+    is_response_field(field) && !matches!(field, PropertyFieldId::CurveResponseBias)
 }
 
 /// Preserves initialized End intent across Start edits and clears only invalidated dependencies.
@@ -2037,7 +2143,8 @@ fn reconcile_end_values(
                         | PropertyFieldId::DensityAspect
                         | PropertyFieldId::RotationDegrees
                         | PropertyFieldId::ShapeRotationDegrees
-                ) || is_response_field(value.field);
+                        | PropertyFieldId::CurveResponseBias
+                );
                 let reset = pattern_field
                     && match value.target {
                         PropertyTarget::Document => all,
@@ -2052,6 +2159,27 @@ fn reconcile_end_values(
                 }
                 let mut value = value.clone();
                 if let PropertyTarget::ChannelOutput(channel, output) = value.target {
+                    if is_channel_response_field(value.field) {
+                        let (Some(old), Some(new)) = (
+                            before.response_structure_for(channel),
+                            after.response_structure_for(channel),
+                        ) else {
+                            continue;
+                        };
+                        if old.output_layer_id != output
+                            || !same_response_kind(&old.response, &new.response)
+                        {
+                            continue;
+                        }
+                        value.target = PropertyTarget::ChannelOutput(channel, new.output_layer_id);
+                        if temporal_descriptor(after, value.target, value.field).is_err() {
+                            continue;
+                        }
+                        value.end += output_base_scalar(before, channel, output, value.field)?
+                            - output_base_scalar(after, channel, new.output_layer_id, value.field)?;
+                        retained.push(TemporalEndOverride::Scalar(value));
+                        continue;
+                    }
                     let selected_copy = matches!(command,
                         Some(DocumentCommand::EditSelectedChannelPatternDefinitionBundle { channel_id, .. }
                         | DocumentCommand::EditSelectedChannelPatternDefinition { channel_id, .. })
@@ -2384,6 +2512,38 @@ fn apply_channel_output_scalar(
     field: PropertyFieldId,
     value: f64,
 ) -> Result<(), ValidationError> {
+    if (is_response_field(field) && field != PropertyFieldId::CurveResponseBias)
+        || field == PropertyFieldId::MarkSizeScale
+    {
+        let absolute = output_base_scalar(document, channel_id, output_layer_id, field)? + value;
+        let effective = document.effective_channel_pattern(channel_id)?;
+        let current = effective
+            .output_settings
+            .iter()
+            .find(|entry| entry.output_layer_id == output_layer_id)
+            .ok_or(ValidationError::new(
+                "temporal.response.output",
+                "response output is missing",
+            ))?;
+        let mut response = document
+            .channel_response_overrides
+            .iter()
+            .find(|entry| entry.channel_id == channel_id)
+            .map(|entry| entry.response.clone())
+            .unwrap_or_else(|| ChannelOutputResponse::empty_for(&current.response));
+        response.set_scalar(field, absolute)?;
+        document
+            .channel_response_overrides
+            .retain(|entry| entry.channel_id != channel_id);
+        document
+            .channel_response_overrides
+            .push(ChannelResponseOverride {
+                channel_id,
+                output_layer_id,
+                response,
+            });
+        return Ok(());
+    }
     let definition_id = document
         .channel_pattern_instance(channel_id)
         .ok_or_else(|| ValidationError::new("temporal.channel", "temporal channel is missing"))?

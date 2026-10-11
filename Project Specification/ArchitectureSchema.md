@@ -55,7 +55,8 @@ No secondary writable state may exist in:
 - Density.
 - Rotation.
 - Offset.
-- Size, thickness, or inset response.
+- Optional named size, thickness, or inset response fields, held separately
+  from its structural Pattern instance.
 - Color.
 - Opacity.
 - Visibility.
@@ -161,6 +162,47 @@ Definitions may be shared by multiple channels.
 ### 3.4 Channels
 
 Each channel references a pattern definition and owns its channel instance and appearance state.
+
+### 3.5 Last-ALL Appearance baseline
+
+`Document` and the reusable `DocumentConfiguration` store one sparse
+`DocumentAppearanceBaseline` for the last values explicitly assigned to ALL at
+the Start frame:
+
+```rust
+pub struct DocumentAppearanceBaseline {
+    pub density: Option<f64>,
+    pub density_aspect: Option<f64>,
+    pub pattern_rotation_degrees: Option<f64>,
+    pub translation_x: Option<f64>,
+    pub translation_y: Option<f64>,
+}
+```
+
+This value is persistent authoring intent for creating replacement channel
+topologies. It is not an evaluator/cache input and is never derived from
+per-channel consensus or history. An explicit ALL Start assignment updates its
+compatible channels and only the matching baseline fields in one atomic
+configuration; same-value assignments can record baseline-only history without
+render invalidation. Named edits and End assignments leave the baseline alone.
+Model replacement seeds canonical channels from the document Pattern base and
+stored baseline; old channel deviations do not seed the new model. An ALL
+Pattern replacement clears density, aspect, and pattern-rotation baseline
+entries tied to the previous base recipe, while retaining X/Y translations.
+
+The document separately stores typed ALL output-response ranges and region
+artwork sampling. Named channels optionally override individual compatible
+response fields; the domain assembles effective output response before engine
+evaluation. Pattern recipes and standalone Presets carry structural output kind,
+connected stroke alignment, and region resize algorithm, but no adjustable
+response bounds or region artwork sampling. Compatible Pattern replacement
+preserves effective channel response and End easing; output-kind changes use
+typed neutral defaults. Model replacement restores the current-kind ALL intent.
+For Marks, this document authority also includes density mode and artistic
+size scale as specified in Addendum 17.3. The engine caches a full-population
+canonical footprint fit separately from source-dependent site selection;
+weighted Lloyd remains source dependent. Renderers consume the resulting
+canonical marks and do not refit or resample them.
 
 ---
 
@@ -609,6 +651,38 @@ Migrations must be:
 - One-directional.
 - Independent of UI defaults.
 
+The pre-release current-only policy may instead reject a superseded in-development
+schema when the current stage explicitly advances its authority; it does not
+require a compatibility reader or reconstruction from visible UI defaults.
+
+### 13.2 Current Appearance-baseline and calibration persistence
+
+The current development project codec writes document schema **17** in media
+container **2**. The source-free Document Preset archive stays at format **3**
+and writes configuration schema **16**. Both store the sparse
+`DocumentAppearanceBaseline` and source-independent saved calibration artifacts
+with their persisted document configuration. The loader does not infer last-ALL
+values from channel state. One optional exact-binding calibration companion for
+the hidden last-ALL Pattern also persists when no active channel uses it;
+model changes can rebind that measured artifact without a fit. Standalone
+Pattern format **8** carries a typed
+structural calibration companion when one has been measured. Superseded
+projects remain current-only; source-free Document Presets use the conversion
+boundary specified in Addendum 17.5. Saved bindings normalize site, randomized
+connection, and maze variation seed values to fixed reference seed `43`, while
+authored Pattern recipes retain those seeds for geometry generation. Seed-free
+v4 profiles remain valid; seed-bearing saved profiles use seed-neutral v5. A
+current-format Pattern reader may discard only a recognized obsolete v4
+seed-bearing optional companion without changing its authored recipe or file.
+Current Advanced Variable output endpoints are desired absolute geometric
+coverage in `0..=1`; the engine uses the saved raw `C(size)` artifact to invert
+each requested coverage to a final transient raw size in `0..=2`. The project
+codec stores coverage endpoints and the unchanged raw measurement separately.
+Recognized older source-free Document Presets stage former raw endpoints in a
+typed, unpublishable import until exact active and hidden ALL companions have
+converted Start and initialized End intent. Ordinary projects remain
+current-only; the archive reader never fits or publishes a neutral shell.
+
 ---
 
 ## 14. Error architecture
@@ -749,6 +823,9 @@ Two straight guide dimensions
 - One to four guide dimensions.
 - Random family.
 - Weighted random placement.
+- Scatter placement uses authored spatial spacing scaled by Feature size;
+  canvas area derives population and artwork weighting thins without refill
+  (Addendum §17.4). Even dispersion uses only its minimum-center distance.
 - Along-guide sites.
 - Curved guides.
 - Normal-offset repetition.

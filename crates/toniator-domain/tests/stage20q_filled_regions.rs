@@ -14,6 +14,7 @@ use toniator_domain::{
 #[test]
 fn stage20q_typed_responses_validate_only_their_compatible_numeric_contract() {
     let valid = |response| PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "stage20q-domain".into(),
             name: "Stage 20Q domain".into(),

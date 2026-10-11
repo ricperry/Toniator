@@ -111,6 +111,7 @@ fn region_preset() -> PresetRecord {
         maximum_fill: 1.5,
     });
     PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "stage20o".into(),
             name: "Stage 20O".into(),

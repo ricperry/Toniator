@@ -31,6 +31,7 @@ fn stage20q_preset_v3_round_trip_retains_typed_region_intent_only() {
         maximum_fill: 1.5,
     });
     let preset = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "stage20q-io".into(),
             name: "Stage 20Q IO".into(),

@@ -2,6 +2,214 @@
 
 use super::*;
 
+/// Covers Advanced descriptors and All batches across both project inputs, three channel models,
+/// and mark, connected-line, region, and source-weighted patterns where each model supports them.
+/// It reads current domain values without constructing GTK state and checks the shared absolute
+/// coverage contract while retaining Uniform mark scale as its separate 0–2 control.
+/// Channel response endpoints and sampling are Advanced controls; structural resize and stroke
+/// alignment stay with Pattern construction while Wizard source response fields remain excluded.
+///
+/// # Panics
+/// Panics when current model/pattern capabilities omit a required help description or coverage
+/// bounds, move a response field away from Advanced, or move structural Pattern information into it.
+#[test]
+fn advanced_help_covers_emitted_settings_across_models_and_output_kinds() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let registry = PresetRegistry::bundled();
+    let catalog = LayeredPresetCatalog::new(&registry, Vec::new()).unwrap();
+    let cases = [
+        ("round-spiral-marks", PropertyFieldId::MarkMinimumFill),
+        (
+            "one-guide-lines",
+            PropertyFieldId::ConnectedMinimumThickness,
+        ),
+        ("grid-voronoi-scale", PropertyFieldId::RegionMinimumFill),
+        (
+            "source-weighted-dispersion-voronoi",
+            PropertyFieldId::RegionMinimumFill,
+        ),
+    ];
+    for source in ["raster-sample.png", "vector-sample.svg"] {
+        for model in [
+            PreviewModel::Rgb,
+            PreviewModel::Cmyk,
+            PreviewModel::SourceColorAlpha,
+        ] {
+            let mut workspace = load_workspace(&root.join("assets").join(source)).unwrap();
+            if model != PreviewModel::Rgb {
+                replace_model_topology(&mut workspace.history, model).unwrap();
+            }
+            let channel = authoritative_channel_ids(workspace.document())[0];
+            for (preset, response_field) in cases {
+                if model == PreviewModel::SourceColorAlpha && preset == "one-guide-lines" {
+                    continue;
+                }
+                apply_catalog_pattern_candidate(
+                    &mut workspace.history,
+                    &catalog,
+                    InspectorTarget::Channel(channel),
+                    preset,
+                )
+                .unwrap();
+                let document = workspace.document();
+                let target = InspectorTarget::Channel(channel);
+                let all_values = document.property_values();
+                let advanced = advanced_settings_values(document, target);
+                let inline = inline_inspector_values(document, target);
+                let projection = document
+                    .pattern_capabilities(PatternCapabilityScope::Channel(channel))
+                    .expect("selected channel capability projection is current");
+                let wizard = wizard_active_values(document, target, &projection);
+                assert!(
+                    !advanced.is_empty(),
+                    "{source} {model:?} {preset} exposes Advanced settings"
+                );
+                assert!(
+                    advanced
+                        .iter()
+                        .all(|value| { !inline_response_field(value.descriptor.field) })
+                );
+                for value in &advanced {
+                    let help = advanced_field_help(value.descriptor.field, Some(&value.descriptor));
+                    assert!(
+                        help.starts_with(inspector_field_guidance(value.descriptor.field)),
+                        "{} {model:?} {preset} has field-specific help",
+                        inspector_field_label(value.descriptor.field)
+                    );
+                    if value.descriptor.bounds.is_some()
+                        && value.descriptor.field != PropertyFieldId::Density
+                    {
+                        assert!(help.contains("Use a value"));
+                    }
+                    if matches!(
+                        value.descriptor.field,
+                        PropertyFieldId::MarkMinimumFill
+                            | PropertyFieldId::ConnectedMinimumThickness
+                            | PropertyFieldId::RegionMinimumFill
+                    ) {
+                        assert_eq!(
+                            inspector_field_label(value.descriptor.field),
+                            "Minimum coverage"
+                        );
+                    }
+                    if matches!(
+                        value.descriptor.field,
+                        PropertyFieldId::MarkMaximumFill
+                            | PropertyFieldId::ConnectedMaximumThickness
+                            | PropertyFieldId::RegionMaximumFill
+                    ) {
+                        assert_eq!(
+                            inspector_field_label(value.descriptor.field),
+                            "Maximum coverage"
+                        );
+                    }
+                    if matches!(
+                        value.descriptor.field,
+                        PropertyFieldId::MarkMinimumFill
+                            | PropertyFieldId::MarkMaximumFill
+                            | PropertyFieldId::ConnectedMinimumThickness
+                            | PropertyFieldId::ConnectedMaximumThickness
+                            | PropertyFieldId::RegionMinimumFill
+                            | PropertyFieldId::RegionMaximumFill
+                    ) {
+                        let bounds = value
+                            .descriptor
+                            .bounds
+                            .expect("coverage endpoints have bounds");
+                        assert_eq!(bounds.minimum, Some(0.0));
+                        assert!(bounds.minimum_inclusive);
+                        assert_eq!(bounds.maximum, Some(1.0));
+                        assert!(bounds.maximum_inclusive);
+                        assert!(help.contains("requested geometric coverage"));
+                        assert!(help.contains("automatically measures and saves"));
+                        assert!(help.contains("saturates at the nearest reachable value"));
+                        assert!(help.contains("paint Alpha and channel Opacity"));
+                    }
+                    if value.descriptor.field == PropertyFieldId::MarkSizeScale {
+                        assert_eq!(
+                            inspector_field_label(value.descriptor.field),
+                            "Uniform mark size scale"
+                        );
+                        let bounds = value.descriptor.bounds.expect("Uniform scale has bounds");
+                        assert_eq!(bounds.minimum, Some(0.0));
+                        assert!(bounds.minimum_inclusive);
+                        assert_eq!(bounds.maximum, Some(2.0));
+                        assert!(bounds.maximum_inclusive);
+                    }
+                }
+                let response_descriptor = all_values
+                    .iter()
+                    .find(|value| value.descriptor.field == response_field)
+                    .map(|value| &value.descriptor)
+                    .expect("the active output keeps its response descriptor");
+                assert!(
+                    !inspector_field_detail(response_descriptor)
+                        .trim()
+                        .is_empty()
+                );
+                assert!(
+                    advanced
+                        .iter()
+                        .any(|value| value.descriptor.field == response_field)
+                );
+                assert!(
+                    !inline
+                        .iter()
+                        .any(|value| { advanced_channel_response_field(value.descriptor.field) })
+                );
+                assert!(
+                    !wizard
+                        .iter()
+                        .any(|value| { advanced_channel_response_field(value.descriptor.field) })
+                );
+                assert!(
+                    !advanced
+                        .iter()
+                        .any(|value| value.descriptor.field == PropertyFieldId::CurveResponseBias)
+                );
+
+                if matches!(
+                    preset,
+                    "grid-voronoi-scale" | "source-weighted-dispersion-voronoi"
+                ) {
+                    assert!(advanced.iter().any(|value| {
+                        value.descriptor.field == PropertyFieldId::RegionSampling
+                    }));
+                    assert!(wizard.iter().any(|value| {
+                        value.descriptor.field == PropertyFieldId::RegionResizeAlgorithm
+                    }));
+                    assert!(!advanced.iter().any(|value| {
+                        value.descriptor.field == PropertyFieldId::RegionResizeAlgorithm
+                    }));
+                }
+
+                let weighting = advanced
+                    .iter()
+                    .filter(|value| {
+                        source_consumer_group(value.descriptor.field) == Some("Source weighting")
+                    })
+                    .collect::<Vec<_>>();
+                assert!(!weighting.is_empty());
+
+                for &field in toniator_domain::ANIMATABLE_SCALAR_FIELD_IDS {
+                    if !advanced_batches::shown_in_advanced(field)
+                        || document.channel_scalar_batch(field).is_err()
+                    {
+                        continue;
+                    }
+                    let descriptor = all_values
+                        .iter()
+                        .find(|value| value.descriptor.field == field)
+                        .map(|value| &value.descriptor)
+                        .expect("an available scalar batch has a current descriptor");
+                    let help = advanced_field_help(field, Some(descriptor));
+                    assert!(help.starts_with(inspector_field_guidance(field)));
+                }
+            }
+        }
+    }
+}
+
 /// Keeps the native inspector hierarchy alive until a numeric activation finishes unwinding.
 /// Runs only in the private GTK harness; domain history changes immediately, but GTK child
 /// replacement must wait for the idle boundary so native focus traversal retains valid widgets.
@@ -451,31 +659,305 @@ fn workspace() -> Workspace {
         .expect("baseline artwork opens")
 }
 
-/// Keeps one real ALL row per field and retains separate response targets on multi-output channels.
+/// Shows range or scale controls from the effective Mark density mode and structural eligibility.
+///
+/// The single-output weighted Pattern exercises the current UI projection; a named Variable edit
+/// switches from scale to ranges, while an ordinary Mark Pattern keeps range controls only.
+///
+/// # Panics
+/// Panics if a current single Mark fixture cannot be materialized or its applicable response
+/// controls do not follow domain-owned mode and Pattern structure.
+#[test]
+fn ton018_mark_density_applicability_projects_scale_and_variable_ranges() {
+    let mut workspace = workspace();
+    let channel = authoritative_channel_ids(workspace.document())[0];
+    let mut recipe =
+        PatternDefinitionRecipe::starter_for_family(PatternRecipeFamilyKind::Dispersion);
+    let PatternStructureRecipe::RandomSites {
+        density_modulation, ..
+    } = &mut recipe.structure
+    else {
+        panic!("dispersion uses random placement");
+    };
+    *density_modulation = toniator_domain::SiteDensityModulation::ArtworkWeighted;
+    let recipe = recipe
+        .with_output_kind(0, PatternRecipeOutputKind::Marks)
+        .expect("weighted dispersion supports Mark output");
+    apply_wizard_recipe(&mut workspace.history, InspectorTarget::DocumentAll, recipe)
+        .expect("weighted Mark structure applies");
+    let effective = workspace
+        .document()
+        .effective_channel_pattern(channel)
+        .unwrap();
+    assert_eq!(effective.output_settings.len(), 1);
+    let output = effective.output_settings[0].output_layer_id;
+    assert!(channel_mark_scale_visible(workspace.document(), channel));
+    assert!(!channel_mark_range_visible(workspace.document(), channel));
+    assert!(channel_fill_mask_inactive(workspace.document(), channel));
+    assert!(
+        advanced_settings_values(workspace.document(), InspectorTarget::Channel(channel))
+            .iter()
+            .any(|value| value.descriptor.field == PropertyFieldId::MarkSizeScale)
+    );
+
+    let command = workspace
+        .document()
+        .set_channel_mark_density_mode_for_effective(
+            channel,
+            output,
+            toniator_domain::MarkDensityMode::Variable,
+        )
+        .unwrap();
+    workspace.history.apply(&command).unwrap();
+    assert!(!channel_mark_scale_visible(workspace.document(), channel));
+    assert!(channel_mark_range_visible(workspace.document(), channel));
+    assert!(!channel_fill_mask_inactive(workspace.document(), channel));
+
+    let command = workspace
+        .document()
+        .set_channel_mark_density_mode_for_effective(
+            channel,
+            output,
+            toniator_domain::MarkDensityMode::Uniform,
+        )
+        .unwrap();
+    workspace.history.apply(&command).unwrap();
+    workspace
+        .history
+        .apply(&DocumentCommand::SetModeledMappingField {
+            channel_id: channel,
+            edit: toniator_domain::ModeledMappingFieldEdit::Cutoff(0.25),
+        })
+        .unwrap();
+    assert!(!channel_fill_mask_inactive(workspace.document(), channel));
+
+    PresetRegistry::bundled()
+        .apply_to_selected(&mut workspace.history, channel, "round-spiral-marks")
+        .unwrap();
+    assert!(weighted_mark_density_states(workspace.document(), channel).is_empty());
+    assert!(!channel_mark_scale_visible(workspace.document(), channel));
+    assert!(channel_mark_range_visible(workspace.document(), channel));
+}
+
+/// Writes a current-schema vector project with one weighted Mark output and strict visible margin.
+///
+/// The ignored test is an opt-in private-GTK fixture generator. It uses the canonical recipe and
+/// project-container APIs, writes only under `target/validation/`, and leaves the immutable vector
+/// source untouched.
+///
+/// # Panics
+/// Panics if the source, current recipe, strict-margin eligibility, or project roundtrip fails.
+#[test]
+#[ignore = "writes a stage-owned strict-margin vector fixture for private GTK verification"]
+fn ton018_write_strict_margin_vector_ui_fixture() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../");
+    let source = root.join("assets/vector-sample.svg");
+    let mut workspace = load_workspace(&source).expect("immutable vector source opens");
+    let mut recipe = toniator_domain::PatternDefinitionRecipe::starter_for_family(
+        toniator_domain::PatternRecipeFamilyKind::Dispersion,
+    );
+    let toniator_domain::PatternStructureRecipe::RandomSites {
+        density_modulation,
+        exclusion,
+        ..
+    } = &mut recipe.structure
+    else {
+        panic!("the dispersion starter uses random sites");
+    };
+    *density_modulation = toniator_domain::SiteDensityModulation::ArtworkWeighted;
+    *exclusion = toniator_domain::SiteExclusionPolicy::VisibleMarkMargin { margin: 0.0 };
+    let recipe = recipe
+        .with_output_kind(0, toniator_domain::PatternRecipeOutputKind::Marks)
+        .expect("the sole dispersion output is one Mark output");
+    apply_wizard_recipe(&mut workspace.history, InspectorTarget::DocumentAll, recipe)
+        .expect("strict-margin weighted Marks apply to the private document");
+
+    let channel = authoritative_channel_ids(workspace.document())[0];
+    let effective = workspace
+        .document()
+        .effective_channel_pattern(channel)
+        .expect("current document resolves the strict-margin pattern");
+    assert_eq!(effective.output_settings.len(), 1);
+    let output = effective.output_settings[0].output_layer_id;
+    let density = workspace
+        .document()
+        .effective_mark_density(channel, output)
+        .expect("the sole Mark output resolves its effective sizing mode");
+    assert_eq!(density.mode, toniator_domain::MarkDensityMode::Variable);
+    assert!(density.uniform_unavailable_reason.is_some());
+
+    let destination =
+        root.join("target/validation/ton018-final-ui-20261009/strict-margin-vector.toniator");
+    fs::create_dir_all(destination.parent().expect("fixture path has a parent"))
+        .expect("stage validation directory exists");
+    save_container(&destination, workspace.document(), &workspace.sources)
+        .expect("strict-margin vector project saves in current schema");
+    let reopened = load_workspace(&destination).expect("strict-margin vector fixture reloads");
+    assert_eq!(reopened.document(), workspace.document());
+}
+
+/// Keeps same-value ALL Start input editable until the stored Appearance baseline records it.
+///
+/// The test follows the main inspector's equality guard through an unchanged effective density,
+/// an explicit ALL batch, and Undo. It also confirms End, named-channel, and non-baseline scalar
+/// authority remains outside the Start Appearance baseline rule, and focus leave requires a text
+/// change only for baseline-backed ALL Start entries.
+///
+/// # Panics
+/// Panics if default document descriptors, scalar batches, baseline publication, or history
+/// boundaries no longer satisfy the main inspector's same-value policy.
+#[test]
+fn ton016_main_same_value_guard_requires_recorded_start_baseline() {
+    let document = Document::new_default_document(
+        toniator_domain::CanvasSpec {
+            width: 80.0,
+            height: 60.0,
+        },
+        toniator_domain::SourceReference::Unassigned,
+    )
+    .expect("default document validates");
+    let all_values = inline_inspector_values(&document, InspectorTarget::DocumentAll);
+    let density = all_values
+        .iter()
+        .find(|value| value.descriptor.field == PropertyFieldId::Density)
+        .expect("ALL inspector exposes density");
+    assert!(main_all_scalar(
+        InspectorTarget::DocumentAll,
+        &density.descriptor
+    ));
+    let batch = document
+        .channel_scalar_batch(PropertyFieldId::Density)
+        .expect("density has compatible channel values");
+    let next = batch.values[0].value;
+    assert!(batch.values.iter().all(|value| value.value == next));
+    for field in [
+        PropertyFieldId::Density,
+        PropertyFieldId::DensityAspect,
+        PropertyFieldId::RotationDegrees,
+        PropertyFieldId::TranslationX,
+        PropertyFieldId::TranslationY,
+    ] {
+        assert!(main_start_appearance_baseline_field(field));
+    }
+    assert!(!main_all_scalar_same_value_intent_is_recorded(
+        temporal_preview::Endpoint::Start,
+        &document,
+        PropertyFieldId::Density,
+        next,
+    ));
+    let edited_since_construction = Cell::new(false);
+    assert!(!main_numeric_focus_leave_should_commit(
+        true,
+        &edited_since_construction,
+    ));
+    assert!(main_numeric_focus_leave_should_commit(
+        false,
+        &edited_since_construction,
+    ));
+    edited_since_construction.set(true);
+    assert!(main_numeric_focus_leave_should_commit(
+        true,
+        &edited_since_construction,
+    ));
+    assert!(!edited_since_construction.get());
+    assert!(main_all_scalar_same_value_intent_is_recorded(
+        temporal_preview::Endpoint::End,
+        &document,
+        PropertyFieldId::Density,
+        next,
+    ));
+
+    let nonbaseline = all_values
+        .iter()
+        .find(|value| {
+            main_all_scalar(InspectorTarget::DocumentAll, &value.descriptor)
+                && !matches!(
+                    value.descriptor.field,
+                    PropertyFieldId::Density
+                        | PropertyFieldId::DensityAspect
+                        | PropertyFieldId::RotationDegrees
+                        | PropertyFieldId::TranslationX
+                        | PropertyFieldId::TranslationY
+                )
+        })
+        .expect("ALL inspector exposes a non-baseline scalar");
+    assert!(!main_start_appearance_baseline_field(
+        nonbaseline.descriptor.field
+    ));
+    let PropertyCurrentValueKind::FiniteF64(nonbaseline_value) = &nonbaseline.value else {
+        panic!("non-baseline ALL scalar has a finite value");
+    };
+    assert!(main_all_scalar_same_value_intent_is_recorded(
+        temporal_preview::Endpoint::Start,
+        &document,
+        nonbaseline.descriptor.field,
+        *nonbaseline_value,
+    ));
+    let channel = document
+        .channel_topology()
+        .expect("default document has channels")
+        .channels()[0]
+        .id;
+    let named_density = inline_inspector_values(&document, InspectorTarget::Channel(channel))
+        .into_iter()
+        .find(|value| value.descriptor.field == PropertyFieldId::Density)
+        .expect("named inspector exposes density");
+    assert!(!main_all_scalar(
+        InspectorTarget::Channel(channel),
+        &named_density.descriptor
+    ));
+
+    let mut history = DocumentHistory::new(
+        DocumentSession::new(document.clone()).expect("initial session validates"),
+    );
+    assert!(
+        advanced_batches::apply(
+            &mut history,
+            temporal_preview::Endpoint::Start,
+            PropertyFieldId::Density,
+            next,
+        )
+        .expect("same-value ALL assignment publishes baseline intent")
+    );
+    assert!(history.can_undo());
+    assert!(main_all_scalar_same_value_intent_is_recorded(
+        temporal_preview::Endpoint::Start,
+        history.document(),
+        PropertyFieldId::Density,
+        next,
+    ));
+    assert!(!history.can_redo());
+    history.undo().expect("baseline intent remains undoable");
+    assert_eq!(history.document(), &document);
+    assert!(
+        !history.can_undo(),
+        "one Undo removes the only baseline edit"
+    );
+    assert!(history.can_redo());
+    assert!(!main_all_scalar_same_value_intent_is_recorded(
+        temporal_preview::Endpoint::Start,
+        history.document(),
+        PropertyFieldId::Density,
+        next,
+    ));
+}
+
+/// Keeps layout controls in Pattern and exposes each compatible response target in Advanced.
+/// Uses one current Guides Mark output so the check does not depend on the workspace's default
+/// construction topology or combine Marks with another drawn output.
 ///
 /// # Panics
 /// Panics if source and geometry homes overlap, fields disappear, or GTK fabricates batch targets.
 #[test]
-fn normal_controls_retain_channel_output_authority() {
+fn pattern_layout_and_advanced_response_keep_channel_output_authority() {
     let mut workspace = workspace();
-    let before = workspace.document().clone();
-    let configuration = before
-        .edit_all_pattern_recipe_configuration(&toniator_domain::PatternRecipeEdit::Append(
-            toniator_domain::PatternRecipeConstructionKind::Marks,
-        ))
-        .unwrap();
-    workspace
-        .history
-        .apply_document_configuration(&before, workspace.history.revision(), &configuration)
-        .unwrap();
+    let recipe = toniator_domain::PatternDefinitionRecipe::starter_for_family(
+        toniator_domain::PatternRecipeFamilyKind::Guides,
+    );
+    apply_wizard_recipe(&mut workspace.history, InspectorTarget::DocumentAll, recipe).unwrap();
     let document = workspace.document();
     let all = inline_inspector_values(document, InspectorTarget::DocumentAll);
-    for field in [
-        PropertyFieldId::TranslationX,
-        PropertyFieldId::TranslationY,
-        PropertyFieldId::MarkMinimumFill,
-        PropertyFieldId::MarkMaximumFill,
-    ] {
+    for field in [PropertyFieldId::TranslationX, PropertyFieldId::TranslationY] {
         let rows = all
             .iter()
             .filter(|row| row.descriptor.field == field)
@@ -492,13 +974,20 @@ fn normal_controls_retain_channel_output_authority() {
                 .contains(&rows[0].descriptor)
         );
     }
+    assert!(!all.iter().any(|row| {
+        matches!(
+            row.descriptor.field,
+            PropertyFieldId::MarkMinimumFill | PropertyFieldId::MarkMaximumFill
+        )
+    }));
     for channel in authoritative_channel_ids(document) {
         let named = inline_inspector_values(document, InspectorTarget::Channel(channel));
+        let advanced = advanced_settings_values(document, InspectorTarget::Channel(channel));
         let outputs = document
             .effective_channel_pattern(channel)
             .unwrap()
             .output_settings;
-        assert!(outputs.len() > 1);
+        assert_eq!(outputs.len(), 1, "the fixture uses one drawing output");
         for output in outputs {
             for field in [
                 PropertyFieldId::MarkMinimumFill,
@@ -512,11 +1001,20 @@ fn normal_controls_retain_channel_output_authority() {
                                 == PropertyTarget::ChannelOutput(channel, output.output_layer_id)
                     })
                     .count();
-                assert_eq!(rows, 1);
+                assert_eq!(rows, 0, "fill response stays in Advanced");
+                let advanced_rows = advanced
+                    .iter()
+                    .filter(|row| {
+                        row.descriptor.field == field
+                            && row.descriptor.target
+                                == PropertyTarget::ChannelOutput(channel, output.output_layer_id)
+                    })
+                    .count();
+                assert_eq!(advanced_rows, 1, "each active output has one Advanced row");
             }
         }
         assert!(
-            advanced_settings_values(document, InspectorTarget::Channel(channel))
+            advanced
                 .iter()
                 .all(|row| !inline_response_field(row.descriptor.field))
         );
@@ -527,12 +1025,73 @@ fn normal_controls_retain_channel_output_authority() {
     );
     assert_eq!(
         inspector_field_label(PropertyFieldId::MarkMaximumFill),
-        "Coverage"
+        "Maximum coverage"
     );
     assert_eq!(
         main_inspector_section(PropertyFieldId::TranslationX),
         main_inspector_section(PropertyFieldId::RotationDegrees)
     );
+}
+
+/// Groups All-channel coverage batches by their current capability-derived output kind.
+///
+/// Three separate channels may use Marks, Lines, and Regions in the same All scope. The
+/// aggregate rows must retain those distinctions without building a mixed-output Pattern.
+///
+/// # Panics
+/// Panics if a current response batch loses its channel-output capability or the All scope
+/// stops exposing all three valid output kinds.
+#[test]
+fn all_response_batches_group_different_output_kinds() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut workspace = load_workspace(&root.join("assets/vector-sample.svg")).unwrap();
+    let registry = PresetRegistry::bundled();
+    let catalog = LayeredPresetCatalog::new(&registry, Vec::new()).unwrap();
+    let channels = authoritative_channel_ids(workspace.document());
+    let presets = [
+        "round-spiral-marks",
+        "one-guide-lines",
+        "grid-voronoi-scale",
+    ];
+    for (channel, preset) in channels.iter().copied().zip(presets) {
+        apply_catalog_pattern_candidate(
+            &mut workspace.history,
+            &catalog,
+            InspectorTarget::Channel(channel),
+            preset,
+        )
+        .unwrap();
+    }
+
+    let document = workspace.document();
+    let mut groups = BTreeSet::new();
+    for (minimum, maximum, expected) in [
+        (
+            PropertyFieldId::MarkMinimumFill,
+            PropertyFieldId::MarkMaximumFill,
+            "Marks",
+        ),
+        (
+            PropertyFieldId::ConnectedMinimumThickness,
+            PropertyFieldId::ConnectedMaximumThickness,
+            "Lines",
+        ),
+        (
+            PropertyFieldId::RegionMinimumFill,
+            PropertyFieldId::RegionMaximumFill,
+            "Regions",
+        ),
+    ] {
+        for field in [minimum, maximum] {
+            let batch = document.channel_scalar_batch(field).unwrap();
+            assert_eq!(
+                advanced_batches::response_batch_output_group(document, &batch),
+                Some(expected)
+            );
+        }
+        groups.insert(expected);
+    }
+    assert_eq!(groups, BTreeSet::from(["Lines", "Marks", "Regions"]));
 }
 
 /// Applies representative ALL controls and their easing/reset to every output at End, with exact Undo.
@@ -547,12 +1106,23 @@ fn representative_all_rows_preserve_end_audience() {
         PropertyFieldId::TranslationX,
         PropertyFieldId::MarkMaximumFill,
     ] {
-        let descriptor =
+        let descriptor = if field == PropertyFieldId::MarkMaximumFill {
+            let first_channel = authoritative_channel_ids(workspace.document())[0];
+            advanced_settings_values(
+                workspace.document(),
+                InspectorTarget::Channel(first_channel),
+            )
+            .into_iter()
+            .find(|row| row.descriptor.field == field)
+            .expect("Advanced exposes the representative mark response field")
+            .descriptor
+        } else {
             inline_inspector_values(workspace.document(), InspectorTarget::DocumentAll)
                 .into_iter()
                 .find(|row| row.descriptor.field == field)
-                .unwrap()
-                .descriptor;
+                .expect("ALL exposes the representative structural field")
+                .descriptor
+        };
         let value = if field == PropertyFieldId::TranslationX {
             17.0
         } else {

@@ -46,6 +46,7 @@ fn guide_face_recipe_round_trips_current_preset_format() {
         orientation: MarkOrientationDraft::Fixed,
     };
     let preset = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "stage20p".into(),
             name: "Guide Faces".into(),

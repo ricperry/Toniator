@@ -407,6 +407,7 @@ fn document_versions_one_through_six_are_rejected() {
 fn preset_v4_bytes_reconstruct_document_base_or_channel_override() {
     assert_eq!(PRESET_FORMAT_VERSION, 4);
     let preset = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "stage20g-grid".into(),
             name: "Stage 20G Grid".into(),

@@ -15,15 +15,19 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use toniator_domain::{Document, DocumentConfiguration};
+use std::collections::BTreeMap;
+use toniator_domain::{Document, DocumentConfiguration, PendingRawPresetImport};
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 use super::{
+    ChannelOutputResponseDto, ChannelResponseOverrideDto,
     DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION, DOCUMENT_PRESET_FORMAT_VERSION,
-    DocumentConfigurationDtoV9, LoadError, MAX_ARCHIVE_BYTES, MAX_DOCUMENT_BYTES, SaveError,
-    declared_zip_entry_count, ensure_supported_file_compression, load_opened, read_limited,
-    safe_archive_name,
+    DocumentAppearanceBaselineDto, DocumentConfigurationDtoV12, DocumentResponseSettingsDto,
+    LoadError, MAX_ARCHIVE_BYTES, MAX_DOCUMENT_BYTES, RegionResizeAlgorithmDtoV6,
+    RegionSamplingStrategyDtoV6, SaveError, SourceToneDto, declared_zip_entry_count,
+    ensure_supported_file_compression, load_opened, read_limited, safe_archive_name,
 };
 
 const PRESET_ENTRY_NAME: &str = "preset.json";
@@ -131,12 +135,21 @@ enum ArchiveKind {
     Project,
 }
 
+/// A current Preset or a former raw-response Preset awaiting explicit engine preparation.
+///
+/// The pending variant does not expose its neutral calibration shell as a current configuration.
+#[derive(Debug)]
+pub enum StagedDocumentPreset {
+    Current(DocumentConfiguration),
+    PendingRaw(PendingRawPresetImport),
+}
+
 #[derive(Serialize, Deserialize)]
 struct DocumentPresetEnvelopeDto {
     kind: String,
     document_preset_format_version: u32,
     document_schema_version: u32,
-    configuration: DocumentConfigurationDtoV9,
+    configuration: DocumentConfigurationDtoV12,
 }
 
 /// Minimal dispatch metadata parsed before the configuration schema is decoded.
@@ -147,13 +160,499 @@ struct DocumentPresetMetadataDto {
     document_schema_version: u32,
 }
 
-/// Loads a source-free v3/configuration-10 Preset or a supported project as
-/// reusable configuration, preserving destination print intent at binding.
+/// Exact pre-response-ownership endpoint payload, decoded only for recognized legacy Presets.
+#[derive(Clone, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "response",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum LegacyResponse {
+    Marks {
+        minimum_fill: f64,
+        maximum_fill: f64,
+    },
+    Connected {
+        minimum_thickness: f64,
+        maximum_thickness: f64,
+        bias: f64,
+    },
+    Regions {
+        algorithm: RegionResizeAlgorithmDtoV6,
+        sampling: RegionSamplingStrategyDtoV6,
+        minimum_fill: f64,
+        maximum_fill: f64,
+    },
+}
+
+impl LegacyResponse {
+    /// Moves old additive endpoint deltas into an effective named response and zeros their
+    /// obsolete structural slots; connected bias remains Pattern-owned.
+    ///
+    /// # Errors
+    /// Rejects malformed or mismatched legacy delta payloads rather than losing channel intent.
+    fn absorb_delta(&self, delta: &mut Value) -> Result<Self, DocumentPresetError> {
+        let kind = delta.get("kind").and_then(Value::as_str).map(str::to_owned);
+        let fields = delta.get_mut("delta").and_then(Value::as_object_mut);
+        let fields = fields.ok_or_else(|| DocumentPresetError::Json {
+            context: "legacy response delta payload is missing".into(),
+        })?;
+        let mut take = |key: &str| -> Result<f64, DocumentPresetError> {
+            let value = fields.get(key).filter(|value| !value.is_null()).cloned();
+            let amount = match &value {
+                Some(value) => value.as_f64().ok_or_else(|| DocumentPresetError::Json {
+                    context: format!("legacy {key} must be numeric"),
+                })?,
+                None => 0.0,
+            };
+            fields.remove(key);
+            Ok(amount)
+        };
+        match (self, kind.as_deref()) {
+            (
+                Self::Marks {
+                    minimum_fill,
+                    maximum_fill,
+                },
+                Some("marks"),
+            ) => Ok(Self::Marks {
+                minimum_fill: minimum_fill + take("minimum_fill_delta")?,
+                maximum_fill: maximum_fill + take("maximum_fill_delta")?,
+            }),
+            (
+                Self::Connected {
+                    minimum_thickness,
+                    maximum_thickness,
+                    bias,
+                },
+                Some("connected"),
+            ) => Ok(Self::Connected {
+                minimum_thickness: minimum_thickness + take("minimum_thickness_delta")?,
+                maximum_thickness: maximum_thickness + take("maximum_thickness_delta")?,
+                bias: *bias,
+            }),
+            (
+                Self::Regions {
+                    algorithm,
+                    sampling,
+                    minimum_fill,
+                    maximum_fill,
+                },
+                Some("regions"),
+            ) => Ok(Self::Regions {
+                algorithm: *algorithm,
+                sampling: *sampling,
+                minimum_fill: minimum_fill + take("minimum_fill_delta")?,
+                maximum_fill: maximum_fill + take("maximum_fill_delta")?,
+            }),
+            _ => Err(DocumentPresetError::Json {
+                context: "legacy response delta kind does not match output".into(),
+            }),
+        }
+    }
+    /// Moves one old effective endpoint pair into current ALL response authority.
+    fn set_all(&self, all: &mut DocumentResponseSettingsDto) {
+        match self {
+            Self::Marks {
+                minimum_fill,
+                maximum_fill,
+            } => {
+                all.marks_minimum_fill = *minimum_fill;
+                all.marks_maximum_fill = *maximum_fill;
+            }
+            Self::Connected {
+                minimum_thickness,
+                maximum_thickness,
+                ..
+            } => {
+                all.connected_minimum_thickness = *minimum_thickness;
+                all.connected_maximum_thickness = *maximum_thickness;
+            }
+            Self::Regions {
+                minimum_fill,
+                maximum_fill,
+                sampling,
+                ..
+            } => {
+                all.regions_minimum_fill = *minimum_fill;
+                all.regions_maximum_fill = *maximum_fill;
+                all.region_sampling = *sampling;
+            }
+        }
+    }
+
+    /// Returns only a named difference from ALL, preserving inherited channels as inherited.
+    fn named_difference(
+        &self,
+        all: &DocumentResponseSettingsDto,
+    ) -> Option<ChannelOutputResponseDto> {
+        match self {
+            Self::Marks {
+                minimum_fill,
+                maximum_fill,
+            } if *minimum_fill != all.marks_minimum_fill
+                || *maximum_fill != all.marks_maximum_fill =>
+            {
+                Some(ChannelOutputResponseDto::Marks {
+                    minimum_fill: Some(*minimum_fill),
+                    maximum_fill: Some(*maximum_fill),
+                    density_mode: None,
+                    size_scale: None,
+                })
+            }
+            Self::Connected {
+                minimum_thickness,
+                maximum_thickness,
+                ..
+            } if *minimum_thickness != all.connected_minimum_thickness
+                || *maximum_thickness != all.connected_maximum_thickness =>
+            {
+                Some(ChannelOutputResponseDto::Connected {
+                    minimum_thickness: Some(*minimum_thickness),
+                    maximum_thickness: Some(*maximum_thickness),
+                })
+            }
+            Self::Regions {
+                minimum_fill,
+                maximum_fill,
+                sampling,
+                ..
+            } if *minimum_fill != all.regions_minimum_fill
+                || *maximum_fill != all.regions_maximum_fill
+                || *sampling != all.region_sampling =>
+            {
+                Some(ChannelOutputResponseDto::Regions {
+                    minimum_fill: Some(*minimum_fill),
+                    maximum_fill: Some(*maximum_fill),
+                    sampling: Some(*sampling),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Keeps only Pattern-owned connected bias or region resize in a current structural shell.
+    fn structural_shell(&self) -> Value {
+        match self {
+            Self::Marks { .. } => json!({"kind":"marks"}),
+            Self::Connected { bias, .. } => json!({"kind":"connected","bias":bias}),
+            Self::Regions { algorithm, .. } => json!({"kind":"regions","algorithm":algorithm}),
+        }
+    }
+}
+
+/// Converts only explicitly recognized source-free Preset revisions into the current DTO shape.
+///
+/// # Errors
+/// Rejects malformed legacy fields and unknown version pairs without guessing a repair.
+fn migrate_legacy_preset(
+    bytes: &[u8],
+    metadata: &DocumentPresetMetadataDto,
+) -> Result<Vec<u8>, DocumentPresetError> {
+    match (
+        metadata.document_preset_format_version,
+        metadata.document_schema_version,
+    ) {
+        (1, 7 | 8) | (3, 10..=14) => {}
+        _ => {
+            return Err(DocumentPresetError::Version {
+                context: format!(
+                    "unsupported document Preset format/schema pair {}/{}",
+                    metadata.document_preset_format_version, metadata.document_schema_version,
+                ),
+            });
+        }
+    }
+    let mut root: Value =
+        serde_json::from_slice(bytes).map_err(|error| DocumentPresetError::Json {
+            context: error.to_string(),
+        })?;
+    let config = root
+        .get_mut("configuration")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| DocumentPresetError::Json {
+            context: "legacy configuration must be an object".into(),
+        })?;
+    let base_id = config
+        .get("pattern_settings")
+        .and_then(|value| value.get("definition_id"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| DocumentPresetError::Json {
+            context: "legacy base Pattern ID is missing".into(),
+        })?;
+    let mut old_responses = BTreeMap::<(u64, u64), LegacyResponse>::new();
+    let bundles = config
+        .get_mut("pattern_definition_bundles")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| DocumentPresetError::Json {
+            context: "legacy Pattern bundles are missing".into(),
+        })?;
+    for bundle in bundles {
+        let id = bundle
+            .get("definition")
+            .and_then(|value| value.get("id"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| DocumentPresetError::Json {
+                context: "legacy Pattern definition ID is missing".into(),
+            })?;
+        let settings = bundle
+            .get_mut("output_settings")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| DocumentPresetError::Json {
+                context: "legacy output settings are missing".into(),
+            })?;
+        for setting in settings {
+            let output_id = setting
+                .get("output_layer_id")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| DocumentPresetError::Json {
+                    context: "legacy output layer ID is missing".into(),
+                })?;
+            let response =
+                setting
+                    .get_mut("response")
+                    .ok_or_else(|| DocumentPresetError::Json {
+                        context: "legacy output response is missing".into(),
+                    })?;
+            if response.get("response").is_some() {
+                let old: LegacyResponse =
+                    serde_json::from_value(response.clone()).map_err(|error| {
+                        DocumentPresetError::Json {
+                            context: format!("legacy output response: {error}"),
+                        }
+                    })?;
+                *response = old.structural_shell();
+                old_responses.insert((id, output_id), old);
+            }
+        }
+        if let Some(mechanisms) = bundle
+            .get_mut("definition")
+            .and_then(|definition| definition.get_mut("mechanisms"))
+            .and_then(Value::as_array_mut)
+        {
+            for mechanism in mechanisms {
+                let is_process =
+                    mechanism.get("kind").and_then(Value::as_str) == Some("random_site_process");
+                let is_product =
+                    mechanism.get("kind").and_then(Value::as_str) == Some("random_site_product");
+                if is_process && mechanism.get("nominal_spacing").is_none() {
+                    let even = mechanism
+                        .get("character")
+                        .and_then(|value| value.get("kind"))
+                        .and_then(Value::as_str)
+                        == Some("even");
+                    mechanism["nominal_spacing"] = if even {
+                        Value::Null
+                    } else {
+                        json!(toniator_domain::DEFAULT_RANDOM_NOMINAL_SPACING)
+                    };
+                }
+                if is_product && mechanism.get("refinement").is_none() {
+                    mechanism["refinement"] =
+                        json!({"enabled":false,"density_weighted":false,"iterations":4});
+                }
+            }
+        }
+    }
+    if config.get("response_settings").is_none() {
+        if old_responses.is_empty() {
+            return Err(DocumentPresetError::Version {
+                context: "legacy response ownership has no convertible endpoints".into(),
+            });
+        }
+        let mut all = DocumentResponseSettingsDto::from_domain(
+            &toniator_domain::DocumentResponseSettings::default(),
+        );
+        for ((id, _), response) in &old_responses {
+            if *id == base_id {
+                response.set_all(&mut all);
+            }
+        }
+        let mut overrides = Vec::<ChannelResponseOverrideDto>::new();
+        let channels = config
+            .get_mut("channel_configuration")
+            .and_then(|value| value.get_mut("channels"))
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| DocumentPresetError::Json {
+                context: "legacy channels are missing".into(),
+            })?;
+        for channel in channels {
+            let channel_id = channel.get("id").and_then(Value::as_u64).ok_or_else(|| {
+                DocumentPresetError::Json {
+                    context: "legacy channel ID is missing".into(),
+                }
+            })?;
+            let definition_id = channel
+                .get("pattern_instance")
+                .and_then(|value| value.get("definition_override"))
+                .and_then(Value::as_u64)
+                .unwrap_or(base_id);
+            let mut effective = old_responses
+                .iter()
+                .filter(|((id, _), _)| *id == definition_id)
+                .map(|((_, output_id), response)| (*output_id, response.clone()))
+                .collect::<BTreeMap<_, _>>();
+            if let Some(deltas) = channel
+                .get_mut("pattern_instance")
+                .and_then(|instance| instance.get_mut("output_response_deltas"))
+                .and_then(Value::as_array_mut)
+            {
+                for entry in deltas.iter_mut() {
+                    let output_id = entry
+                        .get("output_layer_id")
+                        .and_then(Value::as_u64)
+                        .ok_or_else(|| DocumentPresetError::Json {
+                            context: "legacy response delta output ID is missing".into(),
+                        })?;
+                    let base =
+                        effective
+                            .get(&output_id)
+                            .ok_or_else(|| DocumentPresetError::Json {
+                                context: "legacy response delta has no matching output".into(),
+                            })?;
+                    let delta =
+                        entry
+                            .get_mut("delta")
+                            .ok_or_else(|| DocumentPresetError::Json {
+                                context: "legacy response delta is missing".into(),
+                            })?;
+                    effective.insert(output_id, base.absorb_delta(delta)?);
+                }
+                deltas.retain(|entry| {
+                    entry
+                        .get("delta")
+                        .and_then(|delta| delta.get("delta"))
+                        .and_then(Value::as_object)
+                        .is_some_and(|fields| !fields.is_empty())
+                });
+            }
+            for (output_id, response) in effective {
+                if let Some(named) = response.named_difference(&all) {
+                    overrides.push(ChannelResponseOverrideDto {
+                        channel_id,
+                        output_layer_id: output_id,
+                        response: named,
+                    });
+                }
+            }
+            let needs_weighting = channel.get("weighting").is_none();
+            if let Some(mapping) = channel.get_mut("mapping")
+                && mapping.get("tone").is_none()
+            {
+                mapping["tone"] = serde_json::to_value(SourceToneDto::from_domain(
+                    toniator_domain::SourceTone::identity(),
+                ))
+                .expect("identity source tone serializes");
+            }
+            if needs_weighting {
+                let mapping =
+                    channel
+                        .get("mapping")
+                        .cloned()
+                        .ok_or_else(|| DocumentPresetError::Json {
+                            context: "legacy modeled mapping is missing".into(),
+                        })?;
+                channel["weighting"] =
+                    json!({"mapping":mapping,"strength":1.0,"response":{"kind":"linear"}});
+            }
+        }
+        config.insert(
+            "response_settings".into(),
+            serde_json::to_value(all).expect("current response DTO serializes"),
+        );
+        config.insert(
+            "channel_response_overrides".into(),
+            serde_json::to_value(overrides).expect("current named response DTO serializes"),
+        );
+    }
+    if config.get("appearance_baseline").is_none() {
+        config.insert(
+            "appearance_baseline".into(),
+            serde_json::to_value(DocumentAppearanceBaselineDto::from_domain(
+                &Default::default(),
+            ))
+            .expect("default baseline serializes"),
+        );
+    }
+    config.entry("end_overrides").or_insert_with(|| json!([]));
+    config
+        .entry("saved_calibrations")
+        .or_insert_with(|| json!([]));
+    root["document_preset_format_version"] = json!(DOCUMENT_PRESET_FORMAT_VERSION);
+    root["document_schema_version"] = json!(DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION);
+    serde_json::to_vec(&root).map_err(|error| DocumentPresetError::Json {
+        context: error.to_string(),
+    })
+}
+
+/// Removes recognized obsolete v2/v3, seed-specific v4, and Guide Faces v4 measurements.
+///
+/// Pattern structure and every authored response remain unchanged; config16 desired endpoints
+/// are never remapped. The receiver must prepare each missing binding before publication.
+/// Current projects do not use this
+/// converter, and unknown future profiles still fail strict artifact validation.
+///
+/// # Errors
+/// Returns a JSON diagnostic if a recognized Preset cannot be reserialized within its limit.
+fn migrate_former_calibration_profile(
+    bytes: &[u8],
+) -> Result<Option<Vec<u8>>, DocumentPresetError> {
+    const FORMER_PROFILES: [&str; 3] = [
+        "ton018-reference-fixed-canvas1024-v2",
+        "ton018-reference-fixed-canvas1024-spacings32-v3",
+        "ton018-reference-fixed-canvas1024-spacings64-v3",
+    ];
+    let mut root: Value =
+        serde_json::from_slice(bytes).map_err(|error| DocumentPresetError::Json {
+            context: error.to_string(),
+        })?;
+    let Some(configuration) = root.get_mut("configuration").and_then(Value::as_object_mut) else {
+        return Ok(None);
+    };
+    let mut changed = false;
+    if let Some(artifacts) = configuration.get_mut("saved_calibrations").and_then(Value::as_array_mut) {
+        let original_count = artifacts.len();
+        artifacts.retain(|entry| !entry.get("profile").and_then(Value::as_str)
+            .is_some_and(|profile| FORMER_PROFILES.contains(&profile))
+            && !super::obsolete_seeded_v4_companion(entry)
+            && !super::obsolete_guide_faces_v4_companion(entry));
+        changed |= artifacts.len() != original_count;
+    }
+    if configuration.get("baseline_saved_calibration")
+        .and_then(|entry| entry.get("profile"))
+        .and_then(Value::as_str)
+        .is_some_and(|profile| FORMER_PROFILES.contains(&profile))
+        || configuration.get("baseline_saved_calibration")
+            .is_some_and(super::obsolete_seeded_v4_companion)
+        || configuration.get("baseline_saved_calibration")
+            .is_some_and(super::obsolete_guide_faces_v4_companion)
+    {
+        configuration.insert("baseline_saved_calibration".into(), Value::Null);
+        changed = true;
+    }
+    if !changed {
+        return Ok(None);
+    }
+    let migrated = serde_json::to_vec(&root).map_err(|error| DocumentPresetError::Json {
+        context: error.to_string(),
+    })?;
+    if migrated.len() as u64 > MAX_DOCUMENT_BYTES {
+        return Err(DocumentPresetError::Limits {
+            context: "converted preset.json exceeds the 4 MiB document Preset limit".into(),
+        });
+    }
+    Ok(Some(migrated))
+}
+
+/// Loads a source-free Preset with current coverage semantics or a current project as reusable
+/// configuration, preserving destination print intent at binding.
 ///
 /// Archive shape selects the reader, so renaming a project cannot bypass the
 /// ordinary project's source manifest, byte-length, digest, reference, schema,
-/// and container validation. Both routes bind against `destination` before a
-/// configuration is returned.
+/// and container validation. Former raw-response Presets require staged
+/// preparation; this current-only reader rejects them. Both routes bind
+/// against `destination` before a configuration is returned.
 ///
 /// # Errors
 ///
@@ -164,6 +663,22 @@ pub fn load_document_preset(
     path: &Path,
     destination: &Document,
 ) -> Result<DocumentConfiguration, DocumentPresetError> {
+    match load_document_preset_staged(path, destination)? {
+        StagedDocumentPreset::Current(configuration) => Ok(configuration),
+        StagedDocumentPreset::PendingRaw(_) => Err(DocumentPresetError::Version {
+            context: "former raw-response Preset requires explicit calibration preparation".into(),
+        }),
+    }
+}
+
+/// Loads current configuration or typed former raw intent without publishing a neutral shell.
+///
+/// # Errors
+/// Retains strict archive, schema, source, and destination validation diagnostics.
+pub fn load_document_preset_staged(
+    path: &Path,
+    destination: &Document,
+) -> Result<StagedDocumentPreset, DocumentPresetError> {
     let (kind, file) = classify_archive(path)?;
     match kind {
         ArchiveKind::Project => {
@@ -175,7 +690,7 @@ pub fn load_document_preset(
                     context: error.to_string(),
                 }
             })?;
-            Ok(configuration)
+            Ok(StagedDocumentPreset::Current(configuration))
         }
         ArchiveKind::DocumentPreset => load_source_free_preset(path, file, destination),
     }
@@ -209,8 +724,8 @@ pub fn capture_document_preset_destination(
     })
 }
 
-/// Serializes and atomically publishes one source-free v3/configuration-10
-/// snapshot without project-owned print intent.
+/// Serializes and atomically publishes a source-free v3 Preset snapshot using the current
+/// configuration schema without project-owned print intent.
 ///
 /// Missing destinations use atomic no-replace publication. Existing targets
 /// are fingerprinted again immediately before an atomic rename. That overwrite
@@ -235,7 +750,7 @@ pub fn save_document_preset(
         kind: "document_preset".into(),
         document_preset_format_version: DOCUMENT_PRESET_FORMAT_VERSION,
         document_schema_version: DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION,
-        configuration: DocumentConfigurationDtoV9::from_configuration(configuration)
+        configuration: DocumentConfigurationDtoV12::from_configuration(configuration)
             .map_err(map_save_error)?,
     };
     let mut json = serde_json::to_vec(&envelope).map_err(|error| DocumentPresetError::Json {
@@ -386,7 +901,7 @@ fn load_source_free_preset(
     path: &Path,
     mut file: File,
     destination: &Document,
-) -> Result<DocumentConfiguration, DocumentPresetError> {
+) -> Result<StagedDocumentPreset, DocumentPresetError> {
     let length = file
         .metadata()
         .map_err(|error| filesystem_error(path, error.to_string()))?
@@ -440,24 +955,34 @@ fn load_source_free_preset(
             context: format!("unsupported resource kind {:?}", metadata.kind),
         });
     }
-    if metadata.document_preset_format_version != DOCUMENT_PRESET_FORMAT_VERSION {
-        return Err(DocumentPresetError::Version {
-            context: format!(
-                "unsupported document Preset format version {}",
-                metadata.document_preset_format_version
-            ),
-        });
-    }
-    if metadata.document_schema_version != DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION {
-        return Err(DocumentPresetError::Version {
-            context: format!(
-                "unsupported document configuration schema version {}",
-                metadata.document_schema_version
-            ),
-        });
-    }
+    let pending_raw = metadata.document_schema_version < DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION;
+    let migrated = if metadata.document_preset_format_version == DOCUMENT_PRESET_FORMAT_VERSION
+        && metadata.document_schema_version == DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION
+    {
+        migrate_former_calibration_profile(&bytes)?
+    } else if metadata.document_preset_format_version == DOCUMENT_PRESET_FORMAT_VERSION
+        && metadata.document_schema_version + 1 == DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION
+    {
+        let normalized = migrate_former_calibration_profile(&bytes)?.unwrap_or(bytes.clone());
+        let mut root: Value = serde_json::from_slice(&normalized).map_err(|error| DocumentPresetError::Json {
+            context: error.to_string(),
+        })?;
+        root["document_schema_version"] = json!(DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION);
+        let normalized = serde_json::to_vec(&root).map_err(|error| DocumentPresetError::Json {
+            context: error.to_string(),
+        })?;
+        if normalized.len() as u64 > MAX_DOCUMENT_BYTES {
+            return Err(DocumentPresetError::Limits {
+                context: "converted preset.json exceeds the 4 MiB document Preset limit".into(),
+            });
+        }
+        Some(normalized)
+    } else {
+        Some(migrate_legacy_preset(&bytes, &metadata)?)
+    };
+    let decoded = migrated.as_deref().unwrap_or(&bytes);
     let mut ignored = Vec::new();
-    let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
+    let mut deserializer = serde_json::Deserializer::from_slice(decoded);
     let envelope: DocumentPresetEnvelopeDto =
         serde_ignored::deserialize(&mut deserializer, |path| ignored.push(path.to_string()))
             .map_err(|error| DocumentPresetError::Json {
@@ -476,18 +1001,21 @@ fn load_source_free_preset(
     debug_assert_eq!(envelope.kind, metadata.kind);
     debug_assert_eq!(
         envelope.document_preset_format_version,
-        metadata.document_preset_format_version
+        DOCUMENT_PRESET_FORMAT_VERSION
     );
     debug_assert_eq!(
         envelope.document_schema_version,
-        metadata.document_schema_version
+        DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION
     );
-    envelope
-        .configuration
-        .into_domain_configuration(destination)
-        .map_err(|error| DocumentPresetError::DomainValidation {
-            context: error.to_string(),
-        })
+    if pending_raw {
+        envelope.configuration.into_pending_raw_import(destination)
+            .map(StagedDocumentPreset::PendingRaw)
+            .map_err(|error| DocumentPresetError::DomainValidation { context: error.to_string() })
+    } else {
+        envelope.configuration.into_domain_configuration(destination)
+            .map(StagedDocumentPreset::Current)
+            .map_err(|error| DocumentPresetError::DomainValidation { context: error.to_string() })
+    }
 }
 
 /// Opens one path once without following a final symlink and enforces a real byte limit.

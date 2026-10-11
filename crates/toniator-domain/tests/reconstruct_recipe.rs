@@ -298,6 +298,7 @@ fn generic_reference_family(resource_index: usize) -> PatternStructureRecipe {
 /// Does not panic; callers choose whether to expect record validation to succeed.
 fn record(structure: PatternStructureRecipe) -> PresetRecord {
     PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "indexed-generic".into(),
             name: "Indexed Generic".into(),
@@ -409,6 +410,7 @@ fn authored_output_consumers_require_compatible_root_table_references() {
         "preset.recipe.resources.reference.missing_table"
     );
     let out_of_bounds = validate_preset_record(&PresetRecord {
+        saved_calibration: None,
         metadata: record(PatternStructureRecipe::StraightGrid(
             toniator_domain::PatternDefinitionDraft {
                 name: "metadata source".into(),
@@ -472,6 +474,7 @@ fn authored_resource_table_is_root_only_and_nonempty() {
     )
     .expect("table resource validates");
     let record = |structure| PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "table".into(),
             name: "table".into(),
@@ -1593,6 +1596,7 @@ fn new_recipe_output_collection_edits_preserve_local_dependencies() {
     recipe.output_settings[0].source_filter =
         SiteUseFilterRecipe::SitesUnusedBy { output_index: 1 };
     validate_preset_record(&PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "new-output-collection".into(),
             name: "New Output Collection".into(),

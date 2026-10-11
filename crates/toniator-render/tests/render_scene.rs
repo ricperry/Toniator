@@ -132,6 +132,30 @@ fn color(red: f64, green: f64, blue: f64, alpha: f64) -> ColorValue {
     }
 }
 
+/// Keeps a visible circle's AA pixels unchanged when another positive circle is far outside the canvas.
+#[test]
+fn off_canvas_positive_circle_does_not_consume_precision_budget() {
+    let layer = |include_far: bool| {
+        let mut marks = vec![mark(3.5, 3.5, 1.0, SiteScope::Canvas)];
+        if include_far {
+            marks.push(mark(1.0e20, 1.0e20, 1.0, SiteScope::Guard));
+        }
+        RenderLayer::new(
+            ChannelId(1),
+            true,
+            color(0.0, 0.0, 1.0, 1.0),
+            1.0,
+            GeometryOutput::CircularMarks(marks),
+        )
+        .unwrap()
+    };
+    let ordinary = modeled(HalftoneChannelModel::Rgb, vec![layer(false)]);
+    let with_far = modeled(HalftoneChannelModel::Rgb, vec![layer(true)]);
+    let expected = rasterize(&ordinary, RasterBackground::OpaqueBlack).unwrap();
+    let actual = rasterize(&with_far, RasterBackground::OpaqueBlack).unwrap();
+    assert_eq!(actual.pixels(), expected.pixels());
+}
+
 #[test]
 fn preview_target_rerasterizes_geometry_without_changing_native_raster() {
     let scene = scene(true, color(1.0, 0.0, 0.0, 1.0), 1.0);
@@ -250,6 +274,60 @@ fn preview_target_rejects_invalid_or_unsafe_extents() {
         PreviewRasterTarget::new(8193, 8193).unwrap_err().path(),
         "preview.target"
     );
+}
+
+/// Proves an output-backed preview preserves sub-byte blue coverage before final RGBA8 encoding.
+///
+/// # Panics
+/// Panics if preview backing changes scene identity, transparent export, or direct output parity.
+#[test]
+fn preview_background_preserves_faint_blue_before_quantization() {
+    for (radius,blue) in [(0.012827,2_u8),(0.02459,6_u8)] {
+        let layer=RenderLayer::new(ChannelId(1),true,color(0.0,0.0,1.0,1.0),1.0,
+            GeometryOutput::CircularMarks(vec![mark(0.5,0.5,radius,SiteScope::Canvas)])).unwrap();
+        let scene=modeled_with_canvas(HalftoneChannelModel::Rgb,1.0,1.0,vec![layer]);
+        let identity=scene.identity().scene_fingerprint().to_owned();
+        let transparent=PreviewRasterTarget::new(1,1).unwrap();
+        let backed=transparent.with_background(RasterBackground::OpaqueBlack);
+        assert_ne!(transparent.raster_identity(),backed.raster_identity());
+        assert_eq!(transparent.background(),RasterBackground::Transparent);
+        let transparent_preview=rasterize_preview(&scene,transparent).unwrap();
+        let backed_preview=rasterize_preview(&scene,backed).unwrap();
+        assert_eq!(transparent_preview.pixels(),[0,0,255,0]);
+        assert_eq!(backed_preview.pixels(),[0,0,blue,255]);
+        let transparent_output=rasterize_output(&scene,RasterBackground::Transparent,
+            Some(OutputRasterTarget::new(1,1).unwrap()),RasterAntialiasing::On).unwrap();
+        let black_output=rasterize_output(&scene,RasterBackground::OpaqueBlack,
+            Some(OutputRasterTarget::new(1,1).unwrap()),RasterAntialiasing::On).unwrap();
+        assert_eq!(transparent_preview,transparent_output);
+        assert_eq!(backed_preview,black_output);
+        assert_eq!(scene.identity().scene_fingerprint(),identity);
+    }
+}
+
+/// Checks CMYK white backing and SourceColorAlpha transparency against exact output consumers.
+///
+/// # Panics
+/// Panics if presentation backing crosses model or export boundaries.
+#[test]
+fn preview_model_backings_match_output_without_changing_transparent_sca() {
+    let target=PreviewRasterTarget::new(1,1).unwrap();
+    let output_target=Some(OutputRasterTarget::new(1,1).unwrap());
+    let cmyk=modeled_with_canvas(HalftoneChannelModel::Cmyk,1.0,1.0,vec![
+        RenderLayer::new(ChannelId(1),true,color(0.0,0.0,0.0,1.0),1.0,
+            GeometryOutput::CircularMarks(vec![mark(0.5,0.5,0.25,SiteScope::Canvas)])).unwrap()]);
+    let white=rasterize_preview(&cmyk,target.with_background(RasterBackground::OpaqueWhite)).unwrap();
+    let output=rasterize_output(&cmyk,RasterBackground::OpaqueWhite,output_target,RasterAntialiasing::On).unwrap();
+    assert_eq!(white,output);
+    assert_eq!(white.pixels()[3],255);
+    let sca=modeled_with_canvas(HalftoneChannelModel::SourceColorAlpha,1.0,1.0,vec![
+        RenderLayer::new_source_color(ChannelId(1),true,1.0,vec![SourceColorCircle{
+            mark:mark(0.5,0.5,0.25,SiteScope::Canvas),paint:color(0.0,0.0,1.0,1.0)
+        }]).unwrap()]);
+    let transparent=rasterize_preview(&sca,target).unwrap();
+    let output=rasterize_output(&sca,RasterBackground::Transparent,output_target,RasterAntialiasing::On).unwrap();
+    assert_eq!(transparent,output);
+    assert!(transparent.pixels()[3]<255);
 }
 
 #[test]

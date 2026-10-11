@@ -34,6 +34,7 @@ fn library(label: &str) -> (PathBuf, PersonalLibrary) {
 /// Produces a current validated recipe; only metadata changes in filesystem publication tests.
 fn record(name: &str) -> PresetRecord {
     PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "user-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
             name: name.into(),

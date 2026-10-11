@@ -8,6 +8,10 @@ mod transform_regressions;
 #[cfg(test)]
 mod candidate_order_tests;
 
+mod coverage_response;
+mod builtin_calibrations;
+pub use coverage_response::{CoverageCurve, CoverageKnot, GeometryResponseInput};
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     error::Error,
@@ -596,19 +600,20 @@ impl LayeredPresetCatalog {
         channel_id: ChannelId,
         id: &str,
     ) -> Result<toniator_domain::CommandResult, DocumentSessionError> {
-        let recipe = self.recipe_for(id)?;
+        let preset = self.preset_for(id)?;
         let base_definition = history
             .document()
             .pattern_definition_for(channel_id)
             .cloned()
             .ok_or_else(|| unknown_channel_error(channel_id))?;
-        history.apply(
+        history.apply_pattern_with_saved_calibration(
             &DocumentCommand::ReplaceChannelPatternDefinitionOverrideRecipe {
                 base: history.document().pattern_settings().clone(),
                 channel_id,
                 base_definition,
-                recipe,
+                recipe: preset.recipe.clone(),
             },
+            preset.saved_calibration.as_ref(),
         )
     }
 
@@ -623,7 +628,7 @@ impl LayeredPresetCatalog {
         history: &mut DocumentHistory,
         id: &str,
     ) -> Result<toniator_domain::CommandResult, DocumentSessionError> {
-        let recipe = self.recipe_for(id)?;
+        let preset = self.preset_for(id)?;
         let base = history.document().pattern_settings().clone();
         let base_definition = history
             .document()
@@ -632,16 +637,16 @@ impl LayeredPresetCatalog {
             .find(|definition| definition.id == base.definition_id)
             .map(|bundle| bundle.definition.clone())
             .ok_or_else(missing_document_base_definition_error)?;
-        history.apply(&DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
+        history.apply_pattern_with_saved_calibration(&DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
             base,
             base_definition,
-            recipe,
-        })
+            recipe: preset.recipe.clone(),
+        }, preset.saved_calibration.as_ref())
     }
 
-    /// Resolves one recipe or returns the stable unknown-ID session error.
-    fn recipe_for(&self, id: &str) -> Result<PatternDefinitionRecipe, DocumentSessionError> {
-        self.reconstruct(id).ok_or_else(|| {
+    /// Resolves one complete Preset, including its saved measurement, or returns unknown ID.
+    fn preset_for(&self, id: &str) -> Result<&PresetRecord, DocumentSessionError> {
+        self.find(id).map(|entry| &entry.preset).ok_or_else(|| {
             DocumentSessionError::Validation(toniator_domain::ValidationError::new(
                 "preset.id",
                 "preset ID is not present in this catalog",
@@ -926,6 +931,8 @@ impl PresetRegistry {
             PatternStructureRecipe::RandomSites {
                 name: name.into(),
                 coverage: coverage(),
+                nominal_spacing: (!matches!(&character, RandomSiteCharacter::Even { .. }))
+                    .then_some(toniator_domain::DEFAULT_RANDOM_NOMINAL_SPACING),
                 character,
                 seed,
                 density_modulation: SiteDensityModulation::Uniform,
@@ -943,6 +950,7 @@ impl PresetRegistry {
             BUNDLED_PRESET_REGISTRY_VERSION,
             vec![
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "clustered-dispersion-random-links",
                         "Clustered Connections",
@@ -971,6 +979,7 @@ impl PresetRegistry {
                     }),
                 },
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "curve-motif-rows",
                         "Curve Motif",
@@ -1009,6 +1018,7 @@ impl PresetRegistry {
                     ),
                 },
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "even-random-circles",
                         "Poisson Disk Marks",
@@ -1024,6 +1034,7 @@ impl PresetRegistry {
                     )),
                 },
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "grid-voronoi-scale",
                         "Grid Voronoi",
@@ -1041,6 +1052,7 @@ impl PresetRegistry {
                     ),
                 },
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "one-guide-lines",
                         "One Guide Lines",
@@ -1057,6 +1069,7 @@ impl PresetRegistry {
                     }),
                 },
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "round-spiral-line",
                         "Round Spiral Line",
@@ -1079,6 +1092,7 @@ impl PresetRegistry {
                     }),
                 },
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "round-spiral-marks",
                         "Round Spiral Marks",
@@ -1104,6 +1118,7 @@ impl PresetRegistry {
                     }),
                 },
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "source-weighted-dispersion-voronoi",
                         "Source-Weighted Voronoi",
@@ -1115,6 +1130,7 @@ impl PresetRegistry {
                             name: "Source weighted Voronoi".into(),
                             coverage: coverage(),
                             character: RandomSiteCharacter::RawUniform,
+                            nominal_spacing: Some(toniator_domain::DEFAULT_RANDOM_NOMINAL_SPACING),
                             seed: 23,
                             density_modulation: SiteDensityModulation::ArtworkWeighted,
                             exclusion: SiteExclusionPolicy::None,
@@ -1131,6 +1147,7 @@ impl PresetRegistry {
                     ),
                 },
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "square-spiral-marks",
                         "Square Spiral Marks",
@@ -1156,6 +1173,7 @@ impl PresetRegistry {
                     }),
                 },
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "straight-grid-circles",
                         "Straight Grid Circles",
@@ -1165,6 +1183,7 @@ impl PresetRegistry {
                     recipe: mark_recipe(tangent_grid("Straight grid circles", &[0.0, 90.0])),
                 },
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "three-guide-cells-scale",
                         "Three-Guide Cells",
@@ -1183,6 +1202,7 @@ impl PresetRegistry {
                     ),
                 },
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "three-guide-maze",
                         "Three-Guide Maze",
@@ -1199,6 +1219,7 @@ impl PresetRegistry {
                     }),
                 },
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "triagrid-custom-shape-marks",
                         "Triagrid Diamond Marks",
@@ -1218,6 +1239,7 @@ impl PresetRegistry {
                     }),
                 },
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "triagrid-spanning-tree",
                         "Triagrid Spanning Tree",
@@ -1239,6 +1261,7 @@ impl PresetRegistry {
                     }),
                 },
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "two-guide-cells-uniform-offset",
                         "Two-Guide Cells",
@@ -1250,13 +1273,14 @@ impl PresetRegistry {
                         vec![0, 1],
                         toniator_domain::RegionGeometryResponse {
                             algorithm: RegionResizeAlgorithm::UniformOffset,
-                            sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+                            sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
                             minimum_fill: 0.0,
                             maximum_fill: 1.0,
                         },
                     ),
                 },
                 PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "two-guide-maze",
                         "Two-Guide Maze",
@@ -1275,6 +1299,16 @@ impl PresetRegistry {
             ],
         )
         .expect("bundled preset literals satisfy registry validation");
+        for preset in &mut registry.entries {
+            preset.saved_calibration = Some(
+                builtin_calibrations::calibration_for_recipe(
+                    &preset.metadata.id,
+                    &preset.recipe,
+                )
+                .expect("bundled saved calibration satisfies the current typed profile")
+                .expect("every bundled recipe has one checked-in saved calibration"),
+            );
+        }
         let requirement_document = Document::new_default_document(
             CanvasSpec {
                 width: 120.0,
@@ -1400,28 +1434,27 @@ impl PresetRegistry {
         channel_id: ChannelId,
         id: &str,
     ) -> Result<toniator_domain::CommandResult, DocumentSessionError> {
-        let recipe = self
+        let preset = self
             .find(id)
             .ok_or_else(|| {
                 DocumentSessionError::Validation(toniator_domain::ValidationError::new(
                     "preset.id",
                     "preset ID is not present in this registry",
                 ))
-            })?
-            .recipe
-            .clone();
+            })?;
         let base_definition = history
             .document()
             .pattern_definition_for(channel_id)
             .expect("document history preserves channel references")
             .clone();
-        history.apply(
+        history.apply_pattern_with_saved_calibration(
             &DocumentCommand::ReplaceChannelPatternDefinitionOverrideRecipe {
                 base: history.document().pattern_settings().clone(),
                 channel_id,
                 base_definition,
-                recipe,
+                recipe: preset.recipe.clone(),
             },
+            preset.saved_calibration.as_ref(),
         )
     }
 
@@ -1433,16 +1466,14 @@ impl PresetRegistry {
         history: &mut DocumentHistory,
         id: &str,
     ) -> Result<toniator_domain::CommandResult, DocumentSessionError> {
-        let recipe = self
+        let preset = self
             .find(id)
             .ok_or_else(|| {
                 DocumentSessionError::Validation(toniator_domain::ValidationError::new(
                     "preset.id",
                     "preset ID is not present in this registry",
                 ))
-            })?
-            .recipe
-            .clone();
+            })?;
         let base = history.document().pattern_settings().clone();
         let base_definition = history
             .document()
@@ -1452,11 +1483,11 @@ impl PresetRegistry {
             .expect("validated document base definition")
             .definition
             .clone();
-        history.apply(&DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
+        history.apply_pattern_with_saved_calibration(&DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
             base,
             base_definition,
-            recipe,
-        })
+            recipe: preset.recipe.clone(),
+        }, preset.saved_calibration.as_ref())
     }
 
     /// Prepares a shared replacement without mutating the document so callers
@@ -1611,8 +1642,12 @@ pub enum ResolvedSiteDensityModulation {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RandomSiteCapability {
     pub character: RandomSiteCharacter,
+    /// Authored spatial cell side for Raw, Clustered, and Stratified; Even owns distance.
+    pub nominal_spacing: Option<f64>,
     pub seed: u32,
     pub density_modulation: ResolvedSiteDensityModulation,
+    /// Uniform marks retain the complete source-independent candidate population before thinning.
+    pub full_population_for_uniform_marks: bool,
     pub exclusion: SiteExclusionPolicy,
     pub maximum_attempts: u32,
     /// Explicit, persisted bound for deterministic spatial-index neighbor
@@ -1628,11 +1663,13 @@ pub struct RandomSiteCapability {
 /// source IDs remain solely at the decoder lookup boundary.
 pub fn family_requires_decoded_source(family: &FamilyCapability) -> bool {
     family.random.as_ref().is_some_and(|random| {
-        matches!(
-            random.density_modulation,
-            ResolvedSiteDensityModulation::ArtworkWeightedUnbound
-                | ResolvedSiteDensityModulation::ArtworkWeighted { .. }
-        ) || (random.refinement.enabled && random.refinement.density_weighted)
+        (!random.full_population_for_uniform_marks
+            && matches!(
+                random.density_modulation,
+                ResolvedSiteDensityModulation::ArtworkWeightedUnbound
+                    | ResolvedSiteDensityModulation::ArtworkWeighted { .. }
+            ))
+            || (random.refinement.enabled && random.refinement.density_weighted)
     })
 }
 
@@ -2100,6 +2137,50 @@ pub fn realize_curve_motif_canonical_strokes_cancellable(
     is_cancelled: &(dyn Fn() -> bool + Sync),
     progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+    realize_curve_motif_canonical_strokes_with_response_cancellable(
+        family_fingerprint,
+        sites,
+        motif,
+        structure_id,
+        style,
+        mirror_alternate_rows,
+        alternate_row_phase,
+        source,
+        canvas,
+        mapping,
+        response,
+        max_profile_samples,
+        max_outline_segments,
+        GeometryResponseInput::Identity,
+        is_cancelled,
+        progress,
+    )
+}
+
+/// Realizes the original frozen motif rows with a transient geometry response at every width sample.
+///
+/// # Errors
+/// Returns probe validation, chaining, sampling, outline, or cancellation diagnostics atomically.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_curve_motif_canonical_strokes_with_response_cancellable(
+    family_fingerprint: &str,
+    sites: &FamilySiteSet,
+    motif: &CurvePath,
+    structure_id: AuthoredStructureId,
+    style: toniator_domain::PathStrokeStyle,
+    mirror_alternate_rows: bool,
+    alternate_row_phase: Option<f64>,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    response_input: GeometryResponseInput<'_>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+    response_input.validate()?;
     let rows = chain_curve_motif_rows_with_progress_cancellable(
         sites,
         motif,
@@ -2108,6 +2189,51 @@ pub fn realize_curve_motif_canonical_strokes_cancellable(
         is_cancelled,
         progress,
     )?;
+    realize_prechained_curve_motif_strokes_with_response_cancellable(
+        family_fingerprint,
+        &rows,
+        motif.segments().len(),
+        structure_id,
+        style,
+        mirror_alternate_rows,
+        alternate_row_phase,
+        source,
+        canvas,
+        mapping,
+        response,
+        max_profile_samples,
+        max_outline_segments,
+        response_input,
+        is_cancelled,
+    )
+}
+
+/// Samples one already-chained Curve Motif row set without regenerating its placement.
+///
+/// The caller preserves the original row order and motif segment count from the same frozen
+/// family and document-owned prototype. Only canonical output/profile geometry is rebuilt per q.
+///
+/// # Errors
+/// Returns probe, sampling, profile, outline, or cancellation diagnostics atomically.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_prechained_curve_motif_strokes_with_response_cancellable(
+    family_fingerprint: &str,
+    rows: &[CurvePath],
+    motif_segment_count: usize,
+    structure_id: AuthoredStructureId,
+    style: toniator_domain::PathStrokeStyle,
+    mirror_alternate_rows: bool,
+    alternate_row_phase: Option<f64>,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    response_input: GeometryResponseInput<'_>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+    response_input.validate()?;
     let mut strokes = Vec::new();
     reserve_stage20m(
         &mut strokes,
@@ -2126,7 +2252,7 @@ pub fn realize_curve_motif_canonical_strokes_cancellable(
     identity.write(response.minimum_thickness.to_bits().to_le_bytes());
     identity.write(response.maximum_thickness.to_bits().to_le_bytes());
     identity.write(response.bias.to_bits().to_le_bytes());
-    for (row_ordinal, path) in rows.into_iter().enumerate() {
+    for (row_ordinal, path) in rows.iter().cloned().enumerate() {
         if is_cancelled() {
             return Err(PatternPipelineError::new(
                 "evaluation.cancelled",
@@ -2135,7 +2261,7 @@ pub fn realize_curve_motif_canonical_strokes_cancellable(
         }
         let first_copy_end = path
             .segments()
-            .get(motif.segments().len().saturating_sub(1))
+            .get(motif_segment_count.saturating_sub(1))
             .ok_or(PatternPipelineError::new(
                 "curve_motif.cadence",
                 "Curve Motif row must retain one complete adjacent-site copy",
@@ -2172,6 +2298,7 @@ pub fn realize_curve_motif_canonical_strokes_cancellable(
                 canvas,
                 mapping,
                 response,
+                response_input,
                 nominal_basis,
             )?;
             let end_sample = stroke_sample(
@@ -2182,6 +2309,7 @@ pub fn realize_curve_motif_canonical_strokes_cancellable(
                 canvas,
                 mapping,
                 response,
+                response_input,
                 nominal_basis,
             )?;
             if profile.last().is_none_or(|previous: &StrokeProfileSample| {
@@ -2209,6 +2337,7 @@ pub fn realize_curve_motif_canonical_strokes_cancellable(
                 canvas,
                 mapping,
                 response,
+                response_input,
                 nominal_basis,
                 &mut profile,
                 &mut profile_samples,
@@ -2519,6 +2648,54 @@ impl TypedFamilyOutput {
             structure: self.structure.clone(),
         })
     }
+
+    /// Thins an already SiteUseFilter-selected mark population by stable per-site draws.
+    ///
+    /// The family, IDs, guard sites, order, and structural provenance remain unchanged. A zero
+    /// probability suppresses guard MARK output as well as canvas marks; no site replenishment
+    /// follows selection. The caller supplies a validated expected-coverage inverse probability.
+    ///
+    /// # Errors
+    /// Returns cancellation, sampling, or nonfinite probability diagnostics atomically.
+    pub fn thinned_for_uniform_marks(
+        &self,
+        channel_salt: u64,
+        probability: &dyn Fn(&FamilySite) -> Result<f64, PatternPipelineError>,
+        is_cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Self, PatternPipelineError> {
+        let mut members = BTreeSet::new();
+        for site in self.sites.iter() {
+            if is_cancelled() {
+                return Err(PatternPipelineError::new(
+                    "evaluation.cancelled",
+                    "uniform mark selection was cancelled",
+                ));
+            }
+            let p = probability(site)?;
+            if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+                return Err(PatternPipelineError::new(
+                    "density.uniform.probability",
+                    "site survival probability must be finite and normalized",
+                ));
+            }
+            let mut bytes = b"toniator-uniform-mark-selection-v1".to_vec();
+            bytes.extend(channel_salt.to_le_bytes());
+            bytes.extend(site.id.mechanism_id.0.to_le_bytes());
+            bytes.extend(site.id.ordinal.to_le_bytes());
+            let mut hash = Fnv1a64State::new();
+            hash.write(bytes);
+            let draw = hash.0 as f64 / (u64::MAX as f64 + 1.0);
+            if draw < p {
+                members.insert(site.id);
+            }
+        }
+        Ok(Self {
+            family: self.family.clone(),
+            sites: self.sites.filtered(&members),
+            diagnostics: self.diagnostics.clone(),
+            structure: self.structure.clone(),
+        })
+    }
 }
 
 /// Provenance that survives explicit modulation and ordered output realization.
@@ -2766,6 +2943,50 @@ pub fn realize_region_output_cancellable(
         paint,
         sampling_limits,
         treatment_limits,
+        GeometryResponseInput::Identity,
+        cancelled,
+        None,
+        None,
+        #[cfg(feature = "test-evidence")]
+        None,
+    )
+}
+
+/// Applies a transient transfer after each complete region sample, or probes untreated geometry.
+///
+/// A constant probe bypasses source pixels and source cutoff; the caller must supply solid paint.
+/// Ordinary source responses retain their original ReferencePoint or entire AreaAverage sample
+/// before inversion. No per-pixel source response is warped.
+///
+/// # Errors
+/// Returns probe, binding, sampling, treatment, or cancellation diagnostics atomically.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_region_output_with_response_cancellable(
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    untreated: &CanonicalRegionSet,
+    references: &[RegionReference],
+    source: Option<&SourceField>,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    paint: &ChannelPaint,
+    sampling_limits: RegionSamplingLimits,
+    treatment_limits: RegionTreatmentLimits,
+    response_input: GeometryResponseInput<'_>,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<TypedRegionOutputRealization, RegionOutputRealizationError> {
+    realize_region_output_cancellable_impl(
+        capability,
+        setting,
+        untreated,
+        references,
+        source,
+        canvas,
+        mapping,
+        paint,
+        sampling_limits,
+        treatment_limits,
+        response_input,
         cancelled,
         None,
         None,
@@ -2808,6 +3029,7 @@ pub fn realize_region_output_with_progress_cancellable(
         paint,
         sampling_limits,
         treatment_limits,
+        GeometryResponseInput::Identity,
         cancelled,
         Some(progress),
         None,
@@ -2857,6 +3079,7 @@ pub fn realize_region_output_profiled_cancellable(
         paint,
         sampling_limits,
         treatment_limits,
+        GeometryResponseInput::Identity,
         cancelled,
         None,
         Some(&mut performance),
@@ -2902,6 +3125,7 @@ pub fn realize_region_output_with_evidence_cancellable(
         paint,
         sampling_limits,
         treatment_limits,
+        GeometryResponseInput::Identity,
         cancelled,
         None,
         None,
@@ -2932,11 +3156,23 @@ fn realize_region_output_cancellable_impl(
     paint: &ChannelPaint,
     sampling_limits: RegionSamplingLimits,
     treatment_limits: RegionTreatmentLimits,
+    response_input: GeometryResponseInput<'_>,
     cancelled: &(dyn Fn() -> bool + Sync),
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
     mut performance: Option<&mut RegionOutputPerformanceMetrics>,
     #[cfg(feature = "test-evidence")] evidence: Option<&mut Option<RegionEvaluationEvidence>>,
 ) -> Result<TypedRegionOutputRealization, RegionOutputRealizationError> {
+    response_input
+        .validate()
+        .map_err(|error| region_realization_error(error.path(), error.message()))?;
+    if matches!(response_input, GeometryResponseInput::ConstantProbe(_) | GeometryResponseInput::RawProbe(_))
+        && matches!(paint, ChannelPaint::SampledSource)
+    {
+        return Err(region_realization_error(
+            "coverage.response.probe",
+            "constant region probes require solid paint",
+        ));
+    }
     validate_region_output_binding(capability, setting)?;
     poll_region_realizer(cancelled)?;
     let toniator_domain::PatternGeometryResponse::Regions(response) = &setting.response else {
@@ -2946,27 +3182,48 @@ fn realize_region_output_cancellable_impl(
         ));
     };
     let references_by_id = region_reference_table(untreated, references)?;
-    let source = source.ok_or(region_realization_error(
-        "sampling.region.source",
-        "region sampling requires a decoded source field",
-    ))?;
     let sampling_started = Instant::now();
     let report_sampling_progress = |completed: usize, total: usize| {
         if let Some(progress) = progress {
             progress(completed.saturating_mul(800) / total.max(1), 1_000);
         }
     };
-    let (samples, sampling_diagnostics) = sample_untreated_regions(
-        source,
-        untreated,
-        &references_by_id,
-        canvas,
-        mapping,
-        response,
-        sampling_limits,
-        cancelled,
-        progress.map(|_| &report_sampling_progress as &(dyn Fn(usize, usize) + Sync)),
-    )?;
+    let (samples, sampling_diagnostics) =
+        if let GeometryResponseInput::ConstantProbe(q) | GeometryResponseInput::RawProbe(q) = response_input {
+            let mut samples = Vec::new();
+            samples
+                .try_reserve_exact(untreated.regions().len())
+                .map_err(|_| {
+                    region_realization_error(
+                        "region.sampling.allocation",
+                        "constant region probe allocation failed",
+                    )
+                })?;
+            for _ in untreated.regions() {
+                poll_region_realizer(cancelled)?;
+                samples.push(RegionSourceSample {
+                    response: q,
+                    paint: None,
+                });
+            }
+            (samples, RegionSamplingDiagnostics::default())
+        } else {
+            let source = source.ok_or(region_realization_error(
+                "sampling.region.source",
+                "region sampling requires a decoded source field",
+            ))?;
+            sample_untreated_regions(
+                source,
+                untreated,
+                &references_by_id,
+                canvas,
+                mapping,
+                response,
+                sampling_limits,
+                cancelled,
+                progress.map(|_| &report_sampling_progress as &(dyn Fn(usize, usize) + Sync)),
+            )?
+        };
     if let Some(progress) = progress {
         progress(800, 1_000);
     }
@@ -2987,12 +3244,13 @@ fn realize_region_output_cancellable_impl(
         })?;
     for (region, sample) in untreated.regions().iter().zip(&samples) {
         poll_region_realizer(cancelled)?;
-        let treatment = if mapping.suppresses(sample.response)
+        let treatment = if (!matches!(response_input, GeometryResponseInput::ConstantProbe(_) | GeometryResponseInput::RawProbe(_))
+            && mapping.suppresses(sample.response))
             || (matches!(paint, ChannelPaint::SampledSource) && sample.paint.is_none())
         {
             None
         } else {
-            Some(interpolated_region_treatment(response, sample.response)?)
+            Some(interpolated_region_treatment(response, response_input, sample.response)?)
         };
         requests.push(RegionTreatmentRequest {
             base_region_id: region.id.clone(),
@@ -3135,13 +3393,17 @@ fn region_reference_table(
             "every untreated region requires one producer reference",
         ));
     }
+    // Validate against the canonical identity set once. Scanning every region for each
+    // producer reference makes fine Voronoi and Guide Face outputs quadratic in cell count.
+    let valid_ids = untreated
+        .regions()
+        .iter()
+        .map(|region| &region.id)
+        .collect::<BTreeSet<_>>();
     let mut table = BTreeMap::new();
     for reference in references {
         if !reference.point.is_finite()
-            || !untreated
-                .regions()
-                .iter()
-                .any(|region| region.id == reference.region_id)
+            || !valid_ids.contains(&reference.region_id)
             || table
                 .insert(reference.region_id.clone(), reference.point)
                 .is_some()
@@ -3217,24 +3479,22 @@ fn sample_untreated_regions(
     }
 }
 
-/// Interpolates one sampled scalar linearly into the typed normalized fill range.
+/// Resolves one sampled region to a final raw fill without reapplying coverage bounds.
 ///
 /// # Errors
 ///
-/// Returns only a stable response-kind error when a non-region setting reaches this boundary.
+/// Returns a probe or nonfinite response diagnostic before a treatment can publish.
 fn interpolated_region_treatment(
     response: &toniator_domain::RegionGeometryResponse,
+    response_input: GeometryResponseInput<'_>,
     sample: f64,
 ) -> Result<RegionTreatment, RegionOutputRealizationError> {
-    if !sample.is_finite() {
-        return Err(region_realization_error(
-            "region.resize.response.sample",
-            "region source response must remain finite",
-        ));
-    }
+    let fill = response_input
+        .resolve_raw_size(sample, response.minimum_fill, response.maximum_fill)
+        .map_err(|error| region_realization_error(error.path(), error.message()))?;
     Ok(RegionTreatment {
         algorithm: response.algorithm,
-        fill: response.minimum_fill + sample * (response.maximum_fill - response.minimum_fill),
+        fill,
     })
 }
 
@@ -4591,6 +4851,7 @@ fn resolve_random_site_pipeline(
         PatternMechanism::RandomSiteProcess {
             id: base_id,
             character,
+            nominal_spacing,
             seed,
         },
         PatternMechanism::SiteDensityModulation {
@@ -4703,8 +4964,10 @@ fn resolve_random_site_pipeline(
             along_phase: None,
             random: Some(RandomSiteCapability {
                 character: character.clone(),
+                nominal_spacing: *nominal_spacing,
                 seed: *seed,
                 density_modulation: resolved_modulation,
+                full_population_for_uniform_marks: false,
                 exclusion: policy.clone(),
                 maximum_attempts: *maximum_attempts,
                 maximum_neighbor_checks: *maximum_neighbor_checks,
@@ -5085,7 +5348,12 @@ pub fn evaluate_typed_connection_paths_with_source_cancellable(
         .validate()
         .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
     validate_connection_product(family.product, program)?;
-    let adjacency = program.adjacency();
+    let resolved_program = resolve_connection_program_for_feature_size(
+        program,
+        &request.canvas,
+        &request.density,
+    )?;
+    let adjacency = resolved_program.adjacency();
     let policy = SiteAdjacencyPolicy::MutualNearest {
         maximum_degree: adjacency.maximum_degree as usize,
         maximum_distance: adjacency.maximum_distance,
@@ -5101,7 +5369,7 @@ pub fn evaluate_typed_connection_paths_with_source_cancellable(
     let paths = build_connection_paths_cancellable(
         output_layer_id,
         &evaluated.graph,
-        program,
+        &resolved_program,
         connection_limits,
         is_cancelled,
     )
@@ -5111,6 +5379,34 @@ pub fn evaluate_typed_connection_paths_with_source_cancellable(
         graph: evaluated.graph,
         paths,
     })
+}
+
+/// Resolves authored connection reach with Feature size for topology and its guard envelope.
+///
+/// The returned program is derived geometry input; the persisted program retains its authored
+/// maximum distance and all dimensionless degree, algorithm, and seed controls.
+///
+/// # Errors
+/// Returns a stable Feature-scale diagnostic if the resolved maximum distance is not finite-positive.
+pub fn resolve_connection_program_for_feature_size(
+    program: &ConnectionProgram,
+    canvas: &CanvasSpec,
+    density: &ResolvedDensityMetric2D,
+) -> Result<ConnectionProgram, PatternPipelineError> {
+    let scale = resolved_pattern_size_scale(canvas, density)?;
+    let mut resolved = program.clone();
+    let adjacency = match &mut resolved {
+        ConnectionProgram::NearestLinks { adjacency }
+        | ConnectionProgram::RandomLinks { adjacency, .. }
+        | ConnectionProgram::GridSpanningTree { adjacency, .. } => adjacency,
+    };
+    adjacency.maximum_distance = scale_feature_length(
+        adjacency.maximum_distance,
+        scale,
+        "pattern.connection.feature_scale",
+        "Feature size produced a non-finite connection maximum distance",
+    )?;
+    Ok(resolved)
 }
 
 /// Evaluates one typed straight-guide intersection family into conventional retained maze walls.
@@ -6242,6 +6538,17 @@ fn scaled_random_capability(
     scale: f64,
 ) -> Result<RandomSiteCapability, PatternPipelineError> {
     let mut scaled = random.clone();
+    scaled.nominal_spacing = random
+        .nominal_spacing
+        .map(|spacing| {
+            scale_feature_length(
+                spacing,
+                scale,
+                "pattern.random_sites.feature_scale",
+                "Feature size produced a non-finite scatter spacing",
+            )
+        })
+        .transpose()?;
     scaled.character = match &random.character {
         RandomSiteCharacter::RawUniform => RandomSiteCharacter::RawUniform,
         RandomSiteCharacter::Even {
@@ -7714,14 +8021,35 @@ fn site_scope(point: Point2, canvas: Bounds, generation_domain: Bounds) -> Optio
         })
 }
 
-/// Derives a deterministic square-equivalent basis from the active document density.
-fn density_cell_basis(
-    canvas: &CanvasSpec,
-    density: &ResolvedDensityMetric2D,
-) -> Result<NominalCellBasis, PatternPipelineError> {
-    let area = (canvas.width / density.across_x) * (canvas.height / density.across_y);
-    let side = area.sqrt();
-    NominalCellBasis::new(Vector2::new(side, 0.0), Vector2::new(0.0, side))
+/// Returns the sole resolved document-unit spatial scale of a random process.
+///
+/// Recipe validation enforces exactly one scale: Even's minimum distance or
+/// the authored nominal spacing of the other three processes.
+///
+/// # Errors
+/// Returns a stable family diagnostic if an unvalidated capability reaches evaluation.
+fn random_spatial_spacing(random: &RandomSiteCapability) -> Result<f64, PatternPipelineError> {
+    let spacing = match random.character {
+        RandomSiteCharacter::Even {
+            minimum_center_distance,
+        } if random.nominal_spacing.is_none() => minimum_center_distance,
+        RandomSiteCharacter::Even { .. } => 0.0,
+        _ => random.nominal_spacing.unwrap_or(0.0),
+    };
+    (spacing.is_finite() && spacing > 0.0)
+        .then_some(spacing)
+        .ok_or(PatternPipelineError::new(
+            "pattern.family.random_sites.nominal_spacing",
+            "scatter requires one finite positive authored spatial scale",
+        ))
+}
+
+/// Constructs the mark and region basis from the same scatter scale as placement.
+///
+/// # Errors
+/// Returns nominal-cell validation if the finite spacing cannot form a basis.
+fn random_cell_basis(spacing: f64) -> Result<NominalCellBasis, PatternPipelineError> {
+    NominalCellBasis::new(Vector2::new(spacing, 0.0), Vector2::new(0.0, spacing))
         .map_err(family_site_error)
 }
 
@@ -7794,6 +8122,10 @@ pub fn maximum_nominal_cell_diameter(
     density: &ResolvedDensityMetric2D,
 ) -> Result<f64, PatternPipelineError> {
     let pattern_size_scale = resolved_pattern_size_scale(canvas, density)?;
+    if let Some(random) = &family.random {
+        let scaled = scaled_random_capability(random, pattern_size_scale)?;
+        return Ok(random_cell_basis(random_spatial_spacing(&scaled)?)?.diameter());
+    }
     if let Some(parametric) = &family.parametric_curve {
         let effective_curve = scaled_parametric_curve(&parametric.curve, pattern_size_scale)?;
         let radial_spacing = match effective_curve {
@@ -7822,9 +8154,15 @@ pub fn maximum_nominal_cell_diameter(
                 )
             })
             .transpose()?;
-        let bound = site_interval
+        // Along-curve sites use perpendicular local axes: their actual nominal-cell
+        // diameter is the diagonal, not either individual authored spacing.
+        let geometric_bound = site_interval
             .unwrap_or(repetition_basis)
-            .max(repetition_basis);
+            .hypot(repetition_basis);
+        // Realized axes normalize a tangent, scale two components, add/subtract them, and
+        // take a second hypot. Reserve their bounded rounding envelope; this changes only
+        // planned support, never authored distances or realized mark dimensions.
+        let bound = (geometric_bound * (1.0 + 8.0 * f64::EPSILON)).next_up();
         return (bound.is_finite() && bound > 0.0).then_some(bound).ok_or(
             PatternPipelineError::new(
                 "pattern.family.nominal_cell_basis",
@@ -8361,7 +8699,8 @@ impl TypedFamilyStructure {
 /// ordinal while aggregate counts make an unsatisfiable request inspectable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RandomSiteDiagnostics {
-    pub requested_sites: usize,
+    /// Complete spatially offered population before weighting and exclusion.
+    pub offered_candidates: usize,
     pub achieved_sites: usize,
     pub candidates_considered: usize,
     pub rejected_by_density: usize,
@@ -8654,19 +8993,23 @@ fn evaluate_random_sites_with_progress_cancellable(
     let pattern_size_scale = resolved_pattern_size_scale(&request.canvas, &request.density)?;
     let scaled_random = scaled_random_capability(authored_random, pattern_size_scale)?;
     let random = &scaled_random;
-    let weighted_source = match &random.density_modulation {
-        ResolvedSiteDensityModulation::Uniform => None,
-        ResolvedSiteDensityModulation::ArtworkWeightedUnbound => {
-            return Err(PatternPipelineError::new(
-                "pattern.family.random_sites.source_weighting",
-                "artwork-weighted site placement requires receiving-channel source weighting",
-            ));
-        }
-        ResolvedSiteDensityModulation::ArtworkWeighted { .. } => {
-            Some(source.ok_or(PatternPipelineError::new(
-                "pattern.family.random_sites.source",
-                "artwork-weighted site placement requires decoded source pixels",
-            ))?)
+    let weighted_source = if random.full_population_for_uniform_marks {
+        None
+    } else {
+        match &random.density_modulation {
+            ResolvedSiteDensityModulation::Uniform => None,
+            ResolvedSiteDensityModulation::ArtworkWeightedUnbound => {
+                return Err(PatternPipelineError::new(
+                    "pattern.family.random_sites.source_weighting",
+                    "artwork-weighted site placement requires receiving-channel source weighting",
+                ));
+            }
+            ResolvedSiteDensityModulation::ArtworkWeighted { .. } => {
+                Some(source.ok_or(PatternPipelineError::new(
+                    "pattern.family.random_sites.source",
+                    "artwork-weighted site placement requires decoded source pixels",
+                ))?)
+            }
         }
     };
     let refinement_source = if random.refinement.enabled && random.refinement.density_weighted {
@@ -8682,7 +9025,7 @@ fn evaluate_random_sites_with_progress_cancellable(
         Point2::new(request.canvas.width, request.canvas.height),
     )
     .expect("validated canvas forms finite bounds");
-    let expected_visible = checked_requested_count(request)?;
+    let spatial_spacing = random_spatial_spacing(random)?;
     let neighborhood = random_neighborhood(random, request.support_radius);
     let cluster_guard = match random.character {
         RandomSiteCharacter::Clustered { cluster_spread, .. } => cluster_spread * 3.0,
@@ -8715,22 +9058,11 @@ fn evaluate_random_sites_with_progress_cancellable(
             "pattern.family.random_sites.coverage",
             "inverse random-site coverage bounds must be finite",
         ))?;
-    let visible_area = request.canvas.width * request.canvas.height;
-    let padded_area = (padded.max.x - padded.min.x) * (padded.max.y - padded.min.y);
-    let requested = (expected_visible as f64 * padded_area / visible_area)
-        .ceil()
-        .max(1.0);
-    if !requested.is_finite() || requested > usize::MAX as f64 {
-        return Err(PatternPipelineError::new(
-            "channel.pattern.layout.density",
-            "random-site padded count is not machine-representable",
-        ));
-    }
-    let requested = requested as usize;
-    if requested > request.max_family_candidates {
+    let offered = checked_spatial_candidate_count(local, spatial_spacing)?;
+    if offered > request.max_family_candidates {
         return Err(PatternPipelineError::new(
             "coverage.candidate_limit",
-            "random-site requested count exceeds the configured candidate limit",
+            "scatter spatial population exceeds the configured candidate limit",
         ));
     }
     // Schema effort fields are reserved, not application-authored creative ceilings.
@@ -8743,12 +9075,8 @@ fn evaluate_random_sites_with_progress_cancellable(
         ));
     }
     let exclusion_distance = required_exclusion_distance(random, request.support_radius);
-    let settled_rejection_span = random_settled_rejection_span(random, local, requested)?;
-    let parent_count = cluster_parent_count(&random.character, requested);
-    let estimated_work = parent_count
-        .saturating_add(requested)
-        .saturating_add(settled_rejection_span)
-        .max(1);
+    let parent_count = cluster_parent_count(&random.character, offered);
+    let estimated_work = parent_count.saturating_add(offered).max(1);
     let mut prng = StablePrng::new(random.seed);
     let parents = cluster_parents(
         &random.character,
@@ -8762,13 +9090,20 @@ fn evaluate_random_sites_with_progress_cancellable(
     let prepared_candidates = prepared_random_candidates(
         &random.character,
         local,
-        requested,
+        spatial_spacing,
         candidate_budget,
         usize::MAX,
         &mut prng,
         is_cancelled,
     )?;
-    let nominal_cell_basis = density_cell_basis(&request.canvas, &request.density)?;
+    let nominal_cell_basis = random_cell_basis(spatial_spacing)?;
+    let offered_candidates = prepared_candidates.as_ref().map_or(offered, Vec::len);
+    if offered_candidates > candidate_budget {
+        return Err(PatternPipelineError::new(
+            "coverage.candidate_limit",
+            "scatter spatial population exceeds the configured candidate limit",
+        ));
+    }
     let mut sites = Vec::new();
     let mut spatial_index = (exclusion_distance > 0.0)
         .then(|| SpatialIndex::new(exclusion_distance, usize::MAX))
@@ -8777,20 +9112,12 @@ fn evaluate_random_sites_with_progress_cancellable(
     let mut rejected_by_exclusion = 0;
     let mut rejected_outside_envelope = 0;
     let mut candidates_considered = 0;
-    let mut consecutive_rejections = 0_usize;
-    for candidate_ordinal in 0..candidate_budget {
+    for candidate_ordinal in 0..offered_candidates {
         if is_cancelled() {
             return Err(PatternPipelineError::new(
                 "evaluation.cancelled",
                 "evaluation was cancelled",
             ));
-        }
-        if sites.len() == requested
-            || prepared_candidates
-                .as_ref()
-                .is_some_and(|candidates| candidate_ordinal >= candidates.len())
-        {
-            break;
         }
         candidates_considered = candidate_ordinal + 1;
         if candidates_considered == 1 || candidates_considered.is_multiple_of(64) {
@@ -8808,19 +9135,10 @@ fn evaluate_random_sites_with_progress_cancellable(
         let point = transform.apply_point(local_point);
         if !padded.contains(point) {
             rejected_outside_envelope += 1;
-            consecutive_rejections =
-                consecutive_rejections
-                    .checked_add(1)
-                    .ok_or(PatternPipelineError::new(
-                        "coverage.random_sites.attempts",
-                        "random-site convergence counter overflowed",
-                    ))?;
-            if consecutive_rejections >= settled_rejection_span {
-                break;
-            }
             continue;
         }
-        let density_weight = if !canvas.contains(point) {
+        let density_weight = if random.full_population_for_uniform_marks || !canvas.contains(point)
+        {
             // Guard sites are coverage topology, not visible source-weighted placement. Sampling
             // a clamped zero-valued canvas edge here can otherwise remove the entire exterior
             // hull and leave an ordinary Voronoi output unbounded inside the canvas.
@@ -8846,18 +9164,8 @@ fn evaluate_random_sites_with_progress_cancellable(
                 _ => unreachable!("weighted source requirement is checked above"),
             }
         };
-        if prng.unit() > density_weight {
+        if !random.full_population_for_uniform_marks && prng.unit() > density_weight {
             rejected_by_density += 1;
-            consecutive_rejections =
-                consecutive_rejections
-                    .checked_add(1)
-                    .ok_or(PatternPipelineError::new(
-                        "coverage.random_sites.attempts",
-                        "random-site convergence counter overflowed",
-                    ))?;
-            if consecutive_rejections >= settled_rejection_span {
-                break;
-            }
             continue;
         }
         // `Option::transpose` here would retain the fact that an index exists
@@ -8869,16 +9177,6 @@ fn evaluate_random_sites_with_progress_cancellable(
         };
         if conflict.is_some() {
             rejected_by_exclusion += 1;
-            consecutive_rejections =
-                consecutive_rejections
-                    .checked_add(1)
-                    .ok_or(PatternPipelineError::new(
-                        "coverage.random_sites.attempts",
-                        "random-site convergence counter overflowed",
-                    ))?;
-            if consecutive_rejections >= settled_rejection_span {
-                break;
-            }
             // Rejected candidates are aggregated rather than retained.  The
             // accepted record remains bounded and identifies its own ordinal.
             continue;
@@ -8908,7 +9206,6 @@ fn evaluate_random_sites_with_progress_cancellable(
             "coverage.random_sites.allocation",
             "random-site family output could not reserve another site",
         )?;
-        consecutive_rejections = 0;
         if let Some(index) = &mut spatial_index {
             index.insert(point, accepted_ordinal)?;
         }
@@ -8935,7 +9232,7 @@ fn evaluate_random_sites_with_progress_cancellable(
         .filter(|site| site.scope == SiteScope::Canvas)
         .count();
     let diagnostics = RandomSiteDiagnostics {
-        requested_sites: requested,
+        offered_candidates,
         achieved_sites: sites.len(),
         candidates_considered,
         rejected_by_density,
@@ -8953,63 +9250,30 @@ fn evaluate_random_sites_with_progress_cancellable(
     })
 }
 
-/// Derives a finite convergence sweep for random placement that stops making progress.
+/// Computes an area-derived offered field size, never an accepted-site target.
 ///
-/// The baseline span is the requested padded-domain population. Even dispersion
-/// expands it to the number of exclusion-sized cells covering the complete
-/// local domain. The rule therefore scales with canvas, zoom, and authored
-/// spacing rather than imposing an application-authored geometry or work
-/// ceiling. Reaching it publishes the best deterministic placement attained,
-/// including physically saturated or zero-weight source cases.
+/// Raw and Clustered emit this many candidates once; Even uses it only as a
+/// bounded population estimate while its intrinsic distance drives placement.
 ///
 /// # Errors
-///
-/// Returns a stable coverage diagnostic if the finite validated bounds cannot
-/// be represented as a machine-sized cell count.
-fn random_settled_rejection_span(
-    random: &RandomSiteCapability,
-    local: Bounds,
-    requested: usize,
+/// Returns a spatial-density diagnostic when area or spacing cannot represent
+/// the finite population before allocation.
+fn checked_spatial_candidate_count(
+    bounds: Bounds,
+    spacing: f64,
 ) -> Result<usize, PatternPipelineError> {
-    let RandomSiteCharacter::Even {
-        minimum_center_distance,
-    } = random.character
-    else {
-        return Ok(requested.max(1));
-    };
-    let columns = ((local.max.x - local.min.x) / minimum_center_distance)
-        .ceil()
-        .max(1.0);
-    let rows = ((local.max.y - local.min.y) / minimum_center_distance)
-        .ceil()
-        .max(1.0);
-    if columns > usize::MAX as f64 || rows > usize::MAX as f64 {
+    let area = (bounds.max.x - bounds.min.x) * (bounds.max.y - bounds.min.y);
+    let expected = area / spacing / spacing;
+    if !expected.is_finite() || expected < 0.0 || expected > usize::MAX as f64 {
         return Err(PatternPipelineError::new(
-            "coverage.random_sites.spatial_index",
-            "even-dispersion convergence sweep is not representable",
+            "pattern.family.random_sites.nominal_spacing",
+            "scatter spatial population is not representable",
         ));
     }
-    let span = (columns as usize)
-        .checked_mul(rows as usize)
-        .ok_or(PatternPipelineError::new(
-            "coverage.random_sites.spatial_index",
-            "even-dispersion convergence sweep overflowed",
-        ))?;
-    Ok(span.max(requested).max(1))
+    Ok(expected.ceil().max(1.0) as usize)
 }
 
-fn checked_requested_count(request: &GridInspectRequest) -> Result<usize, PatternPipelineError> {
-    let expected = request.density.across_x * request.density.across_y;
-    if !expected.is_finite() || expected <= 0.0 || expected > usize::MAX as f64 {
-        return Err(PatternPipelineError::new(
-            "channel.pattern.layout.density",
-            "random-site requested count is not representable",
-        ));
-    }
-    Ok(expected.round().max(1.0) as usize)
-}
-
-/// Precomputes algorithms whose structure depends on the complete requested domain.
+/// Precomputes algorithms whose structure depends on the complete spatial domain.
 /// Raw and clustered processes remain streaming candidates and return `None`.
 ///
 /// # Errors
@@ -9018,7 +9282,7 @@ fn checked_requested_count(request: &GridInspectRequest) -> Result<usize, Patter
 fn prepared_random_candidates(
     character: &RandomSiteCharacter,
     bounds: Bounds,
-    requested: usize,
+    spatial_spacing: f64,
     budget: usize,
     maximum_neighbor_work: usize,
     prng: &mut StablePrng,
@@ -9030,7 +9294,6 @@ fn prepared_random_candidates(
         } => bridson_candidates(
             bounds,
             *minimum_center_distance,
-            requested,
             budget,
             maximum_neighbor_work,
             prng,
@@ -9038,15 +9301,15 @@ fn prepared_random_candidates(
         )
         .map(Some),
         RandomSiteCharacter::Stratified { jitter } => {
-            stratified_candidates(bounds, *jitter, requested, prng, is_cancelled).map(Some)
+            stratified_candidates(bounds, *jitter, spatial_spacing, budget, prng, is_cancelled)
+                .map(Some)
         }
         RandomSiteCharacter::RawUniform | RandomSiteCharacter::Clustered { .. } => Ok(None),
     }
 }
 
-/// Generates a domain-covering Bridson active-frontier population with deterministic reseeding.
-/// Empty-frontier reseeding reaches disconnected weighted regions before downstream density thinning.
-/// Optional overflow sampling stops at its work limit once the requested population exists.
+/// Generates a distance-limited Bridson field through active-frontier exhaustion.
+/// Empty-frontier reseeding seeks disconnected free space before downstream thinning.
 ///
 /// # Errors
 ///
@@ -9054,7 +9317,6 @@ fn prepared_random_candidates(
 fn bridson_candidates(
     bounds: Bounds,
     distance: f64,
-    requested: usize,
     budget: usize,
     maximum_neighbor_work: usize,
     prng: &mut StablePrng,
@@ -9068,17 +9330,21 @@ fn bridson_candidates(
     let reseed_limit = 128.min(budget.max(1));
     let mut attempts = 0_usize;
     let mut reseed_rejections = 0_usize;
-    let target_pool = requested.saturating_mul(4).min(budget);
     let width = bounds.max.x - bounds.min.x;
     let height = bounds.max.y - bounds.min.y;
-    let seed_target = requested.div_ceil(16).max(4);
-    let seed_columns = ((seed_target as f64 * width / height).sqrt().round() as usize).max(1);
-    let seed_rows = seed_target.div_ceil(seed_columns).max(1);
+    let seed_columns = (width / (4.0 * distance)).ceil().max(1.0) as usize;
+    let seed_rows = (height / (4.0 * distance)).ceil().max(1.0) as usize;
+    if seed_columns
+        .checked_mul(seed_rows)
+        .is_none_or(|count| count > budget)
+    {
+        return Err(PatternPipelineError::new(
+            "coverage.candidate_limit",
+            "Poisson spatial seed field exceeds the configured candidate limit",
+        ));
+    }
     for row in 0..seed_rows {
         for column in 0..seed_columns {
-            if attempts >= budget || points.len() >= target_pool {
-                break;
-            }
             if is_cancelled() {
                 return Err(PatternPipelineError::new(
                     "evaluation.cancelled",
@@ -9104,7 +9370,7 @@ fn bridson_candidates(
             active.push(ordinal);
         }
     }
-    'generation: while attempts < budget {
+    while attempts < budget {
         if is_cancelled() {
             return Err(PatternPipelineError::new(
                 "evaluation.cancelled",
@@ -9114,16 +9380,7 @@ fn bridson_candidates(
         if active.is_empty() {
             let seed = uniform_point(bounds, prng);
             attempts += 1;
-            let conflict = match index.find_point_conflict(seed, &points, distance, is_cancelled) {
-                Ok(conflict) => conflict,
-                Err(error)
-                    if error.path() == "coverage.random_sites.neighbor_limit"
-                        && points.len() >= requested =>
-                {
-                    break 'generation;
-                }
-                Err(error) => return Err(error),
-            };
+            let conflict = index.find_point_conflict(seed, &points, distance, is_cancelled)?;
             if conflict {
                 reseed_rejections += 1;
                 if reseed_rejections >= reseed_limit {
@@ -9142,9 +9399,6 @@ fn bridson_candidates(
             index.insert(seed, ordinal)?;
             active.push(ordinal);
             continue;
-        }
-        if points.len() >= target_pool {
-            break;
         }
         let active_slot = ((prng.unit() * active.len() as f64) as usize).min(active.len() - 1);
         let origin = points[active[active_slot]];
@@ -9167,17 +9421,7 @@ fn bridson_candidates(
             if !bounds.contains(candidate) {
                 continue;
             }
-            let conflict =
-                match index.find_point_conflict(candidate, &points, distance, is_cancelled) {
-                    Ok(conflict) => conflict,
-                    Err(error)
-                        if error.path() == "coverage.random_sites.neighbor_limit"
-                            && points.len() >= requested =>
-                    {
-                        break 'generation;
-                    }
-                    Err(error) => return Err(error),
-                };
+            let conflict = index.find_point_conflict(candidate, &points, distance, is_cancelled)?;
             if conflict {
                 continue;
             }
@@ -9197,34 +9441,49 @@ fn bridson_candidates(
             active.swap_remove(active_slot);
         }
     }
-    if attempts >= budget && !active.is_empty() && points.len() < requested {
+    if attempts >= budget && (!active.is_empty() || reseed_rejections < reseed_limit) {
         return Err(PatternPipelineError::new(
             "coverage.random_sites.attempts",
             "Poisson placement effort limit was exhausted before domain saturation",
         ));
     }
-    spread_candidate_order(&mut points, requested, bounds, is_cancelled)?;
+    let count = points.len();
+    spread_candidate_order(&mut points, count, bounds, is_cancelled)?;
     Ok(points)
 }
 
-/// Generates one jittered point per aspect-aware cell, covering the full domain before truncation.
+/// Generates one jittered point per authored-size spatial cell covering the local envelope.
 ///
 /// # Errors
-///
-/// Returns an allocation diagnostic without publishing a partial population.
+/// Returns cancellation, candidate-limit, or allocation diagnostics without publishing a
+/// partial population.
 fn stratified_candidates(
     bounds: Bounds,
     jitter: f64,
-    requested: usize,
+    spacing: f64,
+    budget: usize,
     prng: &mut StablePrng,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<Point2>, PatternPipelineError> {
-    let width = bounds.max.x - bounds.min.x;
-    let height = bounds.max.y - bounds.min.y;
-    let columns = ((requested as f64 * width / height).sqrt().round() as usize).max(1);
-    let rows = requested.div_ceil(columns).max(1);
-    let cell_width = width / columns as f64;
-    let cell_height = height / rows as f64;
+    let first_column = (bounds.min.x / spacing).floor();
+    let last_column = (bounds.max.x / spacing).ceil();
+    let first_row = (bounds.min.y / spacing).floor();
+    let last_row = (bounds.max.y / spacing).ceil();
+    let columns = last_column - first_column;
+    let rows = last_row - first_row;
+    if !columns.is_finite()
+        || !rows.is_finite()
+        || columns < 1.0
+        || rows < 1.0
+        || columns * rows > budget as f64
+    {
+        return Err(PatternPipelineError::new(
+            "coverage.candidate_limit",
+            "jittered spatial cells exceed the configured candidate limit",
+        ));
+    }
+    let columns = columns as usize;
+    let rows = rows as usize;
     let mut points = Vec::new();
     for row in 0..rows {
         for column in 0..columns {
@@ -9239,15 +9498,16 @@ fn stratified_candidates(
             try_push_family_value(
                 &mut points,
                 Point2::new(
-                    bounds.min.x + (column as f64 + 0.5 + offset_x) * cell_width,
-                    bounds.min.y + (row as f64 + 0.5 + offset_y) * cell_height,
+                    (first_column + column as f64 + 0.5 + offset_x) * spacing,
+                    (first_row + row as f64 + 0.5 + offset_y) * spacing,
                 ),
                 "coverage.random_sites.allocation",
                 "stratified candidates could not reserve another site",
             )?;
         }
     }
-    spread_candidate_order(&mut points, requested, bounds, is_cancelled)?;
+    let count = points.len();
+    spread_candidate_order(&mut points, count, bounds, is_cancelled)?;
     Ok(points)
 }
 
@@ -9704,18 +9964,23 @@ fn weighted_polygon_centroid_with(
     Ok((mass > f64::EPSILON).then(|| Point2::new(x_moment / mass, y_moment / mass)))
 }
 
+/// Plans a conservative guard neighborhood from authored spatial and exclusion lengths.
+/// The caller validates the random spatial scale before this guard-only calculation.
 fn random_neighborhood(random: &RandomSiteCapability, support: f64) -> f64 {
-    let character = match random.character {
+    random_spatial_spacing(random)
+        .unwrap_or(0.0)
+        .max(required_exclusion_distance(random, support))
+}
+
+/// Combines Even's sole minimum-center distance with any explicit exclusion policy.
+fn required_exclusion_distance(random: &RandomSiteCapability, support: f64) -> f64 {
+    let even_distance = match random.character {
         RandomSiteCharacter::Even {
             minimum_center_distance,
         } => minimum_center_distance,
         _ => 0.0,
     };
-    character.max(exclusion_distance(&random.exclusion, support))
-}
-
-fn required_exclusion_distance(random: &RandomSiteCapability, support: f64) -> f64 {
-    random_neighborhood(random, support)
+    even_distance.max(exclusion_distance(&random.exclusion, support))
 }
 
 /// Pushes one family value only after a fallible incremental reservation.
@@ -9746,15 +10011,15 @@ fn exclusion_distance(policy: &SiteExclusionPolicy, support: f64) -> f64 {
     }
 }
 
-/// Resolves the deterministic clustered-parent population without allocating it.
-fn cluster_parent_count(character: &RandomSiteCharacter, requested: usize) -> usize {
+/// Derives clustered-parent intensity from the complete area-offered population.
+fn cluster_parent_count(character: &RandomSiteCharacter, offered: usize) -> usize {
     let RandomSiteCharacter::Clustered {
         cluster_density, ..
     } = character
     else {
         return 0;
     };
-    ((requested as f64 * cluster_density / 100.0).round() as usize).clamp(1, requested.max(1))
+    ((offered as f64 * cluster_density / 100.0).round() as usize).clamp(1, offered.max(1))
 }
 
 /// Builds clustered parents incrementally with cancellation and family progress.
@@ -9854,6 +10119,30 @@ fn completed_density_weight(
     (1.0 - strength) + strength * shaped
 }
 
+/// Samples the same completed artwork-weighting response used by random candidate placement.
+///
+/// Uniform mark selection calls this after the complete population is frozen; guard sites are
+/// included and sampled through the established source placement boundary.
+///
+/// # Errors
+/// Returns the sampler's finite mapping or source diagnostic without changing family topology.
+pub fn completed_artwork_site_weight(
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    point: Point2,
+    weighting: toniator_domain::SourceWeighting,
+) -> Result<f64, PatternPipelineError> {
+    let sampled = source
+        .sample_density_weight(point, canvas, weighting.mapping)
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+    Ok(completed_density_weight(
+        sampled,
+        weighting.mapping,
+        weighting.strength,
+        &weighting.response,
+    ))
+}
+
 fn point_distance(first: Point2, second: Point2) -> f64 {
     let dx = first.x - second.x;
     let dy = first.y - second.y;
@@ -9870,12 +10159,20 @@ fn random_family_fingerprint(
         .random
         .as_ref()
         .expect("random family has random capability");
-    let mut bytes = b"toniator-stage-16b-random-sites-v1".to_vec();
+    let mut bytes = b"toniator-spatial-random-sites-v2".to_vec();
     bytes.extend(family.provenance.definition_id.to_le_bytes());
     for id in &family.provenance.mechanism_ids {
         bytes.extend(id.0.to_le_bytes());
     }
     bytes.extend(random.seed.to_le_bytes());
+    match random.nominal_spacing {
+        Some(spacing) => {
+            bytes.push(1);
+            bytes.extend(spacing.to_bits().to_le_bytes());
+        }
+        None => bytes.push(0),
+    }
+    bytes.push(u8::from(random.full_population_for_uniform_marks));
     match &random.character {
         RandomSiteCharacter::RawUniform => bytes.push(1),
         RandomSiteCharacter::Even {
@@ -9899,28 +10196,32 @@ fn random_family_fingerprint(
             bytes.extend(jitter.to_bits().to_le_bytes());
         }
     }
-    match &random.density_modulation {
-        ResolvedSiteDensityModulation::Uniform => bytes.push(1),
-        ResolvedSiteDensityModulation::ArtworkWeightedUnbound => {
-            unreachable!("unbound source weighting is rejected before family fingerprinting")
-        }
-        ResolvedSiteDensityModulation::ArtworkWeighted {
-            mapping,
-            strength,
-            response,
-        } => {
-            bytes.push(2);
-            bytes.extend(strength.to_bits().to_le_bytes());
-            append_source_mapping_identity(&mut bytes, *mapping);
-            match response {
-                ArtworkWeightResponse::Linear => bytes.push(1),
-                ArtworkWeightResponse::Smoothstep => bytes.push(2),
+    if random.full_population_for_uniform_marks {
+        bytes.push(3);
+    } else {
+        match &random.density_modulation {
+            ResolvedSiteDensityModulation::Uniform => bytes.push(1),
+            ResolvedSiteDensityModulation::ArtworkWeightedUnbound => {
+                unreachable!("unbound source weighting is rejected before family fingerprinting")
             }
-            let source = source.expect("weighted random family supplies decoded source");
-            bytes.extend(source.identity().content_hash.bytes());
-            bytes.extend(source.identity().decoded_pixel_hash.bytes());
-            bytes.extend(source.identity().width.to_le_bytes());
-            bytes.extend(source.identity().height.to_le_bytes());
+            ResolvedSiteDensityModulation::ArtworkWeighted {
+                mapping,
+                strength,
+                response,
+            } => {
+                bytes.push(2);
+                bytes.extend(strength.to_bits().to_le_bytes());
+                append_source_mapping_identity(&mut bytes, *mapping);
+                match response {
+                    ArtworkWeightResponse::Linear => bytes.push(1),
+                    ArtworkWeightResponse::Smoothstep => bytes.push(2),
+                }
+                let source = source.expect("weighted random family supplies decoded source");
+                bytes.extend(source.identity().content_hash.bytes());
+                bytes.extend(source.identity().decoded_pixel_hash.bytes());
+                bytes.extend(source.identity().width.to_le_bytes());
+                bytes.extend(source.identity().height.to_le_bytes());
+            }
         }
     }
     match &random.exclusion {
@@ -10007,14 +10308,46 @@ pub fn realize_typed_mapped_outputs_cancellable(
     response: MarkResponse,
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<TypedRealization<MappedCircularMarkRealization>, PatternPipelineError> {
+    realize_typed_mapped_outputs_with_response_cancellable(
+        family,
+        plan,
+        source,
+        canvas,
+        mapping,
+        response,
+        GeometryResponseInput::Identity,
+        is_cancelled,
+    )
+}
+
+/// Realizes frozen typed mapped circles with one transient completed-scalar transfer.
+///
+/// A constant probe bypasses sampling and cutoff; normal samples retain their original cutoff
+/// before the transfer. The family and ordered provenance are never regenerated.
+///
+/// # Errors
+/// Returns a probe, binding, sampling, cancellation, response, or geometry diagnostic.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_mapped_outputs_with_response_cancellable(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: MarkResponse,
+    response_input: GeometryResponseInput<'_>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<TypedRealization<MappedCircularMarkRealization>, PatternPipelineError> {
+    response_input.validate()?;
     let provenance = realization_provenance(family, plan)?;
     let compatibility = legacy_grid_sites_for_circular_marks(family)?;
-    realize_mapped_circular_marks_cancellable(
+    realize_mapped_circular_marks_with_response_cancellable(
         &compatibility,
         source,
         canvas,
         mapping,
         response,
+        response_input,
         is_cancelled,
     )
     .map(|mut output| {
@@ -10126,6 +10459,37 @@ pub fn realize_typed_mapped_output_cancellable(
     shape_rotation_degrees: f64,
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<TypedOutputRealization<MappedCircularMarkRealization>, PatternPipelineError> {
+    realize_typed_mapped_output_with_response_cancellable(
+        family,
+        plan,
+        capability,
+        setting,
+        source,
+        canvas,
+        mapping,
+        shape_rotation_degrees,
+        GeometryResponseInput::Identity,
+        is_cancelled,
+    )
+}
+
+/// Realizes one mapped-circle output with a transient transfer after ordinary suppression.
+///
+/// # Errors
+/// Returns the existing binding, response, sampling, cancellation, or geometry diagnostic.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_mapped_output_with_response_cancellable(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    shape_rotation_degrees: f64,
+    response_input: GeometryResponseInput<'_>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<TypedOutputRealization<MappedCircularMarkRealization>, PatternPipelineError> {
     validate_output_realization_binding(plan, capability, setting)?;
     let PatternGeometryResponse::Marks(response) = &setting.response else {
         return Err(PatternPipelineError::new(
@@ -10133,7 +10497,7 @@ pub fn realize_typed_mapped_output_cancellable(
             "mapped mark realization requires a mark response",
         ));
     };
-    let realization = realize_typed_mapped_outputs_cancellable(
+    let realization = realize_typed_mapped_outputs_with_response_cancellable(
         family,
         plan,
         source,
@@ -10144,6 +10508,7 @@ pub fn realize_typed_mapped_output_cancellable(
             maximum_fill: response.maximum_fill,
             rotation_offset_degrees: shape_rotation_degrees,
         },
+        response_input,
         is_cancelled,
     )?;
     Ok(TypedOutputRealization {
@@ -10317,6 +10682,49 @@ pub fn realize_typed_canonical_marks_cancellable(
     request: CanonicalMarkRequest,
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<TypedRealization<CanonicalMarkRealization>, PatternPipelineError> {
+    realize_typed_canonical_marks_with_response_cancellable(
+        document,
+        family,
+        plan,
+        source,
+        canvas,
+        request,
+        GeometryResponseInput::Identity,
+        is_cancelled,
+    )
+}
+
+/// Realizes canonical marks with one transient transfer after normal cutoff and alpha handling.
+///
+/// A constant probe bypasses source sampling and is valid only for solid-paint geometry. The
+/// completed source response otherwise retains its original sampling and suppression authority.
+///
+/// # Errors
+///
+/// Returns a stable probe, binding, sampling, cancellation, or canonical-mark diagnostic.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_canonical_marks_with_response_cancellable(
+    document: &Document,
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    request: CanonicalMarkRequest,
+    response_input: GeometryResponseInput<'_>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<TypedRealization<CanonicalMarkRealization>, PatternPipelineError> {
+    response_input.validate()?;
+    if request.sampled_paint
+        && matches!(
+            response_input,
+            GeometryResponseInput::ConstantProbe(_) | GeometryResponseInput::RawProbe(_) | GeometryResponseInput::UniformRadiusProbe(_)
+        )
+    {
+        return Err(PatternPipelineError::new(
+            "coverage.response.probe",
+            "constant geometry probes require solid mark paint",
+        ));
+    }
     let provenance = realization_provenance(family, plan)?;
     let [output] = plan.ordered_outputs.as_slice() else {
         return Err(PatternPipelineError::new(
@@ -10388,7 +10796,14 @@ pub fn realize_typed_canonical_marks_cancellable(
                 orientation,
                 request.response.rotation_offset_degrees,
             )?;
-            let (ink, sampled_paint) = if request.sampled_paint {
+            let (ink, sampled_paint) = if matches!(
+                response_input,
+                GeometryResponseInput::ConstantProbe(_)
+                    | GeometryResponseInput::RawProbe(_)
+                    | GeometryResponseInput::UniformRadiusProbe(_)
+            ) {
+                (1.0, None)
+            } else if request.sampled_paint {
                 let sample = source
                     .sample_source_color(site.position, canvas, request.mapping)
                     .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
@@ -10417,15 +10832,36 @@ pub fn realize_typed_canonical_marks_cancellable(
                     None,
                 )
             };
-            if request.mapping.suppresses(ink) {
+            if !matches!(
+                response_input,
+                GeometryResponseInput::ConstantProbe(_)
+                    | GeometryResponseInput::RawProbe(_)
+                    | GeometryResponseInput::UniformRadiusProbe(_)
+            ) && request.mapping.suppresses(ink)
+            {
+                return Ok(None);
+            }
+            if matches!(response_input, GeometryResponseInput::UniformRadius(_))
+                && sampled_paint.is_some_and(|(_, suppressed)| suppressed)
+            {
+                return Ok(None);
+            }
+            if matches!(response_input, GeometryResponseInput::UniformRadius(0.0)) {
                 return Ok(None);
             }
             let radius = if sampled_paint.is_some_and(|(_, suppressed)| suppressed) {
                 0.0
+            } else if let GeometryResponseInput::UniformRadius(radius)
+            | GeometryResponseInput::UniformRadiusProbe(radius) = response_input
+            {
+                radius
             } else {
-                radius_from_ink_with_diameter(
-                    ink,
-                    request.response,
+                radius_from_raw_size_with_diameter(
+                    response_input.resolve_raw_size(
+                        ink,
+                        request.response.minimum_fill,
+                        request.response.maximum_fill,
+                    )?,
                     site.nominal_cell_basis.diameter(),
                 )
                 .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?
@@ -10555,6 +10991,43 @@ pub fn realize_typed_canonical_mark_output_cancellable(
     max_transformed_curve_segment_instances: usize,
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<TypedOutputRealization<CanonicalMarkRealization>, PatternPipelineError> {
+    realize_typed_canonical_mark_output_with_response_cancellable(
+        document,
+        family,
+        plan,
+        capability,
+        setting,
+        source,
+        canvas,
+        mapping,
+        sampled_paint,
+        shape_rotation_degrees,
+        max_transformed_curve_segment_instances,
+        GeometryResponseInput::Identity,
+        is_cancelled,
+    )
+}
+
+/// Realizes one canonical-mark output with a transient post-sampling geometry response.
+///
+/// # Errors
+/// Returns binding, probe, sampling, cancellation, or canonical geometry diagnostics.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_canonical_mark_output_with_response_cancellable(
+    document: &Document,
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    sampled_paint: bool,
+    shape_rotation_degrees: f64,
+    max_transformed_curve_segment_instances: usize,
+    response_input: GeometryResponseInput<'_>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<TypedOutputRealization<CanonicalMarkRealization>, PatternPipelineError> {
     validate_output_realization_binding(plan, capability, setting)?;
     let PatternGeometryResponse::Marks(response) = &setting.response else {
         return Err(PatternPipelineError::new(
@@ -10562,7 +11035,7 @@ pub fn realize_typed_canonical_mark_output_cancellable(
             "canonical mark realization requires a mark response",
         ));
     };
-    let realization = realize_typed_canonical_marks_cancellable(
+    let realization = realize_typed_canonical_marks_with_response_cancellable(
         document,
         family,
         plan,
@@ -10578,6 +11051,7 @@ pub fn realize_typed_canonical_mark_output_cancellable(
             },
             max_transformed_curve_segment_instances,
         },
+        response_input,
         is_cancelled,
     )?;
     Ok(TypedOutputRealization {
@@ -12023,7 +12497,7 @@ pub struct CanonicalStrokeRealization {
 }
 
 /// Stable canonical sweep contract included in all stroke realization identity.
-pub const CANONICAL_STROKE_OUTLINE_CONTRACT_ID: &str = "toniator-stage-21a-filled-outline-v4";
+pub const CANONICAL_STROKE_OUTLINE_CONTRACT_ID: &str = "toniator-stage-21a-filled-outline-v5";
 /// Bounds adaptive samples per evaluation request before profile allocation.
 pub const MAX_STROKE_PROFILE_SAMPLES: usize = 262_144;
 /// Bounds derived filled-outline segments per evaluation request.
@@ -12057,6 +12531,40 @@ pub fn realize_typed_canonical_strokes_cancellable(
     max_outline_segments: usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<TypedRealization<CanonicalStrokeRealization>, PatternPipelineError> {
+    realize_typed_canonical_strokes_with_response_cancellable(
+        family,
+        plan,
+        source,
+        canvas,
+        mapping,
+        response,
+        _nominal_basis,
+        max_profile_samples,
+        max_outline_segments,
+        GeometryResponseInput::Identity,
+        is_cancelled,
+    )
+}
+
+/// Realizes guide/parametric path widths from one transient completed-scalar transfer.
+///
+/// # Errors
+/// Returns probe validation, source, profile, outline, or cancellation diagnostics atomically.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_canonical_strokes_with_response_cancellable(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    _nominal_basis: f64,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    response_input: GeometryResponseInput<'_>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedRealization<CanonicalStrokeRealization>, PatternPipelineError> {
+    response_input.validate()?;
     let provenance = realization_provenance(family, plan)?;
     let [output] = plan.ordered_outputs.as_slice() else {
         return Err(PatternPipelineError::new(
@@ -12107,6 +12615,7 @@ pub fn realize_typed_canonical_strokes_cancellable(
                 canvas,
                 mapping,
                 response,
+                response_input,
                 nominal_basis,
             )?;
             let end = stroke_sample(
@@ -12117,6 +12626,7 @@ pub fn realize_typed_canonical_strokes_cancellable(
                 canvas,
                 mapping,
                 response,
+                response_input,
                 nominal_basis,
             )?;
             if profile
@@ -12145,6 +12655,7 @@ pub fn realize_typed_canonical_strokes_cancellable(
                 canvas,
                 mapping,
                 response,
+                response_input,
                 nominal_basis,
                 &mut profile,
                 &mut profile_samples,
@@ -12291,6 +12802,41 @@ pub fn realize_typed_canonical_stroke_output_cancellable(
     max_outline_segments: usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<TypedOutputRealization<CanonicalStrokeRealization>, PatternPipelineError> {
+    realize_typed_canonical_stroke_output_with_response_cancellable(
+        family,
+        plan,
+        capability,
+        setting,
+        source,
+        canvas,
+        mapping,
+        max_profile_samples,
+        max_outline_segments,
+        GeometryResponseInput::Identity,
+        is_cancelled,
+    )
+}
+
+/// Realizes a guide or parametric stroke output with a transient completed-scalar transfer.
+///
+/// The transfer reaches adaptive midpoint width sampling before the existing outline authority.
+///
+/// # Errors
+/// Returns binding, probe, sampling, cancellation, profile, or outline diagnostics.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_canonical_stroke_output_with_response_cancellable(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    response_input: GeometryResponseInput<'_>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedOutputRealization<CanonicalStrokeRealization>, PatternPipelineError> {
     validate_output_realization_binding(plan, capability, setting)?;
     let PatternGeometryResponse::Connected(response) = &setting.response else {
         return Err(PatternPipelineError::new(
@@ -12298,7 +12844,7 @@ pub fn realize_typed_canonical_stroke_output_cancellable(
             "guide-path realization requires a connected response",
         ));
     };
-    let realization = realize_typed_canonical_strokes_cancellable(
+    let realization = realize_typed_canonical_strokes_with_response_cancellable(
         family,
         plan,
         source,
@@ -12312,6 +12858,7 @@ pub fn realize_typed_canonical_stroke_output_cancellable(
         1.0,
         max_profile_samples,
         max_outline_segments,
+        response_input,
         is_cancelled,
     )?;
     Ok(TypedOutputRealization {
@@ -12340,6 +12887,38 @@ pub fn realize_connection_canonical_strokes_cancellable(
     max_outline_segments: usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+    realize_connection_canonical_strokes_with_response_cancellable(
+        paths,
+        source,
+        canvas,
+        mapping,
+        response,
+        style,
+        max_profile_samples,
+        max_outline_segments,
+        GeometryResponseInput::Identity,
+        is_cancelled,
+    )
+}
+
+/// Reuses selected frozen connection paths for one transient width transfer.
+///
+/// # Errors
+/// Returns probe validation, source, outline, or cancellation diagnostics atomically.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_connection_canonical_strokes_with_response_cancellable(
+    paths: &ConnectionPathSet,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    style: toniator_domain::PathStrokeStyle,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    response_input: GeometryResponseInput<'_>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+    response_input.validate()?;
     realize_connection_canonical_strokes_from_paths(
         paths.fingerprint().to_owned(),
         paths.paths.len(),
@@ -12357,6 +12936,7 @@ pub fn realize_connection_canonical_strokes_cancellable(
         style,
         max_profile_samples,
         max_outline_segments,
+        response_input,
         is_cancelled,
     )
 }
@@ -12400,6 +12980,7 @@ pub fn realize_owned_connection_canonical_strokes_cancellable(
         style,
         max_profile_samples,
         max_outline_segments,
+        GeometryResponseInput::Identity,
         is_cancelled,
     )
 }
@@ -12421,11 +13002,13 @@ fn realize_connection_canonical_strokes_from_paths<I>(
     style: toniator_domain::PathStrokeStyle,
     max_profile_samples: usize,
     max_outline_segments: usize,
+    response_input: GeometryResponseInput<'_>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CanonicalStrokeRealization, PatternPipelineError>
 where
     I: IntoIterator<Item = (ConnectionPathId, CurvePath, f64)>,
 {
+    response_input.validate()?;
     let mut strokes = Vec::new();
     reserve_stage20m(
         &mut strokes,
@@ -12479,6 +13062,7 @@ where
                     canvas,
                     mapping,
                     response,
+                    response_input,
                     nominal_basis,
                 )?;
                 // Preserve both segment-local locations at a shared graph vertex. The outline
@@ -12626,6 +13210,38 @@ pub fn realize_maze_canonical_strokes_cancellable(
     max_outline_segments: usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+    realize_maze_canonical_strokes_with_response_cancellable(
+        maze,
+        source,
+        canvas,
+        mapping,
+        response,
+        style,
+        max_profile_samples,
+        max_outline_segments,
+        GeometryResponseInput::Identity,
+        is_cancelled,
+    )
+}
+
+/// Reuses a frozen maze producer for one transient post-sampling width transfer.
+///
+/// # Errors
+/// Returns probe validation, source, outline, or cancellation diagnostics without partial walls.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_maze_canonical_strokes_with_response_cancellable(
+    maze: &MazeProgramResult,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    style: toniator_domain::PathStrokeStyle,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    response_input: GeometryResponseInput<'_>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+    response_input.validate()?;
     realize_maze_canonical_strokes_from_paths(
         maze.fingerprint().to_owned(),
         maze.wall_paths.len(),
@@ -12639,6 +13255,7 @@ pub fn realize_maze_canonical_strokes_cancellable(
         style,
         max_profile_samples,
         max_outline_segments,
+        response_input,
         is_cancelled,
     )
 }
@@ -12681,6 +13298,7 @@ pub fn realize_owned_maze_canonical_strokes_cancellable(
         style,
         max_profile_samples,
         max_outline_segments,
+        GeometryResponseInput::Identity,
         is_cancelled,
     )
 }
@@ -12703,11 +13321,13 @@ fn realize_maze_canonical_strokes_from_paths<I>(
     style: toniator_domain::PathStrokeStyle,
     max_profile_samples: usize,
     max_outline_segments: usize,
+    response_input: GeometryResponseInput<'_>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CanonicalStrokeRealization, PatternPipelineError>
 where
     I: IntoIterator<Item = (MazeWallPathId, CurvePath, f64)>,
 {
+    response_input.validate()?;
     let mut strokes = Vec::new();
     reserve_stage20m(
         &mut strokes,
@@ -12761,6 +13381,7 @@ where
                     canvas,
                     mapping,
                     response,
+                    response_input,
                     nominal_basis,
                 )?;
                 if profile.last().is_none_or(|previous: &StrokeProfileSample| {
@@ -13076,6 +13697,7 @@ fn stroke_sample(
     canvas: &CanvasSpec,
     mapping: SourceMapping,
     response: StrokeResponse,
+    response_input: GeometryResponseInput<'_>,
     basis: f64,
 ) -> Result<StrokeProfileSample, PatternPipelineError> {
     let center = segment.point_at(parameter).map_err(|_| {
@@ -13084,13 +13706,23 @@ fn stroke_sample(
             "stroke centerline must remain finite",
         )
     })?;
-    let ink = source
-        .sample_mapping_response(center, canvas, mapping)
-        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
-    let thickness = if mapping.suppresses(ink) {
+    let ink = if let GeometryResponseInput::ConstantProbe(value) | GeometryResponseInput::RawProbe(value) = response_input {
+        value
+    } else {
+        source
+            .sample_mapping_response(center, canvas, mapping)
+            .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?
+    };
+    let thickness = if !matches!(response_input, GeometryResponseInput::ConstantProbe(_) | GeometryResponseInput::RawProbe(_))
+        && mapping.suppresses(ink)
+    {
         0.0
     } else {
-        response.minimum_thickness + ink * (response.maximum_thickness - response.minimum_thickness)
+        response_input.resolve_raw_size(
+            ink,
+            response.minimum_thickness,
+            response.maximum_thickness,
+        )?
     };
     let width = thickness * basis;
     Ok(StrokeProfileSample {
@@ -13130,6 +13762,7 @@ fn append_adaptive_stroke_interval(
     canvas: &CanvasSpec,
     mapping: SourceMapping,
     response: StrokeResponse,
+    response_input: GeometryResponseInput<'_>,
     basis: f64,
     profile: &mut Vec<StrokeProfileSample>,
     profile_samples: &mut usize,
@@ -13151,6 +13784,7 @@ fn append_adaptive_stroke_interval(
         canvas,
         mapping,
         response,
+        response_input,
         basis,
     )?;
     let chord_middle = Point2::new(
@@ -13190,6 +13824,7 @@ fn append_adaptive_stroke_interval(
             canvas,
             mapping,
             response,
+            response_input,
             basis,
             profile,
             profile_samples,
@@ -13209,6 +13844,7 @@ fn append_adaptive_stroke_interval(
             canvas,
             mapping,
             response,
+            response_input,
             basis,
             profile,
             profile_samples,
@@ -13519,6 +14155,37 @@ pub fn realize_mapped_circular_marks_cancellable(
     response: MarkResponse,
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<MappedCircularMarkRealization, RealizationError> {
+    realize_mapped_circular_marks_with_response_cancellable(
+        family,
+        source,
+        canvas,
+        mapping,
+        response,
+        GeometryResponseInput::Identity,
+        is_cancelled,
+    )
+}
+
+/// Realizes mapped circles with a completed-scalar transfer and frozen family placement.
+///
+/// Constant probes bypass source and cutoff for opaque geometry measurements. Normal cutoff
+/// omission occurs before inversion, including when the authored minimum fill is positive.
+///
+/// # Errors
+/// Returns cancellation or probe, sampling, response, support, and geometry diagnostics.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_mapped_circular_marks_with_response_cancellable(
+    family: &GridFamilyOutput,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: MarkResponse,
+    response_input: GeometryResponseInput<'_>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<MappedCircularMarkRealization, RealizationError> {
+    response_input
+        .validate()
+        .map_err(|error| RealizationError::new(error.path(), error.message()))?;
     validate_response(response, family.support_radius)?;
     if !family.has_only_finite_geometry() {
         return Err(RealizationError::new(
@@ -13536,11 +14203,20 @@ pub fn realize_mapped_circular_marks_cancellable(
                     "realization was cancelled",
                 ));
             }
-            let ink = source.sample_mapping_response(site.position, canvas, mapping)?;
-            if mapping.suppresses(ink) {
+            let ink = if let GeometryResponseInput::ConstantProbe(value) | GeometryResponseInput::RawProbe(value) = response_input {
+                value
+            } else {
+                source.sample_mapping_response(site.position, canvas, mapping)?
+            };
+            if !matches!(response_input, GeometryResponseInput::ConstantProbe(_) | GeometryResponseInput::RawProbe(_))
+                && mapping.suppresses(ink)
+            {
                 return Ok(None);
             }
-            let radius = radius_from_ink_with_diameter(ink, response, site.nominal_cell_diameter)?;
+            let raw_size = response_input
+                .resolve_raw_size(ink, response.minimum_fill, response.maximum_fill)
+                .map_err(|error| RealizationError::new(error.path(), error.message()))?;
+            let radius = radius_from_raw_size_with_diameter(raw_size, site.nominal_cell_diameter)?;
             if radius > family.support_radius {
                 return Err(RealizationError::new(
                     "realization.family.support_radius",
@@ -13725,6 +14401,31 @@ pub fn radius_from_ink_with_diameter(
             * nominal_cell_diameter
             / 2.0,
     )
+}
+
+/// Converts one already-resolved raw zero-to-two mark size to its physical radius.
+///
+/// This boundary does not read or reapply desired coverage bounds.
+///
+/// # Errors
+/// Rejects invalid raw size or nominal site basis before producing geometry.
+fn radius_from_raw_size_with_diameter(
+    raw_size: f64,
+    nominal_cell_diameter: f64,
+) -> Result<f64, RealizationError> {
+    if !raw_size.is_finite() || !(0.0..=2.0).contains(&raw_size) {
+        return Err(RealizationError::new(
+            "realization.raw_size",
+            "resolved mark size must be within zero through two",
+        ));
+    }
+    if !nominal_cell_diameter.is_finite() || nominal_cell_diameter <= 0.0 {
+        return Err(RealizationError::new(
+            "realization.nominal_cell_diameter",
+            "nominal cell diameter must be finite and positive",
+        ));
+    }
+    Ok(raw_size * nominal_cell_diameter / 2.0)
 }
 
 fn validate_response(
@@ -14826,6 +15527,7 @@ mod realization_tests {
                     maximum_thickness: 1.0,
                     bias: 0.0,
                 },
+                GeometryResponseInput::Identity,
                 10.0,
             )
             .unwrap()

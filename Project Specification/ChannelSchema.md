@@ -184,6 +184,13 @@ When `aspect_locked = false`, `across_x` and `across_y` are independent.
 
 ### 5.3 Why density is not a stored site count
 
+For current Scatter semantics, Addendum §17.4 supersedes the random-count
+example below. The stored scalar Density encodes `100 / Feature size`; Scatter's
+authored nominal spacing, or Even's minimum-center distance, is the sole
+physical spatial authority. Canvas area derives the offered site population;
+weighting never refills rejected sites. Guide families retain their resolved
+directional metric and Density aspect.
+
 The same density metric must support:
 
 - Random sites.
@@ -460,6 +467,13 @@ Each delta applies only to a matching output-specific base response. A missing
 delta inherits the document response, and a reset removes only that delta.
 `response_curve` and `polarity` remain document-base, output-typed fields;
 they are not additive channel deltas.
+
+For current mark outputs, Addendum 17.3 supersedes the older size-only sketch:
+document ALL response also owns Contextual/Uniform/Variable density intent and
+artistic size scale `0..2`, each optionally overridden by a named channel.
+Uniform resolves only from the effective artwork-weighted Marks capability;
+strict Visible Mark Margin exposes Variable applicability. Pattern resources
+do not store either response field.
 
 ---
 
@@ -764,14 +778,33 @@ Requirements:
 - All authored numeric values serialize as `f64`.
 - Color hex is a UI representation; canonical color components serialize numerically.
 - Document density serializes as `across_x`, `across_y`, and `aspect_locked`.
-- Channel density, pattern rotation, shape rotation, and geometry response
-  serialize only as explicit typed deltas or an explicit inherit/reset state;
-  they never serialize as copied effective base values.
+- Channel density, pattern rotation, shape rotation, and structural connected
+  stroke alignment serialize only as explicit typed deltas or inherit/reset.
+  Named geometry response fields serialize separately as optional typed
+  overrides; omitted fields inherit persisted document ALL response intent.
+  Current Variable mark, stroke, and region endpoints are desired absolute
+  geometric coverage in `0..=1`, including equal bounds. The saved raw
+  `C(size)` artifact remains a separate structural measurement over `0..=2`;
+  it is inverted per sampled request into a transient final raw size. Uniform
+  marks retain their separate full-tone radius and survival inverse. Former
+  source-free Preset raw endpoints are held in a typed pending import and
+  converted per exact channel binding before this current authority is stored.
 - Literal derived pixel spacing is not serialized.
 - Actual generated site counts are not serialized unless used only as an optional cache that can be discarded.
 - Pattern IDs are stable.
 - Channel IDs are stable.
 - Shared-definition references survive save/load.
+- Each modeled channel resolves a saved calibration by its effective typed
+  geometry binding; compatible channels may share measured numbers across IDs,
+  while effective connected bias or shape changes require a distinct binding.
+  The document retains one exact saved companion for the last-ALL base Pattern
+  binding even after every named channel selects a different binding, so a
+  later model switch can reuse that measurement.
+  Scatter site, randomized connection, and maze variation seed values are not
+  part of saved binding identity; changing them still regenerates their
+  authored geometry and reuses the fixed-seed-43 statistical reference. Other
+  structure choices remain exact. Ordinary source, Feature, and Advanced edits
+  also reuse the artifact under Addendum 17.5.
 - Unknown schema versions fail clearly or migrate deterministically.
 - Document settings, channel recipe replacements, channel deltas, translation,
   visibility, color, opacity, and source mapping round-trip exactly.

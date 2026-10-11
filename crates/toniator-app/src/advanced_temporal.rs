@@ -124,7 +124,9 @@ pub(super) fn display_document(
 pub(super) struct Binding {
     target: InspectorTarget,
     locator: AdvancedDescriptorLocator,
+    row: gtk::Box,
     input: gtk::Widget,
+    editable: bool,
     reset_start: Option<gtk::Button>,
     animation: Option<(gtk::Button, gtk::DropDown, gtk::Label)>,
 }
@@ -354,6 +356,10 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
         surface.bindings.clear();
         surface.paint_editors.clear();
         surface.batch_editors.clear();
+        surface.batch_region_sampling = None;
+        surface.mark_density_controls.clear();
+        surface.fill_mask_disclosures.clear();
+        surface.fine_adjustments.clear();
         (
             surface.draft.clone(),
             surface.target,
@@ -385,11 +391,25 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
     };
     let mut bindings = Vec::new();
     let mut paint_editors = Vec::new();
-    let batch_editors = if target == InspectorTarget::DocumentAll {
+    let (
+        batch_editors,
+        batch_region_sampling,
+        batch_density_controls,
+        batch_fill_mask,
+        mut fine_adjustments,
+    ) = if target == InspectorTarget::DocumentAll {
         advanced_batches::append(state, epoch, &document, &fields, &guard)
     } else {
-        Vec::new()
+        (Vec::new(), None, Vec::new(), None, Vec::new())
     };
+    let mut mark_density_controls = batch_density_controls;
+    let mut fill_mask_disclosures = batch_fill_mask.into_iter().collect::<Vec<_>>();
+    let single_target_response_fields = if target == InspectorTarget::DocumentAll {
+        advanced_batches::single_target_response_fields(&document)
+    } else {
+        BTreeSet::new()
+    };
+    let all_scope = target == InspectorTarget::DocumentAll;
     for channel in channels {
         let target = InspectorTarget::Channel(channel);
         let group_name = format!("{} settings", channel_display_name(&document, channel));
@@ -409,6 +429,13 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
             group.set_child(Some(&content));
             fields.append(&group);
         }
+        let appearance_content = source_group(
+            &content,
+            "Paint and channel opacity",
+            Some(
+                "Paint Alpha changes the solid paint. Channel Opacity fades the finished channel; they remain independent.",
+            ),
+        );
         if document.solid_paint(channel).is_ok() {
             paint_editors.push(paint_editor::Controls::new(
                 AdvancedCommitContext {
@@ -417,13 +444,64 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
                     target,
                     refreshing: guard.clone(),
                 },
-                &content,
+                &appearance_content,
                 channel,
                 endpoint,
             ));
         }
-        let values = advanced_settings_values(&document, target);
+        let mut values = advanced_settings_values(&document, target)
+            .into_iter()
+            .filter(|value| {
+                !(all_scope
+                    && (advanced_channel_response_field(value.descriptor.field)
+                        || value.descriptor.field == PropertyFieldId::MarkSizeScale)
+                    && single_target_response_fields.contains(&value.descriptor.field))
+            })
+            .collect::<Vec<_>>();
+        values.sort_by_key(|value| {
+            if value.descriptor.field == PropertyFieldId::ModeledMappingCutoff {
+                0
+            } else {
+                1
+            }
+        });
         let fill_content = source_group(&content, "Fill response", None);
+        let has_fill_mask = values.iter().any(|value| {
+            source_consumer_group(value.descriptor.field) == Some("Fill response")
+                && (is_fill_tone_mapping_field(value.descriptor.field)
+                    || value.descriptor.field == PropertyFieldId::ModeledMappingCutoff)
+        });
+        let fill_mask_disclosure = has_fill_mask
+            .then(|| advanced_batches::append_fill_mask_disclosure(&document, Some(vec![channel])));
+        mark_density_controls.extend(advanced_batches::append_named_mark_density_controls(
+            state,
+            epoch,
+            &document,
+            &fill_content,
+            &guard,
+            channel,
+            all_scope && single_target_response_fields.contains(&PropertyFieldId::MarkSizeScale),
+        ));
+        let fine_fields = |group: &'static str| {
+            values
+                .iter()
+                .filter(|value| {
+                    advanced_fine_adjustment_field(value.descriptor.field)
+                        && source_consumer_group(value.descriptor.field) == Some(group)
+                })
+                .map(|value| value.descriptor.field)
+                .collect::<Vec<_>>()
+        };
+        let fill_fine_fields = fine_fields("Fill response");
+        let weighting_fine_fields = fine_fields("Source weighting");
+        let fill_fine = (!fill_fine_fields.is_empty()).then(|| {
+            advanced_batches::fine_adjustment_disclosure(
+                &document,
+                Some(channel),
+                "Fill response",
+                fill_fine_fields,
+            )
+        });
         let weighting_used = document
             .effective_channel_pattern(channel)
             .ok()
@@ -442,10 +520,51 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
                 "These settings are stored for this channel. The current pattern does not use source weighting.",
             ),
         );
+        let weighting_fine = (!weighting_fine_fields.is_empty()).then(|| {
+            advanced_batches::fine_adjustment_disclosure(
+                &document,
+                Some(channel),
+                "Source weighting",
+                weighting_fine_fields,
+            )
+        });
         for value in values.iter().filter(|value| {
             !matches!(value.descriptor.target, PropertyTarget::ChannelOutput(_, _))
                 && paint_editor::component(value.descriptor.field).is_none()
         }) {
+            let fine = match source_consumer_group(value.descriptor.field) {
+                Some("Fill response") => fill_fine.as_ref(),
+                Some("Source weighting") => weighting_fine.as_ref(),
+                _ => None,
+            };
+            let parent = if matches!(
+                value.descriptor.field,
+                PropertyFieldId::Opacity | PropertyFieldId::Paint
+            ) {
+                &appearance_content
+            } else {
+                match source_consumer_group(value.descriptor.field) {
+                    Some("Fill response") => fine
+                        .filter(|_| advanced_fine_adjustment_field(value.descriptor.field))
+                        .map(advanced_batches::FineAdjustmentDisclosure::content)
+                        .or_else(|| {
+                            (is_fill_tone_mapping_field(value.descriptor.field)
+                                || value.descriptor.field == PropertyFieldId::ModeledMappingCutoff)
+                                .then(|| {
+                                    fill_mask_disclosure
+                                        .as_ref()
+                                        .map(advanced_batches::FillMaskDisclosure::content)
+                                })
+                                .flatten()
+                        })
+                        .unwrap_or(&fill_content),
+                    Some("Source weighting") => fine
+                        .filter(|_| advanced_fine_adjustment_field(value.descriptor.field))
+                        .map(advanced_batches::FineAdjustmentDisclosure::content)
+                        .unwrap_or(&weighting_content),
+                    _ => &content,
+                }
+            };
             if let Some(binding) = append_binding(
                 state,
                 &draft,
@@ -453,16 +572,24 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
                 epoch,
                 target,
                 endpoint,
-                match source_consumer_group(value.descriptor.field) {
-                    Some("Fill response") => &fill_content,
-                    Some("Source weighting") => &weighting_content,
-                    _ => &content,
-                },
+                parent,
                 value.clone(),
                 &guard,
             ) {
                 bindings.push(binding);
             }
+        }
+        if let Some(disclosure) = fill_fine {
+            fill_mask_disclosure
+                .as_ref()
+                .map(advanced_batches::FillMaskDisclosure::content)
+                .unwrap_or(&fill_content)
+                .append(disclosure.expander());
+            fine_adjustments.push(disclosure);
+        }
+        if let Some(disclosure) = weighting_fine {
+            weighting_content.append(disclosure.expander());
+            fine_adjustments.push(disclosure);
         }
         if let Ok(capabilities) =
             document.pattern_capabilities(PatternCapabilityScope::Channel(channel))
@@ -491,6 +618,13 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
                     content.clone()
                 };
                 for value in output_values {
+                    let output_parent = if advanced_channel_response_field(value.descriptor.field)
+                        || value.descriptor.field == PropertyFieldId::MarkSizeScale
+                    {
+                        &fill_content
+                    } else {
+                        &output_content
+                    };
                     if let Some(binding) = append_binding(
                         state,
                         &draft,
@@ -498,7 +632,7 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
                         epoch,
                         target,
                         endpoint,
-                        &output_content,
+                        output_parent,
                         value.clone(),
                         &guard,
                     ) {
@@ -507,6 +641,10 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
                 }
             }
         }
+        if let Some(disclosure) = &fill_mask_disclosure {
+            fill_content.append(disclosure.expander());
+        }
+        fill_mask_disclosures.extend(fill_mask_disclosure);
     }
     if let Some(surface) = state
         .borrow_mut()
@@ -517,30 +655,48 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
         surface.bindings = bindings;
         surface.paint_editors = paint_editors;
         surface.batch_editors = batch_editors;
+        surface.batch_region_sampling = batch_region_sampling;
+        surface.mark_density_controls = mark_density_controls;
+        surface.fill_mask_disclosures = fill_mask_disclosures;
+        surface.fine_adjustments = fine_adjustments;
     }
     guard.set(false);
     refresh(state, epoch);
 }
 
-/// Groups independently mapped source consumers using visible, accessible product names.
-/// Optional guidance explains retained inactive state without disabling valid channel edits.
+/// Groups independently mapped source consumers and places inactive-state guidance on the heading.
+///
+/// The domain descriptors and edit routes remain authoritative. When weighting is inactive the
+/// heading tooltip and Description explain that stored settings remain editable; no help row is added.
 fn source_group(parent: &gtk::Box, name: &str, explanation: Option<&str>) -> gtk::Box {
-    let group = gtk::Frame::new(Some(name));
-    group.update_property(&[gtk::accessible::Property::Label(name)]);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
     content.set_margin_top(8);
     content.set_margin_bottom(8);
     content.set_margin_start(8);
     content.set_margin_end(8);
+    let (group, label) = if let Some(text) = explanation {
+        let expander = gtk::Expander::new(Some(name));
+        expander.set_expanded(false);
+        expander.set_child(Some(&content));
+        expander.set_tooltip_text(Some(text));
+        expander.update_property(&[gtk::accessible::Property::Description(text)]);
+        let label = expander.label_widget().and_downcast::<gtk::Label>();
+        (expander.upcast::<gtk::Widget>(), label)
+    } else {
+        let frame = gtk::Frame::new(Some(name));
+        frame.set_child(Some(&content));
+        let label = frame.label_widget().and_downcast::<gtk::Label>();
+        (frame.upcast::<gtk::Widget>(), label)
+    };
+    group.update_property(&[gtk::accessible::Property::Label(name)]);
     if let Some(text) = explanation {
-        let label = gtk::Label::new(Some(text));
-        label.set_wrap(true);
-        label.set_max_width_chars(48);
-        label.set_xalign(0.0);
-        label.add_css_class("dim-label");
-        content.append(&label);
+        group.set_tooltip_text(Some(text));
+        group.update_property(&[gtk::accessible::Property::Description(text)]);
+        if let Some(label) = label {
+            label.set_tooltip_text(Some(text));
+            label.update_property(&[gtk::accessible::Property::Description(text)]);
+        }
     }
-    group.set_child(Some(&content));
     parent.append(&group);
     content
 }
@@ -638,7 +794,9 @@ fn append_binding(
     Some(Binding {
         target,
         locator,
+        row,
         input,
+        editable,
         reset_start,
         animation,
     })
@@ -676,6 +834,18 @@ fn refresh_values(state: &Rc<RefCell<AppState>>, epoch: u64, discard_pending: bo
     for editor in &surface.batch_editors {
         editor.refresh(&document, discard_pending);
     }
+    for editor in &surface.mark_density_controls {
+        editor.refresh(&document);
+    }
+    for disclosure in &surface.fill_mask_disclosures {
+        disclosure.refresh(&document);
+    }
+    if let Some(editor) = &surface.batch_region_sampling {
+        editor.refresh(&document);
+    }
+    for disclosure in &surface.fine_adjustments {
+        disclosure.refresh(&document);
+    }
     for editor in &surface.paint_editors {
         if let Err(error) = editor.refresh(draft.document(), surface.endpoint) {
             surface.status.set_label(&error);
@@ -687,6 +857,27 @@ fn refresh_values(state: &Rc<RefCell<AppState>>, epoch: u64, discard_pending: bo
         else {
             continue;
         };
+        let channel = binding.target.channel_id();
+        let visible = match current.descriptor.field {
+            PropertyFieldId::MarkMinimumFill | PropertyFieldId::MarkMaximumFill => {
+                channel.is_some_and(|channel| channel_mark_range_visible(&document, channel))
+            }
+            PropertyFieldId::MarkSizeScale => {
+                channel.is_some_and(|channel| channel_mark_scale_visible(&document, channel))
+            }
+            _ => true,
+        };
+        binding.row.set_visible(visible);
+        let mask_disabled = channel.is_some_and(|channel| {
+            is_fill_tone_mapping_field(current.descriptor.field)
+                && channel_fill_mask_inactive(&document, channel)
+        });
+        binding
+            .row
+            .set_sensitive(binding.editable && !mask_disabled);
+        binding
+            .input
+            .set_sensitive(binding.editable && !mask_disabled);
         if let Some(entry) = binding.input.downcast_ref::<gtk::Entry>()
             && (discard_pending || !entry.has_focus())
         {
@@ -1042,5 +1233,233 @@ mod tests {
         assert_eq!(main.document(), &document);
         main.redo().unwrap();
         assert_eq!(main.document(), draft.document());
+    }
+
+    /// Routes structural Stroke alignment through ALL and named Start/End controls and easing.
+    ///
+    /// The scalar batch edits every compatible path at ALL scope; named edits remain isolated, and
+    /// neither path changes the independent Fill/thickness endpoints.
+    ///
+    /// # Panics
+    /// Panics when an inspector descriptor, endpoint command, easing update, or response readback
+    /// loses the structural/output ownership boundary.
+    #[test]
+    fn stroke_alignment_keeps_all_named_start_end_and_easing_authority() {
+        let document = Document::new_default_document(
+            CanvasSpec {
+                width: 100.0,
+                height: 100.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .unwrap()
+        .with_temporal_authority(
+            toniator_domain::ProjectTiming::new(
+                toniator_domain::FrameRate::new(30, 1).unwrap(),
+                toniator_domain::FrameRange::new(0, 3).unwrap(),
+            ),
+            vec![],
+        )
+        .unwrap();
+        let mut all_history = DocumentHistory::new(DocumentSession::new(document.clone()).unwrap());
+        PresetRegistry::bundled()
+            .apply_to_document_base(&mut all_history, "one-guide-lines")
+            .unwrap();
+        let base = all_history.document().response_settings().clone();
+        let mut settings = base.clone();
+        settings.connected_minimum_thickness = 0.2;
+        settings.connected_maximum_thickness = 0.8;
+        all_history
+            .apply(&DocumentCommand::SetAllResponseSettings { base, settings })
+            .unwrap();
+        all_history
+            .apply_temporal(&all_history.document().initialize_end_command().unwrap())
+            .unwrap();
+        let channels = authoritative_channel_ids(all_history.document());
+        assert!(!channels.is_empty());
+
+        advanced_batches::apply(
+            &mut all_history,
+            temporal_preview::Endpoint::Start,
+            PropertyFieldId::CurveResponseBias,
+            0.35,
+        )
+        .unwrap();
+        for channel in &channels {
+            let output = all_history
+                .document()
+                .effective_channel_pattern(*channel)
+                .unwrap()
+                .output_settings
+                .into_iter()
+                .find_map(|output| match output.response {
+                    PatternGeometryResponse::Connected(response) => Some(response),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(output.bias, 0.35);
+            assert_eq!(
+                (output.minimum_thickness, output.maximum_thickness),
+                (0.2, 0.8)
+            );
+        }
+        let all_end_display =
+            display_document(all_history.document(), temporal_preview::Endpoint::End).unwrap();
+        let all_descriptor =
+            inline_inspector_values(&all_end_display, InspectorTarget::DocumentAll)
+                .into_iter()
+                .find(|value| value.descriptor.field == PropertyFieldId::CurveResponseBias)
+                .expect("ALL Pattern sidebar retains Stroke alignment");
+        assert_eq!(
+            inspector_field_label(PropertyFieldId::CurveResponseBias),
+            "Stroke alignment"
+        );
+        assert!(temporal_edit::eligible(&all_descriptor.descriptor));
+        advanced_batches::apply(
+            &mut all_history,
+            temporal_preview::Endpoint::End,
+            PropertyFieldId::CurveResponseBias,
+            0.7,
+        )
+        .unwrap();
+        let easing = temporal_edit::easing_command(
+            all_history.document(),
+            &all_descriptor.descriptor,
+            toniator_domain::Easing::SmoothInOut,
+            true,
+        );
+        all_history.apply_temporal(&easing).unwrap();
+        let start = all_history.document();
+        for channel in &channels {
+            let start_response = start
+                .effective_channel_pattern(*channel)
+                .unwrap()
+                .output_settings
+                .into_iter()
+                .find_map(|output| match output.response {
+                    PatternGeometryResponse::Connected(response) => Some(response),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(start_response.bias, 0.35);
+            assert_eq!(
+                (
+                    start_response.minimum_thickness,
+                    start_response.maximum_thickness
+                ),
+                (0.2, 0.8)
+            );
+            let end = display_document(start, temporal_preview::Endpoint::End).unwrap();
+            let end_response = end
+                .effective_channel_pattern(*channel)
+                .unwrap()
+                .output_settings
+                .into_iter()
+                .find_map(|output| match output.response {
+                    PatternGeometryResponse::Connected(response) => Some(response),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(end_response.bias, 0.7);
+        }
+        assert!(all_history.document().temporal_end_overrides().iter().any(
+            |entry| matches!(entry,
+                toniator_domain::TemporalEndOverride::Scalar(value)
+                    if value.field == PropertyFieldId::CurveResponseBias
+                        && value.easing == toniator_domain::Easing::SmoothInOut)
+        ));
+
+        let mut named_history = DocumentHistory::new(DocumentSession::new(document).unwrap());
+        PresetRegistry::bundled()
+            .apply_to_document_base(&mut named_history, "one-guide-lines")
+            .unwrap();
+        let channel = authoritative_channel_ids(named_history.document())[0];
+        let base = named_history.document().response_settings().clone();
+        let mut settings = base.clone();
+        settings.connected_minimum_thickness = 0.2;
+        settings.connected_maximum_thickness = 0.8;
+        named_history
+            .apply(&DocumentCommand::SetAllResponseSettings { base, settings })
+            .unwrap();
+        let start_display =
+            display_document(named_history.document(), temporal_preview::Endpoint::Start).unwrap();
+        let target = InspectorTarget::Channel(channel);
+        let start_descriptor = inline_inspector_values(&start_display, target)
+            .into_iter()
+            .find(|value| value.descriptor.field == PropertyFieldId::CurveResponseBias)
+            .expect("named Pattern sidebar retains Stroke alignment")
+            .descriptor;
+        let start_command = command_for_inspector_input(
+            named_history.document(),
+            Some(channel),
+            DefinitionEditScope::SelectedCopy,
+            &start_descriptor,
+            InspectorInput::FiniteF64(0.25),
+        )
+        .unwrap();
+        named_history.apply(&start_command).unwrap();
+        named_history
+            .apply_temporal(&named_history.document().initialize_end_command().unwrap())
+            .unwrap();
+        let end_display =
+            display_document(named_history.document(), temporal_preview::Endpoint::End).unwrap();
+        let end_descriptor = inline_inspector_values(&end_display, target)
+            .into_iter()
+            .find(|value| value.descriptor.field == PropertyFieldId::CurveResponseBias)
+            .expect("named End controls retain Stroke alignment")
+            .descriptor;
+        let end_command =
+            temporal_edit::scalar_command(named_history.document(), &end_descriptor, 0.65).unwrap();
+        named_history.apply_temporal(&end_command).unwrap();
+        let easing = temporal_edit::easing_command(
+            named_history.document(),
+            &end_descriptor,
+            toniator_domain::Easing::QuadraticOut,
+            false,
+        );
+        named_history.apply_temporal(&easing).unwrap();
+        let start_response = named_history
+            .document()
+            .effective_channel_pattern(channel)
+            .unwrap()
+            .output_settings
+            .into_iter()
+            .find_map(|output| match output.response {
+                PatternGeometryResponse::Connected(response) => Some(response),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(start_response.bias, 0.25);
+        assert_eq!(
+            (
+                start_response.minimum_thickness,
+                start_response.maximum_thickness
+            ),
+            (0.2, 0.8)
+        );
+        let end =
+            display_document(named_history.document(), temporal_preview::Endpoint::End).unwrap();
+        let end_response = end
+            .effective_channel_pattern(channel)
+            .unwrap()
+            .output_settings
+            .into_iter()
+            .find_map(|output| match output.response {
+                PatternGeometryResponse::Connected(response) => Some(response),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(end_response.bias, 0.65);
+        assert!(
+            named_history
+                .document()
+                .temporal_end_overrides()
+                .iter()
+                .any(|entry| matches!(entry,
+                toniator_domain::TemporalEndOverride::Scalar(value)
+                    if value.target == end_descriptor.target
+                        && value.field == PropertyFieldId::CurveResponseBias
+                        && value.easing == toniator_domain::Easing::QuadraticOut))
+        );
     }
 }

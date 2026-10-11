@@ -45,6 +45,7 @@ fn three_guide_structure() -> PatternStructureRecipe {
 fn guide_face_recipe_requires_ordered_straight_dimensions() {
     let recipe = PatternDefinitionRecipe::guide_faces(three_guide_structure(), vec![0, 1, 2]);
     let record = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "stage20p-guide-faces".into(),
             name: "Guide faces".into(),
@@ -62,6 +63,7 @@ fn guide_face_recipe_requires_ordered_straight_dimensions() {
     let invalid = PatternDefinitionRecipe::guide_faces(three_guide_structure(), vec![1, 0]);
     assert!(
         validate_preset_record(&PresetRecord {
+            saved_calibration: None,
             metadata: record.metadata,
             recipe: invalid
         })
@@ -83,6 +85,7 @@ fn ordered_guide_face_output_requires_unique_increasing_dimensions() {
         }],
     };
     let record = |recipe| PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "ordered-guide-faces".into(),
             name: "Ordered guide faces".into(),

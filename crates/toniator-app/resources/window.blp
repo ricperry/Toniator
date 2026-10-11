@@ -290,10 +290,32 @@ template $ToniatorMainShell : Gtk.Box {
         margin-end: 10;
         valign: start;
         styles [ "toniator-inspector" ]
-        Gtk.Label inspector_status {
-          label: "Open artwork to adjust its pattern.";
+        Gtk.Box inspector_status_row {
+          orientation: horizontal;
+          spacing: 6;
+          valign: center;
+          Gtk.Label inspector_status {
+            label: "Open artwork to adjust its pattern.";
+            xalign: 0;
+            wrap: true;
+            hexpand: true;
+            styles [ "dim-label" ]
+          }
+          Gtk.Button cancel_pattern_calibration {
+            label: "_Cancel";
+            use-underline: true;
+            visible: false;
+            tooltip-text: "Discard the pending Pattern edit and keep the current artwork.";
+            accessibility {
+              label: "Cancel Pattern calibration";
+              description: "Stop preparing the private Pattern edit. The current artwork remains unchanged.";
+            }
+          }
+        }
+        Gtk.Label process_memory_status {
+          label: "Memory usage unavailable";
           xalign: 0;
-          wrap: true;
+          tooltip-text: "Approximate current and process-session peak memory for Toniator, including caches and undo history. Excludes child processes and GPU allocations. Linux kernel values refresh every 2 seconds.";
           styles [ "dim-label" ]
         }
 
@@ -396,15 +418,9 @@ template $ToniatorMainShell : Gtk.Box {
             }
           }
         }
-        Gtk.Expander advanced_expander {
-          label: "Advanced";
-          expanded: false;
-          styles [ "toniator-inspector-group" ]
-          Gtk.Box advanced_controls {
-            orientation: vertical;
-            spacing: 7;
-            margin-top: 7;
-          }
+        Gtk.Box advanced_controls {
+          orientation: vertical;
+          spacing: 7;
         }
       }
     }

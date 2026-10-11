@@ -30,11 +30,12 @@ The schema must support:
 - A shared canonical geometry pipeline for preview, PNG, and SVG.
 
 The pattern schema describes **what structural pattern exists and how it is
-realized**. The document owns the base recipe, base density/detail, base
-pattern and shape rotation, and base output-specific response range. A channel
-may replace the recipe and add typed scalar deltas; the domain resolves the
-effective instance described in `ChannelSchema.md`. Translation, source
-mapping, color, opacity, and visibility remain channel-specific.
+realized**. The document owns the base recipe, density/detail, pattern and
+shape rotation, and separate typed ALL response ranges and region artwork
+sampling. A channel may replace the recipe and add structural deltas or
+individual named response fields; the domain resolves the effective instance
+described in `ChannelSchema.md`. Translation, source mapping, color, opacity,
+and visibility remain channel-specific.
 
 ---
 
@@ -74,7 +75,19 @@ pub struct PatternDefinition {
 `PatternDefinition` is structural. It does not contain color, opacity,
 visibility, translation, density, pattern rotation, shape rotation, mark-size
 response, line-thickness response, or cell-inset response. Those values are
-held by document base settings and, where allowed, channel deltas.
+held by document ALL response intent and optional named-channel fields.
+Connected stroke alignment and region resize algorithm remain structural
+Pattern settings. A Pattern preset does not serialize adjustable response
+bounds or region artwork sampling.
+The current Uniform/Variable mark-density choice and post-fit artistic size
+scale also belong to document ALL/named response, never to a Pattern recipe.
+An artwork-weighted random-site mechanism declares structural eligibility;
+Addendum 17.3 governs contextual resolution, full-population calibration,
+thinning, and the non-overlap exception.
+Addendum 17.5 requires a validated, versioned source-independent calibration
+artifact to accompany finished structural geometry. The artifact's typed
+recipe binding is verification metadata, never a second Pattern materializer;
+scalar Feature size and Advanced response remain outside its identity.
 
 Named patterns such as “Rectangular Dots,” “Triangular Dots,” “Random Stippling,” “Maze,” “Curved Lines,” or “Voronoi Cells” should normally be presets over this schema rather than independent renderer implementations.
 
@@ -763,9 +776,8 @@ pub enum SamplingStrategy {
 }
 ```
 
-The pattern definition declares the supported modulation strategy. The
-domain-resolved document base plus matching channel delta supplies
-output-specific ranges such as:
+The Pattern definition declares structural realization. The domain-resolved
+ALL response plus optional named fields supplies output-specific ranges such as:
 
 - Minimum and maximum mark size.
 - Minimum and maximum line thickness.
@@ -902,6 +914,12 @@ This represents equal nominal spacing when aspect is locked.
 - Curved guides evaluate the density metric against their local tangent and normal.
 
 ### 16.2 Random interpretation
+
+For current Scatter behavior, Addendum §17.4 supersedes the following historical
+expected-count interpretation. Raw, Jittered, and Clustered own one authored
+nominal spacing; Even owns only its minimum-center distance. Feature size scales
+that physical spacing, and canvas area determines the offered population.
+Artwork weighting and exclusion thin it without count replenishment.
 
 Random families derive an expected site density from the same metric. A common isotropic estimate is:
 

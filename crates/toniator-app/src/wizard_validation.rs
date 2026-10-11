@@ -164,8 +164,9 @@ fn validation_frames(document: &Document, still_source: bool) -> Result<Vec<u64>
     Ok(frames)
 }
 
-/// Validates native geometry and source response at distinct authored endpoints with a bounded raster.
-/// The engine retains native canvas/density; only the discarded raster is reduced. No files publish.
+/// Validates native geometry at distinct authored endpoints without fitting unpublished bindings.
+/// Structural preview leaves missing companions for guarded Apply preparation. The engine retains
+/// native canvas/density; only the discarded raster is reduced. No files publish.
 ///
 /// # Errors
 /// Returns canonical media, construction, realization or cancellation errors without mutating input.
@@ -197,7 +198,8 @@ fn validate(
             .for_preview(
                 toniator_engine::PreviewRasterTarget::new(128, 128)
                     .expect("fixed validation raster"),
-            );
+            )
+            .for_structural_preview();
         toniator_engine::evaluate_cancellable_with_limits(
             request,
             toniator_engine::EvaluationLimits::default(),
@@ -715,5 +717,151 @@ mod tests {
         assert!(diagnostic(&error).contains("Reduce Revolutions"));
         assert_eq!(workspace.snapshot(), before);
         assert!(validate(before.document, before.sources, &AtomicBool::new(true)).is_err());
+    }
+
+    /// Admits Clustered Connections after a Poisson/Lloyd edit so Apply can prepare its new binding.
+    ///
+    /// The test uses current default refinement values, preserves all other recipe values, and
+    /// exercises both immutable source formats. Review checks geometry only; candidate preparation
+    /// remains the explicit saved-calibration boundary.
+    ///
+    /// # Panics
+    /// Panics if construction still requires an artifact, the edit changes unrelated settings, or
+    /// Apply admission cannot produce a missing-binding preparation plan.
+    #[test]
+    fn clustered_connections_poisson_lloyd_reaches_calibration_preparation() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for input in ["raster-sample.png", "vector-sample.svg"] {
+            let mut workspace = load_workspace(&root.join("assets").join(input)).unwrap();
+            PresetRegistry::bundled()
+                .apply_to_document_base(&mut workspace.history, "clustered-dispersion-random-links")
+                .unwrap();
+            let clustered = workspace.document().clone();
+            let mut candidate = DocumentHistory::new_draft(&workspace.history);
+            let active_descriptor = |document: &Document, field| {
+                let (projection, _, _) =
+                    wizard_route_for_document(document, InspectorTarget::DocumentAll).unwrap();
+                wizard_active_values(document, InspectorTarget::DocumentAll, &projection)
+                    .into_iter()
+                    .find(|value| value.descriptor.field == field)
+                    .unwrap()
+                    .descriptor
+            };
+
+            let selector =
+                active_descriptor(candidate.document(), PropertyFieldId::RandomCharacter);
+            let transition = candidate
+                .document()
+                .variant_transition_draft(
+                    &selector,
+                    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Even),
+                )
+                .unwrap();
+            apply_wizard_transition(&mut candidate, InspectorTarget::DocumentAll, &transition)
+                .unwrap();
+
+            let retained_settings = |document: &Document| {
+                document
+                    .property_values()
+                    .into_iter()
+                    .filter(|value| {
+                        matches!(
+                            value.descriptor.field,
+                            PropertyFieldId::RandomSeed
+                                | PropertyFieldId::RandomDensityModulation
+                                | PropertyFieldId::RandomMaximumAttempts
+                                | PropertyFieldId::RandomMaximumNeighborChecks
+                        )
+                    })
+                    .map(|value| (value.descriptor.field, value.value))
+                    .collect::<Vec<_>>()
+            };
+            let retained_before = retained_settings(candidate.document());
+
+            let lloyd =
+                active_descriptor(candidate.document(), PropertyFieldId::RandomLloydEnabled);
+            let command = command_for_inspector_input(
+                candidate.document(),
+                None,
+                DefinitionEditScope::DocumentBase,
+                &lloyd,
+                InspectorInput::Boolean(true),
+            )
+            .unwrap();
+            candidate.apply(&command).unwrap();
+            assert_eq!(
+                candidate
+                    .document()
+                    .property_values()
+                    .into_iter()
+                    .filter(|value| {
+                        value.descriptor.field == PropertyFieldId::RandomLloydDensityWeighted
+                    })
+                    .map(|value| value.value)
+                    .collect::<Vec<_>>(),
+                vec![PropertyCurrentValueKind::Boolean(false)],
+                "{input} uses the current unweighted Lloyd default",
+            );
+            assert_eq!(
+                candidate
+                    .document()
+                    .property_values()
+                    .into_iter()
+                    .filter(|value| {
+                        value.descriptor.field == PropertyFieldId::RandomLloydIterations
+                    })
+                    .map(|value| value.value)
+                    .collect::<Vec<_>>(),
+                vec![PropertyCurrentValueKind::U32(4)],
+                "{input} uses the current Lloyd iteration default",
+            );
+            assert_eq!(retained_settings(candidate.document()), retained_before);
+
+            let document = candidate.document().clone();
+            let channels = authoritative_channel_ids(&document);
+            assert!(
+                channels
+                    .iter()
+                    .all(|channel| document.saved_calibration_for(*channel).unwrap().is_none())
+            );
+            validate(
+                document.clone(),
+                workspace.sources.clone(),
+                &AtomicBool::new(false),
+            )
+            .unwrap_or_else(|error| panic!("{input} structural Review: {error}"));
+
+            let validation = Validation {
+                revision: Some(candidate.revision().0),
+                document: Some(document.clone()),
+                result: Some(Ok(())),
+                ..Validation::default()
+            };
+            assert!(
+                validation
+                    .admission(
+                        &document,
+                        candidate.revision().0,
+                        &clustered,
+                        InspectorTarget::DocumentAll,
+                        WizardRoutePage::Review,
+                        false,
+                    )
+                    .is_ok(),
+                "{input} Apply remains admissible after structural construction"
+            );
+            assert!(
+                workspace.document() == &clustered,
+                "{input} main history stays unchanged"
+            );
+
+            let changed = calibration_preparation::changed_channels(&clustered, &document).unwrap();
+            let plan = calibration_preparation::plan_to_prepare(&document, &changed, false, false)
+                .unwrap();
+            assert!(
+                !plan.active.is_empty(),
+                "{input} Apply reaches preparation for the changed Poisson/Lloyd binding"
+            );
+        }
     }
 }

@@ -7,6 +7,7 @@ use toniator_domain::{
 /// Wraps a recipe in current metadata without changing its drawing intent.
 fn record(recipe: PatternDefinitionRecipe) -> PresetRecord {
     PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "single-drawing-output".into(),
             name: "Single drawing output".into(),

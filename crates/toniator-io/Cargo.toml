@@ -1,6 +1,6 @@
 [package]
 name = "toniator-io"
-version = "0.4.0"
+version = "0.4.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -23,3 +23,6 @@ toniator-windows-fs = { path = "../toniator-windows-fs" }
 
 [lib]
 path = "src/lib.rs"
+
+[dev-dependencies]
+toniator-patterns = { path = "../toniator-patterns" }

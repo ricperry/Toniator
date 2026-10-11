@@ -431,12 +431,16 @@ pub fn voronoi_region_references(
                 "region.treatment.identity.reference",
                 "ordinary region has no site owner",
             ))?;
-            let site = family.sites().iter().find(|site| site.id == *owner).ok_or(
-                VoronoiRegionError::new(
+            // FamilySiteSet validates ordinal == emission index. Keep the exact ID check so a
+            // foreign region still fails, without scanning the complete family for every cell.
+            let site = family
+                .sites()
+                .get(owner.ordinal)
+                .filter(|site| site.id == *owner)
+                .ok_or(VoronoiRegionError::new(
                     "region.treatment.identity.reference",
                     "ordinary region owner is absent from the family",
-                ),
-            )?;
+                ))?;
             Ok((
                 region.id.clone(),
                 Point2::new(

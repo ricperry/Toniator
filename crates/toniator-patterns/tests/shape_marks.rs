@@ -10,9 +10,10 @@ use toniator_domain::{
 };
 use toniator_geometry::{CanonicalMark, CurveSegment, Point2};
 use toniator_patterns::{
-    CanonicalMarkRequest, GridInspectRequest, MarkResponse,
-    evaluate_document_typed_family_cancellable, realize_typed_canonical_marks,
-    realize_typed_canonical_marks_cancellable, resolve_document_pattern_pipeline,
+    CanonicalMarkRequest, CoverageCurve, CoverageKnot, GeometryResponseInput, GridInspectRequest,
+    MarkResponse, evaluate_document_typed_family_cancellable, realize_typed_canonical_marks,
+    realize_typed_canonical_marks_cancellable,
+    realize_typed_canonical_marks_with_response_cancellable, resolve_document_pattern_pipeline,
 };
 use toniator_sampling::{SourceFormatHint, decode_source};
 
@@ -258,6 +259,78 @@ fn one_pixel_png(pixel: [u8; 4]) -> Vec<u8> {
         .write_image(&pixel, 1, 1, ColorType::Rgba8.into())
         .unwrap();
     bytes
+}
+
+/// Applies a completed source response once to an authored closed mark after ordinary cutoff.
+///
+/// The calibrated half-response must match a constant geometry-only probe at inverse 0.75;
+/// enabling the original cutoff must still omit the mark before either size interpolation.
+///
+/// # Panics
+/// Panics if this current typed family or its finite mark realization violates the contract.
+#[test]
+fn ton018_authored_mark_calibration_preserves_cutoff_and_probe_geometry() {
+    let (document, definition) = shape_document(asymmetric_shape(), MarkOrientation::Fixed);
+    let plan = resolve_document_pattern_pipeline(&document, &definition).unwrap();
+    let family_request = family_request();
+    let family = evaluate_document_typed_family_cancellable(
+        &document,
+        &definition,
+        &family_request,
+        &|| false,
+    )
+    .unwrap();
+    let source = decode_source(&one_pixel_png([0, 0, 0, 255]), SourceFormatHint::Png).unwrap();
+    let mut mapping = SourceMapping::canonical(SourceMappingComponent::Alpha);
+    mapping.gain = 0.0;
+    mapping.bias = 0.5;
+    let request = CanonicalMarkRequest {
+        mapping,
+        sampled_paint: false,
+        response: MarkResponse {
+            minimum_fill: 0.2,
+            maximum_fill: 0.9,
+            rotation_offset_degrees: 0.0,
+        },
+        max_transformed_curve_segment_instances: 100,
+    };
+    let curve = CoverageCurve::new(vec![
+        CoverageKnot {
+            response: 0.0,
+            coverage: 0.0,
+        },
+        CoverageKnot {
+            response: 0.75,
+            coverage: 0.5,
+        },
+        CoverageKnot {
+            response: 1.0,
+            coverage: 1.0,
+        },
+    ])
+    .unwrap();
+    let run = |request, response_input| {
+        realize_typed_canonical_marks_with_response_cancellable(
+            &document,
+            &family,
+            &plan,
+            &source,
+            &family_request.canvas,
+            request,
+            response_input,
+            &|| false,
+        )
+        .unwrap()
+        .output
+        .marks
+    };
+    let calibrated = run(request, GeometryResponseInput::Calibrated(&curve));
+    let probe = run(request, GeometryResponseInput::ConstantProbe(0.75));
+    assert!(!calibrated.is_empty());
+    assert_eq!(calibrated, probe);
+    let mut suppressed = request;
+    suppressed.mapping.tone.cutoff = 0.6;
+    assert!(run(suppressed, GeometryResponseInput::Calibrated(&curve)).is_empty());
 }
 
 /// Proves sampled authored-shape site workers preserve exact order and cancel inside parallel work.

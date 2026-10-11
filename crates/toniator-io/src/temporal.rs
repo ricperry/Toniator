@@ -159,6 +159,7 @@ const FIELD_NAMES: &[(PropertyFieldId, &str)] = &[
     (PropertyFieldId::TranslationY, "translation_y"),
     (PropertyFieldId::MarkMinimumFill, "mark_minimum_fill"),
     (PropertyFieldId::MarkMaximumFill, "mark_maximum_fill"),
+    (PropertyFieldId::MarkSizeScale, "mark_size_scale"),
     (
         PropertyFieldId::ConnectedMinimumThickness,
         "connected_minimum_thickness",

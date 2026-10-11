@@ -42,8 +42,8 @@ fn bundled_registry_is_stable_and_reconstructs_every_entry() {
         .collect::<Vec<_>>();
     assert_eq!(
         ids.len(),
-        17,
-        "Curve Motif is the seventeenth ordinary built-in"
+        16,
+        "the live bundled registry contains sixteen ordinary built-ins"
     );
     assert_eq!(
         ids,
@@ -53,7 +53,6 @@ fn bundled_registry_is_stable_and_reconstructs_every_entry() {
             "even-random-circles",
             "grid-voronoi-scale",
             "one-guide-lines",
-            "residual-sites-along-guide",
             "round-spiral-line",
             "round-spiral-marks",
             "source-weighted-dispersion-voronoi",
@@ -70,6 +69,16 @@ fn bundled_registry_is_stable_and_reconstructs_every_entry() {
     for entry in registry.entries() {
         let id = &entry.metadata.id;
         assert!(registry.reconstruct(id).is_some());
+        let artifact = entry
+            .saved_calibration
+            .as_ref()
+            .expect("every immutable built-in carries its checked-in companion");
+        toniator_domain::validate_preset_record(entry)
+            .expect("every built-in companion matches its canonical concrete recipe");
+        assert!(
+            artifact.profile().ends_with("-v4") || artifact.profile().ends_with("-v5"),
+            "{id} uses a current typed profile"
+        );
         let mut first = history();
         registry
             .apply_to_selected(&mut first, ChannelId(1), id)
@@ -87,6 +96,7 @@ fn bundled_registry_is_stable_and_reconstructs_every_entry() {
         let reconstructed_registry = PresetRegistry::new(
             1,
             vec![PresetRecord {
+                saved_calibration: None,
                 metadata: entry.metadata.clone(),
                 recipe: reconstructed.clone(),
             }],
@@ -286,6 +296,7 @@ fn source_weighted_voronoi_recipe_uses_luminance_placement_scale_average_and_ful
 #[test]
 fn registry_validation_rejects_duplicate_ids() {
     let entry = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "duplicate".into(),
             name: "Duplicate".into(),
@@ -311,6 +322,7 @@ fn registry_validation_rejects_duplicate_ids() {
 #[test]
 fn invalid_recipe_reference_is_rejected_without_publishing_history() {
     let record = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "invalid-guide-index".into(),
             name: "Invalid Guide Index".into(),
@@ -348,6 +360,7 @@ fn invalid_recipe_reference_is_rejected_without_publishing_history() {
 #[test]
 fn recipe_compound_variants_use_transition_drafts_and_preserve_payloads() {
     let random = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "compound-random".into(),
             name: "Compound Random".into(),
@@ -384,6 +397,7 @@ fn recipe_compound_variants_use_transition_drafts_and_preserve_payloads() {
         }),
     };
     let guided = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "guided-grid".into(),
             name: "Guided Grid".into(),
@@ -585,6 +599,7 @@ fn shape_preset_materialization_is_atomic_and_uses_an_ordinary_typed_reference()
     let registry = PresetRegistry::new(
         1,
         vec![PresetRecord {
+            saved_calibration: None,
             metadata: PresetMetadata {
                 id: "shape-grid".into(),
                 name: "Shape Grid".into(),

@@ -47,34 +47,84 @@ fn construct_spiral_curve_path(
     match spiral.shape {
         SpiralShape::Round => {
             let total = core::f64::consts::TAU * spiral.turns;
-            let count = (total / core::f64::consts::FRAC_PI_2).ceil() as usize;
-            if count == 0 || count > PARAMETRIC_CURVE_MAX_SEGMENTS {
+            let minimum_count = (total / core::f64::consts::FRAC_PI_2).ceil() as usize;
+            if minimum_count == 0 || minimum_count > PARAMETRIC_CURVE_MAX_SEGMENTS {
                 return Err(CurveError::new(
                     "curve.parametric.segment_limit",
                     "spiral construction exceeds the CurvePath segment limit",
                 ));
             }
-            let mut segments = Vec::with_capacity(count);
-            for index in 0..count {
+            let mut segments = Vec::with_capacity(minimum_count);
+            let mut block_start = 0.0;
+            let mut previous_full_turn_count = 4_usize;
+            let whole_turns = spiral.turns.floor() as usize;
+            for block_index in 0..spiral.turns.ceil() as usize {
                 if is_cancelled() {
                     return Err(CurveError::new(
                         "evaluation.cancelled",
                         "evaluation was cancelled",
                     ));
                 }
-                let start_theta = total * index as f64 / count as f64;
-                let end_theta = total * (index + 1) as f64 / count as f64;
-                append_adaptive_round_spiral_span(
-                    &mut segments,
-                    spiral,
-                    origin,
-                    phase,
-                    sign,
-                    start_theta,
-                    end_theta,
-                    0,
-                    is_cancelled,
-                )?;
+                let block_end = (core::f64::consts::TAU * (block_index + 1) as f64).min(total);
+                let span = block_end - block_start;
+                if span <= 0.0 {
+                    return Err(CurveError::new(
+                        "curve.parametric.residual_limit",
+                        "spiral parameter spans must remain positive",
+                    ));
+                }
+                let minimum = (span / core::f64::consts::FRAC_PI_2).ceil() as usize;
+                let full_turn = block_index < whole_turns;
+                let mut count = if full_turn {
+                    previous_full_turn_count.max(minimum)
+                } else {
+                    minimum
+                };
+                loop {
+                    if count > PARAMETRIC_CURVE_MAX_SEGMENTS - segments.len() {
+                        return Err(CurveError::new(
+                            "curve.parametric.segment_limit",
+                            "spiral construction exceeds the CurvePath segment limit",
+                        ));
+                    }
+                    if round_spiral_block_fits(
+                        spiral,
+                        origin,
+                        phase,
+                        sign,
+                        block_start,
+                        block_end,
+                        count,
+                        is_cancelled,
+                    )? {
+                        break;
+                    }
+                    count += 1;
+                }
+                let mut start_theta = block_start;
+                for index in 0..count {
+                    let end_theta = if index + 1 == count {
+                        block_end
+                    } else {
+                        block_start + span * (index + 1) as f64 / count as f64
+                    };
+                    append_adaptive_round_spiral_span(
+                        &mut segments,
+                        spiral,
+                        origin,
+                        phase,
+                        sign,
+                        start_theta,
+                        end_theta,
+                        0,
+                        is_cancelled,
+                    )?;
+                    start_theta = end_theta;
+                }
+                if full_turn {
+                    previous_full_turn_count = count;
+                }
+                block_start = block_end;
             }
             CurvePath::new(segments, PathClosure::Open)
         }
@@ -115,6 +165,61 @@ fn construct_spiral_curve_path(
             CurvePath::polyline(vertices, PathClosure::Open)
         }
     }
+}
+
+/// Checks whether equal initial Hermite spans across one revolution satisfy the canonical
+/// three-witness residual, retaining the adaptive builder as the publication boundary.
+///
+/// # Errors
+///
+/// Returns cancellation, finite-coordinate, or collapsed-parameter diagnostics before allocation.
+#[allow(clippy::too_many_arguments)]
+fn round_spiral_block_fits(
+    spiral: &SpiralCurve,
+    origin: Point2,
+    phase: f64,
+    sign: f64,
+    block_start: f64,
+    block_end: f64,
+    count: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<bool, CurveError> {
+    let span = block_end - block_start;
+    let mut start_theta = block_start;
+    for index in 0..count {
+        if is_cancelled() {
+            return Err(CurveError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let end_theta = if index + 1 == count {
+            block_end
+        } else {
+            block_start + span * (index + 1) as f64 / count as f64
+        };
+        if end_theta <= start_theta {
+            return Err(CurveError::new(
+                "curve.parametric.residual_limit",
+                "spiral parameter spans must remain positive",
+            ));
+        }
+        let candidate =
+            round_spiral_hermite_segment(spiral, origin, phase, sign, start_theta, end_theta)?;
+        if !round_spiral_residual_is_within_limit(
+            &candidate,
+            spiral,
+            origin,
+            phase,
+            sign,
+            start_theta,
+            end_theta,
+        )? {
+            return Ok(false);
+        }
+        start_theta = end_theta;
+    }
+    Ok(true)
 }
 
 /// Appends one dyadically refined Hermite cubic span after deterministic residual witnesses.
@@ -317,6 +422,120 @@ mod tests {
                 )
                 .expect("samples")
             );
+        }
+    }
+
+    /// Keeps concrete full-width default and fine spirals within the finite cubic budget for
+    /// either winding and phase while preserving analytic endpoints, tangents, and dense residuals.
+    ///
+    /// # Panics
+    /// Panics if a published span exceeds the fixed geometric residual or loses analytic joins.
+    #[test]
+    fn full_width_round_spirals_fit_with_exact_hermite_joins() {
+        for (turns, spacing, maximum_segments) in [(47.0, 16.0, 900), (188.0, 4.0, 3_500)] {
+            for winding in [CurveWinding::Clockwise, CurveWinding::CounterClockwise] {
+                for phase_degrees in [0.0, 37.0] {
+                    let spiral = SpiralCurve {
+                        shape: SpiralShape::Round,
+                        turns,
+                        radial_spacing: spacing,
+                        phase_degrees,
+                        winding,
+                    };
+                    let origin = Point2::new(512.0, 512.0);
+                    let path = construct_parametric_curve_path_cancellable(
+                        &ParametricCurve::Spiral(spiral.clone()),
+                        origin,
+                        &|| false,
+                    )
+                    .expect("full-width spiral fits");
+                    assert!(path.segments().len() <= maximum_segments);
+                    let sign = if winding == CurveWinding::Clockwise {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    let phase = phase_degrees.to_radians();
+                    let radial_rate = spacing / core::f64::consts::TAU;
+                    let mut previous_end = origin;
+                    for segment in path.segments() {
+                        let CurveSegment::CubicBezier(cubic) = segment else {
+                            panic!("round spiral uses cubics");
+                        };
+                        assert_eq!(cubic.start(), previous_end);
+                        let start_theta = (cubic.start().x - origin.x)
+                            .hypot(cubic.start().y - origin.y)
+                            / radial_rate;
+                        let end_theta = (cubic.end().x - origin.x).hypot(cubic.end().y - origin.y)
+                            / radial_rate;
+                        let span = end_theta - start_theta;
+                        let (expected_start, derivative_start) = round_spiral_point_and_derivative(
+                            &spiral,
+                            origin,
+                            phase,
+                            sign,
+                            start_theta,
+                        );
+                        let (expected_end, derivative_end) = round_spiral_point_and_derivative(
+                            &spiral, origin, phase, sign, end_theta,
+                        );
+                        assert!(
+                            (cubic.start().x - expected_start.x)
+                                .hypot(cubic.start().y - expected_start.y)
+                                < 1.0e-8
+                        );
+                        assert!(
+                            (cubic.end().x - expected_end.x).hypot(cubic.end().y - expected_end.y)
+                                < 1.0e-8
+                        );
+                        let start_handle = cubic.control_1();
+                        let end_handle = cubic.control_2();
+                        assert!(
+                            (start_handle.x - cubic.start().x - derivative_start.x * span / 3.0)
+                                .hypot(
+                                    start_handle.y
+                                        - cubic.start().y
+                                        - derivative_start.y * span / 3.0
+                                )
+                                < 1.0e-7
+                        );
+                        assert!(
+                            (cubic.end().x - end_handle.x - derivative_end.x * span / 3.0).hypot(
+                                cubic.end().y - end_handle.y - derivative_end.y * span / 3.0
+                            ) < 1.0e-7
+                        );
+                        for sample in 1..16 {
+                            let fraction = sample as f64 / 16.0;
+                            let expected = round_spiral_point_and_derivative(
+                                &spiral,
+                                origin,
+                                phase,
+                                sign,
+                                start_theta + span * fraction,
+                            )
+                            .0;
+                            let actual = CurveSegment::CubicBezier(*cubic)
+                                .point_at(fraction)
+                                .expect("finite cubic sample");
+                            assert!(
+                                (actual.x - expected.x).hypot(actual.y - expected.y)
+                                    <= ROUND_SPIRAL_RESIDUAL_LIMIT + 1.0e-9
+                            );
+                        }
+                        previous_end = cubic.end();
+                    }
+                    let expected_end = round_spiral_point_and_derivative(
+                        &spiral,
+                        origin,
+                        phase,
+                        sign,
+                        core::f64::consts::TAU * turns,
+                    )
+                    .0;
+                    assert_eq!(path.start(), origin);
+                    assert_eq!(path.end(), expected_end);
+                }
+            }
         }
     }
 

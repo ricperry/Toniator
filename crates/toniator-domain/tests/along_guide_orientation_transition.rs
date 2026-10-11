@@ -161,6 +161,7 @@ fn along_guide_transition_rejects_conflicting_active_mark_orientations() {
         definition: Box::new(recipe.structure),
     };
     validate_preset_record(&PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "conflicting-oriented-sites".into(),
             name: "Conflicting Oriented Sites".into(),
@@ -271,6 +272,7 @@ fn structural_only_along_guides_materializes_with_unused_family_orientation() {
         }),
     }];
     validate_preset_record(&PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "unused-family-orientation".into(),
             name: "Unused Family Orientation".into(),
@@ -355,6 +357,7 @@ fn along_guide_orientation_validation_is_active_output_aware() {
         }],
     };
     let error = validate_preset_record(&PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "invalid-oriented-sites".into(),
             name: "Invalid Oriented Sites".into(),

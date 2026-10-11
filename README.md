@@ -13,8 +13,8 @@ Built with Rust and GTK4, Toniator includes a visual Pattern Wizard, a personal
 Pattern library, and a headless command-line renderer. It is free software under
 the [GPL-3.0-only license](LICENSE).
 
-**Current prerelease: 0.4.0.**
-[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.4.0) ·
+**Current prerelease: 0.4.1.**
+[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.4.1) ·
 [Windows development build (0.3.2)](https://github.com/ricperry/Toniator/releases/tag/v0.3.2-windows-dev.20260927) ·
 [native Windows build instructions](docs/windows-build.md) ·
 [known issues](ISSUES.md).
@@ -36,7 +36,7 @@ See [example settings and reproduction commands](docs/examples/README.md).
 ## Download and run
 
 Download **one** of the x86_64 Linux packages from the
-[0.4.0 release](https://github.com/ricperry/Toniator/releases/tag/v0.4.0).
+[0.4.1 release](https://github.com/ricperry/Toniator/releases/tag/v0.4.1).
 Both include the graphical app and CLI, with application ID
 `io.github.ricperry.Toniator`.
 
@@ -52,8 +52,8 @@ until you have recovered any settings or personal Patterns you need.
 In the folder containing your download:
 
 ```bash
-chmod +x Toniator-0.4.0-x86_64.AppImage
-./Toniator-0.4.0-x86_64.AppImage
+chmod +x Toniator-0.4.1-x86_64.AppImage
+./Toniator-0.4.1-x86_64.AppImage
 ```
 
 The AppImage's recorded minimum glibc version is in the attached
@@ -62,7 +62,7 @@ broad distribution compatibility is not established. If FUSE mounting is
 unavailable, run it with:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.0-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.1-x86_64.AppImage
 ```
 
 ### Flatpak
@@ -70,7 +70,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.0-x86_64.AppImage
 With Flatpak installed, run:
 
 ```bash
-flatpak install --user ./Toniator-0.4.0-x86_64.flatpak
+flatpak install --user ./Toniator-0.4.1-x86_64.flatpak
 flatpak run io.github.ricperry.Toniator
 ```
 
@@ -87,7 +87,7 @@ Download `SHA256SUMS` alongside the packages to verify their integrity with
 
 The separate [Windows development release](https://github.com/ricperry/Toniator/releases/tag/v0.3.2-windows-dev.20260927)
 contains unsigned portable GUI and CLI binaries built as version 0.3.2. It is
-not a Windows build of this 0.4.0 prerelease; no 0.4.0 Windows package is
+not a Windows build of this 0.4.1 prerelease; no 0.4.1 Windows package is
 provided. To build the current source natively with MSVC and without WSL, follow
 the [Windows build instructions](docs/windows-build.md). The portable package
 has no installer or signing, and video tools require the optional
@@ -132,7 +132,9 @@ wizard follows four decisions:
 The wizard preview uses a small, neutral light-to-dark sample to make Patterns
 easy to compare. It is a study of the Pattern, not a preview of your own artwork.
 It renders in the background on a bounded sample canvas, including connection
-Patterns. Moving between wizard pages does not wait for a render.
+Patterns. Moving between wizard pages does not wait for a render. The Wizard is
+structure-only: its disposable preview uses neutral response bounds (minimum 0,
+maximum 1), and response ranges and region sampling are not editable there.
 In the main sidebar, **Feature size** controls pattern fineness across families:
 smaller values tighten spacing and produce more detail; larger values make the
 pattern coarser. Scatter separation and cluster spread, spiral pitch, and
@@ -273,7 +275,7 @@ Use an `.svg` output filename for vector export. Render a saved project using
 its stored settings with `toniator render -i artwork.toniator -o artwork.svg`.
 Run `toniator --help` or `toniator render --help` for the supported commands.
 
-In an AppImage, prepend `./Toniator-0.4.0-x86_64.AppImage --cli` in place of
+In an AppImage, prepend `./Toniator-0.4.1-x86_64.AppImage --cli` in place of
 `toniator`. The Flatpak CLI is available through
 `flatpak run --command=toniator io.github.ricperry.Toniator`; direct CLI file paths must be
 accessible inside its sandbox.
@@ -291,20 +293,53 @@ versions; obsolete formats are rejected rather than automatically migrated.
 Document-level Presets store a design configuration; the personal Pattern library
 stores reusable structural recipes.
 
-Advanced Settings provides independent **Fill response** and **Source
-weighting** groups. Each has its own source component,
-inversion, gain, offset, black/white points, gamma, contrast and cutoff. Weighting
-also has its own strength and curve. The Pattern Editor defines whether weighting
-is used and the geometric min/max bounds; it carries no source mapping or tone
-settings. Changing a Pattern preserves both channel source configurations. These
-controls edit the selected Start or End frame; ALL assigns each changed value
-to every compatible channel. Source interpretation remains separate from paint
-color. Black must stay below white throughout the selected interpolation. A
-zero cutoff disables suppression. Fill responses below cutoff produce no
-output, including where minimum fill or thickness is positive. Weighting cutoff
-suppresses the mapped sample before curve and strength blending. Built-in Pattern
-response ranges default to 0–1, with editable minima. X/Y offset is beside
-Rotation, and multi-output channels have separate Coverage controls.
+Advanced Settings has independent **Fill response** and **Source weighting**
+groups. Each exposes source component, inversion, gain, offset, black/white
+points, gamma, contrast and cutoff; Weighting also has its own strength and
+curve. The Pattern definition controls whether artwork weighting affects
+placement and which structure draws. Advanced owns per-channel response ranges
+(0–1 defaults with editable minima), region sampling and Mark sizing.
+Explanatory tooltips and Fine adjustments are available here. Pattern changes
+preserve the two independent source-consumer configurations.
+
+Mark sizing is static and shared by Start and End; eligible scale and response-
+range fields animate through Start, End and easing. The optional Uniform Fill
+mask is Off at cutoff 0, with tone fields disabled until the cutoff is positive.
+Variable keeps artwork-weighted point density while Fill response controls mark
+size. Compatible Patterns preserve matching responses; switching output among
+Marks, Lines and Regions applies defaults to affected response ranges and region
+sampling. Source interpretation stays separate from paint; black remains below
+white throughout interpolation. Fill cutoff suppresses below-cutoff output even
+when minimum geometry is positive, and Weighting cutoff acts before its curve
+and strength. ALL applies changed fields; X/Y offset is beside Rotation.
+
+Eligible single-output solid RGB and CMYK Variable Mark, line, and region
+responses use a saved calibration for each finished structural Pattern
+revision. The calibration uses measured opaque geometric-union coverage to
+adjust sampled fill or line thickness, counting the rendered union including
+overlaps and crossings while keeping the source-derived family, topology, and
+source weighting fixed. It is saved with the Pattern and embedded in applied
+projects and Document Presets. Artwork, Feature size, channel rotation, and
+response edits reuse it; finishing a structural edit replaces it, and Advanced
+provides manual Recalibrate. Reopening and ordinary edits do not fit again.
+Source sampling, alpha/cutoff suppression, and authored response endpoints
+remain in effect.
+
+Artwork-weighted Mark outputs default to **Uniform** sizing in Advanced. Their
+full-tone size targets 99.9% statistical geometric coverage; source-independent
+candidates are then thinned according to artwork weighting. Zero source tone
+selects no marks. The Uniform size scale ranges from 0 to 2 (default 1) and
+remains an artistic adjustment after calibration.
+Minimum-center-distance exclusion remains eligible for Uniform; the stricter
+Visible Mark Margin preserves non-overlap by requiring Variable sizing.
+
+The Pattern Wizard chooses construction and structure. Advanced owns channel
+response ranges, region sampling, and mark sizing. These coverage methods
+estimate overall opaque coverage, not exact local or continuous-plane coverage.
+Sparse or holed custom shapes can exceed bounded fitting limits, single outputs
+retain stochastic variation and natural edge spill, and local dispersion,
+cross-channel correlation, palette saturation, ICC profiles, and physical
+printing remain outside their scope.
 
 Artwork-weighted Patterns support Rotation and X/Y offsets. Weighting is
 recalculated at transformed positions; a notice explains how to restore the
@@ -319,15 +354,22 @@ to the document as one undoable edit; closing the sheet before exporting discard
 them. Optional first/last frames select an export subset. PNG sequences,
 lossless FFV1/Matroska and optional AV1/WebM remain available.
 
-Version 0.4.0 writes project document schema **11** in media container
-**2**. The strict reader also accepts pre-change schema **10**, supplying default
-print-preparation settings; opening that project leaves its file untouched, and
-saving it writes schema 11. The pre-G1a v0.3.3 application cannot read schema 11.
-Document Presets remain format **3** with frozen configuration schema **10**,
-and Pattern format remains **5**. Other unsupported or hybrid document schemas
-are rejected; projects are not downgraded automatically.
+**Published 0.4.0 formats (historical):** project document schema **11** in
+media container **2**, with a strict reader for pre-change schema **10** that
+supplies default print-preparation settings. Opening that project leaves its
+file untouched; saving writes schema 11. The pre-G1a v0.3.3 application cannot
+read schema 11. Document Presets used format **3** with frozen configuration
+schema **10**, and Pattern format **5**. Other unsupported or hybrid document
+schemas were rejected; projects were not downgraded automatically.
 
-Version 0.4.0 includes a headless, advisory garment preflight. For
+**Current development formats:** project document schema **17** in media
+container **2**, Document Preset format **3** with configuration schema **16**,
+and standalone Pattern format **8**. Projects and Document Presets persist saved
+Pattern calibration. Supported older Document Presets have a deterministic
+conversion path that preserves the original bytes; ordinary projects remain
+current-only, and superseded project schemas are rejected.
+
+The published 0.4.0 source includes a headless, advisory garment preflight. For
 example:
 
 ```bash
@@ -376,7 +418,7 @@ exhaustive GNOME/Mutter or native file-portal acceptance.
 - [Pattern Wizard regression checks](docs/PATTERN_WIZARD_TESTING.md)
 - [Example artwork and reproduction commands](docs/examples/README.md)
 - [Package installation and build guide](packaging/README.md)
-- [Release notes](docs/releases/v0.4.0.md)
+- [Release notes](docs/releases/v0.4.1.md)
 - [Previous release notes](docs/releases/v0.3.3.md)
 - [Architecture and design specifications](Project%20Specification/ArchitectureSchema.md)
 

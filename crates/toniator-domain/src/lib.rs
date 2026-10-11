@@ -11,7 +11,16 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+mod calibration;
 mod channel_defaults;
+pub use calibration::{
+    AttachedCalibration, CALIBRATION_PROFILE, CALIBRATION_PROFILE_64,
+    CALIBRATION_PROFILE_GUIDE_FACES, CALIBRATION_PROFILE_GUIDE_FACES_64,
+    CALIBRATION_PROFILE_MEAN, CALIBRATION_PROFILE_ROUND_INTERIOR,
+    CALIBRATION_PROFILE_SEEDED, CALIBRATION_PROFILE_SEEDED_64,
+    CALIBRATION_REFERENCE_CANVAS_SIDE, CALIBRATION_REFERENCE_SEED, CalibrationBinding,
+    CalibrationKnot, CalibrationVariation, SavedCalibration, UniformCalibration,
+};
 mod color_authoring;
 mod pattern_batches;
 pub use pattern_batches::PatternRecipeEdit;
@@ -957,8 +966,9 @@ pub struct CanvasSpec {
 
 /// The persisted density and density-aspect intent supplied to a pattern layout.
 ///
-/// `density²` is the approximate geometry count. `aspect` is the physical
-/// spacing ratio `spacing_x / spacing_y`; neither value is a resolved axis count.
+/// `density = 100 / Feature size` is a canvas-independent inverse scale.
+/// `aspect` is the guide spacing ratio `spacing_x / spacing_y`; neither value
+/// is a site count. Scatter uses its own authored spatial scale.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DensityMetric2D {
     pub density: f64,
@@ -986,8 +996,10 @@ impl DensityMetric2D {
         validate_positive_finite(canvas.height, "canvas.height")?;
         validate_positive_finite(self.density, "document.pattern_settings.density")?;
         validate_positive_finite(self.aspect, "document.pattern_settings.density_aspect")?;
-        let across_x = self.density * (canvas.width / (canvas.height * self.aspect)).sqrt();
-        let across_y = self.density * ((canvas.height * self.aspect) / canvas.width).sqrt();
+        let guide_density = self.density
+            * (canvas.width.min(canvas.height) / canvas.width.max(canvas.height)).sqrt();
+        let across_x = guide_density * (canvas.width / (canvas.height * self.aspect)).sqrt();
+        let across_y = guide_density * ((canvas.height * self.aspect) / canvas.width).sqrt();
         validate_positive_finite(across_x, "effective_pattern.density.across_x")?;
         validate_positive_finite(across_y, "effective_pattern.density.across_y")?;
         Ok(ResolvedDensityMetric2D { across_x, across_y })
@@ -1007,14 +1019,15 @@ impl DensityMetric2D {
         validate_positive_finite(canvas.height, "canvas.height")?;
         validate_positive_finite(resolved.across_x, "effective_pattern.density.across_x")?;
         validate_positive_finite(resolved.across_y, "effective_pattern.density.across_y")?;
-        let density = (resolved.across_x * resolved.across_y).sqrt();
+        let density = (resolved.across_x * resolved.across_y).sqrt()
+            / (canvas.width.min(canvas.height) / canvas.width.max(canvas.height)).sqrt();
         let aspect = canvas.width * resolved.across_y / (canvas.height * resolved.across_x);
         validate_positive_finite(density, "document.pattern_settings.density")?;
         validate_positive_finite(aspect, "document.pattern_settings.density_aspect")?;
         Ok(Self { density, aspect })
     }
 
-    /// Returns the source-size-independent, aspect-normalized default density for a new document.
+    /// Returns canvas-independent Feature size one, encoded as inverse density 100.
     ///
     /// # Errors
     ///
@@ -1022,19 +1035,53 @@ impl DensityMetric2D {
     pub fn default_for_canvas(canvas: &CanvasSpec) -> Result<Self, ValidationError> {
         validate_positive_finite(canvas.width, "canvas.width")?;
         validate_positive_finite(canvas.height, "canvas.height")?;
-        // A default is authored intent, not a derived evaluator resolution:
-        // zoom `1.0` means one hundred sites across the longer canvas edge
-        // and proportional coverage across the shorter one. This remains
-        // source-resolution independent while preserving the exact density /
-        // resolved-across authority. Existing persisted documents retain their
-        // stored value.
-        let density =
-            100.0 * (canvas.width.min(canvas.height) / canvas.width.max(canvas.height)).sqrt();
-        validate_positive_finite(density, "document.pattern_settings.density")?;
         Ok(Self {
-            density,
+            density: 100.0,
             aspect: 1.0,
         })
+    }
+}
+
+/// The last explicitly assigned shared Appearance values for Start-frame scalar fields.
+///
+/// These values are persistent authoring intent used to seed a replacement channel model.
+/// They remain separate from per-channel effective values and are never inferred from channel
+/// consensus, history, or End-frame overrides. `None` leaves the corresponding field to the
+/// current document and topology defaults.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DocumentAppearanceBaseline {
+    pub density: Option<f64>,
+    pub density_aspect: Option<f64>,
+    pub pattern_rotation_degrees: Option<f64>,
+    pub translation_x: Option<f64>,
+    pub translation_y: Option<f64>,
+}
+
+impl DocumentAppearanceBaseline {
+    /// Validates optional shared effective Start values without resolving channels or defaults.
+    ///
+    /// # Errors
+    /// Rejects nonpositive or nonfinite density/aspect and nonfinite rotation or offsets.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if let Some(density) = self.density {
+            validate_positive_finite(density, "document.appearance_baseline.density")?;
+        }
+        if let Some(aspect) = self.density_aspect {
+            validate_positive_finite(aspect, "document.appearance_baseline.density_aspect")?;
+        }
+        if let Some(rotation) = self.pattern_rotation_degrees {
+            validate_finite(
+                rotation,
+                "document.appearance_baseline.pattern_rotation_degrees",
+            )?;
+        }
+        if let Some(translation_x) = self.translation_x {
+            validate_finite(translation_x, "document.appearance_baseline.translation_x")?;
+        }
+        if let Some(translation_y) = self.translation_y {
+            validate_finite(translation_y, "document.appearance_baseline.translation_y")?;
+        }
+        Ok(())
     }
 }
 
@@ -1097,11 +1144,11 @@ pub struct RegionGeometryResponse {
 }
 
 impl Default for RegionGeometryResponse {
-    /// Supplies the current Scale/ReferencePoint authored fill range of 0.0 through 1.0.
+    /// Supplies the neutral Scale/AreaAverage shell; actual channel sampling is document intent.
     fn default() -> Self {
         Self {
             algorithm: RegionResizeAlgorithm::Scale,
-            sampling: RegionSamplingStrategy::ReferencePoint,
+            sampling: RegionSamplingStrategy::AreaAverage,
             minimum_fill: 0.0,
             maximum_fill: 1.0,
         }
@@ -1115,6 +1162,388 @@ pub struct RegionGeometryResponseDelta {
     pub minimum_fill_delta: Option<f64>,
     /// Adds to the upper fill endpoint independently of the current algorithm.
     pub maximum_fill_delta: Option<f64>,
+}
+
+/// Persisted ALL-channel response intent, independent of Pattern construction and output IDs.
+///
+/// Each typed branch survives color-model and Pattern changes. Only the branch matching a
+/// channel's current single output participates in its effective geometry response.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocumentResponseSettings {
+    pub marks: MarkGeometryResponse,
+    /// Contextual mark-density choice; the Pattern retains only structural placement.
+    pub mark_density_mode: MarkDensityMode,
+    /// Artistic multiplier applied after the calibrated Uniform full-tone size.
+    pub mark_size_scale: f64,
+    pub connected_minimum_thickness: f64,
+    pub connected_maximum_thickness: f64,
+    pub regions_minimum_fill: f64,
+    pub regions_maximum_fill: f64,
+    pub region_sampling: RegionSamplingStrategy,
+}
+
+/// Document-owned mark-density intent; Contextual resolves from actual placement capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkDensityMode {
+    Contextual,
+    Uniform,
+    Variable,
+}
+
+/// Effective mark-density choice and its truthful applicability reason for a named channel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EffectiveMarkDensity {
+    pub mode: MarkDensityMode,
+    pub size_scale: f64,
+    pub uniform_unavailable_reason: Option<&'static str>,
+}
+
+/// One ALL-channel response field edit with an explicit equalization target.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DocumentResponseFieldEdit {
+    MarkMinimumFill(f64),
+    MarkMaximumFill(f64),
+    MarkDensityMode(MarkDensityMode),
+    MarkSizeScale(f64),
+    ConnectedMinimumThickness(f64),
+    ConnectedMaximumThickness(f64),
+    RegionMinimumFill(f64),
+    RegionMaximumFill(f64),
+    RegionSampling(RegionSamplingStrategy),
+}
+
+impl Default for DocumentResponseSettings {
+    /// Supplies neutral typed 0–1 ranges and area-average region artwork sampling.
+    fn default() -> Self {
+        Self {
+            marks: MarkGeometryResponse {
+                minimum_fill: 0.0,
+                maximum_fill: 1.0,
+            },
+            mark_density_mode: MarkDensityMode::Contextual,
+            mark_size_scale: 1.0,
+            connected_minimum_thickness: 0.0,
+            connected_maximum_thickness: 1.0,
+            regions_minimum_fill: 0.0,
+            regions_maximum_fill: 1.0,
+            region_sampling: RegionSamplingStrategy::AreaAverage,
+        }
+    }
+}
+
+impl DocumentResponseSettings {
+    /// Validates every stored typed range, including inactive model-switch intent.
+    ///
+    /// # Errors
+    /// Returns the existing finite, order, or range diagnostic before state is published.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        validate_mark_response(&self.marks)?;
+        if !self.mark_size_scale.is_finite() || !(0.0..=2.0).contains(&self.mark_size_scale) {
+            return Err(ValidationError::new(
+                "document.response.mark_size_scale",
+                "mark size scale must be finite and within 0..=2",
+            ));
+        }
+        validate_connected_response(&ConnectedGeometryResponse {
+            minimum_thickness: self.connected_minimum_thickness,
+            maximum_thickness: self.connected_maximum_thickness,
+            bias: 0.0,
+        })?;
+        validate_region_fill_response(self.regions_minimum_fill, self.regions_maximum_fill)
+    }
+}
+
+impl DocumentResponseFieldEdit {
+    /// Applies one ALL field to a local settings candidate without touching named intent.
+    fn apply_to(self, settings: &mut DocumentResponseSettings) {
+        match self {
+            Self::MarkMinimumFill(value) => settings.marks.minimum_fill = value,
+            Self::MarkMaximumFill(value) => settings.marks.maximum_fill = value,
+            Self::MarkDensityMode(value) => settings.mark_density_mode = value,
+            Self::MarkSizeScale(value) => settings.mark_size_scale = value,
+            Self::ConnectedMinimumThickness(value) => settings.connected_minimum_thickness = value,
+            Self::ConnectedMaximumThickness(value) => settings.connected_maximum_thickness = value,
+            Self::RegionMinimumFill(value) => settings.regions_minimum_fill = value,
+            Self::RegionMaximumFill(value) => settings.regions_maximum_fill = value,
+            Self::RegionSampling(value) => settings.region_sampling = value,
+        }
+    }
+
+    /// Removes only the selected named field so all compatible channels inherit its ALL value.
+    fn clear_named(self, response: &mut ChannelOutputResponse) {
+        match (self, response) {
+            (Self::MarkMinimumFill(_), ChannelOutputResponse::Marks { minimum_fill, .. })
+            | (Self::RegionMinimumFill(_), ChannelOutputResponse::Regions { minimum_fill, .. }) => {
+                *minimum_fill = None
+            }
+            (Self::MarkMaximumFill(_), ChannelOutputResponse::Marks { maximum_fill, .. })
+            | (Self::RegionMaximumFill(_), ChannelOutputResponse::Regions { maximum_fill, .. }) => {
+                *maximum_fill = None
+            }
+            (Self::MarkDensityMode(_), ChannelOutputResponse::Marks { density_mode, .. }) => {
+                *density_mode = None
+            }
+            (Self::MarkSizeScale(_), ChannelOutputResponse::Marks { size_scale, .. }) => {
+                *size_scale = None
+            }
+            (
+                Self::ConnectedMinimumThickness(_),
+                ChannelOutputResponse::Connected {
+                    minimum_thickness, ..
+                },
+            ) => *minimum_thickness = None,
+            (
+                Self::ConnectedMaximumThickness(_),
+                ChannelOutputResponse::Connected {
+                    maximum_thickness, ..
+                },
+            ) => *maximum_thickness = None,
+            (Self::RegionSampling(_), ChannelOutputResponse::Regions { sampling, .. }) => {
+                *sampling = None
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Optional named response intent for one output kind. Missing members inherit ALL values.
+/// Structural stroke alignment and region resize remain in Pattern state.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChannelOutputResponse {
+    Marks {
+        minimum_fill: Option<f64>,
+        maximum_fill: Option<f64>,
+        density_mode: Option<MarkDensityMode>,
+        size_scale: Option<f64>,
+    },
+    Connected {
+        minimum_thickness: Option<f64>,
+        maximum_thickness: Option<f64>,
+    },
+    Regions {
+        minimum_fill: Option<f64>,
+        maximum_fill: Option<f64>,
+        sampling: Option<RegionSamplingStrategy>,
+    },
+}
+
+/// A named-channel response override keyed to the current structural output.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChannelResponseOverride {
+    pub channel_id: ChannelId,
+    pub output_layer_id: PatternOutputLayerId,
+    pub response: ChannelOutputResponse,
+}
+
+impl ChannelOutputResponse {
+    /// Supplies an inheritance-only draft for a selected response kind.
+    fn empty_for(structure: &PatternGeometryResponse) -> Self {
+        match structure {
+            PatternGeometryResponse::Marks(_) => Self::Marks {
+                minimum_fill: None,
+                maximum_fill: None,
+                density_mode: None,
+                size_scale: None,
+            },
+            PatternGeometryResponse::Connected(_) => Self::Connected {
+                minimum_thickness: None,
+                maximum_thickness: None,
+            },
+            PatternGeometryResponse::Regions(_) => Self::Regions {
+                minimum_fill: None,
+                maximum_fill: None,
+                sampling: None,
+            },
+        }
+    }
+
+    /// Stores one named scalar field without materializing inherited companions.
+    ///
+    /// # Errors
+    /// Rejects a field that does not belong to this typed response kind.
+    fn set_scalar(&mut self, field: PropertyFieldId, value: f64) -> Result<(), ValidationError> {
+        match (self, field) {
+            (Self::Marks { minimum_fill, .. }, PropertyFieldId::MarkMinimumFill)
+            | (Self::Regions { minimum_fill, .. }, PropertyFieldId::RegionMinimumFill) => {
+                *minimum_fill = Some(value)
+            }
+            (Self::Marks { maximum_fill, .. }, PropertyFieldId::MarkMaximumFill)
+            | (Self::Regions { maximum_fill, .. }, PropertyFieldId::RegionMaximumFill) => {
+                *maximum_fill = Some(value)
+            }
+            (Self::Marks { size_scale, .. }, PropertyFieldId::MarkSizeScale) => {
+                *size_scale = Some(value)
+            }
+            (
+                Self::Connected {
+                    minimum_thickness, ..
+                },
+                PropertyFieldId::ConnectedMinimumThickness,
+            ) => *minimum_thickness = Some(value),
+            (
+                Self::Connected {
+                    maximum_thickness, ..
+                },
+                PropertyFieldId::ConnectedMaximumThickness,
+            ) => *maximum_thickness = Some(value),
+            _ => {
+                return Err(ValidationError::new(
+                    "channel.response.kind",
+                    "response field does not match output kind",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Supplies explicit neutral intent for a newly selected output kind.
+    fn default_for(structure: &PatternGeometryResponse) -> Self {
+        match structure {
+            PatternGeometryResponse::Marks(_) => Self::Marks {
+                minimum_fill: Some(0.0),
+                maximum_fill: Some(1.0),
+                density_mode: Some(MarkDensityMode::Contextual),
+                size_scale: Some(1.0),
+            },
+            PatternGeometryResponse::Connected(_) => Self::Connected {
+                minimum_thickness: Some(0.0),
+                maximum_thickness: Some(1.0),
+            },
+            PatternGeometryResponse::Regions(_) => Self::Regions {
+                minimum_fill: Some(0.0),
+                maximum_fill: Some(1.0),
+                sampling: Some(RegionSamplingStrategy::AreaAverage),
+            },
+        }
+    }
+
+    /// Captures a compatible channel's effective Start response before an ALL kind switch.
+    fn from_effective(response: &PatternGeometryResponse) -> Self {
+        match response {
+            PatternGeometryResponse::Marks(value) => Self::Marks {
+                minimum_fill: Some(value.minimum_fill),
+                maximum_fill: Some(value.maximum_fill),
+                density_mode: None,
+                size_scale: None,
+            },
+            PatternGeometryResponse::Connected(value) => Self::Connected {
+                minimum_thickness: Some(value.minimum_thickness),
+                maximum_thickness: Some(value.maximum_thickness),
+            },
+            PatternGeometryResponse::Regions(value) => Self::Regions {
+                minimum_fill: Some(value.minimum_fill),
+                maximum_fill: Some(value.maximum_fill),
+                sampling: Some(value.sampling),
+            },
+        }
+    }
+
+    /// Reports whether no named field remains after an ALL field edit.
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Marks {
+                minimum_fill,
+                maximum_fill,
+                density_mode,
+                size_scale,
+            } => {
+                minimum_fill.is_none()
+                    && maximum_fill.is_none()
+                    && density_mode.is_none()
+                    && size_scale.is_none()
+            }
+            Self::Connected {
+                minimum_thickness,
+                maximum_thickness,
+            } => minimum_thickness.is_none() && maximum_thickness.is_none(),
+            Self::Regions {
+                minimum_fill,
+                maximum_fill,
+                sampling,
+            } => minimum_fill.is_none() && maximum_fill.is_none() && sampling.is_none(),
+        }
+    }
+}
+
+/// Reports compatible typed response kinds without considering structural IDs or options.
+fn same_response_kind(a: &PatternGeometryResponse, b: &PatternGeometryResponse) -> bool {
+    matches!(
+        (a, b),
+        (
+            PatternGeometryResponse::Marks(_),
+            PatternGeometryResponse::Marks(_)
+        ) | (
+            PatternGeometryResponse::Connected(_),
+            PatternGeometryResponse::Connected(_)
+        ) | (
+            PatternGeometryResponse::Regions(_),
+            PatternGeometryResponse::Regions(_)
+        )
+    )
+}
+
+/// Validates one named response's type and finite optional fields.
+/// Effective range validation follows after ALL inheritance is assembled.
+///
+/// # Errors
+/// Rejects a type mismatch or nonfinite named scalar.
+fn validate_channel_response_override(
+    structure: &PatternGeometryResponse,
+    response: &ChannelOutputResponse,
+) -> Result<(), ValidationError> {
+    let fields: &[Option<f64>] = match (structure, response) {
+        (
+            PatternGeometryResponse::Marks(_),
+            ChannelOutputResponse::Marks {
+                minimum_fill,
+                maximum_fill,
+                size_scale,
+                ..
+            },
+        ) => &[*minimum_fill, *maximum_fill, *size_scale],
+        (
+            PatternGeometryResponse::Connected(_),
+            ChannelOutputResponse::Connected {
+                minimum_thickness,
+                maximum_thickness,
+            },
+        ) => &[*minimum_thickness, *maximum_thickness],
+        (
+            PatternGeometryResponse::Regions(_),
+            ChannelOutputResponse::Regions {
+                minimum_fill,
+                maximum_fill,
+                ..
+            },
+        ) => &[*minimum_fill, *maximum_fill],
+        _ => {
+            return Err(ValidationError::new(
+                "channel.response.kind",
+                "named response must match its structural output kind",
+            ));
+        }
+    };
+    if response.is_empty() {
+        return Err(ValidationError::new(
+            "channel.response.empty",
+            "empty named response must inherit without an override",
+        ));
+    }
+    for value in fields.iter().flatten() {
+        validate_finite(*value, "channel.response.field")?;
+    }
+    if let ChannelOutputResponse::Marks {
+        size_scale: Some(value),
+        ..
+    } = response
+        && !(0.0..=2.0).contains(value)
+    {
+        return Err(ValidationError::new(
+            "channel.response.mark_size_scale",
+            "mark size scale must be within 0..=2",
+        ));
+    }
+    Ok(())
 }
 
 /// One structural-output response bound atomically to an output-layer identity.
@@ -1179,6 +1608,7 @@ impl PatternDefinitionBundle {
                 ));
             }
             validate_response_for_output(output, &settings.response)?;
+            validate_structural_response_shell(&settings.response)?;
         }
         Ok(())
     }
@@ -1233,7 +1663,10 @@ fn bundle_from_definition(definition: PatternDefinition) -> PatternDefinitionBun
                     })
                 }
                 PatternOutputRealization::Regions { .. } => {
-                    PatternGeometryResponse::Regions(RegionGeometryResponse::default())
+                    PatternGeometryResponse::Regions(RegionGeometryResponse {
+                        sampling: RegionSamplingStrategy::AreaAverage,
+                        ..RegionGeometryResponse::default()
+                    })
                 }
             },
         })
@@ -1570,8 +2003,11 @@ fn reconstruct_recipe_family(
                     PatternMechanism::RandomSiteProcess {
                         id,
                         character,
+                        nominal_spacing,
                         seed,
-                    } if *id == base_site_process_id => Some((character.clone(), *seed)),
+                    } if *id == base_site_process_id => {
+                        Some((character.clone(), *nominal_spacing, *seed))
+                    }
                     _ => None,
                 })
                 .ok_or_else(|| {
@@ -1625,7 +2061,8 @@ fn reconstruct_recipe_family(
                 name: definition.name.clone(),
                 coverage: definition.coverage.clone(),
                 character: process.0,
-                seed: process.1,
+                nominal_spacing: process.1,
+                seed: process.2,
                 density_modulation: modulation,
                 exclusion,
                 maximum_attempts: limits.0,
@@ -2118,10 +2555,19 @@ fn validate_response_delta_kind(
     delta: &ChannelGeometryResponseDelta,
 ) -> Result<(), ValidationError> {
     match (base, delta) {
+        (PatternGeometryResponse::Connected(_), ChannelGeometryResponseDelta::Connected(value))
+            if value.minimum_thickness_delta.is_none()
+                && value.maximum_thickness_delta.is_none() =>
+        {
+            validate_region_response_delta(delta)
+        }
         (PatternGeometryResponse::Marks(_), ChannelGeometryResponseDelta::Marks(_))
         | (PatternGeometryResponse::Connected(_), ChannelGeometryResponseDelta::Connected(_))
         | (PatternGeometryResponse::Regions(_), ChannelGeometryResponseDelta::Regions(_)) => {
-            validate_region_response_delta(delta)
+            Err(ValidationError::new(
+                "channel.response.ownership",
+                "fill, thickness, and region sampling belong to channel response state",
+            ))
         }
         _ => Err(ValidationError::new(
             "channel.pattern.output_deltas.kind",
@@ -2204,6 +2650,37 @@ fn validate_pattern_geometry_response(
     }
 }
 
+/// Keeps Pattern recipes and bundles limited to structural choices and neutral response shells.
+/// Authored fill/thickness ranges and region artwork sampling live in document response state.
+///
+/// # Errors
+/// Rejects any non-neutral response field before a Pattern or preset is published.
+fn validate_structural_response_shell(
+    response: &PatternGeometryResponse,
+) -> Result<(), ValidationError> {
+    let neutral = match response {
+        PatternGeometryResponse::Marks(value) => {
+            value.minimum_fill == 0.0 && value.maximum_fill == 1.0
+        }
+        PatternGeometryResponse::Connected(value) => {
+            value.minimum_thickness == 0.0 && value.maximum_thickness == 1.0
+        }
+        PatternGeometryResponse::Regions(value) => {
+            value.minimum_fill == 0.0
+                && value.maximum_fill == 1.0
+                && value.sampling == RegionSamplingStrategy::AreaAverage
+        }
+    };
+    if neutral {
+        Ok(())
+    } else {
+        Err(ValidationError::new(
+            "pattern.response.structural",
+            "Pattern definitions store only structural choices; response ranges and sampling belong to document channels",
+        ))
+    }
+}
+
 /// An optional additive density adjustment for one channel.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DensityMetricDelta2D {
@@ -2256,14 +2733,14 @@ pub enum ChannelGeometryResponseDelta {
     Regions(RegionGeometryResponseDelta),
 }
 
-/// Validates the finite ordered normalized linear-radius fill range for both algorithms.
+/// Validates finite ordered desired geometric-coverage bounds for both region algorithms.
 fn validate_region_fill_response(minimum: f64, maximum: f64) -> Result<(), ValidationError> {
     validate_finite(minimum, "pattern.region.fill.minimum")?;
     validate_finite(maximum, "pattern.region.fill.maximum")?;
-    if !(0.0..=2.0).contains(&minimum) || !(0.0..=2.0).contains(&maximum) || maximum < minimum {
+    if !(0.0..=1.0).contains(&minimum) || !(0.0..=1.0).contains(&maximum) || maximum < minimum {
         return Err(ValidationError::new(
             "pattern.region.fill.range",
-            "region fill endpoints must be ordered within 0.0 through 2.0",
+            "region coverage endpoints must be ordered within 0.0 through 1.0",
         ));
     }
     Ok(())
@@ -4452,6 +4929,32 @@ pub enum RandomSiteCharacter {
     Stratified { jitter: f64 },
 }
 
+/// Built-in authored scatter spacing in document units at Feature size one.
+pub const DEFAULT_RANDOM_NOMINAL_SPACING: f64 = 10.24;
+
+/// Validates the single spatial scale owned by a random process.
+///
+/// Even placement owns minimum-center distance in its character; all other
+/// processes own an independent positive nominal spacing. No count is encoded.
+///
+/// # Errors
+/// Returns a structural spacing diagnostic for a missing, redundant, or
+/// non-finite scale.
+pub fn validate_random_nominal_spacing(
+    character: &RandomSiteCharacter,
+    nominal_spacing: Option<f64>,
+    path: &'static str,
+) -> Result<(), ValidationError> {
+    match (character, nominal_spacing) {
+        (RandomSiteCharacter::Even { .. }, None) => Ok(()),
+        (RandomSiteCharacter::Even { .. }, Some(_)) | (_, None) => Err(ValidationError::new(
+            path,
+            "scatter process has missing or redundant nominal spacing",
+        )),
+        (_, Some(value)) => validate_positive_finite(value, path),
+    }
+}
+
 /// Independent deterministic refinement applied after a random-site process
 /// publishes its initial candidates.  The product owns these controls so the
 /// same relaxed sites feed every declared output.
@@ -4562,6 +5065,9 @@ pub enum PatternMechanism {
     RandomSiteProcess {
         id: PatternMechanismId,
         character: RandomSiteCharacter,
+        /// Authored document-unit spacing for Raw, Clustered, and Stratified.
+        /// Even owns only its minimum-center distance and stores `None` here.
+        nominal_spacing: Option<f64>,
         seed: u32,
     },
     SiteDensityModulation {
@@ -5057,6 +5563,8 @@ impl PatternDefinition {
             mechanisms: vec![
                 PatternMechanism::RandomSiteProcess {
                     id: base_id,
+                    nominal_spacing: (!matches!(character, RandomSiteCharacter::Even { .. }))
+                        .then_some(DEFAULT_RANDOM_NOMINAL_SPACING),
                     character,
                     seed,
                 },
@@ -5188,8 +5696,13 @@ pub struct Document {
     channel_configuration: ChannelConfiguration,
     authored_structures: Vec<AuthoredStructure>,
     pattern_settings: DocumentPatternSettings,
+    response_settings: DocumentResponseSettings,
+    channel_response_overrides: Vec<ChannelResponseOverride>,
+    appearance_baseline: DocumentAppearanceBaseline,
     project_timing: ProjectTiming,
     temporal_end_overrides: Vec<TemporalEndOverride>,
+    saved_calibrations: Vec<AttachedCalibration>,
+    baseline_saved_calibration: Option<SavedCalibration>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -5201,7 +5714,7 @@ enum ChannelConfiguration {
     },
 }
 
-/// An immutable snapshot of the reusable authored document configuration.
+/// An immutable snapshot of reusable authored configuration, including stored last-ALL Start intent.
 ///
 /// This authority deliberately excludes document identity, canvas dimensions,
 /// source identity, physical print intent, revisions, history, evaluator state,
@@ -5214,22 +5727,99 @@ pub struct DocumentConfiguration {
     channel_configuration: ChannelConfiguration,
     authored_structures: Vec<AuthoredStructure>,
     pattern_settings: DocumentPatternSettings,
+    response_settings: DocumentResponseSettings,
+    channel_response_overrides: Vec<ChannelResponseOverride>,
+    appearance_baseline: DocumentAppearanceBaseline,
     temporal_end_overrides: Vec<TemporalEndOverride>,
+    saved_calibrations: Vec<AttachedCalibration>,
+    baseline_saved_calibration: Option<SavedCalibration>,
+}
+
+/// Private, unpublishable source-free Preset import awaiting raw-to-coverage conversion.
+///
+/// The neutral configuration is valid only as a calibration context. Its response endpoints
+/// are placeholders; the typed former raw Start and End authority must be converted with exact
+/// saved bindings before a current `DocumentConfiguration` can be returned to a caller.
+#[derive(Clone, Debug)]
+pub struct PendingRawPresetImport {
+    neutral: DocumentConfiguration,
+    raw_start: DocumentResponseSettings,
+    raw_named: Vec<ChannelResponseOverride>,
+    raw_end: Vec<TemporalEndOverride>,
+}
+
+impl PendingRawPresetImport {
+    /// Holds former raw intent separately from a valid current-schema calibration shell.
+    ///
+    /// The constructor never publishes the shell as a current reusable configuration.
+    ///
+    /// # Errors
+    /// Rejects nonfinite or out-of-domain former raw Start endpoints before measurement.
+    pub fn new(
+        neutral: DocumentConfiguration,
+        raw_start: DocumentResponseSettings,
+        raw_named: Vec<ChannelResponseOverride>,
+        raw_end: Vec<TemporalEndOverride>,
+    ) -> Result<Self, ValidationError> {
+        for (minimum, maximum) in [
+            (raw_start.marks.minimum_fill, raw_start.marks.maximum_fill),
+            (raw_start.connected_minimum_thickness, raw_start.connected_maximum_thickness),
+            (raw_start.regions_minimum_fill, raw_start.regions_maximum_fill),
+        ] {
+            if !minimum.is_finite() || !maximum.is_finite()
+                || !(0.0..=2.0).contains(&minimum)
+                || !(0.0..=2.0).contains(&maximum)
+                || minimum > maximum
+            {
+                return Err(ValidationError::new("preset.raw_response", "former raw response endpoints must be ordered within zero through two"));
+            }
+        }
+        let mut named_keys = HashSet::new();
+        for entry in &raw_named {
+            if !named_keys.insert(entry.channel_id) {
+                return Err(ValidationError::new("preset.raw_response.named", "former named response identities must be unique"));
+            }
+            let (minimum, maximum) = match &entry.response {
+                ChannelOutputResponse::Marks { minimum_fill, maximum_fill, .. }
+                | ChannelOutputResponse::Regions { minimum_fill, maximum_fill, .. } =>
+                    (*minimum_fill, *maximum_fill),
+                ChannelOutputResponse::Connected { minimum_thickness, maximum_thickness } =>
+                    (*minimum_thickness, *maximum_thickness),
+            };
+            for value in [minimum, maximum].into_iter().flatten() {
+                if !value.is_finite() || !(0.0..=2.0).contains(&value) {
+                    return Err(ValidationError::new("preset.raw_response.named", "former named raw endpoint must be within zero through two"));
+                }
+            }
+        }
+        Ok(Self { neutral, raw_start, raw_named, raw_end })
+    }
+
+    /// Gives the explicit preparation service the validated shell and unconverted raw intent.
+    pub fn into_parts(self) -> (DocumentConfiguration, DocumentResponseSettings, Vec<ChannelResponseOverride>, Vec<TemporalEndOverride>) {
+        (self.neutral, self.raw_start, self.raw_named, self.raw_end)
+    }
 }
 
 impl DocumentConfiguration {
     /// Captures the reusable authored authorities from one validated document.
     ///
     /// The snapshot preserves exact IDs, sharing relationships, channel order,
-    /// inheritance versus explicit channel intent, and source-interpretation
-    /// settings while excluding source reference and physical print intent.
+    /// inheritance versus explicit channel intent, last-ALL Appearance intent,
+    /// and source-interpretation settings while excluding source reference and
+    /// physical print intent.
     pub fn capture(document: &Document) -> Self {
         Self {
             pattern_definition_bundles: document.pattern_definition_bundles.clone(),
             channel_configuration: document.channel_configuration.clone(),
             authored_structures: document.authored_structures.clone(),
             pattern_settings: document.pattern_settings.clone(),
+            response_settings: document.response_settings.clone(),
+            channel_response_overrides: document.channel_response_overrides.clone(),
+            appearance_baseline: document.appearance_baseline,
             temporal_end_overrides: document.temporal_end_overrides.clone(),
+            saved_calibrations: document.saved_calibrations.clone(),
+            baseline_saved_calibration: document.baseline_saved_calibration.clone(),
         }
     }
 
@@ -5251,8 +5841,13 @@ impl DocumentConfiguration {
             channel_configuration: self.channel_configuration.clone(),
             authored_structures: self.authored_structures.clone(),
             pattern_settings: self.pattern_settings.clone(),
+            response_settings: self.response_settings.clone(),
+            channel_response_overrides: self.channel_response_overrides.clone(),
+            appearance_baseline: self.appearance_baseline,
             project_timing: destination.project_timing.clone(),
             temporal_end_overrides: self.temporal_end_overrides.clone(),
+            saved_calibrations: self.saved_calibrations.clone(),
+            baseline_saved_calibration: self.baseline_saved_calibration.clone(),
         };
         candidate.validate()?;
         Ok(candidate)
@@ -5266,6 +5861,21 @@ impl DocumentConfiguration {
     /// Returns the exact captured document-wide Pattern settings.
     pub fn pattern_settings(&self) -> &DocumentPatternSettings {
         &self.pattern_settings
+    }
+
+    /// Returns the exact stored ALL-channel response intent across all output kinds.
+    pub fn response_settings(&self) -> &DocumentResponseSettings {
+        &self.response_settings
+    }
+
+    /// Returns absolute named-channel response intent in channel order.
+    pub fn channel_response_overrides(&self) -> &[ChannelResponseOverride] {
+        &self.channel_response_overrides
+    }
+
+    /// Returns the exact last-ALL Start Appearance intent captured by this configuration.
+    pub fn appearance_baseline(&self) -> &DocumentAppearanceBaseline {
+        &self.appearance_baseline
     }
 
     /// Returns legacy channel state when this configuration uses legacy channel authority.
@@ -5300,6 +5910,16 @@ impl DocumentConfiguration {
     /// Returns reusable End-frame overrides without project-only timing or source state.
     pub fn temporal_end_overrides(&self) -> &[TemporalEndOverride] {
         &self.temporal_end_overrides
+    }
+
+    /// Returns the exact reusable calibration records for project and Preset persistence.
+    pub fn saved_calibrations(&self) -> &[AttachedCalibration] {
+        &self.saved_calibrations
+    }
+
+    /// Returns the one hidden ALL companion captured with reusable document configuration.
+    pub fn baseline_saved_calibration(&self) -> Option<&SavedCalibration> {
+        self.baseline_saved_calibration.as_ref()
     }
 }
 
@@ -5361,7 +5981,7 @@ impl Document {
             },
         };
         let topology = ChannelTopology::canonical(HalftoneChannelModel::Rgb, template)?;
-        Self::with_source_and_topology(
+        let document = Self::with_source_and_topology(
             DocumentId(1),
             canvas,
             source,
@@ -5369,7 +5989,13 @@ impl Document {
             settings,
             HalftoneChannelModel::Rgb,
             topology,
-        )
+        )?;
+        let mut document = document;
+        for channel_id in document.channel_ids() {
+            let artifact = calibration::default_straight_artifact(&document, channel_id)?;
+            document = document.with_saved_calibration(channel_id, artifact)?;
+        }
+        Ok(document)
     }
 
     /// Constructs and validates a document with an unassigned source reference.
@@ -5422,8 +6048,13 @@ impl Document {
             channel_configuration: ChannelConfiguration::Legacy(channels),
             authored_structures: Vec::new(),
             pattern_settings,
+            response_settings: DocumentResponseSettings::default(),
+            channel_response_overrides: Vec::new(),
+            appearance_baseline: DocumentAppearanceBaseline::default(),
             project_timing: ProjectTiming::default(),
             temporal_end_overrides: Vec::new(),
+            saved_calibrations: Vec::new(),
+            baseline_saved_calibration: None,
         };
         document.validate()?;
         Ok(document)
@@ -5458,8 +6089,13 @@ impl Document {
             channel_configuration: ChannelConfiguration::Topology { model, topology },
             authored_structures: Vec::new(),
             pattern_settings,
+            response_settings: DocumentResponseSettings::default(),
+            channel_response_overrides: Vec::new(),
+            appearance_baseline: DocumentAppearanceBaseline::default(),
             project_timing: ProjectTiming::default(),
             temporal_end_overrides: Vec::new(),
+            saved_calibrations: Vec::new(),
+            baseline_saved_calibration: None,
         };
         document.validate()?;
         Ok(document)
@@ -5490,8 +6126,13 @@ impl Document {
             channel_configuration: ChannelConfiguration::Legacy(channels),
             authored_structures,
             pattern_settings,
+            response_settings: DocumentResponseSettings::default(),
+            channel_response_overrides: Vec::new(),
+            appearance_baseline: DocumentAppearanceBaseline::default(),
             project_timing: ProjectTiming::default(),
             temporal_end_overrides: Vec::new(),
+            saved_calibrations: Vec::new(),
+            baseline_saved_calibration: None,
         };
         document.validate()?;
         Ok(document)
@@ -5524,8 +6165,13 @@ impl Document {
             channel_configuration: ChannelConfiguration::Topology { model, topology },
             authored_structures,
             pattern_settings,
+            response_settings: DocumentResponseSettings::default(),
+            channel_response_overrides: Vec::new(),
+            appearance_baseline: DocumentAppearanceBaseline::default(),
             project_timing: ProjectTiming::default(),
             temporal_end_overrides: Vec::new(),
+            saved_calibrations: Vec::new(),
+            baseline_saved_calibration: None,
         };
         document.validate()?;
         Ok(document)
@@ -5541,6 +6187,192 @@ impl Document {
 
     pub fn source(&self) -> &SourceReference {
         &self.source
+    }
+
+    /// Returns persisted measurements whose structural bindings remain current.
+    pub fn saved_calibrations(&self) -> &[AttachedCalibration] {
+        &self.saved_calibrations
+    }
+
+    /// Returns the exact shared binding a fresh modeled topology will inherit.
+    ///
+    /// # Errors
+    /// Rejects an unrepresentable base Pattern recipe or invalid stored ALL aspect.
+    pub fn baseline_calibration_binding(&self) -> Result<CalibrationBinding, ValidationError> {
+        CalibrationBinding::for_document_baseline(self)
+    }
+
+    /// Reads a hidden ALL companion only while its complete typed binding remains current.
+    ///
+    /// # Errors
+    /// Propagates base recipe reconstruction or ALL aspect validation errors.
+    pub fn baseline_saved_calibration(&self) -> Result<Option<&SavedCalibration>, ValidationError> {
+        let binding = self.baseline_calibration_binding()?;
+        Ok(self.baseline_saved_calibration.as_ref().filter(|artifact| artifact.binding() == &binding))
+    }
+
+    /// Requires complete current saved authority before guarded structural publication.
+    ///
+    /// Private drafts and loaded projects may temporarily lack measurements; a completed
+    /// structural candidate must have the hidden ALL companion and every active binding.
+    ///
+    /// # Errors
+    /// Reports the missing ALL or channel binding without entering a fitter.
+    pub fn require_saved_calibration_authority(&self) -> Result<(), ValidationError> {
+        if self.baseline_saved_calibration()?.is_none() {
+            return Err(ValidationError::new("calibration.baseline.missing",
+                "shared Pattern calibration is missing; Recalibrate All"));
+        }
+        for channel_id in self.channel_ids() {
+            if self.saved_calibration_for(channel_id)?.is_none() {
+                return Err(ValidationError::new("calibration.channel.missing",
+                    "another channel Pattern calibration is missing; Recalibrate All"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads only a measurement whose typed structure still matches this channel.
+    ///
+    /// # Errors
+    /// Returns reconstruction diagnostics; a stale or absent entry returns `None`.
+    pub fn saved_calibration_for(
+        &self,
+        channel_id: ChannelId,
+    ) -> Result<Option<&SavedCalibration>, ValidationError> {
+        let binding = CalibrationBinding::for_channel(self, channel_id)?;
+        Ok(self
+            .saved_calibrations
+            .iter()
+            .find(|entry| entry.channel_id == channel_id && entry.artifact.binding() == &binding)
+            .or_else(|| {
+                self.saved_calibrations
+                    .iter()
+                    .find(|entry| entry.artifact.binding() == &binding)
+            })
+            .map(|entry| &entry.artifact)
+            .or_else(|| self.baseline_saved_calibration.as_ref()
+                .filter(|artifact| artifact.binding() == &binding)))
+    }
+
+    /// Replaces one structural binding's measurement across every equivalent channel atomically.
+    ///
+    /// # Errors
+    /// Rejects a stale structural binding or an invalid resulting document.
+    pub fn with_saved_calibration(
+        &self,
+        channel_id: ChannelId,
+        artifact: SavedCalibration,
+    ) -> Result<Self, ValidationError> {
+        if artifact.binding() != &CalibrationBinding::for_channel(self, channel_id)? {
+            return Err(ValidationError::new(
+                "calibration.binding",
+                "saved calibration does not match current Pattern geometry; Recalibrate",
+            ));
+        }
+        let mut candidate = self.clone();
+        let channels = self
+            .channel_ids()
+            .into_iter()
+            .filter(|id| {
+                CalibrationBinding::for_channel(self, *id).ok().as_ref() == Some(artifact.binding())
+            })
+            .collect::<Vec<_>>();
+        candidate
+            .saved_calibrations
+            .retain(|entry| !channels.contains(&entry.channel_id));
+        candidate
+            .saved_calibrations
+            .extend(channels.into_iter().map(|channel_id| AttachedCalibration {
+                channel_id,
+                artifact: artifact.clone(),
+            }));
+        if &candidate.baseline_calibration_binding()? == artifact.binding() {
+            candidate.baseline_saved_calibration = Some(artifact);
+        }
+        candidate.validate()?;
+        Ok(candidate)
+    }
+
+    /// Replaces the hidden ALL measurement and any equal active channel payload atomically.
+    ///
+    /// # Errors
+    /// Rejects a stale base binding or invalid complete candidate.
+    pub fn with_saved_baseline_calibration(
+        &self,
+        artifact: SavedCalibration,
+    ) -> Result<Self, ValidationError> {
+        if artifact.binding() != &self.baseline_calibration_binding()? {
+            return Err(ValidationError::new("calibration.baseline.binding",
+                "shared Pattern calibration does not match current ALL geometry; Recalibrate"));
+        }
+        let mut candidate = self.clone();
+        for entry in &mut candidate.saved_calibrations {
+            if entry.artifact.binding() == artifact.binding() {
+                entry.artifact = artifact.clone();
+            }
+        }
+        candidate.baseline_saved_calibration = Some(artifact);
+        candidate.validate()?;
+        Ok(candidate)
+    }
+
+    /// Restores current-schema project or Preset measurements after complete document construction.
+    ///
+    /// # Errors
+    /// Rejects duplicate channels or any stale binding before returning a candidate.
+    pub fn with_saved_calibrations(
+        &self,
+        entries: Vec<AttachedCalibration>,
+    ) -> Result<Self, ValidationError> {
+        let mut candidate = self.clone();
+        candidate.saved_calibrations.clear();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut bindings = Vec::<SavedCalibration>::new();
+        for entry in entries {
+            if !seen.insert(entry.channel_id) {
+                return Err(ValidationError::new(
+                    "calibration.channel_id",
+                    "saved calibration channels must be unique",
+                ));
+            }
+            if bindings.iter().any(|artifact| {
+                artifact.binding() == entry.artifact.binding() && artifact != &entry.artifact
+            }) {
+                return Err(ValidationError::new(
+                    "calibration.binding",
+                    "equal structural bindings cannot carry different saved measurements",
+                ));
+            }
+            bindings.push(entry.artifact.clone());
+            candidate = candidate.with_saved_calibration(entry.channel_id, entry.artifact)?;
+        }
+        Ok(candidate)
+    }
+
+    /// Restores active and hidden ALL artifacts with exact same-binding payload equality.
+    ///
+    /// # Errors
+    /// Rejects duplicate, stale, or conflicting measurements before exposing a document.
+    pub fn with_saved_calibration_authority(
+        &self,
+        entries: Vec<AttachedCalibration>,
+        baseline: Option<SavedCalibration>,
+    ) -> Result<Self, ValidationError> {
+        let mut empty = self.clone();
+        empty.saved_calibrations.clear();
+        empty.baseline_saved_calibration = None;
+        let mut candidate = empty.with_saved_calibrations(entries)?;
+        if let Some(artifact) = baseline {
+            if candidate.saved_calibrations.iter().any(|entry| {
+                entry.artifact.binding() == artifact.binding() && entry.artifact != artifact
+            }) {
+                return Err(ValidationError::new("calibration.baseline.payload",
+                    "equal shared and channel bindings carry different measurements"));
+            }
+            candidate = candidate.with_saved_baseline_calibration(artifact)?;
+        }
+        Ok(candidate)
     }
 
     /// Returns project-specific physical placement and independent advisory width intent.
@@ -5578,11 +6410,77 @@ impl Document {
         &self.pattern_definition_bundles
     }
 
-    /// Returns the persisted document-wide base settings.  This is the only
-    /// shared pattern authority; frontends must construct mutations through
-    /// domain commands rather than calculate channel inheritance themselves.
+    /// Returns the persisted document-wide Pattern base settings.
+    ///
+    /// Last-ALL Appearance intent is stored separately in `appearance_baseline`; frontends must
+    /// construct mutations through domain commands rather than calculate channel inheritance.
     pub fn pattern_settings(&self) -> &DocumentPatternSettings {
         &self.pattern_settings
+    }
+
+    /// Returns the persisted ALL response for each typed output, including inactive kinds.
+    pub fn response_settings(&self) -> &DocumentResponseSettings {
+        &self.response_settings
+    }
+
+    /// Returns absolute named response overrides separate from Pattern structure.
+    pub fn channel_response_overrides(&self) -> &[ChannelResponseOverride] {
+        &self.channel_response_overrides
+    }
+
+    /// Returns authored named intent or an inheritance-only draft for an active output.
+    fn named_response_draft(
+        &self,
+        channel_id: ChannelId,
+        output_layer_id: PatternOutputLayerId,
+        structure: &PatternGeometryResponse,
+    ) -> ChannelOutputResponse {
+        self.channel_response_overrides
+            .iter()
+            .find(|entry| {
+                entry.channel_id == channel_id && entry.output_layer_id == output_layer_id
+            })
+            .map_or_else(
+                || ChannelOutputResponse::empty_for(structure),
+                |entry| entry.response.clone(),
+            )
+    }
+
+    /// Installs current-schema response authority when restoring a saved configuration.
+    ///
+    /// # Errors
+    /// Rejects invalid ranges, foreign channels or outputs, and kind mismatches atomically.
+    pub fn with_response_authority(
+        mut self,
+        settings: DocumentResponseSettings,
+        overrides: Vec<ChannelResponseOverride>,
+    ) -> Result<Self, ValidationError> {
+        self.response_settings = settings;
+        self.channel_response_overrides = overrides;
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Returns the exact persisted last-ALL Appearance Start intent, without deriving it from channels.
+    pub fn appearance_baseline(&self) -> &DocumentAppearanceBaseline {
+        &self.appearance_baseline
+    }
+
+    /// Installs a validated persisted Appearance baseline during project restoration.
+    ///
+    /// Runtime ALL edits publish the baseline with their effective channel assignments through
+    /// `DocumentConfiguration`; this construction method never creates a history transition.
+    ///
+    /// # Errors
+    /// Returns baseline or complete-document validation diagnostics without mutating the source document.
+    pub fn with_appearance_baseline(
+        mut self,
+        appearance_baseline: DocumentAppearanceBaseline,
+    ) -> Result<Self, ValidationError> {
+        appearance_baseline.validate()?;
+        self.appearance_baseline = appearance_baseline;
+        self.validate()?;
+        Ok(self)
     }
 
     /// Returns one channel's stored replacement and additive intent without
@@ -5759,8 +6657,78 @@ impl Document {
             + instance.layout_delta.rotation_degrees.unwrap_or(0.0);
         let shape_rotation_degrees = self.pattern_settings.shape_rotation_degrees
             + instance.shape_rotation_delta_degrees.unwrap_or(0.0);
-        let output_settings =
+        let mut output_settings =
             effective_pattern_output_settings(bundle, &instance.output_response_deltas)?;
+        for output in &mut output_settings {
+            let override_response = self
+                .channel_response_overrides
+                .iter()
+                .find(|entry| {
+                    entry.channel_id == channel_id
+                        && entry.output_layer_id == output.output_layer_id
+                })
+                .map(|entry| &entry.response);
+            match (&mut output.response, override_response) {
+                (
+                    PatternGeometryResponse::Marks(value),
+                    Some(ChannelOutputResponse::Marks {
+                        minimum_fill,
+                        maximum_fill,
+                        ..
+                    }),
+                ) => {
+                    value.minimum_fill =
+                        minimum_fill.unwrap_or(self.response_settings.marks.minimum_fill);
+                    value.maximum_fill =
+                        maximum_fill.unwrap_or(self.response_settings.marks.maximum_fill);
+                }
+                (PatternGeometryResponse::Marks(value), None) => {
+                    *value = self.response_settings.marks.clone()
+                }
+                (
+                    PatternGeometryResponse::Connected(value),
+                    Some(ChannelOutputResponse::Connected {
+                        minimum_thickness,
+                        maximum_thickness,
+                    }),
+                ) => {
+                    value.minimum_thickness = minimum_thickness
+                        .unwrap_or(self.response_settings.connected_minimum_thickness);
+                    value.maximum_thickness = maximum_thickness
+                        .unwrap_or(self.response_settings.connected_maximum_thickness);
+                }
+                (PatternGeometryResponse::Connected(value), None) => {
+                    value.minimum_thickness = self.response_settings.connected_minimum_thickness;
+                    value.maximum_thickness = self.response_settings.connected_maximum_thickness;
+                }
+                (
+                    PatternGeometryResponse::Regions(value),
+                    Some(ChannelOutputResponse::Regions {
+                        minimum_fill,
+                        maximum_fill,
+                        sampling,
+                    }),
+                ) => {
+                    value.minimum_fill =
+                        minimum_fill.unwrap_or(self.response_settings.regions_minimum_fill);
+                    value.maximum_fill =
+                        maximum_fill.unwrap_or(self.response_settings.regions_maximum_fill);
+                    value.sampling = sampling.unwrap_or(self.response_settings.region_sampling);
+                }
+                (PatternGeometryResponse::Regions(value), None) => {
+                    value.minimum_fill = self.response_settings.regions_minimum_fill;
+                    value.maximum_fill = self.response_settings.regions_maximum_fill;
+                    value.sampling = self.response_settings.region_sampling;
+                }
+                _ => {
+                    return Err(ValidationError::new(
+                        "channel.response.kind",
+                        "named response does not match structural output",
+                    ));
+                }
+            }
+            validate_pattern_geometry_response(&output.response)?;
+        }
         let effective = EffectiveChannelPatternInstance {
             definition_id,
             density,
@@ -5839,6 +6807,105 @@ impl Document {
         projection.active_controls =
             capability_active_controls(self, scope, definition_id, true, supports_shape_rotation);
         Ok(projection)
+    }
+
+    /// Resolves one mark output's document-owned density intent against its actual structure.
+    ///
+    /// Strict visible-mark separation keeps Variable sizing; its reason is available to Advanced
+    /// Settings even when a dormant explicit Uniform choice is stored. The result is derived and
+    /// never changes authored Pattern or inactive variable-range intent.
+    ///
+    /// # Errors
+    /// Returns a channel, definition, or output-kind diagnostic before evaluation.
+    pub fn effective_mark_density(
+        &self,
+        channel_id: ChannelId,
+        output_layer_id: PatternOutputLayerId,
+    ) -> Result<EffectiveMarkDensity, ValidationError> {
+        let effective = self.effective_channel_pattern(channel_id)?;
+        let definition = self
+            .definition(effective.definition_id)
+            .ok_or(ValidationError::new(
+                "channel.pattern.definition_id",
+                "channel resolves a missing definition",
+            ))?;
+        let output = definition
+            .output_layers
+            .iter()
+            .find(|value| value.id == output_layer_id)
+            .ok_or(ValidationError::new(
+                "channel.response.output_layer_id",
+                "output is missing",
+            ))?;
+        if !matches!(
+            output.realization,
+            PatternOutputRealization::CircularMarks { .. }
+                | PatternOutputRealization::MarkPrototype { .. }
+        ) {
+            return Err(ValidationError::new(
+                "channel.response.kind",
+                "mark density requires a mark output",
+            ));
+        }
+        let named = self.channel_response_overrides.iter().find(|value| {
+            value.channel_id == channel_id && value.output_layer_id == output_layer_id
+        });
+        let (mode, size_scale) = match named.map(|value| &value.response) {
+            Some(ChannelOutputResponse::Marks {
+                density_mode,
+                size_scale,
+                ..
+            }) => (
+                density_mode.unwrap_or(self.response_settings.mark_density_mode),
+                size_scale.unwrap_or(self.response_settings.mark_size_scale),
+            ),
+            None => (
+                self.response_settings.mark_density_mode,
+                self.response_settings.mark_size_scale,
+            ),
+            _ => {
+                return Err(ValidationError::new(
+                    "channel.response.kind",
+                    "named response must match marks",
+                ));
+            }
+        };
+        let artwork_weighted = definition.mechanisms.iter().any(|mechanism| {
+            matches!(
+                mechanism,
+                PatternMechanism::SiteDensityModulation {
+                    modulation: SiteDensityModulation::ArtworkWeighted,
+                    ..
+                }
+            )
+        });
+        let strict_margin = definition.mechanisms.iter().any(|mechanism| {
+            matches!(
+                mechanism,
+                PatternMechanism::SiteExclusion {
+                    policy: SiteExclusionPolicy::VisibleMarkMargin { .. },
+                    ..
+                }
+            )
+        });
+        let reason = if strict_margin {
+            Some(
+                "Visible Mark Margin forbids overlap, so this pattern uses Variable sizing instead of automatic Uniform calibration",
+            )
+        } else if !artwork_weighted {
+            Some("Uniform density is available for artwork-weighted random mark placement")
+        } else {
+            None
+        };
+        Ok(EffectiveMarkDensity {
+            mode: if reason.is_some() || mode == MarkDensityMode::Variable {
+                MarkDensityMode::Variable
+            } else {
+                MarkDensityMode::Uniform
+            },
+            size_scale,
+            uniform_unavailable_reason: reason,
+        })
     }
 
     /// Builds a stale-aware density/density-aspect delta command from desired effective values.
@@ -5921,7 +6988,13 @@ impl Document {
         })
     }
 
-    /// Builds a stale-aware output-keyed response delta from desired effective values.
+    /// Builds one named response edit, or a structural alignment delta for a path.
+    ///
+    /// This API accepts one changed authority at a time. Existing sidebar fields each edit one
+    /// value; callers seeking an atomic paired range update use `SetChannelResponse` directly.
+    ///
+    /// # Errors
+    /// Rejects a foreign output, mismatched kind, invalid range, or mixed structural/response edit.
     pub fn set_channel_output_response_for_effective(
         &self,
         channel_id: ChannelId,
@@ -5929,53 +7002,115 @@ impl Document {
         desired: PatternGeometryResponse,
     ) -> Result<DocumentCommand, ValidationError> {
         let effective = self.effective_channel_pattern(channel_id)?;
-        let base = self
-            .bundle(effective.definition_id)
-            .and_then(|bundle| {
-                bundle
-                    .output_settings
-                    .iter()
-                    .find(|setting| setting.output_layer_id == output_layer_id)
-            })
+        let current = effective
+            .output_settings
+            .iter()
+            .find(|setting| setting.output_layer_id == output_layer_id)
             .ok_or(ValidationError::new(
-                "channel.pattern.output_layer_id",
-                "channel output response targets a missing structural output",
+                "channel.response.output_layer_id",
+                "output is missing",
             ))?;
-        let delta = match (&base.response, desired) {
-            (PatternGeometryResponse::Marks(base), PatternGeometryResponse::Marks(desired)) => {
-                validate_mark_response(&desired)?;
-                ChannelGeometryResponseDelta::Marks(MarkGeometryResponseDelta {
-                    minimum_fill_delta: Some(desired.minimum_fill - base.minimum_fill),
-                    maximum_fill_delta: Some(desired.maximum_fill - base.maximum_fill),
-                })
+        let mut named = self.named_response_draft(channel_id, output_layer_id, &current.response);
+        match (&current.response, desired) {
+            (PatternGeometryResponse::Marks(current), PatternGeometryResponse::Marks(value)) => {
+                validate_mark_response(&value)?;
+                if current.minimum_fill != value.minimum_fill {
+                    named.set_scalar(PropertyFieldId::MarkMinimumFill, value.minimum_fill)?;
+                }
+                if current.maximum_fill != value.maximum_fill {
+                    named.set_scalar(PropertyFieldId::MarkMaximumFill, value.maximum_fill)?;
+                }
             }
             (
-                PatternGeometryResponse::Connected(base),
-                PatternGeometryResponse::Connected(desired),
+                PatternGeometryResponse::Connected(current),
+                PatternGeometryResponse::Connected(value),
             ) => {
-                validate_connected_response(&desired)?;
-                ChannelGeometryResponseDelta::Connected(ConnectedGeometryResponseDelta {
-                    minimum_thickness_delta: Some(
-                        desired.minimum_thickness - base.minimum_thickness,
-                    ),
-                    maximum_thickness_delta: Some(
-                        desired.maximum_thickness - base.maximum_thickness,
-                    ),
-                    bias_delta: Some(desired.bias - base.bias),
-                })
+                validate_connected_response(&value)?;
+                let range_changed = current.minimum_thickness != value.minimum_thickness
+                    || current.maximum_thickness != value.maximum_thickness;
+                let bias_changed = current.bias != value.bias;
+                if range_changed && bias_changed {
+                    return Err(ValidationError::new(
+                        "channel.response.mixed_edit",
+                        "edit range and structural alignment separately",
+                    ));
+                }
+                if bias_changed {
+                    let Some(PatternGeometryResponse::Connected(base)) = self
+                        .bundle(effective.definition_id)
+                        .and_then(|bundle| {
+                            bundle
+                                .output_settings
+                                .iter()
+                                .find(|setting| setting.output_layer_id == output_layer_id)
+                        })
+                        .map(|setting| &setting.response)
+                    else {
+                        return Err(ValidationError::new(
+                            "channel.response.output_layer_id",
+                            "path output is missing",
+                        ));
+                    };
+                    return Ok(DocumentCommand::SetChannelOutputResponseDelta {
+                        base: self.pattern_settings.clone(),
+                        channel_id,
+                        output_layer_id,
+                        delta: ChannelGeometryResponseDelta::Connected(
+                            ConnectedGeometryResponseDelta {
+                                minimum_thickness_delta: None,
+                                maximum_thickness_delta: None,
+                                bias_delta: Some(value.bias - base.bias),
+                            },
+                        ),
+                    });
+                }
+                if current.minimum_thickness != value.minimum_thickness {
+                    named.set_scalar(
+                        PropertyFieldId::ConnectedMinimumThickness,
+                        value.minimum_thickness,
+                    )?;
+                }
+                if current.maximum_thickness != value.maximum_thickness {
+                    named.set_scalar(
+                        PropertyFieldId::ConnectedMaximumThickness,
+                        value.maximum_thickness,
+                    )?;
+                }
+            }
+            (
+                PatternGeometryResponse::Regions(current),
+                PatternGeometryResponse::Regions(value),
+            ) if current.algorithm == value.algorithm => {
+                validate_region_fill_response(value.minimum_fill, value.maximum_fill)?;
+                if current.minimum_fill != value.minimum_fill {
+                    named.set_scalar(PropertyFieldId::RegionMinimumFill, value.minimum_fill)?;
+                }
+                if current.maximum_fill != value.maximum_fill {
+                    named.set_scalar(PropertyFieldId::RegionMaximumFill, value.maximum_fill)?;
+                }
+                if current.sampling != value.sampling
+                    && let ChannelOutputResponse::Regions { sampling, .. } = &mut named
+                {
+                    *sampling = Some(value.sampling);
+                }
             }
             _ => {
                 return Err(ValidationError::new(
-                    "channel.pattern.geometry_response",
-                    "desired response must match the document response branch",
+                    "channel.response.kind",
+                    "desired response must match the current output kind",
                 ));
             }
-        };
-        Ok(DocumentCommand::SetChannelOutputResponseDelta {
-            base: self.pattern_settings.clone(),
+        }
+        if named.is_empty() {
+            return Err(ValidationError::new(
+                "channel.response.noop",
+                "named response edit has no changed field",
+            ));
+        }
+        Ok(DocumentCommand::SetChannelResponse {
             channel_id,
             output_layer_id,
-            delta,
+            response: named,
         })
     }
 
@@ -6002,15 +7137,115 @@ impl Document {
         })
     }
 
-    /// Builds a stale-aware mark-response field delta while retaining the
-    /// other optional member exactly as authored. This prevents a one-field
-    /// edit from materializing an inherited companion value.
+    /// Builds a named reset for one typed output response field without removing sibling members.
+    ///
+    /// The field must have an explicit override for this channel and output. The final field reset
+    /// removes the now-empty output entry; structural Stroke alignment remains in its Pattern delta.
+    ///
+    /// # Errors
+    /// Returns a validation error when the field has no matching named override or its response kind differs.
+    pub fn reset_channel_response_field(
+        &self,
+        channel_id: ChannelId,
+        output_layer_id: PatternOutputLayerId,
+        field: PropertyFieldId,
+    ) -> Result<DocumentCommand, ValidationError> {
+        let Some(entry) = self.channel_response_overrides.iter().find(|entry| {
+            entry.channel_id == channel_id && entry.output_layer_id == output_layer_id
+        }) else {
+            return Err(ValidationError::new(
+                "channel.response.reset",
+                "channel response field has no matching override",
+            ));
+        };
+        let mut response = entry.response.clone();
+        let cleared = match (&mut response, field) {
+            (
+                ChannelOutputResponse::Marks { minimum_fill, .. },
+                PropertyFieldId::MarkMinimumFill,
+            ) if minimum_fill.is_some() => {
+                *minimum_fill = None;
+                true
+            }
+            (
+                ChannelOutputResponse::Marks { maximum_fill, .. },
+                PropertyFieldId::MarkMaximumFill,
+            ) if maximum_fill.is_some() => {
+                *maximum_fill = None;
+                true
+            }
+            (ChannelOutputResponse::Marks { size_scale, .. }, PropertyFieldId::MarkSizeScale)
+                if size_scale.is_some() =>
+            {
+                *size_scale = None;
+                true
+            }
+            (
+                ChannelOutputResponse::Connected {
+                    minimum_thickness, ..
+                },
+                PropertyFieldId::ConnectedMinimumThickness,
+            ) if minimum_thickness.is_some() => {
+                *minimum_thickness = None;
+                true
+            }
+            (
+                ChannelOutputResponse::Connected {
+                    maximum_thickness, ..
+                },
+                PropertyFieldId::ConnectedMaximumThickness,
+            ) if maximum_thickness.is_some() => {
+                *maximum_thickness = None;
+                true
+            }
+            (
+                ChannelOutputResponse::Regions { minimum_fill, .. },
+                PropertyFieldId::RegionMinimumFill,
+            ) if minimum_fill.is_some() => {
+                *minimum_fill = None;
+                true
+            }
+            (
+                ChannelOutputResponse::Regions { maximum_fill, .. },
+                PropertyFieldId::RegionMaximumFill,
+            ) if maximum_fill.is_some() => {
+                *maximum_fill = None;
+                true
+            }
+            (ChannelOutputResponse::Regions { sampling, .. }, PropertyFieldId::RegionSampling)
+                if sampling.is_some() =>
+            {
+                *sampling = None;
+                true
+            }
+            _ => false,
+        };
+        if !cleared {
+            return Err(ValidationError::new(
+                "channel.response.reset",
+                "channel response field has no matching override",
+            ));
+        }
+        if response.is_empty() {
+            Ok(DocumentCommand::ResetChannelResponse {
+                channel_id,
+                output_layer_id,
+            })
+        } else {
+            Ok(DocumentCommand::SetChannelResponse {
+                channel_id,
+                output_layer_id,
+                response,
+            })
+        }
+    }
+
+    /// Builds a named mark response edit while preserving the other effective endpoint.
     ///
     /// # Errors
     ///
     /// Returns a validation error without mutation when the channel is
-    /// missing, the desired resolved response is invalid, or the stored base
-    /// cannot produce a finite delta.
+    /// missing or the resulting range is invalid.
     pub fn set_channel_mark_response_field_for_effective(
         &self,
         channel_id: ChannelId,
@@ -6018,82 +7253,175 @@ impl Document {
         edit: MarkGeometryFieldEdit,
     ) -> Result<DocumentCommand, ValidationError> {
         let effective = self.effective_channel_pattern(channel_id)?;
-        let Some(PatternGeometryResponse::Marks(mut desired)) = effective
+        let Some(PatternGeometryResponse::Marks(current)) = effective
             .output_settings
             .iter()
             .find(|setting| setting.output_layer_id == output_layer_id)
-            .map(|setting| setting.response.clone())
-        else {
-            return Err(ValidationError::new(
-                "channel.pattern.geometry_response",
-                "mark response editing requires the marks branch",
-            ));
-        };
-        let Some(PatternGeometryResponse::Marks(base)) = self
-            .bundle(effective.definition_id)
-            .and_then(|bundle| {
-                bundle
-                    .output_settings
-                    .iter()
-                    .find(|setting| setting.output_layer_id == output_layer_id)
-            })
             .map(|setting| &setting.response)
         else {
             return Err(ValidationError::new(
-                "channel.pattern.geometry_response",
-                "mark response editing requires the marks base",
+                "channel.response.kind",
+                "mark response requires a mark output",
             ));
         };
-        let instance = self
-            .channel_pattern_instance(channel_id)
-            .ok_or(ValidationError::new(
-                "channel.id",
-                "command targets a missing channel",
-            ))?;
-        let mut delta = match instance
-            .output_response_deltas
-            .iter()
-            .find(|delta| delta.output_layer_id == output_layer_id)
-            .map(|delta| &delta.delta)
-        {
-            Some(ChannelGeometryResponseDelta::Marks(delta)) => delta.clone(),
-            Some(ChannelGeometryResponseDelta::Connected(_)) => {
-                return Err(ValidationError::new(
-                    "channel.pattern.geometry_response_delta",
-                    "mark response editing requires a matching mark delta",
-                ));
-            }
-            Some(ChannelGeometryResponseDelta::Regions(_)) => {
-                return Err(ValidationError::new(
-                    "channel.pattern.geometry_response_delta",
-                    "mark response editing requires a matching mark delta",
-                ));
-            }
-            None => MarkGeometryResponseDelta {
-                minimum_fill_delta: None,
-                maximum_fill_delta: None,
-            },
-        };
-        match edit {
+        let mut desired = current.clone();
+        let (field, value) = match edit {
             MarkGeometryFieldEdit::MinimumFill(value) => {
                 desired.minimum_fill = value;
-                delta.minimum_fill_delta = Some(value - base.minimum_fill);
+                (PropertyFieldId::MarkMinimumFill, value)
             }
             MarkGeometryFieldEdit::MaximumFill(value) => {
                 desired.maximum_fill = value;
-                delta.maximum_fill_delta = Some(value - base.maximum_fill);
+                (PropertyFieldId::MarkMaximumFill, value)
             }
-        }
+        };
         validate_mark_response(&desired)?;
-        Ok(DocumentCommand::SetChannelOutputResponseDelta {
-            base: self.pattern_settings.clone(),
+        let mut named = self.named_response_draft(
             channel_id,
             output_layer_id,
-            delta: ChannelGeometryResponseDelta::Marks(delta),
+            &PatternGeometryResponse::Marks(current.clone()),
+        );
+        named.set_scalar(field, value)?;
+        Ok(DocumentCommand::SetChannelResponse {
+            channel_id,
+            output_layer_id,
+            response: named,
         })
     }
 
-    /// Builds one stale-aware region endpoint delta while preserving the companion optional delta.
+    /// Builds a named static mark-density choice while preserving inherited size and range.
+    ///
+    /// # Errors
+    /// Returns a channel or output-kind diagnostic without changing the document.
+    pub fn set_channel_mark_density_mode_for_effective(
+        &self,
+        channel_id: ChannelId,
+        output_layer_id: PatternOutputLayerId,
+        mode: MarkDensityMode,
+    ) -> Result<DocumentCommand, ValidationError> {
+        let effective = self.effective_channel_pattern(channel_id)?;
+        let setting = effective
+            .output_settings
+            .iter()
+            .find(|value| value.output_layer_id == output_layer_id)
+            .ok_or(ValidationError::new(
+                "channel.response.output_layer_id",
+                "output is missing",
+            ))?;
+        if !matches!(setting.response, PatternGeometryResponse::Marks(_)) {
+            return Err(ValidationError::new(
+                "channel.response.kind",
+                "mark density requires a mark output",
+            ));
+        }
+        let mut response =
+            self.named_response_draft(channel_id, output_layer_id, &setting.response);
+        let ChannelOutputResponse::Marks { density_mode, .. } = &mut response else {
+            unreachable!("validated mark draft")
+        };
+        *density_mode = Some(mode);
+        Ok(DocumentCommand::SetChannelResponse {
+            channel_id,
+            output_layer_id,
+            response,
+        })
+    }
+
+    /// Clears only one named mark-density mode so it inherits current ALL intent.
+    ///
+    /// Paired Variable bounds and artistic scale remain independently explicit. An already
+    /// inherited mode produces the ordinary no-op reset command for the validated output.
+    ///
+    /// # Errors
+    /// Rejects a foreign channel or a non-Mark output without mutating document authority.
+    pub fn reset_channel_mark_density_mode(
+        &self,
+        channel_id: ChannelId,
+        output_layer_id: PatternOutputLayerId,
+    ) -> Result<DocumentCommand, ValidationError> {
+        let effective = self.effective_channel_pattern(channel_id)?;
+        let setting = effective
+            .output_settings
+            .iter()
+            .find(|value| value.output_layer_id == output_layer_id)
+            .ok_or(ValidationError::new(
+                "channel.response.output_layer_id",
+                "output is missing",
+            ))?;
+        if !matches!(setting.response, PatternGeometryResponse::Marks(_)) {
+            return Err(ValidationError::new(
+                "channel.response.kind",
+                "mark density requires a mark output",
+            ));
+        }
+        let mut response =
+            self.named_response_draft(channel_id, output_layer_id, &setting.response);
+        let ChannelOutputResponse::Marks { density_mode, .. } = &mut response else {
+            unreachable!("validated mark draft")
+        };
+        *density_mode = None;
+        if response.is_empty() {
+            Ok(DocumentCommand::ResetChannelResponse {
+                channel_id,
+                output_layer_id,
+            })
+        } else {
+            Ok(DocumentCommand::SetChannelResponse {
+                channel_id,
+                output_layer_id,
+                response,
+            })
+        }
+    }
+
+    /// Builds a named artistic size-scale edit without changing the calibrated baseline.
+    ///
+    /// # Errors
+    /// Rejects a foreign mark output or a nonfinite value outside the bounded 0..=2 range.
+    pub fn set_channel_mark_size_scale_for_effective(
+        &self,
+        channel_id: ChannelId,
+        output_layer_id: PatternOutputLayerId,
+        size_scale: f64,
+    ) -> Result<DocumentCommand, ValidationError> {
+        if !size_scale.is_finite() || !(0.0..=2.0).contains(&size_scale) {
+            return Err(ValidationError::new(
+                "channel.response.mark_size_scale",
+                "mark size scale must be finite and within 0..=2",
+            ));
+        }
+        let effective = self.effective_channel_pattern(channel_id)?;
+        let setting = effective
+            .output_settings
+            .iter()
+            .find(|value| value.output_layer_id == output_layer_id)
+            .ok_or(ValidationError::new(
+                "channel.response.output_layer_id",
+                "output is missing",
+            ))?;
+        if !matches!(setting.response, PatternGeometryResponse::Marks(_)) {
+            return Err(ValidationError::new(
+                "channel.response.kind",
+                "mark size scale requires a mark output",
+            ));
+        }
+        let mut response =
+            self.named_response_draft(channel_id, output_layer_id, &setting.response);
+        let ChannelOutputResponse::Marks {
+            size_scale: value, ..
+        } = &mut response
+        else {
+            unreachable!("validated mark draft")
+        };
+        *value = Some(size_scale);
+        Ok(DocumentCommand::SetChannelResponse {
+            channel_id,
+            output_layer_id,
+            response,
+        })
+    }
+
+    /// Builds one named region endpoint edit while preserving sampling and the companion endpoint.
     ///
     /// # Errors
     ///
@@ -6105,88 +7433,46 @@ impl Document {
         edit: RegionGeometryFieldEdit,
     ) -> Result<DocumentCommand, ValidationError> {
         let effective = self.effective_channel_pattern(channel_id)?;
-        let desired = effective
+        let Some(PatternGeometryResponse::Regions(current)) = effective
             .output_settings
             .iter()
             .find(|setting| setting.output_layer_id == output_layer_id)
-            .map(|setting| setting.response.clone())
-            .ok_or(ValidationError::new(
-                "channel.pattern.geometry_response",
-                "region response output is missing",
-            ))?;
-        let base = self
-            .bundle(effective.definition_id)
-            .and_then(|bundle| {
-                bundle
-                    .output_settings
-                    .iter()
-                    .find(|setting| setting.output_layer_id == output_layer_id)
-            })
-            .map(|setting| setting.response.clone())
-            .ok_or(ValidationError::new(
-                "channel.pattern.geometry_response",
-                "region response base is missing",
-            ))?;
-        let instance = self
-            .channel_pattern_instance(channel_id)
-            .ok_or(ValidationError::new(
-                "channel.id",
-                "command targets a missing channel",
-            ))?;
-        let existing = instance
-            .output_response_deltas
-            .iter()
-            .find(|delta| delta.output_layer_id == output_layer_id)
-            .map(|entry| entry.delta.clone());
-        let (PatternGeometryResponse::Regions(desired), PatternGeometryResponse::Regions(base)) =
-            (desired, base)
+            .map(|setting| &setting.response)
         else {
             return Err(ValidationError::new(
-                "channel.pattern.geometry_response",
-                "region field edit requires a region response",
+                "channel.response.kind",
+                "region response requires a region output",
             ));
         };
-        let mut minimum_fill_delta = existing.as_ref().and_then(|delta| match delta {
-            ChannelGeometryResponseDelta::Regions(delta) => delta.minimum_fill_delta,
-            _ => None,
-        });
-        let mut maximum_fill_delta = existing.as_ref().and_then(|delta| match delta {
-            ChannelGeometryResponseDelta::Regions(delta) => delta.maximum_fill_delta,
-            _ => None,
-        });
-        let mut desired = desired;
-        match edit {
+        let mut desired = current.clone();
+        let (field, value) = match edit {
             RegionGeometryFieldEdit::MinimumFill(value) => {
                 desired.minimum_fill = value;
-                minimum_fill_delta = Some(value - base.minimum_fill);
+                (PropertyFieldId::RegionMinimumFill, value)
             }
             RegionGeometryFieldEdit::MaximumFill(value) => {
                 desired.maximum_fill = value;
-                maximum_fill_delta = Some(value - base.maximum_fill);
+                (PropertyFieldId::RegionMaximumFill, value)
             }
-        }
+        };
         validate_region_fill_response(desired.minimum_fill, desired.maximum_fill)?;
-        let delta = ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta {
-            minimum_fill_delta,
-            maximum_fill_delta,
-        });
-        Ok(DocumentCommand::SetChannelOutputResponseDelta {
-            base: self.pattern_settings.clone(),
+        let mut named = self.named_response_draft(
             channel_id,
             output_layer_id,
-            delta,
+            &PatternGeometryResponse::Regions(current.clone()),
+        );
+        named.set_scalar(field, value)?;
+        Ok(DocumentCommand::SetChannelResponse {
+            channel_id,
+            output_layer_id,
+            response: named,
         })
     }
 
-    /// Builds the selected-channel structural command behind treatment and sampling descriptors.
-    ///
-    /// Numeric endpoint widgets keep using `set_channel_region_response_field_for_effective` so
-    /// they preserve channel-local additive intent; this helper is only the atomic base-response
-    /// authority for treatment or sampling edits.
+    /// Routes selected region treatment to Pattern structure and artwork sampling to channel response.
     ///
     /// # Errors
-    ///
-    /// Returns a stable channel/output/response diagnostic without changing the document.
+    /// Rejects a foreign output, invalid range, or simultaneous structure/response change.
     pub fn set_selected_channel_region_response_for_effective(
         &self,
         channel_id: ChannelId,
@@ -6194,32 +7480,88 @@ impl Document {
         response: RegionGeometryResponse,
     ) -> Result<DocumentCommand, ValidationError> {
         let effective = self.effective_channel_pattern(channel_id)?;
+        let Some(PatternGeometryResponse::Regions(current)) = effective
+            .output_settings
+            .iter()
+            .find(|setting| setting.output_layer_id == output_layer_id)
+            .map(|setting| &setting.response)
+        else {
+            return Err(ValidationError::new(
+                "channel.response.kind",
+                "region output is missing",
+            ));
+        };
         let base_bundle =
             self.bundle(effective.definition_id)
                 .cloned()
                 .ok_or(ValidationError::new(
                     "pattern.bundle",
-                    "selected channel resolves a missing response bundle",
+                    "selected region bundle is missing",
                 ))?;
-        Ok(
-            DocumentCommand::EditSelectedChannelPatternDefinitionBundle {
+        if response.algorithm != current.algorithm {
+            if response.minimum_fill != current.minimum_fill
+                || response.maximum_fill != current.maximum_fill
+                || response.sampling != current.sampling
+            {
+                return Err(ValidationError::new(
+                    "channel.response.mixed_edit",
+                    "edit region structure and response separately",
+                ));
+            }
+            let Some(PatternGeometryResponse::Regions(mut shell)) = base_bundle
+                .output_settings
+                .iter()
+                .find(|setting| setting.output_layer_id == output_layer_id)
+                .map(|setting| setting.response.clone())
+            else {
+                return Err(ValidationError::new(
+                    "pattern.bundle.output",
+                    "region output is missing",
+                ));
+            };
+            shell.algorithm = response.algorithm;
+            Ok(
+                DocumentCommand::EditSelectedChannelPatternDefinitionBundle {
+                    channel_id,
+                    base_bundle,
+                    edit: PatternDefinitionBundleEdit::OutputSettings(
+                        PatternOutputSettingsEdit::SetRegionResponse {
+                            output_layer_id,
+                            response: shell,
+                        },
+                    ),
+                },
+            )
+        } else {
+            validate_region_fill_response(response.minimum_fill, response.maximum_fill)?;
+            let mut named = self.named_response_draft(
                 channel_id,
-                base_bundle,
-                edit: PatternDefinitionBundleEdit::OutputSettings(
-                    PatternOutputSettingsEdit::SetRegionResponse {
-                        output_layer_id,
-                        response,
-                    },
-                ),
-            },
-        )
+                output_layer_id,
+                &PatternGeometryResponse::Regions(current.clone()),
+            );
+            if response.minimum_fill != current.minimum_fill {
+                named.set_scalar(PropertyFieldId::RegionMinimumFill, response.minimum_fill)?;
+            }
+            if response.maximum_fill != current.maximum_fill {
+                named.set_scalar(PropertyFieldId::RegionMaximumFill, response.maximum_fill)?;
+            }
+            if response.sampling != current.sampling
+                && let ChannelOutputResponse::Regions { sampling, .. } = &mut named
+            {
+                *sampling = Some(response.sampling);
+            }
+            Ok(DocumentCommand::SetChannelResponse {
+                channel_id,
+                output_layer_id,
+                response: named,
+            })
+        }
     }
 
-    /// Builds the deliberate shared structural command behind a disclosed linked-output edit.
+    /// Routes shared region treatment to Pattern structure and response values to ALL intent.
     ///
     /// # Errors
-    ///
-    /// Returns a stable missing-definition diagnostic without changing the document.
+    /// Rejects missing outputs, invalid ranges, and mixed structure/response edits.
     pub fn set_shared_region_response_for_definition(
         &self,
         definition_id: PatternDefinitionId,
@@ -6231,17 +7573,47 @@ impl Document {
             .cloned()
             .ok_or(ValidationError::new(
                 "pattern.bundle",
-                "shared region response targets a missing bundle",
+                "shared region bundle is missing",
             ))?;
-        Ok(DocumentCommand::EditSharedPatternDefinitionBundle {
-            definition_id,
-            base_bundle,
-            edit: PatternDefinitionBundleEdit::OutputSettings(
-                PatternOutputSettingsEdit::SetRegionResponse {
-                    output_layer_id,
-                    response,
-                },
-            ),
+        let Some(PatternGeometryResponse::Regions(shell)) = base_bundle
+            .output_settings
+            .iter()
+            .find(|setting| setting.output_layer_id == output_layer_id)
+            .map(|setting| &setting.response)
+        else {
+            return Err(ValidationError::new(
+                "pattern.bundle.output",
+                "region output is missing",
+            ));
+        };
+        if response.algorithm != shell.algorithm {
+            let mut structural = shell.clone();
+            structural.algorithm = response.algorithm;
+            return Ok(DocumentCommand::EditSharedPatternDefinitionBundle {
+                definition_id,
+                base_bundle,
+                edit: PatternDefinitionBundleEdit::OutputSettings(
+                    PatternOutputSettingsEdit::SetRegionResponse {
+                        output_layer_id,
+                        response: structural,
+                    },
+                ),
+            });
+        }
+        if definition_id != self.pattern_settings.definition_id {
+            return Err(ValidationError::new(
+                "document.response.definition_id",
+                "ALL response requires the document base output",
+            ));
+        }
+        let mut settings = self.response_settings.clone();
+        settings.regions_minimum_fill = response.minimum_fill;
+        settings.regions_maximum_fill = response.maximum_fill;
+        settings.region_sampling = response.sampling;
+        settings.validate()?;
+        Ok(DocumentCommand::SetAllResponseSettings {
+            base: self.response_settings.clone(),
+            settings,
         })
     }
 
@@ -6414,6 +7786,59 @@ impl Document {
         Ok(topology)
     }
 
+    /// Builds canonical channels seeded from explicitly stored last-ALL Start Appearance intent.
+    ///
+    /// Stored density, aspect, and rotation values become channel-relative deltas from the
+    /// document Pattern base; stored X/Y values become absolute channel translations. Unset
+    /// values retain the supplied template. The helper never reads old channels or guesses a
+    /// shared value from their current effective state.
+    ///
+    /// # Errors
+    /// Returns topology, baseline, effective-pattern, or complete-document validation diagnostics.
+    pub fn canonical_channel_topology_with_appearance_baseline(
+        &self,
+        model: HalftoneChannelModel,
+        template: ChannelTopologyTemplate,
+    ) -> Result<ChannelTopology, ValidationError> {
+        let canonical = self.canonical_channel_topology(model, template)?;
+        let mut channels = canonical.channels().to_vec();
+        for channel in &mut channels {
+            let layout = &mut channel.pattern_instance.layout_delta;
+            if self.appearance_baseline.density.is_some()
+                || self.appearance_baseline.density_aspect.is_some()
+            {
+                let delta = layout.density.get_or_insert(DensityMetricDelta2D {
+                    density_delta: 0.0,
+                    aspect_delta: 0.0,
+                });
+                if let Some(density) = self.appearance_baseline.density {
+                    delta.density_delta = density - self.pattern_settings.density.density;
+                }
+                if let Some(aspect) = self.appearance_baseline.density_aspect {
+                    delta.aspect_delta = aspect - self.pattern_settings.density.aspect;
+                }
+            }
+            if let Some(rotation) = self.appearance_baseline.pattern_rotation_degrees {
+                layout.rotation_degrees =
+                    Some(rotation - self.pattern_settings.pattern_rotation_degrees);
+            }
+            if let Some(translation_x) = self.appearance_baseline.translation_x {
+                layout.translation_x = translation_x;
+            }
+            if let Some(translation_y) = self.appearance_baseline.translation_y {
+                layout.translation_y = translation_y;
+            }
+        }
+        let topology = ChannelTopology::new(channels);
+        let mut candidate = self.clone();
+        candidate.channel_configuration = ChannelConfiguration::Topology {
+            model,
+            topology: topology.clone(),
+        };
+        candidate.validate()?;
+        Ok(topology)
+    }
+
     /// Returns a legacy channel only; modeled channels are available through
     /// `channel_topology` and `modeled_channel`.
     pub fn channel(&self, channel_id: ChannelId) -> Option<&ChannelState> {
@@ -6446,7 +7871,8 @@ impl Document {
 
     /// Returns deterministic schema-derived descriptors from the exhaustive
     /// field contract. Runtime topology and compatible references restrict enum choices;
-    /// no frontend or catalog identity participates in this authority.
+    /// no frontend or catalog identity participates in this authority. Scatter
+    /// omits Density aspect because its isotropic spatial process cannot consume it.
     pub fn property_descriptors(&self) -> Vec<PropertyDescriptor> {
         let mut descriptors = vec![descriptor_from_contract(
             PropertyFieldId::SourceReference,
@@ -6459,10 +7885,26 @@ impl Document {
             PropertyFieldId::RotationDegrees,
             PropertyFieldId::ShapeRotationDegrees,
         ] {
+            if field == PropertyFieldId::DensityAspect
+                && self
+                    .definition(self.pattern_settings.definition_id)
+                    .is_some_and(|definition| {
+                        matches!(definition.family, PatternFamily::RandomSites { .. })
+                    })
+            {
+                continue;
+            }
             descriptors.push(descriptor_from_contract(field, PropertyTarget::Document));
         }
         for channel_id in self.channel_ids() {
             let target = PropertyTarget::Channel(channel_id);
+            let scatter = self
+                .effective_channel_pattern(channel_id)
+                .ok()
+                .and_then(|effective| self.definition(effective.definition_id))
+                .is_some_and(|definition| {
+                    matches!(definition.family, PatternFamily::RandomSites { .. })
+                });
             for field in [
                 PropertyFieldId::Density,
                 PropertyFieldId::DensityAspect,
@@ -6486,6 +7928,9 @@ impl Document {
                 PropertyFieldId::ArtworkWeightStrength,
                 PropertyFieldId::ArtworkWeightResponse,
             ] {
+                if field == PropertyFieldId::DensityAspect && scatter {
+                    continue;
+                }
                 descriptors.push(descriptor_from_contract(field, target));
             }
             if let Ok(effective) = self.effective_channel_pattern(channel_id)
@@ -6497,6 +7942,7 @@ impl Document {
                         | PatternOutputRealization::MarkPrototype { .. } => &[
                             PropertyFieldId::MarkMinimumFill,
                             PropertyFieldId::MarkMaximumFill,
+                            PropertyFieldId::MarkSizeScale,
                         ],
                         PatternOutputRealization::GuidePaths { .. }
                         | PatternOutputRealization::ParametricPaths { .. }
@@ -6718,7 +8164,12 @@ impl Document {
                             descriptors.push(descriptor_from_contract(field, target));
                         }
                         match character {
-                            RandomSiteCharacter::RawUniform => {}
+                            RandomSiteCharacter::RawUniform => {
+                                descriptors.push(descriptor_from_contract(
+                                    PropertyFieldId::RandomNominalSpacing,
+                                    target,
+                                ))
+                            }
                             RandomSiteCharacter::Even { .. } => {
                                 descriptors.push(descriptor_from_contract(
                                     PropertyFieldId::RandomEvenMinimumCenterDistance,
@@ -6726,6 +8177,10 @@ impl Document {
                                 ))
                             }
                             RandomSiteCharacter::Clustered { .. } => {
+                                descriptors.push(descriptor_from_contract(
+                                    PropertyFieldId::RandomNominalSpacing,
+                                    target,
+                                ));
                                 for field in [
                                     PropertyFieldId::RandomClusterDensity,
                                     PropertyFieldId::RandomClusterSpread,
@@ -6735,6 +8190,10 @@ impl Document {
                                 }
                             }
                             RandomSiteCharacter::Stratified { .. } => {
+                                descriptors.push(descriptor_from_contract(
+                                    PropertyFieldId::RandomNominalSpacing,
+                                    target,
+                                ));
                                 descriptors.push(descriptor_from_contract(
                                     PropertyFieldId::RandomStratifiedJitter,
                                     target,
@@ -7581,6 +9040,16 @@ impl Document {
                         PatternGeometryResponse::Marks(response),
                     ) => PropertyCurrentValueKind::FiniteF64(response.maximum_fill),
                     (
+                        PropertyFieldId::MarkSizeScale,
+                        PatternOutputRealization::CircularMarks { .. }
+                        | PatternOutputRealization::MarkPrototype { .. },
+                        PatternGeometryResponse::Marks(_),
+                    ) => PropertyCurrentValueKind::FiniteF64(
+                        self.effective_mark_density(channel_id, output_layer_id)
+                            .expect("validated mark density resolves")
+                            .size_scale,
+                    ),
+                    (
                         PropertyFieldId::ConnectedMinimumThickness,
                         PatternOutputRealization::GuidePaths { .. }
                         | PatternOutputRealization::ParametricPaths { .. }
@@ -7847,22 +9316,32 @@ impl Document {
                     .map(|setting| &setting.response)
                     .expect("active output response descriptor");
                 match (descriptor.field, response) {
-                    (
-                        PropertyFieldId::MarkMinimumFill,
-                        PatternGeometryResponse::Marks(response),
-                    ) => return PropertyCurrentValueKind::FiniteF64(response.minimum_fill),
-                    (
-                        PropertyFieldId::MarkMaximumFill,
-                        PatternGeometryResponse::Marks(response),
-                    ) => return PropertyCurrentValueKind::FiniteF64(response.maximum_fill),
+                    (PropertyFieldId::MarkMinimumFill, PatternGeometryResponse::Marks(_)) => {
+                        return PropertyCurrentValueKind::FiniteF64(
+                            self.response_settings.marks.minimum_fill,
+                        );
+                    }
+                    (PropertyFieldId::MarkMaximumFill, PatternGeometryResponse::Marks(_)) => {
+                        return PropertyCurrentValueKind::FiniteF64(
+                            self.response_settings.marks.maximum_fill,
+                        );
+                    }
                     (
                         PropertyFieldId::ConnectedMinimumThickness,
-                        PatternGeometryResponse::Connected(response),
-                    ) => return PropertyCurrentValueKind::FiniteF64(response.minimum_thickness),
+                        PatternGeometryResponse::Connected(_),
+                    ) => {
+                        return PropertyCurrentValueKind::FiniteF64(
+                            self.response_settings.connected_minimum_thickness,
+                        );
+                    }
                     (
                         PropertyFieldId::ConnectedMaximumThickness,
-                        PatternGeometryResponse::Connected(response),
-                    ) => return PropertyCurrentValueKind::FiniteF64(response.maximum_thickness),
+                        PatternGeometryResponse::Connected(_),
+                    ) => {
+                        return PropertyCurrentValueKind::FiniteF64(
+                            self.response_settings.connected_maximum_thickness,
+                        );
+                    }
                     (
                         PropertyFieldId::CurveResponseBias,
                         PatternGeometryResponse::Connected(response),
@@ -7875,22 +9354,23 @@ impl Document {
                             PropertyEnumChoice::RegionResizeAlgorithm(response.algorithm),
                         );
                     }
-                    (
-                        PropertyFieldId::RegionSampling,
-                        PatternGeometryResponse::Regions(response),
-                    ) => {
+                    (PropertyFieldId::RegionSampling, PatternGeometryResponse::Regions(_)) => {
                         return PropertyCurrentValueKind::EnumChoice(
-                            PropertyEnumChoice::RegionSampling(response.sampling),
+                            PropertyEnumChoice::RegionSampling(
+                                self.response_settings.region_sampling,
+                            ),
                         );
                     }
-                    (
-                        PropertyFieldId::RegionMinimumFill,
-                        PatternGeometryResponse::Regions(response),
-                    ) => return PropertyCurrentValueKind::FiniteF64(response.minimum_fill),
-                    (
-                        PropertyFieldId::RegionMaximumFill,
-                        PatternGeometryResponse::Regions(response),
-                    ) => return PropertyCurrentValueKind::FiniteF64(response.maximum_fill),
+                    (PropertyFieldId::RegionMinimumFill, PatternGeometryResponse::Regions(_)) => {
+                        return PropertyCurrentValueKind::FiniteF64(
+                            self.response_settings.regions_minimum_fill,
+                        );
+                    }
+                    (PropertyFieldId::RegionMaximumFill, PatternGeometryResponse::Regions(_)) => {
+                        return PropertyCurrentValueKind::FiniteF64(
+                            self.response_settings.regions_maximum_fill,
+                        );
+                    }
                     _ => {}
                 }
                 match (descriptor.field, &layer.realization) {
@@ -8033,6 +9513,19 @@ impl Document {
                 .map(|entry| &entry.delta),
             _ => None,
         };
+        let named_response = match descriptor.target {
+            PropertyTarget::ChannelOutput(target_channel, output_layer_id)
+                if target_channel == channel_id =>
+            {
+                self.channel_response_overrides
+                    .iter()
+                    .find(|entry| {
+                        entry.channel_id == channel_id && entry.output_layer_id == output_layer_id
+                    })
+                    .map(|entry| &entry.response)
+            }
+            _ => None,
+        };
         match descriptor.field {
             PropertyFieldId::Density | PropertyFieldId::DensityAspect => {
                 if instance.layout_delta.density.is_some() {
@@ -8055,36 +9548,39 @@ impl Document {
                     PropertyInheritance::Inherited
                 }
             }
-            PropertyFieldId::MarkMinimumFill => match output_delta {
-                Some(ChannelGeometryResponseDelta::Marks(delta))
-                    if delta.minimum_fill_delta.is_some() =>
-                {
-                    PropertyInheritance::Explicit
-                }
+            PropertyFieldId::MarkMinimumFill => match named_response {
+                Some(ChannelOutputResponse::Marks {
+                    minimum_fill: Some(_),
+                    ..
+                }) => PropertyInheritance::Explicit,
                 _ => PropertyInheritance::Inherited,
             },
-            PropertyFieldId::MarkMaximumFill => match output_delta {
-                Some(ChannelGeometryResponseDelta::Marks(delta))
-                    if delta.maximum_fill_delta.is_some() =>
-                {
-                    PropertyInheritance::Explicit
-                }
+            PropertyFieldId::MarkMaximumFill => match named_response {
+                Some(ChannelOutputResponse::Marks {
+                    maximum_fill: Some(_),
+                    ..
+                }) => PropertyInheritance::Explicit,
                 _ => PropertyInheritance::Inherited,
             },
-            PropertyFieldId::ConnectedMinimumThickness => match output_delta {
-                Some(ChannelGeometryResponseDelta::Connected(delta))
-                    if delta.minimum_thickness_delta.is_some() =>
-                {
-                    PropertyInheritance::Explicit
-                }
+            PropertyFieldId::MarkSizeScale => match named_response {
+                Some(ChannelOutputResponse::Marks {
+                    size_scale: Some(_),
+                    ..
+                }) => PropertyInheritance::Explicit,
                 _ => PropertyInheritance::Inherited,
             },
-            PropertyFieldId::ConnectedMaximumThickness => match output_delta {
-                Some(ChannelGeometryResponseDelta::Connected(delta))
-                    if delta.maximum_thickness_delta.is_some() =>
-                {
-                    PropertyInheritance::Explicit
-                }
+            PropertyFieldId::ConnectedMinimumThickness => match named_response {
+                Some(ChannelOutputResponse::Connected {
+                    minimum_thickness: Some(_),
+                    ..
+                }) => PropertyInheritance::Explicit,
+                _ => PropertyInheritance::Inherited,
+            },
+            PropertyFieldId::ConnectedMaximumThickness => match named_response {
+                Some(ChannelOutputResponse::Connected {
+                    maximum_thickness: Some(_),
+                    ..
+                }) => PropertyInheritance::Explicit,
                 _ => PropertyInheritance::Inherited,
             },
             PropertyFieldId::CurveResponseBias => match output_delta {
@@ -8095,18 +9591,24 @@ impl Document {
                 }
                 _ => PropertyInheritance::Inherited,
             },
-            PropertyFieldId::RegionMinimumFill => match output_delta {
-                Some(ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta {
-                    minimum_fill_delta: Some(_),
+            PropertyFieldId::RegionMinimumFill => match named_response {
+                Some(ChannelOutputResponse::Regions {
+                    minimum_fill: Some(_),
                     ..
-                })) => PropertyInheritance::Explicit,
+                }) => PropertyInheritance::Explicit,
                 _ => PropertyInheritance::Inherited,
             },
-            PropertyFieldId::RegionMaximumFill => match output_delta {
-                Some(ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta {
-                    maximum_fill_delta: Some(_),
+            PropertyFieldId::RegionMaximumFill => match named_response {
+                Some(ChannelOutputResponse::Regions {
+                    maximum_fill: Some(_),
                     ..
-                })) => PropertyInheritance::Explicit,
+                }) => PropertyInheritance::Explicit,
+                _ => PropertyInheritance::Inherited,
+            },
+            PropertyFieldId::RegionSampling => match named_response {
+                Some(ChannelOutputResponse::Regions {
+                    sampling: Some(_), ..
+                }) => PropertyInheritance::Explicit,
                 _ => PropertyInheritance::Inherited,
             },
             PropertyFieldId::DefinitionSelection => {
@@ -8336,6 +9838,104 @@ impl Document {
 
     fn definition(&self, id: PatternDefinitionId) -> Option<&PatternDefinition> {
         self.bundle(id).map(|bundle| &bundle.definition)
+    }
+
+    /// Returns the sole structural output identity and kind for response reconciliation.
+    fn response_structure_for(&self, channel_id: ChannelId) -> Option<&PatternOutputSettings> {
+        let instance = self.channel_pattern_instance(channel_id)?;
+        self.bundle(
+            instance
+                .definition_override
+                .unwrap_or(self.pattern_settings.definition_id),
+        )?
+        .output_settings
+        .first()
+    }
+
+    /// Rebinds compatible named response intent across structural ID changes and defaults new kinds.
+    /// A model switch restores ALL intent; a kind-changing Pattern replacement explicitly forgets
+    /// the old kind's endpoints so switching back starts at neutral 0–1.
+    fn reconcile_response_after_structure(&mut self, before: &Document, command: &DocumentCommand) {
+        if matches!(command, DocumentCommand::ReplaceChannelTopology { .. }) {
+            self.channel_response_overrides.clear();
+            return;
+        }
+        let old_base = before
+            .bundle(before.pattern_settings.definition_id)
+            .and_then(|bundle| bundle.output_settings.first());
+        let new_base = self
+            .bundle(self.pattern_settings.definition_id)
+            .and_then(|bundle| bundle.output_settings.first());
+        let base_kind_changed = matches!((old_base, new_base),
+            (Some(old), Some(new)) if !same_response_kind(&old.response, &new.response));
+        if base_kind_changed {
+            self.response_settings = DocumentResponseSettings::default();
+        }
+        let mut next = Vec::new();
+        for channel_id in self.channel_ids() {
+            let (Some(old), Some(new)) = (
+                before.response_structure_for(channel_id),
+                self.response_structure_for(channel_id),
+            ) else {
+                continue;
+            };
+            let changed_kind = !same_response_kind(&old.response, &new.response);
+            if changed_kind {
+                if !base_kind_changed {
+                    next.push(ChannelResponseOverride {
+                        channel_id,
+                        output_layer_id: new.output_layer_id,
+                        response: ChannelOutputResponse::default_for(&new.response),
+                    });
+                }
+            } else if base_kind_changed {
+                if let Ok(effective) = before.effective_channel_pattern(channel_id)
+                    && let Some(output) = effective.output_settings.first()
+                {
+                    let mut response = ChannelOutputResponse::from_effective(&output.response);
+                    if let ChannelOutputResponse::Marks {
+                        density_mode,
+                        size_scale,
+                        ..
+                    } = &mut response
+                    {
+                        let previous = before.channel_response_overrides.iter().find(|entry| {
+                            entry.channel_id == channel_id
+                                && entry.output_layer_id == old.output_layer_id
+                        });
+                        let (named_mode, named_scale) = match previous.map(|entry| &entry.response)
+                        {
+                            Some(ChannelOutputResponse::Marks {
+                                density_mode,
+                                size_scale,
+                                ..
+                            }) => (*density_mode, *size_scale),
+                            _ => (None, None),
+                        };
+                        *density_mode =
+                            Some(named_mode.unwrap_or(before.response_settings.mark_density_mode));
+                        *size_scale =
+                            Some(named_scale.unwrap_or(before.response_settings.mark_size_scale));
+                    }
+                    next.push(ChannelResponseOverride {
+                        channel_id,
+                        output_layer_id: new.output_layer_id,
+                        response,
+                    });
+                }
+            } else if let Some(existing) = self
+                .channel_response_overrides
+                .iter()
+                .find(|entry| entry.channel_id == channel_id)
+            {
+                next.push(ChannelResponseOverride {
+                    channel_id,
+                    output_layer_id: new.output_layer_id,
+                    response: existing.response.clone(),
+                });
+            }
+        }
+        self.channel_response_overrides = next;
     }
 
     /// Reconstructs one current document definition as an ID-free recipe.
@@ -9668,6 +11268,7 @@ impl Document {
                 name,
                 coverage,
                 character: _,
+                nominal_spacing: _,
                 seed: _,
                 density_modulation: _,
                 exclusion: _,
@@ -9964,6 +11565,7 @@ impl Document {
             PatternStructureRecipe::RandomSites {
                 coverage,
                 character,
+                nominal_spacing,
                 seed,
                 density_modulation,
                 exclusion,
@@ -10050,6 +11652,15 @@ impl Document {
                         PropertyFieldId::RandomCharacter,
                         PropertyEnumChoice::RandomCharacter(character_choice),
                         character_updates,
+                    )?;
+                }
+                if let Some(value) = nominal_spacing {
+                    self.apply_recipe_edit(
+                        definition_id,
+                        PatternDefinitionEdit::SetRandomNominalSpacing {
+                            mechanism_id: *random_id,
+                            nominal_spacing: *value,
+                        },
                     )?;
                 }
                 let (modulation_choice, modulation_updates) =
@@ -10392,10 +12003,12 @@ impl Document {
                 PatternMechanism::RandomSiteProcess {
                     id,
                     character,
+                    nominal_spacing,
                     seed,
                 } => PatternMechanism::RandomSiteProcess {
                     id: remap_mechanism(*id),
                     character: character.clone(),
+                    nominal_spacing: *nominal_spacing,
                     seed: *seed,
                 },
                 PatternMechanism::SiteDensityModulation {
@@ -10646,7 +12259,21 @@ impl Document {
         validate_positive_finite(self.canvas.width, "canvas.width")?;
         validate_positive_finite(self.canvas.height, "canvas.height")?;
         self.print_preparation.validate()?;
+        self.appearance_baseline.validate()?;
+        self.response_settings.validate()?;
         validate_authored_structures(&self.authored_structures)?;
+        if let Some(artifact) = &self.baseline_saved_calibration {
+            if artifact.binding() != &self.baseline_calibration_binding()? {
+                return Err(ValidationError::new("calibration.baseline.binding",
+                    "shared Pattern calibration is stale; Recalibrate"));
+            }
+            if self.saved_calibrations.iter().any(|entry| {
+                entry.artifact.binding() == artifact.binding() && &entry.artifact != artifact
+            }) {
+                return Err(ValidationError::new("calibration.baseline.payload",
+                    "equal shared and channel bindings carry different measurements"));
+            }
+        }
 
         let mut definition_ids = HashSet::new();
         let mut mechanism_ids = HashSet::new();
@@ -10753,6 +12380,40 @@ impl Document {
                 validate_topology(*model, topology, &self.pattern_definition_bundles)?;
             }
         }
+        let mut response_channels = HashSet::new();
+        for override_entry in &self.channel_response_overrides {
+            if !response_channels.insert(override_entry.channel_id) {
+                return Err(ValidationError::new(
+                    "channel.response.overrides.order",
+                    "only one response override is permitted per channel",
+                ));
+            }
+            let instance = self
+                .channel_pattern_instance(override_entry.channel_id)
+                .ok_or(ValidationError::new(
+                    "channel.response.channel_id",
+                    "response override targets a missing channel",
+                ))?;
+            let bundle = self
+                .bundle(
+                    instance
+                        .definition_override
+                        .unwrap_or(self.pattern_settings.definition_id),
+                )
+                .ok_or(ValidationError::new(
+                    "channel.response.definition_id",
+                    "response override resolves a missing definition",
+                ))?;
+            let setting = bundle
+                .output_settings
+                .iter()
+                .find(|setting| setting.output_layer_id == override_entry.output_layer_id)
+                .ok_or(ValidationError::new(
+                    "channel.response.output_layer_id",
+                    "response override targets a foreign output",
+                ))?;
+            validate_channel_response_override(&setting.response, &override_entry.response)?;
+        }
         for channel_id in self.channel_ids() {
             let effective = self.effective_channel_pattern(channel_id)?;
             if matches!(
@@ -10803,7 +12464,47 @@ impl Document {
         command.validate(self)?;
         let mut candidate = self.clone();
         command.apply_to_valid_document(&mut candidate);
+        candidate.reconcile_response_after_structure(self, command);
         temporal::reconcile_end_after_start(self, &mut candidate, command)?;
+        let baseline_binding = candidate.baseline_calibration_binding()?;
+        candidate.baseline_saved_calibration = self.baseline_saved_calibration.as_ref()
+            .filter(|artifact| artifact.binding() == &baseline_binding)
+            .cloned()
+            .or_else(|| self.saved_calibrations.iter()
+                .find(|entry| entry.artifact.binding() == &baseline_binding)
+                .map(|entry| entry.artifact.clone()));
+        let mut retained = candidate
+            .saved_calibrations
+            .iter()
+            .filter(|entry| {
+                CalibrationBinding::for_channel(&candidate, entry.channel_id)
+                    .ok()
+                    .as_ref()
+                    == Some(entry.artifact.binding())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for channel_id in candidate.channel_ids() {
+            if retained.iter().any(|entry| entry.channel_id == channel_id) {
+                continue;
+            }
+            let binding = CalibrationBinding::for_channel(&candidate, channel_id)?;
+            if let Some(source) = self
+                .saved_calibrations
+                .iter()
+                .find(|entry| entry.artifact.binding() == &binding)
+            {
+                retained.push(AttachedCalibration {
+                    channel_id,
+                    artifact: source.artifact.clone(),
+                });
+            } else if let Some(artifact) = candidate.baseline_saved_calibration.as_ref()
+                .filter(|artifact| artifact.binding() == &binding)
+            {
+                retained.push(AttachedCalibration { channel_id, artifact: artifact.clone() });
+            }
+        }
+        candidate.saved_calibrations = retained;
         candidate.validate()?;
         if candidate == *self {
             return Err(ValidationError::new(
@@ -11635,13 +13336,32 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
             character,
         } => {
             if let Some(PatternMechanism::RandomSiteProcess {
-                character: current, ..
+                character: current,
+                nominal_spacing,
+                ..
             }) = definition
                 .mechanisms
                 .iter_mut()
                 .find(|mechanism| mechanism.id() == *mechanism_id)
             {
+                *nominal_spacing = (!matches!(character, RandomSiteCharacter::Even { .. }))
+                    .then_some(nominal_spacing.unwrap_or(DEFAULT_RANDOM_NOMINAL_SPACING));
                 *current = character.clone();
+            }
+        }
+        PatternDefinitionEdit::SetRandomNominalSpacing {
+            mechanism_id,
+            nominal_spacing,
+        } => {
+            if let Some(PatternMechanism::RandomSiteProcess {
+                nominal_spacing: current,
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = Some(*nominal_spacing);
             }
         }
         PatternDefinitionEdit::SetRandomSeed { mechanism_id, seed } => {
@@ -12577,6 +14297,13 @@ fn remap_definition_edit_with(
             mechanism_id: mechanism(*mechanism_id),
             character: character.clone(),
         },
+        PatternDefinitionEdit::SetRandomNominalSpacing {
+            mechanism_id,
+            nominal_spacing,
+        } => PatternDefinitionEdit::SetRandomNominalSpacing {
+            mechanism_id: mechanism(*mechanism_id),
+            nominal_spacing: *nominal_spacing,
+        },
         PatternDefinitionEdit::SetRandomSeed { mechanism_id, seed } => {
             PatternDefinitionEdit::SetRandomSeed {
                 mechanism_id: mechanism(*mechanism_id),
@@ -13237,6 +14964,19 @@ fn validate_definition_edit(
             validate_random_process_target(definition, *mechanism_id)?;
             validate_random_character(character)
         }
+        PatternDefinitionEdit::SetRandomNominalSpacing {
+            mechanism_id,
+            nominal_spacing,
+        } => match validate_random_process_target(definition, *mechanism_id)? {
+            RandomSiteCharacter::Even { .. } => Err(ValidationError::new(
+                "pattern_definitions.mechanisms.random_sites.nominal_spacing",
+                "Even scatter owns minimum-center distance instead of nominal spacing",
+            )),
+            _ => validate_positive_finite(
+                *nominal_spacing,
+                "pattern_definitions.mechanisms.random_sites.nominal_spacing",
+            ),
+        },
         PatternDefinitionEdit::SetRandomSeed { mechanism_id, .. } => {
             validate_random_process_target(definition, *mechanism_id).map(|_| ())
         }
@@ -15182,6 +16922,18 @@ fn capability_active_controls(
             )
         })
         .filter(|descriptor| {
+            !matches!(
+                descriptor.field,
+                PropertyFieldId::MarkMinimumFill
+                    | PropertyFieldId::MarkMaximumFill
+                    | PropertyFieldId::ConnectedMinimumThickness
+                    | PropertyFieldId::ConnectedMaximumThickness
+                    | PropertyFieldId::RegionMinimumFill
+                    | PropertyFieldId::RegionMaximumFill
+                    | PropertyFieldId::RegionSampling
+            )
+        })
+        .filter(|descriptor| {
             supports_pattern_rotation || descriptor.field != PropertyFieldId::RotationDegrees
         })
         .filter(|descriptor| {
@@ -15445,6 +17197,7 @@ fn validate_random_site_definition(
         PatternMechanism::RandomSiteProcess {
             id: declared_base,
             character,
+            nominal_spacing,
             ..
         },
         PatternMechanism::SiteDensityModulation {
@@ -15485,6 +17238,11 @@ fn validate_random_site_definition(
         ));
     }
     validate_random_character(character)?;
+    validate_random_nominal_spacing(
+        character,
+        *nominal_spacing,
+        "pattern_definitions.mechanisms.random_sites.nominal_spacing",
+    )?;
     validate_site_density_modulation(modulation)?;
     validate_site_exclusion(policy)?;
     if *maximum_attempts == 0 {
@@ -15628,17 +17386,21 @@ fn validate_site_density_modulation(
     }
 }
 
-/// Reports whether one definition consumes channel weighting during family construction.
+/// Reports whether source-driven site selection or enabled weighted Lloyd consumes weighting.
 pub fn definition_uses_source_weighting(definition: &PatternDefinition) -> bool {
-    definition.mechanisms.iter().any(|mechanism| {
-        matches!(
-            mechanism,
+    definition
+        .mechanisms
+        .iter()
+        .any(|mechanism| match mechanism {
             PatternMechanism::SiteDensityModulation {
                 modulation: SiteDensityModulation::ArtworkWeighted,
                 ..
+            } => true,
+            PatternMechanism::RandomSiteProduct { refinement, .. } => {
+                refinement.enabled && refinement.density_weighted && refinement.iterations > 0
             }
-        )
-    })
+            _ => false,
+        })
 }
 
 fn validate_site_exclusion(policy: &SiteExclusionPolicy) -> Result<(), ValidationError> {
@@ -16489,13 +18251,13 @@ fn validate_mark_response(response: &MarkGeometryResponse) -> Result<(), Validat
     validate_range_finite(
         response.minimum_fill,
         0.0,
-        2.0,
+        1.0,
         "channel.pattern.mark_geometry_response.minimum_fill",
     )?;
     validate_range_finite(
         response.maximum_fill,
         0.0,
-        2.0,
+        1.0,
         "channel.pattern.mark_geometry_response.maximum_fill",
     )?;
     if response.minimum_fill > response.maximum_fill {
@@ -16507,22 +18269,22 @@ fn validate_mark_response(response: &MarkGeometryResponse) -> Result<(), Validat
     Ok(())
 }
 
-/// Validates the normalized stroke-width response after document authority has composed deltas.
+/// Validates desired connected-stroke coverage after document authority composes deltas.
 fn validate_connected_response(
     response: &ConnectedGeometryResponse,
 ) -> Result<(), ValidationError> {
     for value in [response.minimum_thickness, response.maximum_thickness] {
-        if !value.is_finite() || !(0.0..=2.0).contains(&value) {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
             return Err(ValidationError::new(
                 "channel.pattern.geometry_response",
-                "stroke thickness must be finite and within 0.0..=2.0",
+                "desired stroke coverage must be finite and within 0.0..=1.0",
             ));
         }
     }
     if response.minimum_thickness > response.maximum_thickness {
         return Err(ValidationError::new(
             "channel.pattern.geometry_response",
-            "minimum stroke thickness must not exceed maximum stroke thickness",
+            "minimum stroke coverage must not exceed maximum stroke coverage",
         ));
     }
     if !response.bias.is_finite() || !(-1.0..=1.0).contains(&response.bias) {
@@ -16821,6 +18583,7 @@ pub enum PropertyFieldId {
     TranslationY,
     MarkMinimumFill,
     MarkMaximumFill,
+    MarkSizeScale,
     ConnectedMinimumThickness,
     ConnectedMaximumThickness,
     CurveResponseBias,
@@ -16868,6 +18631,7 @@ pub enum PropertyFieldId {
     AlongGuideIntervalMultiplier,
     AlongGuidePhase,
     RandomCharacter,
+    RandomNominalSpacing,
     RandomEvenMinimumCenterDistance,
     RandomClusterDensity,
     RandomClusterSpread,
@@ -16940,6 +18704,7 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::TranslationY,
     PropertyFieldId::MarkMinimumFill,
     PropertyFieldId::MarkMaximumFill,
+    PropertyFieldId::MarkSizeScale,
     PropertyFieldId::ConnectedMinimumThickness,
     PropertyFieldId::ConnectedMaximumThickness,
     PropertyFieldId::CurveResponseBias,
@@ -16987,6 +18752,7 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::AlongGuideIntervalMultiplier,
     PropertyFieldId::AlongGuidePhase,
     PropertyFieldId::RandomCharacter,
+    PropertyFieldId::RandomNominalSpacing,
     PropertyFieldId::RandomEvenMinimumCenterDistance,
     PropertyFieldId::RandomClusterDensity,
     PropertyFieldId::RandomClusterSpread,
@@ -17272,6 +19038,7 @@ pub enum PropertyCommandKind {
     SetChannelShapeRotationDelta,
     SetTranslationAxis,
     SetChannelGeometryResponseDelta,
+    SetChannelResponse,
     SetRegionResponse,
     SetLegacyMappingField,
     SetModeledMappingField,
@@ -17301,6 +19068,7 @@ pub enum PropertyCommandKind {
     SetAlongGuideIntervalMultiplier,
     SetAlongGuidePhase,
     SetRandomCharacter,
+    SetRandomNominalSpacing,
     SetRandomSeed,
     SetRandomEvenMinimumCenterDistance,
     SetRandomClusterDensity,
@@ -17724,6 +19492,13 @@ fn property_value_for_mechanism(
                 RandomSiteCharacter::Stratified { .. } => RandomCharacterKind::Stratified,
             },
         )),
+        (
+            PropertyFieldId::RandomNominalSpacing,
+            PatternMechanism::RandomSiteProcess {
+                nominal_spacing: Some(value),
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(*value),
         (PropertyFieldId::RandomSeed, PatternMechanism::RandomSiteProcess { seed, .. }) => {
             PropertyCurrentValueKind::U32(*seed)
         }
@@ -19150,6 +20925,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::RegionMaximumFill => {
                 PropertyCommandKind::SetChannelGeometryResponseDelta
             }
+            PropertyFieldId::MarkSizeScale => PropertyCommandKind::SetChannelResponse,
             PropertyFieldId::RegionResizeAlgorithm | PropertyFieldId::RegionSampling => {
                 PropertyCommandKind::SetRegionResponse
             }
@@ -19212,6 +20988,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             }
             PropertyFieldId::AlongGuidePhase => PropertyCommandKind::SetAlongGuidePhase,
             PropertyFieldId::RandomCharacter => PropertyCommandKind::SetRandomCharacter,
+            PropertyFieldId::RandomNominalSpacing => PropertyCommandKind::SetRandomNominalSpacing,
             PropertyFieldId::RandomSeed => PropertyCommandKind::SetRandomSeed,
             PropertyFieldId::RandomEvenMinimumCenterDistance => {
                 PropertyCommandKind::SetRandomEvenMinimumCenterDistance
@@ -19376,6 +21153,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::GuideOffsetSpacing
             | PropertyFieldId::GuideStackSpacingMultiplier
             | PropertyFieldId::AlongGuideIntervalMultiplier
+            | PropertyFieldId::RandomNominalSpacing
             | PropertyFieldId::RandomEvenMinimumCenterDistance
             | PropertyFieldId::RandomClusterSpread
             | PropertyFieldId::ExclusionMinimumCenterDistance
@@ -19406,6 +21184,12 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::MarkMaximumFill
             | PropertyFieldId::ConnectedMinimumThickness
             | PropertyFieldId::ConnectedMaximumThickness => fill_bounds(),
+            PropertyFieldId::MarkSizeScale => Some(PropertyBounds {
+                minimum: Some(0.0),
+                minimum_inclusive: true,
+                maximum: Some(2.0),
+                maximum_inclusive: true,
+            }),
             PropertyFieldId::CurveResponseBias => Some(PropertyBounds {
                 minimum: Some(-1.0),
                 minimum_inclusive: true,
@@ -19468,6 +21252,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::TranslationY
             | PropertyFieldId::CoverageAdditionalMargin
             | PropertyFieldId::IntersectionMergeEpsilon
+            | PropertyFieldId::RandomNominalSpacing
             | PropertyFieldId::RandomEvenMinimumCenterDistance
             | PropertyFieldId::RandomClusterSpread
             | PropertyFieldId::ExclusionMinimumCenterDistance
@@ -19553,6 +21338,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::RandomCharacter | PropertyFieldId::RandomSeed => {
                 PropertyApplicability::RandomProcess
             }
+            PropertyFieldId::RandomNominalSpacing => PropertyApplicability::RandomProcess,
             PropertyFieldId::RandomEvenMinimumCenterDistance => {
                 PropertyApplicability::EvenRandomProcess
             }
@@ -19604,6 +21390,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::SourceReference => InvalidationLevel::Source,
             PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::MarkSizeScale
             | PropertyFieldId::ConnectedMinimumThickness
             | PropertyFieldId::ConnectedMaximumThickness
             | PropertyFieldId::CurveResponseBias
@@ -19681,6 +21468,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
                 | PropertyFieldId::AlongGuideIntervalMultiplier
                 | PropertyFieldId::AlongGuidePhase
                 | PropertyFieldId::RandomCharacter
+                | PropertyFieldId::RandomNominalSpacing
                 | PropertyFieldId::RandomEvenMinimumCenterDistance
                 | PropertyFieldId::RandomClusterDensity
                 | PropertyFieldId::RandomClusterSpread
@@ -20038,6 +21826,7 @@ const fn property_authority(field: PropertyFieldId, target: PropertyTarget) -> P
             | PropertyFieldId::ShapeRotationDegrees
             | PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::MarkSizeScale
             | PropertyFieldId::ConnectedMinimumThickness
             | PropertyFieldId::ConnectedMaximumThickness
             | PropertyFieldId::CurveResponseBias
@@ -20126,12 +21915,12 @@ const fn nonnegative_bounds() -> Option<PropertyBounds> {
     })
 }
 
-/// Returns the exact normalized fill interval exposed by descriptor metadata.
+/// Returns the desired geometric coverage interval exposed by response descriptors.
 const fn fill_bounds() -> Option<PropertyBounds> {
     Some(PropertyBounds {
         minimum: Some(0.0),
         minimum_inclusive: true,
-        maximum: Some(2.0),
+        maximum: Some(1.0),
         maximum_inclusive: true,
     })
 }
@@ -20258,6 +22047,8 @@ pub enum PatternStructureRecipe {
         name: String,
         coverage: CoveragePolicy,
         character: RandomSiteCharacter,
+        /// Authored document-unit spacing except for Even, which owns minimum distance.
+        nominal_spacing: Option<f64>,
         seed: u32,
         density_modulation: SiteDensityModulation,
         exclusion: SiteExclusionPolicy,
@@ -20512,6 +22303,7 @@ impl PatternDefinitionRecipe {
                     name: "New dispersion".into(),
                     coverage,
                     character: RandomSiteCharacter::RawUniform,
+                    nominal_spacing: Some(DEFAULT_RANDOM_NOMINAL_SPACING),
                     seed: 1,
                     density_modulation: SiteDensityModulation::Uniform,
                     exclusion: SiteExclusionPolicy::None,
@@ -21644,11 +23436,20 @@ fn decompose_recipe_outputs(
 fn compose_recipe_outputs(
     parts: EditableRecipeOutputs,
 ) -> Result<PatternDefinitionRecipe, ValidationError> {
+    let recipe = assemble_recipe_outputs(parts);
+    validate_recipe_output_settings(&recipe)?;
+    validate_pattern_structure_recipe(&recipe.structure)?;
+    Ok(recipe)
+}
+
+/// Canonicalizes typed painter order without validating presentation labels already removed
+/// from persisted calibration bindings; ordinary recipe publication still uses the checked form.
+fn assemble_recipe_outputs(parts: EditableRecipeOutputs) -> PatternDefinitionRecipe {
     let ordered = PatternStructureRecipe::OrderedOutputs {
         definition: Box::new(parts.definition),
         outputs: parts.outputs,
     };
-    let recipe = PatternDefinitionRecipe {
+    PatternDefinitionRecipe {
         structure: if parts.resources.is_empty() {
             ordered
         } else {
@@ -21658,10 +23459,7 @@ fn compose_recipe_outputs(
             }
         },
         output_settings: parts.settings,
-    };
-    validate_recipe_output_settings(&recipe)?;
-    validate_pattern_structure_recipe(&recipe.structure)?;
-    Ok(recipe)
+    }
 }
 
 /// Classifies one current ID-free output realization for artist-facing construction controls.
@@ -22291,12 +24089,74 @@ struct MaterializedPatternDefinitionRecipe {
 pub struct PresetRecord {
     pub metadata: PresetMetadata,
     pub recipe: PatternDefinitionRecipe,
+    /// Optional source-independent measurement bound to the concrete reference recipe.
+    pub saved_calibration: Option<SavedCalibration>,
+}
+
+/// Materializes only CoverCanvas spiral intent in a cloned recipe for companion comparison.
+/// The stored Preset remains generic; receiving documents still require exact concrete binding.
+///
+/// # Errors
+/// Returns the existing finite spiral diagnostic if the fixed reference cannot be materialized.
+fn materialize_preset_reference_spiral(
+    structure: &mut PatternStructureRecipe,
+) -> Result<(), ValidationError> {
+    match structure {
+        PatternStructureRecipe::ParametricCurve {
+            curve,
+            spiral_coverage,
+            ..
+        } if *spiral_coverage == SpiralCoveragePolicy::CoverCanvas => {
+            let canvas = CanvasSpec {
+                width: CALIBRATION_REFERENCE_CANVAS_SIDE,
+                height: CALIBRATION_REFERENCE_CANVAS_SIDE,
+            };
+            *curve = materialize_recipe_spiral_curve(curve, *spiral_coverage, &canvas)?;
+            validate_parametric_curve(curve)?;
+            *spiral_coverage = SpiralCoveragePolicy::Fixed;
+            Ok(())
+        }
+        PatternStructureRecipe::AuthoredResources { definition, .. }
+        | PatternStructureRecipe::ConnectionPaths { definition, .. }
+        | PatternStructureRecipe::MazeWalls { definition, .. }
+        | PatternStructureRecipe::AuthoredClosedShapeMarks { definition, .. }
+        | PatternStructureRecipe::CurveMotifPaths { definition, .. }
+        | PatternStructureRecipe::VoronoiRegions { definition }
+        | PatternStructureRecipe::GuideFaceRegions { definition, .. }
+        | PatternStructureRecipe::OrderedOutputs { definition, .. } => {
+            materialize_preset_reference_spiral(definition)
+        }
+        PatternStructureRecipe::StraightGrid(_)
+        | PatternStructureRecipe::GeneralizedStraightGuides { .. }
+        | PatternStructureRecipe::GenericGuides { .. }
+        | PatternStructureRecipe::RandomSites { .. }
+        | PatternStructureRecipe::ParametricCurve { .. } => Ok(()),
+    }
 }
 
 /// Validates pure preset metadata and ID-free recipe inputs without allocating
 /// IDs, mutating a document, or publishing history. Full reconstruction still
 /// reuses command validation when a recipe is applied to a document.
+/// A CoverCanvas companion is checked against that recipe's concrete 1024-square reference.
+///
+/// # Errors
+/// Returns metadata, recipe, or exact companion-binding validation diagnostics.
 pub fn validate_preset_record(record: &PresetRecord) -> Result<(), ValidationError> {
+    if let Some(artifact) = &record.saved_calibration {
+        let mut reference_recipe = record.recipe.clone();
+        materialize_preset_reference_spiral(&mut reference_recipe.structure)?;
+        let expected = CalibrationBinding::new(
+            reference_recipe,
+            artifact.binding().density_aspect(),
+            artifact.binding().shape_rotation_degrees(),
+        )?;
+        if artifact.binding() != &expected {
+            return Err(ValidationError::new(
+                "preset.calibration.binding",
+                "Pattern Preset calibration does not match its recipe",
+            ));
+        }
+    }
     for (path, value) in [
         ("preset.metadata.id", record.metadata.id.as_str()),
         ("preset.metadata.name", record.metadata.name.as_str()),
@@ -22669,6 +24529,7 @@ fn validate_pattern_structure_recipe_with_resources(
             name,
             coverage,
             character,
+            nominal_spacing,
             seed: _,
             density_modulation,
             exclusion,
@@ -22680,6 +24541,11 @@ fn validate_pattern_structure_recipe_with_resources(
                 name: name.clone(),
                 coverage: coverage.clone(),
             })?;
+            validate_random_nominal_spacing(
+                character,
+                *nominal_spacing,
+                "preset.recipe.character.nominal_spacing",
+            )?;
             match character {
                 RandomSiteCharacter::RawUniform => {}
                 RandomSiteCharacter::Even {
@@ -23069,6 +24935,7 @@ fn validate_recipe_output_settings(
             ));
         }
         validate_pattern_geometry_response(&setting.response)?;
+        validate_structural_response_shell(&setting.response)?;
     }
     let mut indegree = vec![0_usize; recipe.output_settings.len()];
     let mut dependents = vec![Vec::new(); recipe.output_settings.len()];
@@ -23526,6 +25393,10 @@ pub enum PatternDefinitionEdit {
         mechanism_id: PatternMechanismId,
         character: RandomSiteCharacter,
     },
+    SetRandomNominalSpacing {
+        mechanism_id: PatternMechanismId,
+        nominal_spacing: f64,
+    },
     SetRandomSeed {
         mechanism_id: PatternMechanismId,
         seed: u32,
@@ -23668,6 +25539,27 @@ pub enum DocumentCommand {
     SetPrintPreparation {
         base: PrintPreparationSettings,
         settings: PrintPreparationSettings,
+    },
+    /// Replaces all typed response intent and equalizes compatible active channels.
+    SetAllResponseSettings {
+        base: DocumentResponseSettings,
+        settings: DocumentResponseSettings,
+    },
+    /// Changes one ALL response field and makes compatible named channels inherit that field.
+    SetAllResponseField {
+        base: DocumentResponseSettings,
+        edit: DocumentResponseFieldEdit,
+    },
+    /// Stores one absolute named-channel response independently of Pattern construction.
+    SetChannelResponse {
+        channel_id: ChannelId,
+        output_layer_id: PatternOutputLayerId,
+        response: ChannelOutputResponse,
+    },
+    /// Removes a named override so the channel inherits the current ALL response.
+    ResetChannelResponse {
+        channel_id: ChannelId,
+        output_layer_id: PatternOutputLayerId,
     },
     /// Replaces the document-owned settings after comparing an exact stale
     /// base; all channel instances are revalidated atomically before publish.
@@ -24122,6 +26014,12 @@ impl PatternDefinitionEdit {
                     },
                 )),
             ),
+            Edit::SetRandomNominalSpacing {
+                nominal_spacing, ..
+            } => (
+                PropertyFieldId::RandomNominalSpacing,
+                PropertyFieldValue::FiniteF64(*nominal_spacing),
+            ),
             Edit::SetRandomSeed { seed, .. } => {
                 (PropertyFieldId::RandomSeed, PropertyFieldValue::U32(*seed))
             }
@@ -24316,7 +26214,11 @@ impl DocumentCommand {
             Command::SetPrintPreparation { .. } => DocumentCommandFieldClassification::NonField(
                 NonFieldCommandOperation::PrintPreparation,
             ),
-            Command::SetDocumentPatternSettings { .. }
+            Command::SetAllResponseSettings { .. }
+            | Command::SetAllResponseField { .. }
+            | Command::SetChannelResponse { .. }
+            | Command::ResetChannelResponse { .. }
+            | Command::SetDocumentPatternSettings { .. }
             | Command::ReplaceDocumentPatternDefinitionRecipe { .. }
             | Command::SetChannelPatternDefinitionOverride { .. }
             | Command::ResetChannelPatternDefinitionOverride { .. }
@@ -24610,6 +26512,8 @@ impl DocumentCommand {
         matches!(
             self,
             Self::SetPrintPreparation { .. }
+                | Self::SetAllResponseSettings { .. }
+                | Self::SetAllResponseField { .. }
                 | Self::SetDocumentPatternSettings { .. }
                 | Self::ReplaceDocumentPatternDefinitionRecipe { .. }
                 | Self::ReplaceChannelPatternDefinitionOverrideRecipe { .. }
@@ -24648,6 +26552,8 @@ impl DocumentCommand {
             | Self::ResetChannelShapeRotationDelta { channel_id, .. }
             | Self::SetChannelOutputResponseDelta { channel_id, .. }
             | Self::ResetChannelOutputResponseDelta { channel_id, .. }
+            | Self::SetChannelResponse { channel_id, .. }
+            | Self::ResetChannelResponse { channel_id, .. }
             | Self::SetTranslationAxis { channel_id, .. }
             | Self::SetColorComponent { channel_id, .. }
             | Self::SetOpacity { channel_id, .. }
@@ -24659,6 +26565,8 @@ impl DocumentCommand {
             | Self::EditSelectedChannelPatternDefinition { channel_id, .. }
             | Self::EditSelectedChannelPatternDefinitionBundle { channel_id, .. } => *channel_id,
             Self::SetPrintPreparation { .. }
+            | Self::SetAllResponseSettings { .. }
+            | Self::SetAllResponseField { .. }
             | Self::SetSourceReference { .. }
             | Self::SetDocumentPatternSettings { .. }
             | Self::ReplaceDocumentPatternDefinitionRecipe { .. }
@@ -24687,6 +26595,8 @@ impl DocumentCommand {
         if !matches!(
             self,
             Self::SetPrintPreparation { .. }
+                | Self::SetAllResponseSettings { .. }
+                | Self::SetAllResponseField { .. }
                 | Self::SetSourceReference { .. }
                 | Self::SetDocumentPatternSettings { .. }
                 | Self::ReplaceDocumentPatternDefinitionRecipe { .. }
@@ -24723,6 +26633,73 @@ impl DocumentCommand {
                     ));
                 }
                 settings.validate()
+            }
+            Self::SetAllResponseSettings { base, settings } => {
+                if &document.response_settings != base {
+                    return Err(ValidationError::new(
+                        "document.response.base",
+                        "ALL response base is stale",
+                    ));
+                }
+                settings.validate()
+            }
+            Self::SetAllResponseField { base, edit } => {
+                if &document.response_settings != base {
+                    return Err(ValidationError::new(
+                        "document.response.base",
+                        "ALL response base is stale",
+                    ));
+                }
+                let mut settings = base.clone();
+                edit.apply_to(&mut settings);
+                settings.validate()
+            }
+            Self::SetChannelResponse {
+                channel_id,
+                output_layer_id,
+                response,
+            } => {
+                let instance =
+                    document
+                        .channel_pattern_instance(*channel_id)
+                        .ok_or(ValidationError::new(
+                            "channel.response.channel_id",
+                            "response channel is missing",
+                        ))?;
+                let bundle = document
+                    .bundle(
+                        instance
+                            .definition_override
+                            .unwrap_or(document.pattern_settings.definition_id),
+                    )
+                    .ok_or(ValidationError::new(
+                        "channel.response.definition_id",
+                        "response definition is missing",
+                    ))?;
+                let setting = bundle
+                    .output_settings
+                    .iter()
+                    .find(|setting| setting.output_layer_id == *output_layer_id)
+                    .ok_or(ValidationError::new(
+                        "channel.response.output_layer_id",
+                        "response output is missing",
+                    ))?;
+                validate_channel_response_override(&setting.response, response)
+            }
+            Self::ResetChannelResponse {
+                channel_id,
+                output_layer_id,
+            } => {
+                if document.channel_response_overrides.iter().any(|entry| {
+                    entry.channel_id == *channel_id && entry.output_layer_id == *output_layer_id
+                }) {
+                    Ok(())
+                } else {
+                    Err(ValidationError::new(
+                        "channel.response.reset",
+                        "channel response has no matching override",
+                    ))
+                }
             }
             Self::SetDocumentPatternSettings { base, settings } => {
                 if &document.pattern_settings != base {
@@ -25317,6 +27294,47 @@ impl DocumentCommand {
                 document.print_preparation = settings.clone();
                 return;
             }
+            Self::SetAllResponseSettings { settings, .. } => {
+                document.response_settings = settings.clone();
+                document.channel_response_overrides.clear();
+                return;
+            }
+            Self::SetAllResponseField { edit, .. } => {
+                edit.apply_to(&mut document.response_settings);
+                for entry in &mut document.channel_response_overrides {
+                    edit.clear_named(&mut entry.response);
+                }
+                document
+                    .channel_response_overrides
+                    .retain(|entry| !entry.response.is_empty());
+                return;
+            }
+            Self::SetChannelResponse {
+                channel_id,
+                output_layer_id,
+                response,
+            } => {
+                document
+                    .channel_response_overrides
+                    .retain(|entry| entry.channel_id != *channel_id);
+                document
+                    .channel_response_overrides
+                    .push(ChannelResponseOverride {
+                        channel_id: *channel_id,
+                        output_layer_id: *output_layer_id,
+                        response: response.clone(),
+                    });
+                return;
+            }
+            Self::ResetChannelResponse {
+                channel_id,
+                output_layer_id,
+            } => {
+                document.channel_response_overrides.retain(|entry| {
+                    entry.channel_id != *channel_id || entry.output_layer_id != *output_layer_id
+                });
+                return;
+            }
             Self::SetDocumentPatternSettings { settings, .. } => {
                 document.pattern_settings = settings.clone();
                 document.prune_document_base_output_response_deltas();
@@ -25334,6 +27352,9 @@ impl DocumentCommand {
                     .pattern_definition_bundles
                     .push(materialized.bundle);
                 document.pattern_settings.definition_id = definition_id;
+                document.appearance_baseline.density = None;
+                document.appearance_baseline.density_aspect = None;
+                document.appearance_baseline.pattern_rotation_degrees = None;
                 for channel_id in document.channel_ids() {
                     let instance = document
                         .channel_pattern_instance_mut(channel_id)
@@ -25860,17 +27881,41 @@ impl DocumentCommand {
             let active = after
                 .effective_channel_pattern(*channel_id)
                 .ok()
-                .and_then(|effective| after.definition(effective.definition_id))
-                .is_some_and(definition_uses_source_weighting);
+                .and_then(|effective| {
+                    after
+                        .definition(effective.definition_id)
+                        .map(|definition| (effective, definition))
+                })
+                .filter(|(_, definition)| definition_uses_source_weighting(definition));
+            let uniform_source_free = active.as_ref().is_some_and(|(_, definition)| {
+                let weighted_lloyd = definition.mechanisms.iter().any(|mechanism| matches!(
+                    mechanism, PatternMechanism::RandomSiteProduct { refinement, .. }
+                        if refinement.enabled && refinement.density_weighted && refinement.iterations > 0
+                ));
+                !weighted_lloyd && definition.output_layers.iter().all(|output| {
+                    after.effective_mark_density(*channel_id, output.id).ok()
+                        .is_some_and(|density| density.mode == MarkDensityMode::Uniform)
+                })
+            });
             return CommandResult {
                 affected_channels: vec![*channel_id],
-                invalidation: active.then_some(InvalidationLevel::Family),
+                invalidation: active.map(|_| {
+                    if uniform_source_free {
+                        InvalidationLevel::Realization
+                    } else {
+                        InvalidationLevel::Family
+                    }
+                }),
                 created_authored_structure_id: None,
             };
         }
         if matches!(
             self,
-            Self::SetDocumentPatternSettings { .. }
+            Self::SetAllResponseSettings { .. }
+                | Self::SetAllResponseField { .. }
+                | Self::SetChannelResponse { .. }
+                | Self::ResetChannelResponse { .. }
+                | Self::SetDocumentPatternSettings { .. }
                 | Self::ReplaceDocumentPatternDefinitionRecipe { .. }
                 | Self::SetChannelPatternDefinitionOverride { .. }
                 | Self::ResetChannelPatternDefinitionOverride { .. }
@@ -25891,7 +27936,39 @@ impl DocumentCommand {
                 .filter(|channel_id| {
                     let old = before.effective_channel_pattern(*channel_id).ok();
                     let new = after.effective_channel_pattern(*channel_id).ok();
-                    if old == new {
+                    let density_level = old.as_ref().zip(new.as_ref()).and_then(|(old, new)| {
+                        old.output_settings
+                            .iter()
+                            .filter(|output| {
+                                matches!(output.response, PatternGeometryResponse::Marks(_))
+                                    && new.output_settings.iter().any(|candidate| {
+                                        candidate.output_layer_id == output.output_layer_id
+                                            && matches!(
+                                                candidate.response,
+                                                PatternGeometryResponse::Marks(_)
+                                            )
+                                    })
+                            })
+                            .filter_map(|output| {
+                                let previous = before
+                                    .effective_mark_density(*channel_id, output.output_layer_id)
+                                    .ok()?;
+                                let current = after
+                                    .effective_mark_density(*channel_id, output.output_layer_id)
+                                    .ok()?;
+                                if previous.mode != current.mode {
+                                    Some(InvalidationLevel::Family)
+                                } else if current.mode == MarkDensityMode::Uniform
+                                    && previous.size_scale != current.size_scale
+                                {
+                                    Some(InvalidationLevel::Realization)
+                                } else {
+                                    None
+                                }
+                            })
+                            .fold(None, strongest_invalidation)
+                    });
+                    if old == new && density_level.is_none() {
                         return false;
                     }
                     let family = old.as_ref().zip(new.as_ref()).is_none_or(|(old, new)| {
@@ -25901,14 +27978,16 @@ impl DocumentCommand {
                             || old.translation_x != new.translation_x
                             || old.translation_y != new.translation_y
                     });
-                    level = strongest_invalidation(
-                        level,
-                        if family {
-                            InvalidationLevel::Family
-                        } else {
-                            InvalidationLevel::Realization
-                        },
-                    );
+                    let structural_level = if family {
+                        InvalidationLevel::Family
+                    } else {
+                        InvalidationLevel::Realization
+                    };
+                    let channel_level = density_level.map_or(structural_level, |density| {
+                        strongest_invalidation(Some(structural_level), density)
+                            .expect("changed response has an invalidation")
+                    });
+                    level = strongest_invalidation(level, channel_level);
                     true
                 })
                 .collect();
@@ -26513,6 +28592,58 @@ impl DocumentHistory {
         let before = self.session.snapshot();
         let result = self.session.apply_from_history(command)?;
         let after = self.session.snapshot();
+        self.undo.push(HistoryEntry {
+            before,
+            after,
+            result: result.clone(),
+        });
+        self.redo.clear();
+        Ok(result)
+    }
+
+    /// Publishes one Pattern command and its compatible saved measurement as one undo entry.
+    ///
+    /// The concrete definition is authoritative. A companion artifact attaches only after its
+    /// binding matches a receiving channel; CoverCanvas variants require their own measurement.
+    ///
+    /// # Errors
+    /// Rejects command, binding, validation, or revision failures without changing history.
+    pub fn apply_pattern_with_saved_calibration(
+        &mut self,
+        command: &DocumentCommand,
+        artifact: Option<&SavedCalibration>,
+    ) -> Result<CommandResult, DocumentSessionError> {
+        let before = self.session.snapshot();
+        let (mut after, mut result) = before.apply_command(command)?;
+        if let Some(artifact) = artifact {
+            let receivers = match command {
+                DocumentCommand::ReplaceChannelPatternDefinitionOverrideRecipe {
+                    channel_id,
+                    ..
+                } => vec![*channel_id],
+                DocumentCommand::ReplaceDocumentPatternDefinitionRecipe { .. } => {
+                    after.channel_ids()
+                }
+                _ => {
+                    return Err(DocumentSessionError::Validation(ValidationError::new(
+                        "calibration.command",
+                        "saved Pattern calibration requires a concrete Preset replacement",
+                    )));
+                }
+            };
+            let receiver = receivers.into_iter().find(|channel_id| {
+                CalibrationBinding::for_channel(&after, *channel_id).ok().as_ref()
+                    == Some(artifact.binding())
+            }).ok_or_else(|| DocumentSessionError::Validation(ValidationError::new(
+                "calibration.binding",
+                "Pattern Preset has no calibration for the concrete receiving geometry; Recalibrate",
+            )))?;
+            after = after.with_saved_calibration(receiver, artifact.clone())?;
+            let difference = squash_result(&before, &after);
+            result.affected_channels = difference.affected_channels;
+            result.invalidation = difference.invalidation;
+        }
+        self.session.restore_history_snapshot(after.clone())?;
         self.undo.push(HistoryEntry {
             before,
             after,
@@ -27132,6 +29263,77 @@ impl DocumentHistory {
         self.redo.clear();
         Ok(result)
     }
+
+    /// Publishes a current structural calibration as one undoable realization change.
+    ///
+    /// The caller must retain the root document and revision while measuring; this prevents a
+    /// completed background job from attaching to a newer edit. Replacement is atomic.
+    ///
+    /// # Errors
+    /// Rejects a stale root, mismatched structural binding, validation failure, or revision limit.
+    pub fn attach_saved_calibration(
+        &mut self,
+        base: &Document,
+        revision: Revision,
+        channel_id: ChannelId,
+        artifact: SavedCalibration,
+    ) -> Result<CommandResult, DocumentSessionError> {
+        if self.document() != base || self.revision() != revision {
+            return Err(DocumentSessionError::Validation(ValidationError::new(
+                "calibration.root",
+                "calibration root is stale against current history",
+            )));
+        }
+        let after = base.with_saved_calibration(channel_id, artifact)?;
+        let difference = squash_result(base, &after);
+        let result = CommandResult {
+            affected_channels: difference.affected_channels,
+            invalidation: Some(InvalidationLevel::Realization),
+            created_authored_structure_id: None,
+        };
+        let before = self.session.snapshot();
+        self.session.restore_history_snapshot(after.clone())?;
+        self.undo.push(HistoryEntry {
+            before,
+            after,
+            result: result.clone(),
+        });
+        self.redo.clear();
+        Ok(result)
+    }
+
+    /// Publishes one hidden ALL calibration under the same stale-root guard as channel artifacts.
+    ///
+    /// Equal active bindings receive the replacement in this undoable history step. A hidden-only
+    /// payload change has no rendering invalidation until a later topology uses that binding.
+    ///
+    /// # Errors
+    /// Rejects a stale root, mismatched base binding, invalid candidate, or revision limit.
+    pub fn attach_saved_baseline_calibration(
+        &mut self,
+        base: &Document,
+        revision: Revision,
+        artifact: SavedCalibration,
+    ) -> Result<CommandResult, DocumentSessionError> {
+        if self.document() != base || self.revision() != revision {
+            return Err(DocumentSessionError::Validation(ValidationError::new(
+                "calibration.root",
+                "calibration root is stale against current history",
+            )));
+        }
+        let after = base.with_saved_baseline_calibration(artifact)?;
+        let difference = squash_result(base, &after);
+        let result = CommandResult {
+            affected_channels: difference.affected_channels,
+            invalidation: difference.invalidation,
+            created_authored_structure_id: None,
+        };
+        let before = self.session.snapshot();
+        self.session.restore_history_snapshot(after.clone())?;
+        self.undo.push(HistoryEntry { before, after, result: result.clone() });
+        self.redo.clear();
+        Ok(result)
+    }
 }
 
 /// Summarizes static and temporal authored differences without replaying draft history.
@@ -27168,6 +29370,24 @@ fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
                 != after.modeled_channel(*id).map(|value| value.role)
         });
     let mut changed_channels = HashSet::new();
+    for entry in before
+        .saved_calibrations
+        .iter()
+        .chain(after.saved_calibrations.iter())
+    {
+        if before
+            .saved_calibrations
+            .iter()
+            .find(|item| item.channel_id == entry.channel_id)
+            != after
+                .saved_calibrations
+                .iter()
+                .find(|item| item.channel_id == entry.channel_id)
+        {
+            changed_channels.insert(entry.channel_id);
+            level = strongest_invalidation(level, InvalidationLevel::Realization);
+        }
+    }
     if before.temporal_end_overrides != after.temporal_end_overrides
         || before.project_timing != after.project_timing
     {

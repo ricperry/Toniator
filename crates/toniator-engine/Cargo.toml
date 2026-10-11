@@ -1,6 +1,6 @@
 [package]
 name = "toniator-engine"
-version = "0.4.0"
+version = "0.4.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -22,3 +22,4 @@ path = "src/lib.rs"
 # Enables the patterns-side test evidence record only while compiling this crate's tests.
 toniator-patterns = { path = "../toniator-patterns", features = ["test-evidence"] }
 image.workspace = true
+zip.workspace = true

@@ -15,6 +15,13 @@ template $ToniatorAdvancedSettingsShell : Gtk.Box {
     halign: start;
   }
 
+  Gtk.Button advanced_recalibrate {
+    label: "Reca_librate Pattern";
+    use-underline: true;
+    halign: start;
+    tooltip-text: "Measure this Pattern's current structural binding again in the private draft. Apply keeps the result; Cancel discards it.";
+  }
+
   Gtk.Label advanced_status {
     label: "Changes do not affect your artwork until Apply.";
     xalign: 0;

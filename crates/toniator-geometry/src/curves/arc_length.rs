@@ -8,6 +8,7 @@ use super::{
 #[derive(Clone, Debug, PartialEq)]
 pub struct PathArcLength {
     segments: Vec<SegmentArcLength>,
+    segment_ends: Vec<f64>,
     total_length: f64,
 }
 
@@ -19,9 +20,11 @@ impl PathArcLength {
     /// Propagates bounded segment measurement failures without exposing a partial table.
     pub(crate) fn measure(path: &CurvePath) -> Result<Self, CurveError> {
         let mut segments = Vec::with_capacity(path.segments().len());
+        let mut segment_ends = Vec::with_capacity(path.segments().len());
         let mut budget = InverseBudget::new(MAX_WORK_ITEMS, MAX_ARC_LENGTH_LEAVES);
         let mut total = 0.0;
         let mut compensation = 0.0;
+        let mut ordinary_prefix = 0.0;
         for segment in path.segments() {
             let profile = segment.arc_length_profile_with_counts(
                 MAX_SUBDIVISION_DEPTH,
@@ -41,6 +44,8 @@ impl PathArcLength {
                     "curve-path arithmetic must remain finite",
                 ));
             }
+            ordinary_prefix += length;
+            segment_ends.push(ordinary_prefix);
             segments.push(SegmentArcLength {
                 segment: *segment,
                 leaves,
@@ -49,6 +54,7 @@ impl PathArcLength {
         }
         Ok(Self {
             segments,
+            segment_ends,
             total_length: total,
         })
     }
@@ -82,14 +88,15 @@ impl PathArcLength {
         if distance == self.total_length {
             return PathLocation::new(self.segments.len() - 1, 1.0);
         }
-        let mut prefix = 0.0;
-        for (index, measured) in self.segments.iter().enumerate() {
-            let end = prefix + measured.length;
-            if distance <= end {
-                let parameter = measured.parameter_at_length(distance - prefix)?;
-                return PathLocation::new(index, parameter);
-            }
-            prefix = end;
+        let index = self.segment_ends.partition_point(|end| *end < distance);
+        if let Some(measured) = self.segments.get(index) {
+            let prefix = if index == 0 {
+                0.0
+            } else {
+                self.segment_ends[index - 1]
+            };
+            let parameter = measured.parameter_at_length(distance - prefix)?;
+            return PathLocation::new(index, parameter);
         }
         PathLocation::new(self.segments.len() - 1, 1.0)
     }
@@ -295,7 +302,43 @@ fn compensated_leaf_sum(leaves: &[ArcLengthLeaf]) -> Result<f64, CurveError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{CubicBezierSegment, CurvePath, CurveSegment, PathClosure, Point2};
+    use crate::{CubicBezierSegment, CurvePath, CurveSegment, PathClosure, PathLocation, Point2};
+
+    /// Keeps earliest exact joins, repeated zero-length prefixes, and the final endpoint stable
+    /// when the path table selects a segment by binary search.
+    ///
+    /// # Panics
+    /// Panics if distance inversion skips an earlier join or loses the last path endpoint.
+    #[test]
+    fn prefix_lookup_preserves_joins_and_zero_length_segments() {
+        let path = CurvePath::polyline(
+            vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(0.0, 0.0),
+                Point2::new(3.0, 0.0),
+                Point2::new(3.0, 0.0),
+                Point2::new(3.0, 4.0),
+                Point2::new(3.0, 4.0),
+            ],
+            PathClosure::Open,
+        )
+        .expect("finite path with degenerate segments");
+        let measured = path.measure_arc_length().expect("finite length table");
+        assert_eq!(measured.total_length(), 7.0);
+        assert_eq!(
+            measured.location_at_length(0.0).unwrap(),
+            PathLocation::new(0, 0.0).unwrap()
+        );
+        assert_eq!(
+            measured.location_at_length(3.0).unwrap(),
+            PathLocation::new(1, 1.0).unwrap()
+        );
+        assert_eq!(
+            measured.location_at_length(7.0).unwrap(),
+            PathLocation::new(4, 1.0).unwrap()
+        );
+        assert_eq!(measured.location_at_length(3.5).unwrap().segment_index(), 3);
+    }
 
     /// Proves the zero-length inverse contract rejects every positive distance atomically.
     #[test]

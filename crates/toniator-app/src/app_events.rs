@@ -23,6 +23,11 @@ pub(crate) enum AppEvent {
         generation: u64,
         result: Result<(), String>,
     },
+    /// Returns exact-binding calibration artifacts for one guarded private candidate.
+    CalibrationPrepared {
+        id: crate::calibration_preparation::TaskId,
+        result: Box<Result<crate::calibration_preparation::PreparedCalibrations, String>>,
+    },
     /// Carries phase progress and terminal recovery ownership for one desktop export sheet.
     TemporalExport(crate::temporal_export::Event),
     /// Supplies the current decoded endpoint before immutable preview evaluation.

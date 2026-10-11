@@ -743,12 +743,13 @@ fn normalize_segment(segment: CurveSegment) -> Result<CurveSegment, CanonicalReg
     }
 }
 
-/// Collapses only consecutive sub-ULP line seams before canonical topology validation.
+/// Collapses consecutive line seams within the established numerical topology tolerance.
 ///
 /// A producer or positive affine resize can round one shared line vertex through two nearby
-/// constructions. The seam has no representable positive extent at the established coordinate
-/// scale, so this function rebuilds the closed line ring without it. Cubic rings remain exactly
-/// untouched, and no inter-region, complement, or negative-space measurement occurs.
+/// constructions. This coordinate-scale tolerance can also remove a representable very short
+/// edge; edges beyond it retain ordinary topology validation. Its dependence on absolute
+/// coordinates is part of the existing cleanup policy. Cubic rings remain exactly untouched,
+/// and no inter-region, complement, or negative-space measurement occurs.
 ///
 /// # Errors
 ///
@@ -773,7 +774,9 @@ fn collapse_line_rounding_seams(
     let coordinate_scale = points.iter().fold(1.0_f64, |scale, point| {
         scale.max(point.x.abs()).max(point.y.abs())
     });
-    let seam_tolerance = 128.0 * f64::EPSILON * coordinate_scale;
+    // Two independent circumcenter constructions can differ by more than the former
+    // 128-epsilon threshold even when they denote the same Voronoi vertex.
+    let seam_tolerance = 256.0 * f64::EPSILON * coordinate_scale;
     loop {
         let duplicate = (0..points.len()).find(|&index| {
             let next = (index + 1) % points.len();
@@ -1283,6 +1286,74 @@ mod tests {
                 .path(),
             "region.geometry.self_crossing"
         );
+    }
+
+    /// Preserves a fine ordinary Voronoi cell whose two circumcenter constructions round apart.
+    ///
+    /// # Panics
+    /// Panics if the precision seam remains a false self-crossing or a genuine bow tie is accepted.
+    #[test]
+    fn collapses_fine_voronoi_circumcenter_rounding_seam() {
+        let ring = CurvePath::polyline(
+            vec![
+                Point2::new(-0.276346713712671, -1.0313399760799005),
+                Point2::new(1.940678319975518, 0.2486600239200809),
+                Point2::new(0.6606783199755509, 2.465685057608246),
+                Point2::new(-1.5563467137126474, 1.1856850576082587),
+                Point2::new(-1.5563467137126694, 1.1856850576081772),
+            ],
+            PathClosure::Closed,
+        )
+        .expect("finite observed cell");
+        let regions = build_canonical_regions(triangle_proposal(ring))
+            .expect("rounding seam does not change convex cell topology");
+        assert_eq!(regions.regions()[0].ring.segments().len(), 4);
+        assert!(regions.regions()[0].area > 0.0);
+    }
+
+    /// Keeps a distinct short line edge just beyond the numerical seam tolerance.
+    ///
+    /// # Panics
+    /// Panics if seam cleanup erases an edge above its own threshold; later generic intersection
+    /// validation may independently reject such a small edge.
+    #[test]
+    fn seam_cleanup_retains_line_edge_just_above_tolerance() {
+        let ring = CurvePath::polyline(
+            vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(2.0, 0.0),
+                Point2::new(2.0 + 1.0e-13, 1.0e-13),
+                Point2::new(2.0, 2.0),
+                Point2::new(0.0, 2.0),
+            ],
+            PathClosure::Closed,
+        )
+        .expect("finite distinct short edge");
+        let mut segments = ring.segments().to_vec();
+        collapse_line_rounding_seams(&mut segments).expect("finite seam cleanup");
+        assert_eq!(segments.len(), 5);
+    }
+
+    /// Preserves a distinct small edge that also clears generic intersection validation.
+    ///
+    /// # Panics
+    /// Panics if an above-threshold ordinary cell boundary loses valid positive geometry.
+    #[test]
+    fn preserves_distinct_small_voronoi_boundary_edge() {
+        let ring = CurvePath::polyline(
+            vec![
+                Point2::new(-0.276346713712671, -1.0313399760799005),
+                Point2::new(1.940678319975518, 0.2486600239200809),
+                Point2::new(0.6606783199755509, 2.465685057608246),
+                Point2::new(-1.5563467137126474, 1.1856850576082587),
+                Point2::new(-1.5563467139126474, 1.1856850568082587),
+            ],
+            PathClosure::Closed,
+        )
+        .expect("finite distinct small edge");
+        let regions = build_canonical_regions(triangle_proposal(ring))
+            .expect("small nonzero edge remains a valid boundary");
+        assert_eq!(regions.regions()[0].ring.segments().len(), 5);
     }
 
     /// Proves every bounded-work category rejects atomically at its configured threshold.

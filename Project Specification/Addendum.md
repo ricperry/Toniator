@@ -477,6 +477,14 @@ P <- s*C + P*(1-s)
 A <- s   + A*(1-s)
 ```
 
+For antialiased output, a maximal contiguous run of layer outputs with no
+per-primitive paints, fully opaque layer color, and full layer opacity joins
+its typed positive geometry before coverage is measured. The joined area is
+painted once with that layer color. Other outputs retain ordered per-primitive
+source-over. Each primitive's own fill rule is applied before joining; the
+join does not cross layers or channel-composition boundaries. Antialiasing-off
+output retains its hard-edge behavior.
+
 RGB uses additive linear Porter-Duff lighter composition:
 
 ```text
@@ -510,8 +518,14 @@ substitute.
 
 Preview backdrop is viewer-only presentation. Default viewer policy is black
 for RGB, white for CMYK, and fixed neutral mid-gray for SourceColorAlpha. It
-does not modify the document, `RenderScene`, raster bytes, SVG, or export
-background.
+does not modify the document, `RenderScene`, native transparent raster, SVG,
+or export background. RGB and CMYK preview targets apply their selected black
+or white backdrop in the renderer's linear floating-point result before the
+preview's final sRGBA8 encoding, so coverage below an alpha-byte threshold
+still contributes visible color. SourceColorAlpha preview targets remain
+transparent over the viewer's neutral gray. The preview target and raster
+cache identity include this presentation choice; canonical scene identity and
+PNG export policy do not.
 
 PNG export background is a final-consumer choice:
 
@@ -1045,10 +1059,12 @@ channel's matching component; Advanced Settings owns their source selection,
 including explicit Luminance for monochrome artwork. Changing either mapping
 does not edit the recipe, and applying a Pattern does not overwrite those choices.
 
-The Pattern Editor/Wizard defines construction, whether source weighting is
-used, and geometric bounds such as minimum/maximum fill or thickness. Source
-mapping and source-response shaping belong to document/channel state and are
-edited in main-window Advanced Settings. This includes weighting strength,
+The Pattern Editor/Wizard defines construction and whether source weighting is
+used. Its response preview uses neutral minimum `0` and maximum `1`; it does
+not author adjustable fill or thickness bounds. Those typed bounds and region
+artwork sampling belong to document/channel response state and are edited in
+main-window Advanced Settings. Source mapping and source-response shaping also
+belong to document/channel state. This includes weighting strength,
 response curve, inversion, gain, bias and tonal interpretation. A recipe must
 not store or edit these source settings. Weighting consumes its independently
 configured source response; fill/geometry consumes its own. Do not implicitly
@@ -1340,14 +1356,14 @@ This section supersedes conflicting language in `PatternSchema.md` and
 `ChannelSchema.md` about every channel owning a fully independent pattern
 instance.
 
-The document owns one base structural pattern recipe and base settings for
-pattern rotation, shape rotation, density/detail, and an output-specific
-minimum/maximum response range. A channel may select an optional replacement
-recipe and may add an explicit typed delta to applicable density/detail,
-pattern-rotation, shape-rotation, or output-response scalars. A channel with
-no replacement or delta inherits the document value. Resetting a channel
-setting removes its delta and restores inheritance; it is not a hidden copy of
-the then-current document value.
+The document owns one base structural Pattern recipe and base settings for
+pattern rotation, shape rotation, and density/detail. It separately owns typed
+ALL channel-response ranges and region artwork sampling. A channel may select
+an optional replacement recipe, add applicable structural density/detail,
+pattern-rotation, shape-rotation, or connected stroke-alignment deltas, and
+author optional named response fields. A channel with no replacement or field
+override inherits the applicable document value. Resetting a named response
+field restores inheritance; it is not a hidden copy of the current ALL value.
 
 The document/domain layer resolves and validates an effective pattern instance
 before evaluation. GTK, CLI parsing, renderers, and exporters may project or
@@ -1366,8 +1382,9 @@ mechanism:
 Output-specific response values remain distinct typed fields. The artist may
 use common labels such as minimum and maximum fill, but mark fill/size,
 stroke-thickness response, and region inset/grow-shrink response are not one
-stored value or one interchangeable unit. Response curve and polarity remain
-document-base, output-typed fields; channels do not additively override them.
+stored value or one interchangeable unit. Structural connected stroke alignment
+and region resize algorithm remain Pattern intent. Source tone and weighting
+remain separate document/channel source consumers.
 
 Stage 20G owns the current-only document-schema transition, validation,
 history, invalidation, and persistence work for this authority. It does not
@@ -1387,11 +1404,13 @@ alpha zero therefore cannot create a response fringe. Alpha remains an
 independent scalar; mapping inversion/gain/bias determines its response, and
 it is never multiplied by alpha a second time.
 
-SourceColorAlpha separately interpolates associated linear RGB and alpha,
-unassociates positive-alpha RGB for per-mark paint, and uses sampled alpha as
-the mark-response field. Positive alpha affects mark size only. Exact zero
-sampled alpha suppresses visible mark paint even when minimum mark size is
-nonzero.
+SourceColorAlpha separately interpolates associated linear RGB and alpha and
+unassociates positive-alpha RGB for per-mark paint. In Variable mark mode,
+sampled alpha drives mark size once. In Uniform artwork-weighted mark mode,
+sampled alpha drives mark survival once; each surviving positive-alpha mark has
+the calibrated fixed size and opaque sampled paint apart from channel opacity.
+Exact zero sampled alpha suppresses visible mark paint in either mode, even
+when an inactive Variable minimum mark size is nonzero.
 
 SVG decoder output must be unpremultiplied to retain straight RGBA; the normal
 precision and zero-alpha caveats of that conversion remain applicable. Raw
@@ -1472,6 +1491,15 @@ samples only for independent centerline-flatness requirements. Linear response
 between the retained samples is the current default, and the sampling interval
 does not change pattern-site Density authority.
 
+Shared canonical outline compaction preserves those adaptive source samples as
+its input and retains the largest normalized error first. Centerline deviation
+remains bounded by 0.125 document units. At each positive sampled half-width,
+interpolation deviation is bounded by the smaller of 0.125 document units or
+2% of that local half-width. Exact zero-width breaks, authored segment and
+tangent boundaries, and closed seams remain explicit. The iterative compaction
+polls cancellation and obeys the caller's derived-outline segment bound; it
+does not alter source sampling or authored path geometry.
+
 Canonical-stroke rasterization flattens each outline once, schedules edges by
 the pixel-row intervals where they can contribute, and traverses only active
 nonzero-winding X spans. It does not scan every flattened edge or every pixel
@@ -1519,9 +1547,14 @@ source order inside indexed parallel region work. Request-wide checked counts,
 fallible working storage, cancellation, coalesced progress, deterministic
 publication order, and stale-result rejection remain mandatory.
 
-The current-only document schema is version 6. Obsolete version-5 documents
-are rejected rather than migrated or adapted. Preset format v3 remains the
-unchanged recipe-only authority and does not acquire document settings.
+The density and still-source behavior in this section was established at the
+schema-v6 checkpoint; that version is no longer current. Current development
+uses project document schema **13** in media container **2**, and source-free
+Document Preset format **3** with configuration schema **12**. Earlier project
+schema 12 and Preset configuration schema 11 are rejected; values are not
+reconstructed from channel consensus or migrated through UI defaults. Pattern
+format **6** stores structural output intent only; document response does not
+become authority in reusable Pattern resources.
 
 The still-source boundary accepts PNG, SVG, JPEG/JPG, WebP, BMP, TIFF,
 OpenEXR, and AVIF. A `.toniator` container preserves the exact original source
@@ -1543,12 +1576,294 @@ property is equalized: unrelated channel intent, the other initialized endpoint,
 and interpolation choices remain intact. Inapplicable outputs are omitted and
 invalid coupled bounds reject the entire edit. A preset applied to ALL atomically replaces the base recipe and clears
 every channel's pattern replacement plus density, density-aspect,
-pattern-rotation, shape-rotation, and output-response deltas. The operation
+pattern-rotation, shape-rotation, and structural stroke-alignment deltas. The operation
 first discloses affected channels, is one undoable command, and Undo restores
 the exact former base and channel intent. Translation, source mapping, paint,
 color, opacity, and visibility remain untouched. Applying a preset to a named
-channel retains selected-channel replacement and prunes only deltas made
-incompatible by that replacement.
+channel retains selected-channel replacement and prunes only structural deltas
+made incompatible by that replacement. Channel-response intent is reconciled
+per channel as specified below.
+
+### 17.1 Last-ALL Appearance baseline
+
+The document and reusable `DocumentConfiguration` each store a typed, sparse
+`DocumentAppearanceBaseline`. Its optional values are effective Start-frame
+Density, Density aspect, pattern rotation, X translation, and Y translation.
+Density and aspect are positive finite values; rotation and translations are
+finite. An unset field carries no recorded shared intent and keeps the current
+document or canonical-topology default.
+
+An explicit ALL Start assignment atomically updates every compatible channel
+and only the baseline entries named in that assignment. It records intent even
+when the effective channel values already match. Such a baseline-only update
+is one dirty, undoable persistence/history change with no render invalidation.
+An ALL End assignment and every named-channel assignment leave the baseline
+unchanged. The baseline is never inferred from current channels, a majority, or
+history.
+
+When the color/channel model changes, canonical channels are rebuilt from the
+document's base Pattern and the stored baseline. Stored density/aspect values
+become channel-relative additive deltas, pattern rotation becomes a relative
+delta, and X/Y remain absolute channel translations. Existing channel-specific
+deviations do not seed the replacement model. Unset baseline entries retain
+the canonical topology defaults.
+
+An ALL Pattern replacement clears stored density, density-aspect, and
+pattern-rotation entries along with the corresponding Pattern-relative channel
+deltas, so the replacement cannot later resurrect values tied to the previous
+base recipe. It retains X/Y baseline entries because replacement preserves
+translations. A named Pattern replacement leaves every shared baseline entry
+unchanged.
+
+Project schema 13 and Document Preset configuration schema 12 serialize this
+baseline. The surrounding media container and Document Preset format stay at
+versions 2 and 3; the Pattern resource version does not change.
+Older development project and configuration schemas are rejected without
+compatibility adapters or inferred defaults.
+
+### 17.2 Channel-response ownership and Pattern replacement
+
+The document and reusable configuration store typed ALL response intent for
+marks, connected strokes, and regions. Each named channel may override individual
+compatible fields without copying unrelated ALL fields. An explicit ALL Start
+field assignment equalizes only that field on compatible active channels and
+records the ALL value even when it matches the old baseline. Paired response
+bounds can publish atomically. Named assignments leave the ALL intent unchanged;
+Undo and Redo restore both authorities exactly. Color-model replacement seeds
+new channels from the stored ALL response for the current output kind.
+
+Applying a Pattern never imports adjustable response bounds or sampling from its
+recipe. Compatible output-kind replacement preserves each affected channel's
+effective Start response and initialized End value and easing while rebinding
+the sole output identity. Same-structure edits preserve by output identity.
+When a channel changes between marks, connected strokes, and regions, only that
+channel's incompatible response defaults to `0..1`; a new region defaults to
+area-average artwork sampling. A document-base kind change also records neutral
+ALL intent so later model switches or a return to the old kind do not resurrect
+stale bounds. Structural stroke alignment and region resize continue to follow
+Pattern replacement and their own temporal reset rules. Source mapping and
+independent artwork-weighting settings are preserved.
+
+Project schema 13, Document Preset configuration schema 12, and standalone
+Pattern Preset format 6 encode this boundary. Superseded pre-release shapes are
+rejected rather than migrated.
+
+### 17.3 Uniform artwork-weighted marks
+
+Current document response also stores a mark density mode (`Contextual`,
+`Uniform`, or `Variable`) and a finite artistic mark size scale in `0..2`, with
+default `Contextual` and scale `1`. Named mark outputs may override each field
+independently. `Contextual` resolves Uniform only for an actual artwork-weighted
+random-site Marks output; other marks retain Variable sizing. A strict Visible
+Mark Margin exclusion retains non-overlap and resolves Variable with an
+applicability reason. An explicit Variable choice keeps the authored minimum
+and maximum fill response; the inactive range and scale remain stored through
+compatible replacements and model switches. Incompatible output-kind changes
+reset only the affected response intent. The mode is static; size scale follows
+the continuous Start/End response path.
+
+Uniform mode constructs the complete site population independently of ordinary
+artwork weighting, then uses stable per-site thinning without replenishment.
+Site-use filters and guard-site mark output obey the same survival decision.
+A bounded, source-independent canonical circle or authored closed-shape fit
+measures at least `99.9%` full-tone opaque canvas coverage; overlap
+multiplicity supplies the inverse expected coverage for lower tones. The
+artistic scale applies after this fit and must remain within the population's
+planned support. Density-weighted Lloyd remains source dependent. Independent
+fill cutoff and alpha paint suppression remain effective; ordinary fill tone
+and Variable bounds do not alter Uniform size. Variable RGB/CMYK geometric-union
+calibration remains unchanged. This statistical flat-field response does not
+promise local pixel equivalence at artwork boundaries.
+
+Current project schema 14 and Document Preset configuration schema 13 persist
+document-owned mode and scale. Standalone Pattern format 6 remains structural;
+superseded development schemas reject without migration.
+
+### 17.4 Authored spatial density for Scatter
+
+This subsection supersedes the Scatter count interpretation and default Density
+formula in section 17 above. Current Density is the scalar `100 / Feature size`,
+where Feature size is finite, positive, dimensionless, and independent of canvas
+extent. Fresh documents use Density `100`, hence Feature size `1`. The existing
+resolved guide axis counts preserve the guide appearance at each canvas:
+
+```text
+guide_density = density × sqrt(min(width, height) / max(width, height))
+across_x = guide_density × sqrt(width / (height × aspect))
+across_y = guide_density × sqrt((height × aspect) / width)
+```
+
+The inverse projection uses those same factors. Scatter does not interpret
+`across_x × across_y` as a target count. Raw, Jittered, and Clustered recipes
+own one finite positive nominal spacing in authored document units; its built-in
+default is `10.24`. Even dispersion uses its authored minimum-center distance as
+its sole spatial scale and stores no second nominal spacing. Feature size
+multiplies these lengths directly, without scaling them by canvas dimensions.
+Scatter Density aspect is inapplicable; guide recipes retain their current
+aspect behavior.
+
+At a fixed Feature size, canvas area determines the offered Scatter population.
+Raw offers candidates from area intensity, Jittered offers physical cells, and
+Clustered derives parent and offspring intensities from area while retaining its
+authored concentration and spread. Even dispersion runs its geometric exclusion
+process to bounded saturation rather than stopping at a desired count. Source
+weighting and exclusion filter this complete offered field without replenishing
+rejected sites. Seed, full off-canvas guard topology, strict visible margins,
+and Lloyd behavior remain authoritative. Exhausted resource limits fail with a
+diagnostic rather than publish an underfilled partial family. Scatter mark and
+line response use the same Feature-scaled spatial basis as placement. Changing
+Feature size does not rewrite the authored recipe distance.
+
+The current in-development schema transition is project `15`, Document Preset
+configuration `14`, and standalone Pattern `7`. These formats persist the one
+authored Scatter spacing where applicable; superseded formats reject without
+migration. This transition does not yet persist a saved calibration artifact.
+
+### 17.5 Saved structural calibration and Preset conversion
+
+This subsection supersedes earlier transient or render-time fitting language
+and the version/rejection statements above. A finished structural Pattern edit
+measures one source-independent, fixed-reference coverage artifact. The
+artifact stores a versioned geometry profile, typed ID-free structural binding,
+and monotone raw `C(size)` observations over `0..=2`. Eligible marks also store
+the dimensionless Uniform full-tone radius and survival inverse, regardless of
+the response mode selected when measured. The binding includes effective
+connected-stroke bias, shape rotation, and guide aspect where those affect
+coverage; it excludes scalar Density/Feature size, artwork, source tone and
+paint, whole-Pattern placement/rotation, and Advanced response range, sampling,
+mode, and artistic scale. A channel may reuse an artifact from another channel
+only when its complete typed binding matches.
+Scatter site, randomized connection, and maze variation seed values are excluded
+from that binding. The saved reference uses fixed seed `43` for each such field;
+the authored seed remains in the Pattern and still changes its generated
+geometry. Seed-bearing bindings use distinct seed-neutral v5 strict or mean
+profiles, while seed-free v4 measurements remain current except for the revised
+Guide Faces producer described below. Cross-seed response is
+statistical: representative alternate-seed checks are acceptance evidence, not
+a guarantee for every `u32` seed or individual render.
+
+The document also retains one optional saved companion for the last-ALL base
+Pattern binding, even when no currently modeled channel uses it. Named channel
+edits cannot erase that companion. A later model replacement may rebind it to
+new channels without measuring. A structural change to the ALL binding must
+prepare its missing companion alongside changed active bindings before
+publication. Named Recalibrate forces only its selected binding and fills a
+missing ALL companion; ALL Recalibrate forces all distinct active bindings and
+the ALL companion. Equivalent bindings share one measurement and one atomic
+history result. Project and Document Preset persistence retain this companion.
+
+Ordinary preview, PNG, SVG, reopening, and nonstructural edits use the saved
+artifact without entering a fitter. A missing, stale, or unsupported artifact
+requires explicit recalibration; it never silently uses an identity response or
+unbounded transient fit. A user may request Recalibrate. Structural Apply/Save
+publishes the structure and all required artifact replacements as one guarded,
+undoable result; cancellation or a stale revision publishes neither. Neutral
+Wizard structural previews remain disposable and do not fit per edit. The
+source-independent fixed reference does not infer a transfer artifact for an
+unmeasured family, shape, or rotation.
+
+Advanced Variable mark, connected-stroke, and region response endpoints now
+express **desired absolute geometric coverage** in `0..=1`, for every supported
+single-output model and paint, including equal endpoints. For each sampled
+source response, the document first interpolates desired coverage between
+those endpoints. The saved raw `C(size)` curve then maps that request to one
+final raw size in `0..=2`, clamping only to the measured `C(0)..=C(2)` reach.
+The document does not normalize requested coverage to that reachable span or
+apply the Advanced range a second time. A zero request remains at the earliest
+attainable response; positive low tones retain measured inverse precision.
+Uniform marks keep their separate 99.9% full-tone footprint and survival
+inverse. Source mapping, cutoff, alpha suppression, paint, contextual mode, and
+strict nonoverlap retain their existing authorities. Calibration probes use an
+explicit transient raw-size request; no ordinary document field temporarily
+stores a raw size in a coverage-valued response slot. Raw geometry profiles
+and their fixed reference populations remain unchanged.
+
+The fixed 1024-square reference first fits 32 nominal spacings and checks an
+independent 64-spacing population. Only a population-convergence failure may
+retry one complete 64-spacing fit with a 128-spacing check. Both tiers retain
+the same raw-knot, measurement-work, low-tone inverse, cancellation, and
+accuracy limits. After both tiers fail convergence, an isotropic single finite
+Round Spiral with one ordinary structural stroke or mark output may use one
+distinct covered-interior profile: a fixed 768-square canvas, 64-spacing fit,
+and independent 128-spacing check. Its complete outer revolution must enclose
+the reference square: `(turns - 1) * radial_spacing >= hypot(384, 384)`.
+The authored finite turns, spacing, shape, and exact calibration binding remain
+unchanged; the profile records the alternate measurement window. All existing
+fit, transfer, low-tone inverse, work, and cancellation gates remain in force.
+An ineligible or failed interior attempt remains an explicit diagnostic.
+Existing 1024-square companions retain their measured profile and numeric data.
+After both strict population checks fail, only a typed random-site family,
+seeded connection program, or maze may use a bounded average of the frozen 32-
+and 64-spacing populations measured at each identical size. The mean retains
+the same tight interpolation and inverse checks and an independent 128-spacing
+transfer check: raw variation is at most 2% of reachable span, normalized tone
+variation at most one percentage point and at most 10% relative for low tones,
+including the default response interval `0..=1`. Its distinct seed-neutral v5 profile
+stores typed observed maxima, not a confidence interval or guarantee for each
+render. Eligible weighted Uniform marks use the same paired populations for
+full-tone radius and survival inverse, require 99.9% full tone, and use white
+128-spacing coverage to select one bounded common footprint. The 128-spacing
+lower-tone survival response remains an independent transfer check. The
+persisted profile identifies which strict tier or approved mean produced the
+artifact. A former
+numeric profile in a recognized source-free Document Preset is discarded during
+conversion so the destination can recalibrate before publication; current
+projects still reject that obsolete profile.
+Current seed-free strict geometry profiles are v4 at both 32/64 and 64/128
+tiers except Guide Faces; seed-bearing strict and 32+64 mean profiles are
+seed-neutral v5. Guide Faces producer contract v2 canonicalizes provenance-linked
+near-coincident contacts while preserving the authored guides and the fixed
+reference windows. It uses distinct seed-free Guide Faces v5 profiles for the
+32/64 and 64/128 strict tiers. A former generic v4 companion whose typed output
+is Guide Faces is obsolete even if its recipe still matches: supported source-free
+Document Presets discard only that numeric companion and prepare the exact active
+and hidden ALL bindings before publication. Configuration-16 desired-coverage
+Start and End values stay unchanged; older raw-response Presets still convert
+their endpoints through the newly prepared curve. A standalone Pattern Preset
+may discard its optional former Guide Faces v4 companion in memory while
+preserving authored recipe and file bytes. Ordinary projects reject the obsolete
+companion. Unaffected producers keep their profiles and numeric artifacts; this
+producer revision changes no container or schema shape. Recognized
+former v2 and v3 measurements are removed from source-free Document Presets
+without changing authored Pattern or response intent; ordinary projects reject
+those obsolete profiles. A recognized source-free Document Preset also removes
+only former v4 seed-bearing numeric companions. A current-format standalone
+Pattern Preset may drop only its optional former v4 seed-bearing companion when
+read, preserving the authored recipe, seeds, and original file bytes so a later
+structural Apply can prepare v5. Unknown profiles still reject; ordinary projects
+remain current-only. A generic CoverCanvas Pattern Preset may carry the
+measurement of its exact finite spiral materialized on the fixed 1024-square
+reference. Validation computes that concrete reference from the authored
+CoverCanvas recipe while leaving the stored recipe generic. Applying the Preset
+attaches the companion only when the receiving channel's complete concrete
+binding matches it; a different canvas-derived turn count requires its own
+measurement.
+
+The current project document schema is **17** in media container **2**;
+source-free Document Preset format remains **3** with configuration schema
+**16**; standalone Pattern Preset format is **8**. Projects remain current-only.
+Standalone Pattern Presets carry an optional typed artifact and remain
+current-only. Source-free `.toniator-preset` Document Presets are the explicit
+pre-release compatibility exception: recognized older formats retain former raw
+Start and initialized End response intent in a typed, unpublishable pending
+import. A valid current neutral shell supplies exact active and hidden ALL
+bindings for headless saved-companion reuse or bounded calibration. Only after
+every required companion is present does conversion map each former raw
+endpoint `a` to its binding's measured `C(a)`, reconstruct ALL and explicit
+named authority where distinct curves require it, and validate a complete
+current configuration. An old raw endpoint above one is not clipped before
+conversion. Missing data, cancellation, or a stale publication guard leaves
+the existing document and original Preset bytes unchanged. Conversion
+preserves active effective endpoint coverage and easing for ALL and named
+channels; it does not reproduce former raw-size interpolation or former
+uncalibrated SourceColorAlpha intermediate footprints. It preserves authored scalar Density and
+explicit Scatter distances; old Raw/Jittered/Clustered recipes without an
+authored spacing receive the current `10.24` default. Obsolete dormant
+per-Pattern response endpoints have no live current authority and do not
+override current Advanced response on later Pattern replacement. Original
+archives are retained when personal files are converted. Unknown or
+unrepresentable revisions fail with a precise diagnostic rather than silently
+discarding active settings.
 
 ---
 

@@ -100,6 +100,7 @@ fn record() -> PresetRecord {
     )
     .expect("asymmetric open motif validates");
     PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "curve-motif-persistence".into(),
             name: "Curve Motif Persistence".into(),

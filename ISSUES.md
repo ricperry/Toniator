@@ -148,12 +148,14 @@ an entry does not authorize a later stage or change an accepted contract.
 
 ## TON-001 — Intermittent RGB edit to CMYK crash
 
-- Status: Open; deferred pending a reliable reproducer and separate authorization.
+- Status: Permanently deferred at the user's request (2026-10-08).
 - Report: Switching an edited RGB document to CMYK has intermittently crashed.
   A deterministic reproduction is not established. Gate 21B-4 does not diagnose
   or claim to repair this older report.
-- Next step: Capture the exact document and edit sequence with a private GTK
-  log/backtrace, then scope the repair from that evidence.
+- Disposition: The user has been unable to reproduce the issue across numerous
+  coding sessions, trials, and tests since shortly after it was added to this
+  ledger. Retain the historical report without claiming a diagnosed fix; no
+  further investigation or repair is planned.
 
 ## TON-002 — First personal Pattern thumbnail can block the gallery
 
@@ -310,8 +312,8 @@ an entry does not authorize a later stage or change an accepted contract.
   bypass. No GTK readback, independent Debian 13.6 reproduction, GNOME/Mutter
   review, supplier print, or ICC conversion/soft proof was performed. The
   alpha-based preflight cannot detect color-only detail
-  inside opaque areas. TON-001 and TON-003 remain separate open reproductions;
-  TON-008 is resolved in this ledger, and TON-010 remains paused.
+  inside opaque areas. TON-003 remains separately open; TON-001 is permanently
+  deferred. TON-008 is resolved in this ledger, and TON-010 remains paused.
 - Next step: The proposed G2 preview/backing status is presentation only and
   does not resolve TON-012. A transparency/color investigation remains separate
   and gated; keep supplier/process behavior and the separate TON-001 and TON-003
@@ -320,9 +322,8 @@ an entry does not authorize a later stage or change an accepted contract.
 
 ## TON-013 — SVG export emits zero-radius circles and rounds tiny positive radii to zero
 
-- Status: Open, deferred as a separate bounded SVG-export correctness task.
-  This issue is independent of garment preflight/G2a and G2R; no fix is part of
-  the current stage.
+- Status: Fixed and user-accepted (2026-10-08); not yet committed. The fix is confined
+  to SVG serialization and remains independent of garment preflight/G2a and G2R.
 - User-reported impact: Official SVG exports contain non-rendering circles that
   clutter Inkscape layers. The user reports selection/union difficulty and an
   associated crash risk; selection, union, and crash causality have not been
@@ -340,6 +341,9 @@ an entry does not authorize a later stage or change an accepted contract.
   clean diagnostic comparison `raster-sample-export.zero-radius-removed.svg`
   (SHA-256 `06f371bd45ba3b058eea3a485951e845414c845f69660267ac4487dc2c70c39a`)
   is a separate derivative, not the failing fixture or a replacement input.
+  The current retained `.toniator` working copy has a different hash from this
+  historical diagnostic hash and was preserved without using it as a reproduction
+  baseline.
 - The supplied Inkscape 1.4.4 parity record compares transparent 1024×1024 RGBA
   output for the fixture and that derivative: zero changed pixels, maximum
   channel difference zero, and equal RGB and alpha. This is limited to the
@@ -350,37 +354,32 @@ an entry does not authorize a later stage or change an accepted contract.
 - Diagnostic records retained locally: `diagnosis-report.txt`,
   `xml-analysis.json`, and `render-parity.json`. These supplied records and
   user-owned input files are not distributed in this checkpoint.
-- Source assessment at HEAD `a980005`: both supported circle-writing branches
-  emit circles unconditionally in `crates/toniator-render/src/lib.rs`
-  (`GeometryOutput::CircularMarks` near 4443 and `CanonicalMark::Circle` near
-  4493). `compact_number` near 4719 formats to six fractional digits, so a
-  positive radius such as `1e-7` can serialize as zero. This is a confirmed
-  serialization hazard, but it is not proven to explain every zero-radius
-  element in the supplied fixture. `crates/toniator-patterns/src/lib.rs`
-  `radius_from_ink_with_diameter` near 13703/13726 can produce genuine zero
-  geometry when minimum fill and evaluated ink are zero; do not change geometry
-  to fix serialization.
-- Next step: In a separately approved SVG task, omit only genuine `r == 0`
-  circles in every supported circle-writing branch. Preserve every valid
-  positive radius, including `1e-7` and values that the current formatter would
-  round to zero; do not add an epsilon cutoff or drop values after formatting.
-  Keep canonical marks, sites, IDs, paint, and intentional tiny geometry intact;
-  do not force circles into paths. Add focused structural tests for exact zero,
-  tiny positive radii, both branches, and retained associations, plus bounded
-  raster appearance parity. Test Inkscape selection/union only in a separately
-  authorized GUI check. Do not alter raster/preview output, minimum-fill
-  geometry, or unrelated numeric formatting as part of this fix.
+- Implementation: Both supported circle-writing branches now omit only exact
+  zero radii during SVG serialization. Original enumeration IDs and paint
+  associations remain stable, and every positive radius is retained. Radius
+  formatting alone uses shortest nonzero round-trip text when the shared compact
+  formatter would produce zero; canonical geometry, raster output, and other
+  numeric formatting are unchanged.
+- Verification: Focused renderer tests cover signed zero, tiny positive radii,
+  both writer branches, and retained IDs/paint. The 64×64 Inkscape fixture
+  parity under `target/validation/issues-20261008/ton013-zero-circle-parity/`
+  rasterizes an ordinary circle with `r=0` and `r=-0`, then the same SVG after
+  only those zero circles are removed; decoded RGBA is identical. Both immutable
+  sample SVG outputs were also rasterized by Inkscape as recorded in the round
+  report. This is bounded consumer evidence; GUI selection/union was not tested
+  and no causal claim is made about the reported crash.
 
 ## TON-014 — SVG font discovery can reject available system fonts
 
-- Status: Open; low priority and deferred at the user's request. Tracking only;
-  no diagnosis or fix is authorized by this entry.
+- Status: Fixed and user-accepted (2026-10-08); not yet committed.
 - Observed failure: The unchanged published `b819fd4` AppImage rejects
   `vector-sample.svg` on a clean Debian 13.7 / Xfce 4.20 / X11 VM during stock
   file-chooser import and a separate direct-file launch:
   `source.svg.font_policy: no usable system sans-serif font is available`.
-  DejaVu fonts are installed and `fc-match sans` succeeds. Root cause remains
-  unresolved; these observations do not establish why the importer rejects them.
+  DejaVu fonts are installed and `fc-match sans` succeeds. `fontdb`'s original
+  generic SansSerif query can still fail when the configured preferred family
+  alias names a font that is not installed; `fc-match` alone does not establish
+  that this query succeeds.
 - Candidate SHA-256:
   `9643e6fc6577c2ec7a687283d71fdbe132062c569ebac652bfba50f2ed00e86a`.
   Existing packaged-QA evidence: `packaged-qa-progress.json` and
@@ -397,42 +396,63 @@ an entry does not authorize a later stage or change an accepted contract.
 - User guidance: Convert SVG text to paths/curves in the authoring tool before
   export when precise source-reference interpretation matters, instead of relying
   on other consumers having identical fonts installed. This stabilizes the source
-  reference, not Toniator output fidelity. It is not a verified workaround for
-  the importer error above; textless/outlined SVG import has not been tested for
-  this failure.
+  reference, not Toniator output fidelity. It is not a workaround required by
+  the implemented fallback.
+- Implementation: The sampler keeps the existing generic SansSerif query as
+  first choice. Only if it fails, it tries exact installed family matches in
+  deterministic order: DejaVu Sans, Noto Sans, Liberation Sans, and FreeSans.
+  It updates the generic mapping only after an actual fontdb family match; the
+  existing no-usable-font diagnostic remains when no candidate exists.
+- Verification: Focused tests retain a successful original generic-family
+  selection, resolve a broken FreeSans alias to available DejaVu Sans, reject an
+  empty database, and decode the immutable text SVG. The immutable PNG source
+  field remains unchanged. A parent-verified CLI inspection in a fresh Debian 13
+  container without a FONTCONFIG_FILE override succeeded with glyph coverage
+  true; details are in `target/validation/issues-20261008/report.md`.
 
 ## TON-015 — Advanced sidebar entry has conflicting disclosure behavior
 
-- Status: Open; user-reported, not reproduced; tracking only. No implementation
-  is authorized by this entry.
+- Status: Fixed and user-accepted (2026-10-08); not yet committed. The existing Advanced
+  Settings button now opens its dialog directly; the orphan expander was removed.
 - Report: The main sidebar presents a single button under a collapsible
   Advanced heading. The user considers this organization confusing.
-- Acceptable designs, pending implementation planning: make Advanced a complete
-  collapsible section containing its settings, or make it a direct button that
-  opens a dialog. This entry does not choose between them.
-- Verification: Inspect the live sidebar and keyboard/accessibility behavior;
-  confirm the chosen design has either settings inside the expanded section or
-  a direct dialog-opening action, with no orphan button under the heading.
+- Verification: Blueprint/resource source and app checks pass. Private Sway
+  screenshots in `.codex-work/evidence/ui-run-20261008-134656-111906/`
+  show the Advanced Settings button without an orphan disclosure heading and
+  its directly opened dialog. This is automated Sway visual evidence, not
+  GNOME/Mutter or human desktop acceptance.
 
 ## TON-016 — Shared appearance baseline should survive channel-model changes
 
-- Status: Open; user-reported concern, not reproduced; tracking only. No
-  persistence or schema change is proposed by this entry.
+- Status: Fixed and user-accepted (2026-10-08); not yet committed. A stored last-ALL
+  baseline now survives replacement channel models.
 - Report: Appearance settings applied to All compatible channels may lose their
   shared baseline when Color & Channel Model changes.
-- Expected behavior: Preserve the shared baseline across model changes. Only
-  channel-specific deviations without a relevant counterpart in the destination
-  model may change; such an exception must not reset the shared baseline or all
-  channel appearances.
-- Verification: Apply distinct appearance values to All compatible channels,
-  change Color & Channel Model, and verify the shared values remain. Repeat with
-  a per-channel override and verify only an override without a destination-model
-  counterpart may change.
+- Implementation: `DocumentAppearanceBaseline` stores optional Start values
+  for density, density aspect, pattern rotation, and X/Y translation in both
+  `Document` and reusable `DocumentConfiguration`. ALL assignments update only
+  specified fields; named/End edits do not. Model changes seed canonical
+  channels from this authority rather than old channels. ALL Pattern replacement
+  clears recipe-relative density/aspect/rotation entries and keeps translations.
+  Project schema 12 and Document Preset configuration schema 11 persist the
+  baseline; older schema 11/configuration 10 are rejected with no inference.
+- Verification: Focused tests cover all five values, partial updates, named and
+  End edits, RGB→CMYK→Source color + alpha→RGB model changes, ALL versus named
+  Pattern replacement, baseline-only `None` invalidation, exact Undo/Redo, and
+  project/Preset round trips plus obsolete/invalid rejection. App-level witnesses
+  cycle both immutable sample workspaces through the real model selector and
+  export native PNGs under `target/validation/issues-20261008/ton016-model-witnesses/`.
+  Private Sway screenshots `10-ton016-all-five-baseline.png` through
+  `15-ton016-returned-r-baseline.png` show all five values retained across RGB,
+  CMYK, SourceColorAlpha, and RGB return after a named-channel override. AT-SPI
+  checks confirm untouched Tab/focus-leave creates no baseline history, Enter
+  on the same visible value records it once, and focus leave does not add a
+  second entry. Exact Undo/Redo and changed-value commit readbacks are in
+  `target/validation/issues-20261008/report.md` and its linked evidence.
 
 ## TON-017 — Applying a built-in Pattern should not require a review step
 
-- Status: Open; user-reported, not reproduced; tracking only. No implementation
-  is authorized by this entry.
+- Status: Fixed and user-accepted (2026-10-08); not yet committed.
 - Report: Selecting a built-in Pattern in Pattern Wizard presents Review Pattern
   as an action before applying the familiar Pattern.
 - Expected behavior: The selected built-in offers exactly Cancel, Customize,
@@ -441,21 +461,114 @@ an entry does not authorize a later stage or change an accepted contract.
   label change. Preserve Cancel, Customize, and Create new semantics. Customize
   remains the way to inspect and step through settings. This issue does not
   authorize redesigning the custom-Pattern workflow.
-- Verification: In the live wizard, verify the four actions and direct built-in
-  application; also verify Customize can inspect/step through settings and that
-  Cancel and Create new retain their current behavior.
+- Implementation: Built-in gallery entries expose exactly Cancel, Customize,
+  Create new, and Apply Pattern. Apply Pattern uses the captured current target
+  directly, publishes one atomic undoable replacement, and shows affected channel
+  names in the gallery. Personal Patterns retain Review Pattern; Customize,
+  Create new, and Cancel retain their separate paths.
+- Verification: Eight focused app tests cover built-in-only admission, gallery
+  action ownership across preview refresh, Create new candidate markers, target
+  disclosure, personal/stale rejection, direct apply, delta clearing, and
+  named/ALL Undo/Redo. Private Sway evidence confirms direct Apply, Undo/Redo,
+  Cancel, Customize, and Create new flows. After Create new → Back → selecting
+  One Guide Lines, live AT-SPI readback reported the card toggle pressed and the
+  Apply Pattern action correctly named/described; direct Apply closed the wizard
+  and rendered the recipe. The selected card was offscreen in the saved frame;
+  see the round report for the saved-versus-live evidence boundary. This is not
+  GNOME/Mutter or human desktop acceptance.
 
 ## TON-018 — Calibrate RGB and CMYK advanced settings for source-tone fidelity
 
-- Status: Deferred at the user's request (2026-10-07); tracking only. Do not
-  begin calibration until the user requests it and supplies the presets.
-- Goal: Dial in Advanced settings separately for RGB and CMYK, using each
-  mode's respective user-provided preset, so the overall image tone matches
-  the source artwork.
-- Inputs pending: The user will provide the preset or presets for the two
-  modes before calibration begins.
-- Scope when resumed: Compare each preset's rendered result with the source,
-  tune its Advanced settings, and record the final values for each mode.
-- Verification: Present source, baseline, and calibrated comparisons for RGB
-  and CMYK, with the corresponding preset and settings identified, for the
-  user's review of overall tonal fidelity.
+- Status: In progress as of 2026-10-11; not user-accepted, checkpointed, or
+  released. Preserve the accepted but uncommitted TON-013–17 work and the
+  extensive dirty worktree.
+- Current behavior: Production stores one calibration per finished structural
+  Pattern revision, persists it with the Pattern and in applied projects and
+  Document Presets, reuses it for artwork, Feature size, whole-Pattern rotation,
+  seed variation, and response edits, replaces it after completed structural
+  edits, and offers manual Recalibrate in Advanced. Structural calibration jobs
+  publish atomically and reject stale completion. Advanced owns response
+  settings; the Wizard preview stays neutral and structural. Variable retains
+  artwork-weighted density. Uniform targets 99.9% statistical geometric
+  coverage; strict Visible Mark Margin requires Variable. Fixed authored
+  spacing remains fixed; Scatter population derives from artwork area, with
+  Feature size scaling placement and marks together.
+- Persistence: Project schema 17, media container 2, Document Preset format 3
+  with configuration schema 16, and standalone Pattern format 8 are current.
+  Supported older Document Presets have deterministic conversion that
+  preserves original bytes; ordinary projects remain current-only.
+- Verification: The exact photo's prior Straight RGB Feature 0.25 failure now
+  exports natively in 11.12 s at 1.33 GiB peak memory on the tested machine.
+  Focused evidence covers both immutable sample assets and includes [three-guide
+  seam repair](target/validation/ton018-three-guide-seam-20261011/README.md),
+  [outline simplification](target/validation/ton018-outline-relative-20261011/README.md),
+  and [area-raster coverage](target/validation/ton018-area-raster-20261011/README.md).
+  The [private Sway screenshot](.codex-work/evidence/ui-run-20261011-184949-688907/01-guide-preview.png)
+  was reviewed and the session stopped. Verification passed: `cargo build -p toniator-app -p toniator-cli --offline`.
+  Scoped strict Clippy for render/app/CLI, the focused off-canvas circle
+  witness, and `git diff --check` also pass. Automated Sway/wlroots evidence
+  does not establish human review or GNOME/Mutter acceptance. PNG
+  tiling is not implemented; the UI reports the 67,108,864-pixel cap.
+- Remaining: Eleven of fifteen personal Document Preset candidates converted
+  in isolation; four fail across three bindings: Confetti and Noisy Stained
+  Glass Uniform Offset (raw 2, seed 23), HexGridDotsAlignedRGB (128-knot cap),
+  and SkinnyCurve (convergence). Originals remain untouched; any later
+  conversion needs exact backups and hash guards. A user-approved opaque SVG
+  join has not begun, so the current SVG seam risk remains. The animation
+  response policy after structural edits is unanswered; do not infer it. Finish
+  broad GTK workflows and Pattern-family spot checks. Add a focused test for
+  multi-contour omission accounting; omission of a contour is a risk to
+  investigate, not a confirmed defect. The whole-primitive tiny-area guard is
+  implemented.
+
+## TON-019 — Preview panning stalls during drag and appears to discard rendered areas
+
+- Status: Open; user-reported (2026-10-08), not independently reproduced;
+  tracking only. No implementation is authorized by this entry.
+- Report: Click-and-drag panning frequently stops to render newly exposed
+  canvas areas, interrupting the active drag. Previously rendered areas that
+  move off screen appear to require rendering again when the user pans back;
+  the cache behavior and cause have not been verified.
+- Expected behavior: Keep panning responsive throughout the drag. Defer new
+  rendering for exposed areas until the user releases the drag, then render
+  the final viewport. Reuse valid previously rendered areas when panning back
+  instead of discarding them merely because they moved off screen. Cache reuse
+  must respect document/render changes and zoom or resolution changes, with
+  bounded memory use.
+- Verification: At a zoom level with canvas overflow, drag continuously across
+  uncached areas and confirm no new viewport render interrupts the gesture.
+  Release and verify the final exposed area updates. Pan away and back over
+  rendered areas without editing or changing zoom, and inspect render activity
+  to verify reuse. Also check invalidation after edits or zoom changes, rapid
+  successive drags, stale-result rejection, memory bounds, and both immutable
+  sample artworks. Keep this interaction/cache issue distinct from TON-003's
+  dense-Pattern construction and full-resolution preview latency.
+
+## TON-020 — Creating a new grid after a customized Grid Voronoi exposes confusing retained guide state
+
+- Status: Open; user-reported (2026-10-08), not independently reproduced;
+  tracking only. No implementation is authorized by this entry.
+- Reported workflow: Select **Grid Voronoi**, customize its two grid-defining
+  curves into wave-shaped guides, and apply the Pattern. Later, reopen Pattern
+  Wizard and try to create a new grid-family Pattern using only a single guide.
+  The user reports that the new grid cannot be defined correctly: subsequent
+  wizard pages have confusing layouts and unexpectedly many options, appearing
+  to retain multiple stale grids from the earlier Pattern.
+- Uncertainty: Retained wizard/grid state is the suspected cause, not a
+  confirmed diagnosis. The intervening actions implied by "after a while" and
+  the exact affected pages/options have not yet been captured.
+- Expected behavior: Creating a new Pattern starts a coherent draft for the
+  chosen family. A single-guide configuration is straightforward to define;
+  prior grids, curve edits, and guide collections do not silently populate or
+  complicate it. Subsequent pages reflect the active configuration and expose
+  relevant options clearly, while preserving access to supported capabilities.
+  Customizing the existing Pattern remains distinct from creating a new one.
+- Verification when authorized: Reproduce the two-wave-guide Grid Voronoi
+  workflow, apply it, reopen the wizard, and create a single-guide Pattern.
+  Inspect the draft's guide/curve identities and counts, generated page route,
+  visible controls, preview, and applied result for unintended retained state.
+  Compare with creating the same Pattern from a fresh document; also check
+  Back/Next and Cancel/reopen behavior without changing the main document
+  before Apply. Record the exact intervening actions if immediate reopening
+  does not reproduce the report. Keep this separate from TON-017's built-in
+  direct-Apply and gallery-selection fixes.

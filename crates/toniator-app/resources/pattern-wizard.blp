@@ -39,7 +39,7 @@ template $ToniatorPatternWizardShell : Gtk.Box {
           xalign: 0;
           styles [ "heading" ]
         }
-        Gtk.Label {
+        Gtk.Label wizard_preview_description {
           label: "A neutral light-to-dark sample shows how your pattern responds to tone. Apply it to see the result on your artwork.";
           xalign: 0;
           wrap: true;
@@ -117,7 +117,7 @@ template $ToniatorPatternWizardShell : Gtk.Box {
         }
 
         Gtk.Label wizard_gallery_instruction {
-          label: "Select a Pattern to preview it, then Review Pattern to check and apply it. Customize changes its design; Create new starts a fresh layout.";
+          label: "Select a built-in Pattern to preview it, then Apply Pattern to apply it directly. Customize walks through its layout and drawing settings; Create new starts a fresh layout. Saved personal Patterns keep the Review step.";
           xalign: 0;
           wrap: true;
           styles [ "dim-label" ]

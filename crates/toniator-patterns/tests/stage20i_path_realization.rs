@@ -7,9 +7,10 @@ use toniator_domain::{
     StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_patterns::{
-    GridInspectRequest, RealizationStructuralInput, StrokeResponse,
-    evaluate_document_typed_family_cancellable, realize_typed_canonical_strokes_cancellable,
-    resolve_document_pattern_pipeline,
+    CoverageCurve, CoverageKnot, GeometryResponseInput, GridInspectRequest,
+    RealizationStructuralInput, StrokeResponse, evaluate_document_typed_family_cancellable,
+    realize_typed_canonical_strokes_cancellable,
+    realize_typed_canonical_strokes_with_response_cancellable, resolve_document_pattern_pipeline,
 };
 use toniator_sampling::{SourceFormatHint, decode_source};
 
@@ -126,6 +127,80 @@ fn path_family() -> (
         SourceFormatHint::Svg,
     ).expect("bounded test source decodes");
     (document, family, plan, source)
+}
+
+/// Transfers a completed uniform source sample inside adaptive guide-width realization.
+///
+/// Calibrated width/profile geometry equals a matching constant probe at every adaptive sample;
+/// the original source cutoff still creates zero-width gaps before transfer.
+///
+/// # Panics
+/// Panics if the current guide family, source sampler, or bounded outline realization fails.
+#[test]
+fn ton018_stroke_transfer_matches_constant_probe_and_respects_cutoff() {
+    let (document, family, plan, source) = path_family();
+    let mapping = SourceMapping::canonical(SourceMappingComponent::Red);
+    let ink = source
+        .sample_mapping_response(
+            toniator_geometry::Point2::new(32.0, 24.0),
+            document.canvas(),
+            mapping,
+        )
+        .unwrap();
+    let curve = CoverageCurve::new(vec![
+        CoverageKnot {
+            response: 0.0,
+            coverage: 0.0,
+        },
+        CoverageKnot {
+            response: 0.75,
+            coverage: 0.5,
+        },
+        CoverageKnot {
+            response: 1.0,
+            coverage: 1.0,
+        },
+    ])
+    .unwrap();
+    let response = StrokeResponse {
+        minimum_thickness: 0.2,
+        maximum_thickness: 1.0,
+        bias: 0.0,
+    };
+    let realize = |mapping, input| {
+        realize_typed_canonical_strokes_with_response_cancellable(
+            &family,
+            &plan,
+            &source,
+            document.canvas(),
+            mapping,
+            response,
+            1.0,
+            262_144,
+            100_000,
+            input,
+            &|| false,
+        )
+        .unwrap()
+        .output
+        .strokes
+    };
+    let calibrated = realize(mapping, GeometryResponseInput::Calibrated(&curve));
+    let probe = realize(
+        mapping,
+        GeometryResponseInput::ConstantProbe(curve.inverse(ink).unwrap()),
+    );
+    assert!(!calibrated.is_empty());
+    assert_eq!(calibrated, probe);
+    assert!(calibrated.iter().any(|stroke| stroke.profile.len() > 2));
+    let mut suppressed = mapping;
+    suppressed.tone.cutoff = (ink + 0.1).min(1.0);
+    let omitted = realize(suppressed, GeometryResponseInput::Calibrated(&curve));
+    assert!(
+        omitted
+            .iter()
+            .all(|stroke| stroke.profile.iter().all(|sample| sample.width == 0.0))
+    );
 }
 
 /// Proves a public guide-path realization consumes only ordered raw paths/bases and adaptively subdivides pattern-scale intervals.

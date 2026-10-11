@@ -13,8 +13,8 @@ use crate::{
     planar_arrangement::{self, ArrangementPiece, VertexKey},
 };
 
-/// Stable identity for the Stage 20P guide-arrangement-face contract.
-pub const GUIDE_FACE_CONTRACT_ID: &str = "toniator.guide-faces.v1";
+/// Producer identity for provenance-canonicalized Guide Faces arrangement geometry.
+pub const GUIDE_FACE_CONTRACT_ID: &str = "toniator.guide-faces.v2";
 
 /// Configurable bounded work for one guide-face build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +98,174 @@ pub struct GuideFaceResult {
     pub diagnostics: GuideFaceDiagnostics,
 }
 
+/// One ordered segment split and its pairwise contact provenance, if any.
+#[derive(Clone, Copy)]
+struct SplitParameter {
+    value: f64,
+    contact: Option<usize>,
+}
+
+/// One disjoint-set contact class bounded to one existing arrangement lattice unit per axis.
+struct ContactClass {
+    parent: usize,
+    size: usize,
+    key: VertexKey,
+    minimum: Point2,
+    maximum: Point2,
+}
+
+/// Canonicalizes only pairwise contacts linked by the same source-path split parameter.
+///
+/// Unrelated nearby contacts never weld by geometric proximity. Each union class must fit within
+/// one existing 1e-9 lattice unit in **each axis**; an over-spread transitive chain fails rather
+/// than silently merging distinct authored vertices. The lexicographically smallest observed
+/// lattice key is independent of union order.
+#[derive(Default)]
+struct ContactClasses {
+    classes: Vec<ContactClass>,
+}
+
+impl ContactClasses {
+    /// Adds one bounded pairwise contact with its preexisting lattice key.
+    ///
+    /// # Errors
+    /// Returns numeric or fallible-allocation diagnostics before a partial class is published.
+    fn add(&mut self, point: Point2) -> Result<usize, GuideFaceError> {
+        let key = planar_arrangement::vertex_key(point).map_err(curve_error)?;
+        self.classes.try_reserve(1).map_err(|_| {
+            GuideFaceError::new(
+                "region.guide_faces.allocation.contacts",
+                "guide-face contact allocation failed",
+            )
+        })?;
+        let id = self.classes.len();
+        self.classes.push(ContactClass {
+            parent: id,
+            size: 1,
+            key,
+            minimum: point,
+            maximum: point,
+        });
+        Ok(id)
+    }
+
+    /// Finds a contact root iteratively and compresses its union-by-size path.
+    ///
+    /// Every parent path has logarithmic maximum depth before compression because only a
+    /// smaller class attaches to an equally large or larger class.
+    fn root(&mut self, id: usize) -> usize {
+        let mut root = id;
+        while self.classes[root].parent != root {
+            root = self.classes[root].parent;
+        }
+        let mut current = id;
+        while self.classes[current].parent != root {
+            let parent = self.classes[current].parent;
+            self.classes[current].parent = root;
+            current = parent;
+        }
+        root
+    }
+
+    /// Unifies provenance-linked contacts only when their entire class remains one lattice unit wide.
+    ///
+    /// # Errors
+    /// Rejects an over-spread class atomically as ambiguous arrangement topology.
+    fn union(&mut self, first: usize, second: usize) -> Result<(), GuideFaceError> {
+        let first = self.root(first);
+        let second = self.root(second);
+        if first == second {
+            return Ok(());
+        }
+        let minimum = Point2::new(
+            self.classes[first]
+                .minimum
+                .x
+                .min(self.classes[second].minimum.x),
+            self.classes[first]
+                .minimum
+                .y
+                .min(self.classes[second].minimum.y),
+        );
+        let maximum = Point2::new(
+            self.classes[first]
+                .maximum
+                .x
+                .max(self.classes[second].maximum.x),
+            self.classes[first]
+                .maximum
+                .y
+                .max(self.classes[second].maximum.y),
+        );
+        if maximum.x - minimum.x > planar_arrangement::VERTEX_LATTICE_UNIT
+            || maximum.y - minimum.y > planar_arrangement::VERTEX_LATTICE_UNIT
+        {
+            return Err(GuideFaceError::new(
+                "region.guide_faces.geometry.vertex",
+                "coincident guide contacts exceed one arrangement lattice unit",
+            ));
+        }
+        let (keep, absorbed) = if self.classes[first].size > self.classes[second].size
+            || (self.classes[first].size == self.classes[second].size && first < second)
+        {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let size = self.classes[keep]
+            .size
+            .checked_add(self.classes[absorbed].size)
+            .ok_or(GuideFaceError::new(
+                "region.guide_faces.limits.intersection_contacts",
+                "guide-face contact class size overflowed",
+            ))?;
+        self.classes[absorbed].parent = keep;
+        self.classes[keep].size = size;
+        self.classes[keep].key = self.classes[keep].key.min(self.classes[absorbed].key);
+        self.classes[keep].minimum = minimum;
+        self.classes[keep].maximum = maximum;
+        Ok(())
+    }
+
+    /// Returns the single representative key shared by every incident split piece.
+    fn key(&mut self, id: usize) -> VertexKey {
+        let root = self.root(id);
+        self.classes[root].key
+    }
+}
+
+/// Anchors each same-path parameter group to its first retained value and links its contacts.
+///
+/// The existing 1e-12 parameter equivalence remains the only welding trigger. Comparing every
+/// candidate to the retained anchor prevents a long chain of individually close values from
+/// collapsing distinct intersections. Contact-class extent independently bounds cross-path chains.
+///
+/// # Errors
+/// Returns cancellation or an ambiguous-contact diagnostic before fragment construction.
+fn canonicalize_split_parameters(
+    values: &mut Vec<SplitParameter>,
+    contacts: &mut ContactClasses,
+    cancelled: &impl Fn() -> bool,
+) -> Result<(), GuideFaceError> {
+    values.sort_by(|left, right| left.value.total_cmp(&right.value));
+    let mut retained = 0usize;
+    for next in 0..values.len() {
+        poll(cancelled)?;
+        if retained > 0 && values[next].value - values[retained - 1].value <= 1e-12 {
+            match (values[retained - 1].contact, values[next].contact) {
+                (Some(first), Some(second)) => contacts.union(first, second)?,
+                (None, Some(contact)) => values[retained - 1].contact = Some(contact),
+                _ => {}
+            }
+        } else {
+            values.swap(retained, next);
+            retained += 1;
+        }
+    }
+    values.truncate(retained);
+    Ok(())
+}
+
 /// Builds all complete positive bounded guide faces relevant to the final canvas.
 ///
 /// # Errors
@@ -179,7 +347,8 @@ pub fn build_guide_faces_cancellable(
             "guide-face source-segment limit exceeded",
         ));
     }
-    let mut parameters = Vec::<Vec<Vec<f64>>>::new();
+    let mut parameters = Vec::<Vec<Vec<SplitParameter>>>::new();
+    let mut contact_classes = ContactClasses::default();
     reserve(
         &mut parameters,
         paths.len(),
@@ -195,7 +364,16 @@ pub fn build_guide_faces_cancellable(
         for _ in path.path.segments() {
             let mut values = Vec::new();
             reserve(&mut values, 2, "split-parameter allocation failed")?;
-            values.extend([0.0, 1.0]);
+            values.extend([
+                SplitParameter {
+                    value: 0.0,
+                    contact: None,
+                },
+                SplitParameter {
+                    value: 1.0,
+                    contact: None,
+                },
+            ]);
             per_path.push(values);
         }
         parameters.push(per_path);
@@ -232,18 +410,25 @@ pub fn build_guide_faces_cancellable(
                             "guide-face contact limit exceeded",
                         ));
                     }
+                    let contact = contact_classes.add(intersection.point())?;
                     reserve(
                         &mut parameters[path_index][first_segment],
                         1,
                         "split-contact allocation failed",
                     )?;
-                    parameters[path_index][first_segment].push(intersection.first_parameter());
+                    parameters[path_index][first_segment].push(SplitParameter {
+                        value: intersection.first_parameter(),
+                        contact: Some(contact),
+                    });
                     reserve(
                         &mut parameters[path_index][second_segment],
                         1,
                         "split-contact allocation failed",
                     )?;
-                    parameters[path_index][second_segment].push(intersection.second_parameter());
+                    parameters[path_index][second_segment].push(SplitParameter {
+                        value: intersection.second_parameter(),
+                        contact: Some(contact),
+                    });
                 }
             }
         }
@@ -279,6 +464,7 @@ pub fn build_guide_faces_cancellable(
                         "guide-face contact limit exceeded",
                     ));
                 }
+                let contact = contact_classes.add(intersection.point())?;
                 let first_segment = intersection.first_location().segment_index();
                 let second_segment = intersection.second_location().segment_index();
                 reserve(
@@ -286,14 +472,26 @@ pub fn build_guide_faces_cancellable(
                     1,
                     "split-contact allocation failed",
                 )?;
-                parameters[first][first_segment].push(intersection.first_location().parameter());
+                parameters[first][first_segment].push(SplitParameter {
+                    value: intersection.first_location().parameter(),
+                    contact: Some(contact),
+                });
                 reserve(
                     &mut parameters[second][second_segment],
                     1,
                     "split-contact allocation failed",
                 )?;
-                parameters[second][second_segment].push(intersection.second_location().parameter());
+                parameters[second][second_segment].push(SplitParameter {
+                    value: intersection.second_location().parameter(),
+                    contact: Some(contact),
+                });
             }
+        }
+    }
+    for per_path in &mut parameters {
+        for values in per_path {
+            charge(&mut inspections, values.len(), limits)?;
+            canonicalize_split_parameters(values, &mut contact_classes, &cancelled)?;
         }
     }
     let mut pieces = Vec::<ArrangementPiece<PieceProvenance>>::new();
@@ -306,17 +504,23 @@ pub fn build_guide_faces_cancellable(
     for (path_index, path) in paths.iter().enumerate() {
         for (segment_index, segment) in path.path.segments().iter().copied().enumerate() {
             let values = &mut parameters[path_index][segment_index];
-            values.sort_by(f64::total_cmp);
-            values.dedup_by(|left, right| (*left - *right).abs() <= 1e-12);
             for pair in values.windows(2) {
                 poll(&cancelled)?;
-                if pair[1] - pair[0] <= 1e-12 {
+                if pair[1].value - pair[0].value <= 1e-12 {
                     continue;
                 }
-                let fragment = segment_range(segment, pair[0], pair[1]).map_err(curve_error)?;
-                let start =
-                    planar_arrangement::vertex_key(fragment.start()).map_err(curve_error)?;
-                let end = planar_arrangement::vertex_key(fragment.end()).map_err(curve_error)?;
+                let fragment =
+                    segment_range(segment, pair[0].value, pair[1].value).map_err(curve_error)?;
+                let start = match pair[0].contact {
+                    Some(contact) => contact_classes.key(contact),
+                    None => {
+                        planar_arrangement::vertex_key(fragment.start()).map_err(curve_error)?
+                    }
+                };
+                let end = match pair[1].contact {
+                    Some(contact) => contact_classes.key(contact),
+                    None => planar_arrangement::vertex_key(fragment.end()).map_err(curve_error)?,
+                };
                 if start == end {
                     return Err(GuideFaceError::new(
                         "region.guide_faces.geometry.path",
@@ -341,8 +545,8 @@ pub fn build_guide_faces_cancellable(
                     payload: PieceProvenance {
                         path: path.id,
                         segment_index,
-                        start: pair[0],
-                        end: pair[1],
+                        start: pair[0].value,
+                        end: pair[1].value,
                     },
                 });
                 if pieces.len() > limits.max_split_segments {
@@ -413,6 +617,13 @@ pub fn build_guide_faces_cancellable(
         )
     })?;
     used.resize(edges.len(), false);
+    let mut seen = Vec::new();
+    reserve(
+        &mut seen,
+        edges.len(),
+        "guide-face face-walk state allocation failed",
+    )?;
+    seen.resize(edges.len(), false);
     let mut groups = Vec::new();
     groups
         .try_reserve(limits.max_faces.min(edges.len()))
@@ -434,14 +645,8 @@ pub fn build_guide_faces_cancellable(
                 "guide-face face-walk allocation failed",
             )
         })?;
-        let mut seen = Vec::new();
-        reserve(
-            &mut seen,
-            edges.len(),
-            "guide-face face-walk state allocation failed",
-        )?;
-        seen.resize(edges.len(), false);
         let mut current = start;
+        let mut retraces_piece = false;
         loop {
             poll(&cancelled)?;
             inspections = inspections.checked_add(1).ok_or(GuideFaceError::new(
@@ -457,6 +662,9 @@ pub fn build_guide_faces_cancellable(
             if seen[current] {
                 break;
             }
+            // Embedded half-edges are paired in forward/reverse order. A walk that
+            // visits both directions retraces one segment and cannot bound a simple face.
+            retraces_piece |= seen[current ^ 1];
             seen[current] = true;
             reserve(&mut walk, 1, "guide-face face-walk allocation failed")?;
             walk.push(current);
@@ -473,11 +681,17 @@ pub fn build_guide_faces_cancellable(
                 break;
             }
         }
+        for edge in &walk {
+            seen[*edge] = false;
+        }
         if current != start || walk.len() < 3 {
             continue;
         }
         for edge in &walk {
             used[*edge] = true;
+        }
+        if retraces_piece {
+            continue;
         }
         let mut segments = Vec::new();
         segments.try_reserve(walk.len()).map_err(|_| {
@@ -1274,6 +1488,226 @@ mod tests {
                 .collect(),
         )
         .expect("ordered finite structural paths")
+    }
+
+    /// Recreates the six exact finite F.25 source guides around the observed missing row.
+    ///
+    /// Group order and subcell translation change only input enumeration/phase, never authored
+    /// spacing, contacts, or the requirement that the four bounded local triangles exist.
+    fn seam_paths(translation: Point2, order: [u64; 3]) -> StructuralPathSet {
+        let lines = [
+            (
+                1,
+                [
+                    (
+                        499.19999999999998863,
+                        -22.48000000000001819,
+                        499.19999999999998863,
+                        1046.48000000000001819,
+                    ),
+                    (
+                        501.75999999999999091,
+                        -22.48000000000001819,
+                        501.75999999999999091,
+                        1046.48000000000001819,
+                    ),
+                ],
+            ),
+            (
+                2,
+                [
+                    (
+                        956.41369167662185191,
+                        -170.25117098918030933,
+                        -301.05369167662195196,
+                        555.74796128698949360,
+                    ),
+                    (
+                        957.69369167662193831,
+                        -168.03414595549213573,
+                        -299.77369167662197924,
+                        557.96498632067766721,
+                    ),
+                ],
+            ),
+            (
+                3,
+                [
+                    (
+                        1319.93369167662194741,
+                        564.61606142174173328,
+                        62.46630832337808670,
+                        -161.38307085442750122,
+                    ),
+                    (
+                        1318.65369167662174732,
+                        566.83308645542990689,
+                        61.18630832337805714,
+                        -159.16604582073932761,
+                    ),
+                ],
+            ),
+        ];
+        let mut selected = Vec::new();
+        for dimension in order {
+            let group = lines.iter().find(|(id, _)| *id == dimension).unwrap().1;
+            for (x1, y1, x2, y2) in group {
+                selected.push((
+                    dimension,
+                    CurvePath::line(
+                        Point2::new(x1 + translation.x, y1 + translation.y),
+                        Point2::new(x2 + translation.x, y2 + translation.y),
+                    )
+                    .expect("translated source guide remains finite"),
+                ));
+            }
+        }
+        paths(selected)
+    }
+
+    /// The exact six-guide F.25 witness and its tiny phase shifts retain all four local faces.
+    ///
+    /// This fails when independently rounded triple contacts straddle adjacent lattice buckets,
+    /// and it checks every dimension-group permutation without replacing authored guide geometry.
+    #[test]
+    fn provenance_linked_triples_keep_dense_guide_faces_complete() {
+        for order in [
+            [1, 2, 3],
+            [1, 3, 2],
+            [2, 1, 3],
+            [2, 3, 1],
+            [3, 1, 2],
+            [3, 2, 1],
+        ] {
+            for shift in [
+                Point2::new(0.0, 0.0),
+                Point2::new(0.25e-9, -0.25e-9),
+                Point2::new(-0.25e-9, 0.25e-9),
+            ] {
+                let result = build_guide_faces_cancellable(
+                    GuideFaceRequest {
+                        output_layer_id: PatternOutputLayerId(8),
+                        guide_mechanism_id: PatternMechanismId(7),
+                        dimensions: order.map(GuideDimensionId).to_vec(),
+                        paths: seam_paths(shift, order),
+                        canvas: Bounds::new(
+                            Point2::new(490.0 + shift.x, 82.0 + shift.y),
+                            Point2::new(510.0 + shift.x, 106.0 + shift.y),
+                        )
+                        .unwrap(),
+                    },
+                    GuideFaceLimits::default(),
+                    || false,
+                )
+                .expect("contact-equivalent source guides form bounded faces");
+                assert_eq!(
+                    result.diagnostics.faces, 4,
+                    "order={order:?} shift={shift:?}"
+                );
+                let point = Point2::new(500.5 + shift.x, 94.5 + shift.y);
+                assert!(
+                    result.regions.regions().iter().any(|region| {
+                        region.bounds.min.x <= point.x
+                            && region.bounds.max.x >= point.x
+                            && region.bounds.min.y <= point.y
+                            && region.bounds.max.y >= point.y
+                    }),
+                    "missing central bounded face for order={order:?} shift={shift:?}"
+                );
+            }
+        }
+    }
+
+    /// Anchored parameter grouping links only the first equivalent pair and preserves a later contact.
+    #[test]
+    fn split_parameter_grouping_does_not_chain_distinct_contacts() {
+        let mut classes = ContactClasses::default();
+        let first = classes.add(Point2::new(0.0, 0.0)).unwrap();
+        let second = classes.add(Point2::new(0.9e-9, 0.0)).unwrap();
+        let third = classes.add(Point2::new(1.8e-9, 0.0)).unwrap();
+        let mut values = vec![
+            SplitParameter {
+                value: 0.2,
+                contact: Some(first),
+            },
+            SplitParameter {
+                value: 0.2 + 0.75e-12,
+                contact: Some(second),
+            },
+            SplitParameter {
+                value: 0.2 + 1.5e-12,
+                contact: Some(third),
+            },
+        ];
+        canonicalize_split_parameters(&mut values, &mut classes, &|| false).unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!(classes.key(first), classes.key(second));
+        assert_ne!(classes.key(first), classes.key(third));
+    }
+
+    /// Cross-path union rejects a transitive span beyond one old lattice unit without welding it.
+    #[test]
+    fn contact_union_rejects_over_spread_transitive_chains() {
+        let mut classes = ContactClasses::default();
+        let first = classes.add(Point2::new(0.0, 0.0)).unwrap();
+        let middle = classes.add(Point2::new(0.8e-9, 0.0)).unwrap();
+        let last = classes.add(Point2::new(1.6e-9, 0.0)).unwrap();
+        classes.union(first, middle).unwrap();
+        let error = classes.union(middle, last).unwrap_err();
+        assert_eq!(error.path(), "region.guide_faces.geometry.vertex");
+        assert_ne!(classes.root(first), classes.root(last));
+    }
+
+    /// Separate nearby crossings beyond one lattice unit fail before any silent vertex merge.
+    #[test]
+    fn distinct_near_contacts_cannot_share_one_arrangement_vertex() {
+        let mut classes = ContactClasses::default();
+        let first = classes.add(Point2::new(100.0, 100.0)).unwrap();
+        let second = classes.add(Point2::new(100.0 + 1.2e-9, 100.0)).unwrap();
+        let mut values = vec![
+            SplitParameter {
+                value: 0.4,
+                contact: Some(first),
+            },
+            SplitParameter {
+                value: 0.4 + 0.5e-12,
+                contact: Some(second),
+            },
+        ];
+        let error =
+            canonicalize_split_parameters(&mut values, &mut classes, &|| false).unwrap_err();
+        assert_eq!(error.path(), "region.guide_faces.geometry.vertex");
+        assert_ne!(classes.root(first), classes.root(second));
+    }
+
+    /// Dense local coincidence pass retains cancellation and configured work failure paths.
+    #[test]
+    fn seam_contact_canonicalization_remains_cancellable_and_bounded() {
+        let request = GuideFaceRequest {
+            output_layer_id: PatternOutputLayerId(8),
+            guide_mechanism_id: PatternMechanismId(7),
+            dimensions: vec![
+                GuideDimensionId(1),
+                GuideDimensionId(2),
+                GuideDimensionId(3),
+            ],
+            paths: seam_paths(Point2::new(0.0, 0.0), [1, 2, 3]),
+            canvas: Bounds::new(Point2::new(490.0, 82.0), Point2::new(510.0, 106.0)).unwrap(),
+        };
+        let cancelled =
+            build_guide_faces_cancellable(request.clone(), GuideFaceLimits::default(), || true)
+                .unwrap_err();
+        assert_eq!(cancelled.path(), "evaluation.cancelled");
+        let limited = build_guide_faces_cancellable(
+            request,
+            GuideFaceLimits {
+                max_inspections: 1,
+                ..GuideFaceLimits::default()
+            },
+            || false,
+        )
+        .unwrap_err();
+        assert_eq!(limited.path(), "region.guide_faces.limits.inspections");
     }
 
     /// Proves a positive-length retrace classifies one private traversal as non-simple.

@@ -6,6 +6,12 @@
 //! pattern settings. Raster compositing happens in linear premultiplied RGBA;
 //! `RasterSurface` exposes only straight sRGBA bytes at the output boundary.
 
+mod vector_occupancy;
+mod area_raster;
+pub use vector_occupancy::{
+    VectorOccupancyMeasurement, VectorOccupancyPrecision, measure_geometry_vector_occupancy,
+};
+
 use std::{collections::HashSet, error::Error, fmt, sync::Arc};
 
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
@@ -955,7 +961,54 @@ fn validate_layer(layer: &RenderLayer) -> Result<(), RenderError> {
 ///
 /// Returns stable geometry or sampled-paint diagnostics before scene construction.
 fn validate_output_geometry(output: &RenderOutputLayer) -> Result<(), RenderError> {
-    match output.geometry() {
+    validate_geometry(output.geometry())?;
+    if let Some(paints) = &output.primitive_paints {
+        if matches!(output.geometry(), GeometryOutput::CanonicalStrokes(_)) {
+            return Err(RenderError::new(
+                "scene.layer.source_color",
+                "canonical strokes require solid channel paint",
+            ));
+        }
+        let primitives = match output.geometry() {
+            GeometryOutput::CircularMarks(marks) => marks.len(),
+            GeometryOutput::CanonicalMarks(marks) => marks.len(),
+            GeometryOutput::CanonicalRegions(regions) => regions.regions().len(),
+            GeometryOutput::CanonicalStrokes(_) => 0,
+        };
+        if paints.len() != primitives {
+            return Err(RenderError::new(
+                "scene.layer.source_color",
+                "source-colored paint count must match canonical primitive count",
+            ));
+        }
+        for paint in paints.iter() {
+            for value in [paint.red, paint.green, paint.blue, paint.alpha] {
+                if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                    return Err(RenderError::new(
+                        "scene.layer.source_color",
+                        "source-colored paint must be finite values within 0.0..=1.0",
+                    ));
+                }
+            }
+            if !matches!(output.geometry(), GeometryOutput::CanonicalRegions(_))
+                && paint.alpha != 1.0
+            {
+                return Err(RenderError::new(
+                    "scene.layer.source_color",
+                    "sampled per-mark paint alpha must be exactly 1.0",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validates the same canonical geometry for scene construction and geometry-only measurement.
+///
+/// # Errors
+/// Returns the established invalid-circle, mark, stroke, or region diagnostic.
+fn validate_geometry(geometry: &GeometryOutput) -> Result<(), RenderError> {
+    match geometry {
         GeometryOutput::CircularMarks(marks) => {
             if marks.iter().any(|mark| {
                 !mark.center.is_finite() || !mark.radius.is_finite() || mark.radius < 0.0
@@ -1020,44 +1073,6 @@ fn validate_output_geometry(output: &RenderOutputLayer) -> Result<(), RenderErro
                 return Err(RenderError::new(
                     "scene.layer.geometry",
                     "canonical regions must be finite positive-area geometry",
-                ));
-            }
-        }
-    }
-    if let Some(paints) = &output.primitive_paints {
-        if matches!(output.geometry(), GeometryOutput::CanonicalStrokes(_)) {
-            return Err(RenderError::new(
-                "scene.layer.source_color",
-                "canonical strokes require solid channel paint",
-            ));
-        }
-        let primitives = match output.geometry() {
-            GeometryOutput::CircularMarks(marks) => marks.len(),
-            GeometryOutput::CanonicalMarks(marks) => marks.len(),
-            GeometryOutput::CanonicalRegions(regions) => regions.regions().len(),
-            GeometryOutput::CanonicalStrokes(_) => 0,
-        };
-        if paints.len() != primitives {
-            return Err(RenderError::new(
-                "scene.layer.source_color",
-                "source-colored paint count must match canonical primitive count",
-            ));
-        }
-        for paint in paints.iter() {
-            for value in [paint.red, paint.green, paint.blue, paint.alpha] {
-                if !value.is_finite() || !(0.0..=1.0).contains(&value) {
-                    return Err(RenderError::new(
-                        "scene.layer.source_color",
-                        "source-colored paint must be finite values within 0.0..=1.0",
-                    ));
-                }
-            }
-            if !matches!(output.geometry(), GeometryOutput::CanonicalRegions(_))
-                && paint.alpha != 1.0
-            {
-                return Err(RenderError::new(
-                    "scene.layer.source_color",
-                    "sampled per-mark paint alpha must be exactly 1.0",
                 ));
             }
         }
@@ -1599,7 +1614,7 @@ fn append_scene_outline_segment(hash: &mut u64, segment: &CurveSegment) {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RasterBackground {
     OpaqueBlack,
     OpaqueWhite,
@@ -1727,6 +1742,13 @@ pub struct OutputRasterTarget {
 }
 
 impl OutputRasterTarget {
+    /// Returns the maximum pixel count admitted by the final-output renderer.
+    ///
+    /// This is a renderer resource bound, not a PNG format dimension limit.
+    pub const fn maximum_pixels() -> u64 {
+        MAX_OUTPUT_PIXELS
+    }
+
     /// Checks final PNG dimensions against the shared positive-size and pixel-budget authority.
     ///
     /// # Errors
@@ -1767,12 +1789,13 @@ impl OutputRasterTarget {
     }
 }
 
-/// Checked, renderer-owned pixel extent for a derived transparent preview.
+/// Checked, renderer-owned pixel extent and presentation backing for a derived preview.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PreviewRasterTarget {
     width: u32,
     height: u32,
     viewport: Option<PreviewViewport>,
+    background: RasterBackground,
 }
 
 /// Retains exact finite transform bits so crop placement participates in raster identity only.
@@ -1805,13 +1828,15 @@ impl PreviewRasterTarget {
             width,
             height,
             viewport: None,
+            background: RasterBackground::Transparent,
         })
     }
 
     /// Checks a viewport-sized raster with a canonical-document origin and physical pixel scale.
     ///
-    /// Negative origins retain transparent letterbox space. The uniform scale maps one document
-    /// unit to physical pixels; neither the canvas nor canonical geometry is changed.
+    /// Negative origins retain letterbox space in the target's requested presentation backing.
+    /// The uniform scale maps one document unit to physical pixels; neither the canvas nor
+    /// canonical geometry is changed.
     ///
     /// # Errors
     /// Returns `preview.target` for invalid extents or non-finite/non-positive transforms.
@@ -1854,14 +1879,30 @@ impl PreviewRasterTarget {
         })
     }
 
+    /// Selects a preview-only backing before final RGBA8 conversion.
+    pub const fn with_background(mut self, background: RasterBackground) -> Self {
+        self.background = background;
+        self
+    }
+
+    /// Returns the preview-only backing without changing scene or export authority.
+    pub const fn background(self) -> RasterBackground {
+        self.background
+    }
+
     /// Describes only the derived raster target, including exact crop-transform bits.
     pub fn raster_identity(self) -> String {
+        let background=match self.background {
+            RasterBackground::Transparent=>"transparent",
+            RasterBackground::OpaqueBlack=>"black",
+            RasterBackground::OpaqueWhite=>"white",
+        };
         match self.viewport {
             Some(value) => format!(
-                "{}x{}:viewport:{:016x}:{:016x}:{:016x}",
+                "{}x{}:viewport:{:016x}:{:016x}:{:016x}:{background}",
                 self.width, self.height, value.origin_x, value.origin_y, value.scale
             ),
-            None => format!("{}x{}:fit", self.width, self.height),
+            None => format!("{}x{}:fit:{background}", self.width, self.height),
         }
     }
     pub const fn width(self) -> u32 {
@@ -1878,6 +1919,114 @@ pub struct RasterSurface {
     height: u32,
     /// Straight, 8-bit sRGBA in row-major pixel order.
     pixels: Vec<u8>,
+}
+
+/// One opaque geometric union mask at an explicit output target.
+///
+/// Bytes are exactly zero or one. Paint, layer opacity, channel model, background, and
+/// antialiasing are absent; each one marks a production-renderer center sample inside at least
+/// one canonical primitive. This is a measurement result, not a scene or geometry authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OccupancyMask {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    covered_pixels: usize,
+}
+
+/// Per-pixel count of distinct canonical mark footprints at center-sampled resolution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkMultiplicityMask {
+    width: u32,
+    height: u32,
+    counts: Vec<u32>,
+}
+
+impl MarkMultiplicityMask {
+    /// Returns the measured width without modifying the canonical output.
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Returns the measured height without modifying the canonical output.
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Borrows row-major overlap counts, including zero-count canvas pixels.
+    pub fn counts(&self) -> &[u32] {
+        &self.counts
+    }
+}
+
+/// One finite, positive document-space crop for geometric occupancy measurement.
+///
+/// The raster consumer validates containment in the document canvas; this type contains no
+/// geometry and does not crop or reconstruct canonical primitives.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OccupancyWindow {
+    origin_x: f64,
+    origin_y: f64,
+    width: f64,
+    height: f64,
+}
+
+impl OccupancyWindow {
+    /// Constructs a finite positive document-space window, without assuming a canvas.
+    ///
+    /// # Errors
+    /// Returns `raster.window` for nonfinite coordinates or nonpositive extents.
+    pub fn new(origin_x: f64, origin_y: f64, width: f64, height: f64) -> Result<Self, RenderError> {
+        if ![origin_x, origin_y, width, height]
+            .into_iter()
+            .all(f64::is_finite)
+            || width <= 0.0
+            || height <= 0.0
+        {
+            return Err(RenderError::new(
+                "raster.window",
+                "occupancy window must have finite coordinates and positive extents",
+            ));
+        }
+        Ok(Self {
+            origin_x,
+            origin_y,
+            width,
+            height,
+        })
+    }
+
+    /// Returns the document-space crop origin and extents.
+    pub const fn components(self) -> (f64, f64, f64, f64) {
+        (self.origin_x, self.origin_y, self.width, self.height)
+    }
+}
+
+impl OccupancyMask {
+    /// Returns the explicit output width in pixels.
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Returns the explicit output height in pixels.
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Borrows row-major binary occupancy bytes without changing the union.
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    /// Returns the number of output sample centers inside at least one primitive.
+    pub const fn covered_pixels(&self) -> usize {
+        self.covered_pixels
+    }
+
+    /// Returns the occupied fraction of a checked positive-size explicit target.
+    pub fn fraction(&self) -> f64 {
+        self.covered_pixels as f64 / self.pixels.len() as f64
+    }
 }
 
 impl RasterSurface {
@@ -1926,6 +2075,95 @@ struct PremultipliedLinearPixel {
     green: f64,
     blue: f64,
     alpha: f64,
+}
+
+/// Receives one existing canonical coverage result without changing how geometry is traversed.
+///
+/// The RGBA implementation retains its two historical compositing formulas. The occupancy
+/// implementation marks a binary union independently of appearance or painter order.
+trait RasterPixelSink {
+    const IS_OCCUPANCY: bool;
+
+    /// Applies one accepted ellipse coverage to the destination representation.
+    fn paint_ellipse(&mut self, index: usize, coverage: f64, color: &ColorValue, opacity: f64);
+
+    /// Applies one accepted closed-shape coverage to the destination representation.
+    fn paint_shape(&mut self, index: usize, coverage: f64, color: &ColorValue, opacity: f64);
+}
+
+impl RasterPixelSink for Vec<PremultipliedLinearPixel> {
+    const IS_OCCUPANCY: bool = false;
+
+    /// Applies the existing ellipse premultiplied source-over arithmetic exactly once.
+    ///
+    /// # Panics
+    /// Panics only if a shared geometry walker supplies an index outside its checked target.
+    fn paint_ellipse(&mut self, index: usize, coverage: f64, color: &ColorValue, opacity: f64) {
+        let source_alpha = (color.alpha * opacity * coverage).clamp(0.0, 1.0);
+        let destination = &mut self[index];
+        let remaining = 1.0 - source_alpha;
+        destination.red = color.red * source_alpha + destination.red * remaining;
+        destination.green = color.green * source_alpha + destination.green * remaining;
+        destination.blue = color.blue * source_alpha + destination.blue * remaining;
+        destination.alpha = source_alpha + destination.alpha * remaining;
+    }
+
+    /// Applies the existing closed-shape, stroke, and region source-over arithmetic once.
+    ///
+    /// # Panics
+    /// Panics only if a shared geometry walker supplies an index outside its checked target.
+    fn paint_shape(&mut self, index: usize, coverage: f64, color: &ColorValue, opacity: f64) {
+        let source = PremultipliedLinearPixel {
+            red: color.red * color.alpha * opacity * coverage,
+            green: color.green * color.alpha * opacity * coverage,
+            blue: color.blue * color.alpha * opacity * coverage,
+            alpha: color.alpha * opacity * coverage,
+        };
+        source_over(&mut self[index], source);
+    }
+}
+
+impl RasterPixelSink for OccupancyMask {
+    const IS_OCCUPANCY: bool = true;
+
+    /// Records one ellipse hit without allocating color storage or applying layer appearance.
+    ///
+    /// # Panics
+    /// Panics only if a shared geometry walker supplies an index outside its checked target.
+    fn paint_ellipse(&mut self, index: usize, _coverage: f64, _color: &ColorValue, _opacity: f64) {
+        if self.pixels[index] == 0 {
+            self.pixels[index] = 1;
+            self.covered_pixels += 1;
+        }
+    }
+
+    /// Records one filled-path hit idempotently, including overlap across primitives.
+    ///
+    /// # Panics
+    /// Panics only if a shared geometry walker supplies an index outside its checked target.
+    fn paint_shape(&mut self, index: usize, _coverage: f64, _color: &ColorValue, _opacity: f64) {
+        self.paint_ellipse(index, 1.0, _color, _opacity);
+    }
+}
+
+impl RasterPixelSink for MarkMultiplicityMask {
+    const IS_OCCUPANCY: bool = true;
+
+    /// Counts one canonical circular-mark hit at one center sample.
+    ///
+    /// # Panics
+    /// The checked raster target and preflighted mark count guarantee a valid index and u32 sum.
+    fn paint_ellipse(&mut self, index: usize, _coverage: f64, _color: &ColorValue, _opacity: f64) {
+        self.counts[index] += 1;
+    }
+
+    /// Counts one even-odd closed-mark hit, never individual path segments.
+    ///
+    /// # Panics
+    /// The checked raster target and preflighted mark count guarantee a valid index and u32 sum.
+    fn paint_shape(&mut self, index: usize, coverage: f64, color: &ColorValue, opacity: f64) {
+        self.paint_ellipse(index, coverage, color, opacity);
+    }
 }
 
 /// Rasterizes one canonical scene at native integral canvas dimensions with transparent-aware AA.
@@ -2117,6 +2355,218 @@ pub fn rasterize_output_cancellable_with_progress(
     Ok(surface)
 }
 
+/// Measures the center-sampled opaque union of one canonical output at an explicit target.
+///
+/// This consumer shares the normal renderer's ellipse, even-odd closed-mark, nonzero region,
+/// and nonzero stroke-outline traversal. Its fixed antialiasing-off mask excludes paint,
+/// opacity, channel model, backing, and source sampling. The same geometry validation used by
+/// scene construction runs here; callers keep family and placement frozen across scalar probes.
+///
+/// # Errors
+/// Returns canvas, cancellation, allocation, flattening, or request-wide edge-limit diagnostics
+/// without publishing a partial mask. `OutputRasterTarget` has already checked the pixel ceiling.
+pub fn rasterize_geometry_occupancy(
+    geometry: &GeometryOutput,
+    canvas: &CanvasSpec,
+    target: OutputRasterTarget,
+    limits: RasterizationLimits,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<OccupancyMask, RenderError> {
+    rasterize_geometry_occupancy_in_window(geometry, canvas, None, target, limits, is_cancelled)
+}
+
+/// Measures distinct overlapping canonical marks with the production AA-off footprint walker.
+///
+/// Paint and compositing never enter this source-independent calibration observation. Each
+/// circle or even-odd closed path contributes at most one count to a pixel; the caller may form
+/// an expected random-thinning coverage curve from the returned multiplicities.
+///
+/// # Errors
+/// Rejects non-mark geometry, excessive mark counts, raster limits, cancellation, or allocation.
+pub fn rasterize_mark_multiplicity(
+    geometry: &GeometryOutput,
+    canvas: &CanvasSpec,
+    target: OutputRasterTarget,
+    limits: RasterizationLimits,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<MarkMultiplicityMask, RenderError> {
+    validate_canvas(canvas)?;
+    validate_geometry(geometry)?;
+    let mark_count = match geometry {
+        GeometryOutput::CanonicalMarks(marks) => marks.len(),
+        GeometryOutput::CircularMarks(marks) => marks.len(),
+        _ => {
+            return Err(RenderError::new(
+                "density.uniform.geometry",
+                "multiplicity measurement requires marks",
+            ));
+        }
+    };
+    if mark_count > u32::MAX as usize {
+        return Err(RenderError::new(
+            "density.uniform.mark_limit",
+            "mark count exceeds the overlap counter",
+        ));
+    }
+    let count = raster_pixel_count(target.width, target.height)?;
+    let mut counts = Vec::new();
+    counts.try_reserve_exact(count).map_err(|_| {
+        RenderError::new("raster.allocation", "multiplicity mask allocation failed")
+    })?;
+    counts.resize(count, 0);
+    let mut mask = MarkMultiplicityMask {
+        width: target.width,
+        height: target.height,
+        counts,
+    };
+    let mut work = RasterWork::with_progress(
+        limits,
+        RasterAntialiasing::Off,
+        is_cancelled,
+        0,
+        &ignore_raster_progress,
+    );
+    work.check()?;
+    let opaque_white = ColorValue {
+        red: 1.0,
+        green: 1.0,
+        blue: 1.0,
+        alpha: 1.0,
+    };
+    rasterize_output_geometry(
+        &mut mask,
+        geometry,
+        target,
+        OutputTransform {
+            scale_x: f64::from(target.width) / canvas.width,
+            scale_y: f64::from(target.height) / canvas.height,
+            offset_x: 0.0,
+            offset_y: 0.0,
+        },
+        RasterAntialiasing::Off,
+        &opaque_white,
+        1.0,
+        None,
+        None,
+        &mut work,
+    )?;
+    work.check()?;
+    Ok(mask)
+}
+
+/// Measures one document-space window of intact canonical geometry at an explicit target.
+///
+/// All primitives retain their original coordinates, including those originating outside the
+/// window. Only the final consumer clips pixels. A target whose sample pitch matches the full
+/// canvas raster in pitch and phase is an exact crop of the full-canvas AA-Off mask.
+///
+/// # Errors
+/// Returns window, canvas, geometry, cancellation, allocation, flattening, or edge diagnostics.
+pub fn rasterize_geometry_occupancy_window(
+    geometry: &GeometryOutput,
+    canvas: &CanvasSpec,
+    window: OccupancyWindow,
+    target: OutputRasterTarget,
+    limits: RasterizationLimits,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<OccupancyMask, RenderError> {
+    rasterize_geometry_occupancy_in_window(
+        geometry,
+        canvas,
+        Some(window),
+        target,
+        limits,
+        is_cancelled,
+    )
+}
+
+/// Applies one validated occupancy crop while retaining the shared canonical raster traversal.
+///
+/// # Errors
+/// Returns the same stable diagnostics as the public full-canvas and window consumers.
+fn rasterize_geometry_occupancy_in_window(
+    geometry: &GeometryOutput,
+    canvas: &CanvasSpec,
+    window: Option<OccupancyWindow>,
+    target: OutputRasterTarget,
+    limits: RasterizationLimits,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<OccupancyMask, RenderError> {
+    validate_canvas(canvas)?;
+    validate_geometry(geometry)?;
+    if let Some(window) = window
+        && (window.origin_x < 0.0
+            || window.origin_y < 0.0
+            || window.width > canvas.width - window.origin_x
+            || window.height > canvas.height - window.origin_y)
+    {
+        return Err(RenderError::new(
+            "raster.window",
+            "occupancy window must lie within the document canvas",
+        ));
+    }
+    let mut work = RasterWork::with_progress(
+        limits,
+        RasterAntialiasing::Off,
+        is_cancelled,
+        0,
+        &ignore_raster_progress,
+    );
+    work.check()?;
+    let count = raster_pixel_count(target.width, target.height)?;
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(count)
+        .map_err(|_| RenderError::new("raster.allocation", "occupancy mask allocation failed"))?;
+    pixels.resize(count, 0);
+    let mut mask = OccupancyMask {
+        width: target.width,
+        height: target.height,
+        pixels,
+        covered_pixels: 0,
+    };
+    let (origin_x, origin_y, extent_x, extent_y) = window.map_or(
+        (0.0, 0.0, canvas.width, canvas.height),
+        OccupancyWindow::components,
+    );
+    let transform = OutputTransform {
+        scale_x: f64::from(target.width) / extent_x,
+        scale_y: f64::from(target.height) / extent_y,
+        offset_x: -origin_x * (f64::from(target.width) / extent_x),
+        offset_y: -origin_y * (f64::from(target.height) / extent_y),
+    };
+    if !transform.scale_x.is_finite()
+        || !transform.scale_y.is_finite()
+        || !transform.offset_x.is_finite()
+        || !transform.offset_y.is_finite()
+    {
+        return Err(RenderError::new(
+            "raster.output_transform",
+            "occupancy target scale must be finite",
+        ));
+    }
+    let opaque_white = ColorValue {
+        red: 1.0,
+        green: 1.0,
+        blue: 1.0,
+        alpha: 1.0,
+    };
+    rasterize_output_geometry(
+        &mut mask,
+        geometry,
+        target,
+        transform,
+        RasterAntialiasing::Off,
+        &opaque_white,
+        1.0,
+        None,
+        window,
+        &mut work,
+    )?;
+    work.check()?;
+    Ok(mask)
+}
+
 /// Stable consumer-only identity suitable for a PNG cache. It intentionally
 /// includes no source, document, family, realization, or scene mutation: the
 /// scene fingerprint is the complete immutable canonical input.
@@ -2140,12 +2590,12 @@ pub fn raster_output_identity(
         RasterAntialiasing::Off => "off",
     };
     format!(
-        "{}:toniator-raster-output-v1:{background}:{target}:{antialiasing}",
+        "{}:toniator-raster-output-area-v2:{background}:{target}:{antialiasing}",
         scene.identity.scene_fingerprint
     )
 }
 
-/// Rerasterizes canonical scene geometry into a transparent fitted target.
+/// Rerasterizes canonical scene geometry into a fitted target with its requested backing.
 /// This is intentionally not a resample of [`RasterSurface`].
 ///
 /// # Errors
@@ -2237,7 +2687,7 @@ pub fn rasterize_preview_cancellable_with_progress(
         finish_model_composition(model, &mut pixels, is_cancelled)?;
     }
     work.parallel_phase();
-    apply_background(&mut pixels, RasterBackground::Transparent, is_cancelled)?;
+    apply_background(&mut pixels, target.background(), is_cancelled)?;
     work.parallel_phase();
     let surface = pixels_from_linear(width, height, pixels, is_cancelled)?;
     work.parallel_phase();
@@ -2280,8 +2730,7 @@ impl PreviewTransform {
     }
 }
 
-/// Retains the accepted Stage 5 raster path byte-for-byte for callers which
-/// have not opted into an explicit Stage 9C model.
+/// Rasterizes an unmodeled scene through the shared AA-on area path and ordinary layer source-over.
 ///
 /// # Errors
 ///
@@ -2295,81 +2744,11 @@ fn rasterize_stage5(
     let width = target.width;
     let height = target.height;
     let background = background_pixel(background);
-    let mut linear_pixels = vec![background; width as usize * height as usize];
+    let mut linear_pixels = allocate_linear_pixels(width, height, background)?;
     for layer in &scene.layers {
-        if !layer.visible {
-            continue;
-        }
-        for output in &layer.outputs {
-            match output.geometry() {
-                GeometryOutput::CircularMarks(marks) => {
-                    for (index, mark) in marks.iter().enumerate() {
-                        composite_circle(
-                            &mut linear_pixels,
-                            width,
-                            height,
-                            mark,
-                            output
-                                .primitive_paints
-                                .as_ref()
-                                .and_then(|paints| paints.get(index))
-                                .unwrap_or(&layer.color),
-                            layer.opacity,
-                            work,
-                        )?;
-                        work.primitive();
-                    }
-                }
-                GeometryOutput::CanonicalMarks(marks) => {
-                    for (index, mark) in marks.iter().enumerate() {
-                        composite_canonical_mark(
-                            &mut linear_pixels,
-                            width,
-                            height,
-                            mark,
-                            output
-                                .primitive_paints
-                                .as_ref()
-                                .and_then(|paints| paints.get(index))
-                                .unwrap_or(&layer.color),
-                            layer.opacity,
-                            CanonicalRasterTransform::native(),
-                            work,
-                        )?;
-                        work.primitive();
-                    }
-                }
-                GeometryOutput::CanonicalStrokes(strokes) => {
-                    for stroke in strokes {
-                        composite_canonical_stroke(
-                            &mut linear_pixels,
-                            width,
-                            height,
-                            stroke,
-                            &layer.color,
-                            layer.opacity,
-                            CanonicalRasterTransform::native(),
-                            work,
-                        )?;
-                        work.primitive();
-                    }
-                }
-                GeometryOutput::CanonicalRegions(regions) => {
-                    for (index, region) in regions.regions().iter().enumerate() {
-                        composite_canonical_region(
-                            &mut linear_pixels,
-                            width,
-                            height,
-                            region,
-                            output_primitive_paint(layer, Some(output), index),
-                            layer.opacity,
-                            CanonicalRasterTransform::native(),
-                            work,
-                        )?;
-                        work.primitive();
-                    }
-                }
-            }
+        let layer_pixels = rasterize_layer(layer, width, height, work)?;
+        for (destination, source) in linear_pixels.iter_mut().zip(layer_pixels) {
+            source_over(destination, source);
         }
     }
     let surface = pixels_from_linear(width, height, linear_pixels, work.is_cancelled)?;
@@ -2512,86 +2891,7 @@ fn rasterize_layer(
     height: u32,
     work: &mut RasterWork<'_>,
 ) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
-    let mut pixels = allocate_linear_pixels(
-        width,
-        height,
-        background_pixel(RasterBackground::Transparent),
-    )?;
-    if !layer.visible {
-        return Ok(pixels);
-    }
-    for output in &layer.outputs {
-        match output.geometry() {
-            GeometryOutput::CircularMarks(marks) => {
-                for (index, mark) in marks.iter().enumerate() {
-                    composite_circle(
-                        &mut pixels,
-                        width,
-                        height,
-                        mark,
-                        output
-                            .primitive_paints
-                            .as_ref()
-                            .and_then(|paints| paints.get(index))
-                            .unwrap_or(&layer.color),
-                        layer.opacity,
-                        work,
-                    )?;
-                    work.primitive();
-                }
-            }
-            GeometryOutput::CanonicalMarks(marks) => {
-                for (index, mark) in marks.iter().enumerate() {
-                    composite_canonical_mark(
-                        &mut pixels,
-                        width,
-                        height,
-                        mark,
-                        output
-                            .primitive_paints
-                            .as_ref()
-                            .and_then(|paints| paints.get(index))
-                            .unwrap_or(&layer.color),
-                        layer.opacity,
-                        CanonicalRasterTransform::native(),
-                        work,
-                    )?;
-                    work.primitive();
-                }
-            }
-            GeometryOutput::CanonicalStrokes(strokes) => {
-                for stroke in strokes {
-                    composite_canonical_stroke(
-                        &mut pixels,
-                        width,
-                        height,
-                        stroke,
-                        &layer.color,
-                        layer.opacity,
-                        CanonicalRasterTransform::native(),
-                        work,
-                    )?;
-                    work.primitive();
-                }
-            }
-            GeometryOutput::CanonicalRegions(regions) => {
-                for (index, region) in regions.regions().iter().enumerate() {
-                    composite_canonical_region(
-                        &mut pixels,
-                        width,
-                        height,
-                        region,
-                        output_primitive_paint(layer, Some(output), index),
-                        layer.opacity,
-                        CanonicalRasterTransform::native(),
-                        work,
-                    )?;
-                    work.primitive();
-                }
-            }
-        }
-    }
-    Ok(pixels)
+    area_raster::rasterize_area_layer(layer, width, height, CanonicalRasterTransform::native(), None, work)
 }
 
 /// Rasterizes one fitted-preview layer with final target clipping and shared work accounting.
@@ -2606,93 +2906,17 @@ fn rasterize_layer_with_transform(
     transform: PreviewTransform,
     work: &mut RasterWork<'_>,
 ) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
-    let mut pixels = allocate_linear_pixels(
-        width,
-        height,
-        background_pixel(RasterBackground::Transparent),
-    )?;
-    if !layer.visible {
-        return Ok(pixels);
-    }
-    for output in &layer.outputs {
-        match output.geometry() {
-            GeometryOutput::CircularMarks(marks) => {
-                for (index, mark) in marks.iter().enumerate() {
-                    composite_circle_transformed(
-                        &mut pixels,
-                        width,
-                        height,
-                        mark,
-                        output
-                            .primitive_paints
-                            .as_ref()
-                            .and_then(|paints| paints.get(index))
-                            .unwrap_or(&layer.color),
-                        layer.opacity,
-                        transform,
-                        work,
-                    )?;
-                    work.primitive();
-                }
-            }
-            GeometryOutput::CanonicalMarks(marks) => {
-                for (index, mark) in marks.iter().enumerate() {
-                    composite_canonical_mark(
-                        &mut pixels,
-                        width,
-                        height,
-                        mark,
-                        output
-                            .primitive_paints
-                            .as_ref()
-                            .and_then(|paints| paints.get(index))
-                            .unwrap_or(&layer.color),
-                        layer.opacity,
-                        CanonicalRasterTransform::preview(transform),
-                        work,
-                    )?;
-                    work.primitive();
-                }
-            }
-            GeometryOutput::CanonicalStrokes(strokes) => {
-                for stroke in strokes {
-                    composite_canonical_stroke(
-                        &mut pixels,
-                        width,
-                        height,
-                        stroke,
-                        &layer.color,
-                        layer.opacity,
-                        CanonicalRasterTransform::preview(transform),
-                        work,
-                    )?;
-                    work.primitive();
-                }
-            }
-            GeometryOutput::CanonicalRegions(regions) => {
-                for (index, region) in regions.regions().iter().enumerate() {
-                    composite_canonical_region(
-                        &mut pixels,
-                        width,
-                        height,
-                        region,
-                        output_primitive_paint(layer, Some(output), index),
-                        layer.opacity,
-                        CanonicalRasterTransform::preview(transform),
-                        work,
-                    )?;
-                    work.primitive();
-                }
-            }
-        }
-    }
-    Ok(pixels)
+    area_raster::rasterize_area_layer(layer, width, height,
+        CanonicalRasterTransform::preview(transform),
+        Some([transform.offset_x, transform.offset_y, transform.right, transform.bottom]), work)
 }
 
 #[derive(Clone, Copy)]
 struct OutputTransform {
     scale_x: f64,
     scale_y: f64,
+    offset_x: f64,
+    offset_y: f64,
 }
 
 /// Maps immutable canonical coordinates into one concrete raster target before adaptive flattening.
@@ -2730,8 +2954,8 @@ impl CanonicalRasterTransform {
         Self {
             scale_x: value.scale_x,
             scale_y: value.scale_y,
-            offset_x: 0.0,
-            offset_y: 0.0,
+            offset_x: value.offset_x,
+            offset_y: value.offset_y,
         }
     }
 
@@ -2750,6 +2974,8 @@ impl OutputTransform {
         Self {
             scale_x: f64::from(target.width) / scene.canvas.width,
             scale_y: f64::from(target.height) / scene.canvas.height,
+            offset_x: 0.0,
+            offset_y: 0.0,
         }
     }
 }
@@ -2766,6 +2992,10 @@ fn rasterize_layer_for_output(
     antialiasing: RasterAntialiasing,
     work: &mut RasterWork<'_>,
 ) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
+    if antialiasing == RasterAntialiasing::On {
+        return area_raster::rasterize_area_layer(layer, target.width, target.height,
+            CanonicalRasterTransform::output(transform), None, work);
+    }
     let mut pixels = allocate_linear_pixels(
         target.width,
         target.height,
@@ -2775,77 +3005,186 @@ fn rasterize_layer_for_output(
         return Ok(pixels);
     }
     for output in &layer.outputs {
-        match output.geometry() {
-            GeometryOutput::CircularMarks(marks) => {
-                for (index, mark) in marks.iter().enumerate() {
-                    composite_ellipse(
-                        &mut pixels,
-                        target.width,
-                        target.height,
-                        mark.center.x * transform.scale_x,
-                        mark.center.y * transform.scale_y,
-                        mark.radius * transform.scale_x,
-                        mark.radius * transform.scale_y,
-                        output
-                            .primitive_paints
-                            .as_ref()
-                            .and_then(|paints| paints.get(index))
-                            .unwrap_or(&layer.color),
-                        layer.opacity,
-                        antialiasing,
-                        None,
-                    )?;
+        rasterize_output_geometry(
+            &mut pixels,
+            output.geometry(),
+            target,
+            transform,
+            antialiasing,
+            &layer.color,
+            layer.opacity,
+            output.primitive_paints(),
+            None,
+            work,
+        )?;
+    }
+    Ok(pixels)
+}
+
+/// Conservatively rejects only primitives whose canonical bounds cannot touch a measurement crop.
+///
+/// Nonfinite derived bounds remain in the shared walker, which owns their existing diagnostics;
+/// strict comparisons retain boundary-touching and off-window-origin crossing primitives.
+fn bounds_outside_occupancy_window(
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+    window: OccupancyWindow,
+) -> bool {
+    [min_x, min_y, max_x, max_y].into_iter().all(f64::is_finite)
+        && (max_x < window.origin_x
+            || max_y < window.origin_y
+            || min_x > window.origin_x + window.width
+            || min_y > window.origin_y + window.height)
+}
+
+/// Traverses one canonical output through the existing shape walkers into either color or union storage.
+///
+/// Per-primitive paint remains aligned by original primitive index for the normal RGBA consumer;
+/// occupancy always supplies no paint table. An occupancy window may reject only primitives whose
+/// canonical bounds lie wholly outside it, before the same shape walker flattens remaining paths.
+/// The caller owns one shared edge/cancellation budget.
+///
+/// # Errors
+/// Propagates cancellation, flattening, numeric, or request-wide edge-limit diagnostics.
+#[allow(clippy::too_many_arguments)]
+fn rasterize_output_geometry<P: RasterPixelSink>(
+    pixels: &mut P,
+    geometry: &GeometryOutput,
+    target: OutputRasterTarget,
+    transform: OutputTransform,
+    antialiasing: RasterAntialiasing,
+    color: &ColorValue,
+    opacity: f64,
+    primitive_paints: Option<&[ColorValue]>,
+    window: Option<OccupancyWindow>,
+    work: &mut RasterWork<'_>,
+) -> Result<(), RenderError> {
+    match geometry {
+        GeometryOutput::CircularMarks(marks) => {
+            for (index, mark) in marks.iter().enumerate() {
+                if window.is_some_and(|window| {
+                    bounds_outside_occupancy_window(
+                        mark.center.x - mark.radius,
+                        mark.center.y - mark.radius,
+                        mark.center.x + mark.radius,
+                        mark.center.y + mark.radius,
+                        window,
+                    )
+                }) {
+                    continue;
                 }
+                composite_ellipse(
+                    pixels,
+                    target.width,
+                    target.height,
+                    transform.offset_x + mark.center.x * transform.scale_x,
+                    transform.offset_y + mark.center.y * transform.scale_y,
+                    mark.radius * transform.scale_x,
+                    mark.radius * transform.scale_y,
+                    primitive_paints
+                        .and_then(|paints| paints.get(index))
+                        .unwrap_or(color),
+                    opacity,
+                    antialiasing,
+                    if P::IS_OCCUPANCY { Some(work) } else { None },
+                )?;
             }
-            GeometryOutput::CanonicalMarks(marks) => {
-                for (index, mark) in marks.iter().enumerate() {
-                    composite_canonical_mark(
-                        &mut pixels,
-                        target.width,
-                        target.height,
-                        mark,
-                        output
-                            .primitive_paints
-                            .as_ref()
-                            .and_then(|paints| paints.get(index))
-                            .unwrap_or(&layer.color),
-                        layer.opacity,
-                        CanonicalRasterTransform::output(transform),
-                        work,
-                    )?;
+        }
+        GeometryOutput::CanonicalMarks(marks) => {
+            for (index, mark) in marks.iter().enumerate() {
+                let outside = window.is_some_and(|window| match mark {
+                    CanonicalMark::Circle { center, radius, .. } => {
+                        bounds_outside_occupancy_window(
+                            center.x - radius,
+                            center.y - radius,
+                            center.x + radius,
+                            center.y + radius,
+                            window,
+                        )
+                    }
+                    CanonicalMark::ClosedPath(path) => bounds_outside_occupancy_window(
+                        path.bounds.min.x,
+                        path.bounds.min.y,
+                        path.bounds.max.x,
+                        path.bounds.max.y,
+                        window,
+                    ),
+                });
+                if outside {
+                    continue;
                 }
+                composite_canonical_mark(
+                    pixels,
+                    target.width,
+                    target.height,
+                    mark,
+                    primitive_paints
+                        .and_then(|paints| paints.get(index))
+                        .unwrap_or(color),
+                    opacity,
+                    CanonicalRasterTransform::output(transform),
+                    work,
+                )?;
             }
-            GeometryOutput::CanonicalStrokes(strokes) => {
-                for stroke in strokes {
-                    composite_canonical_stroke(
-                        &mut pixels,
-                        target.width,
-                        target.height,
-                        stroke,
-                        &layer.color,
-                        layer.opacity,
-                        CanonicalRasterTransform::output(transform),
-                        work,
-                    )?;
+        }
+        GeometryOutput::CanonicalStrokes(strokes) => {
+            for stroke in strokes {
+                if window.is_some_and(|window| {
+                    stroke.outline.bounds.is_some_and(|bounds| {
+                        bounds_outside_occupancy_window(
+                            bounds.min.x,
+                            bounds.min.y,
+                            bounds.max.x,
+                            bounds.max.y,
+                            window,
+                        )
+                    })
+                }) {
+                    continue;
                 }
+                composite_canonical_stroke(
+                    pixels,
+                    target.width,
+                    target.height,
+                    stroke,
+                    color,
+                    opacity,
+                    CanonicalRasterTransform::output(transform),
+                    work,
+                )?;
             }
-            GeometryOutput::CanonicalRegions(regions) => {
-                for (index, region) in regions.regions().iter().enumerate() {
-                    composite_canonical_region(
-                        &mut pixels,
-                        target.width,
-                        target.height,
-                        region,
-                        output_primitive_paint(layer, Some(output), index),
-                        layer.opacity,
-                        CanonicalRasterTransform::output(transform),
-                        work,
-                    )?;
+        }
+        GeometryOutput::CanonicalRegions(regions) => {
+            for (index, region) in regions.regions().iter().enumerate() {
+                if window.is_some_and(|window| {
+                    bounds_outside_occupancy_window(
+                        region.bounds.min.x,
+                        region.bounds.min.y,
+                        region.bounds.max.x,
+                        region.bounds.max.y,
+                        window,
+                    )
+                }) {
+                    continue;
                 }
+                composite_canonical_region(
+                    pixels,
+                    target.width,
+                    target.height,
+                    region,
+                    primitive_paints
+                        .and_then(|paints| paints.get(index))
+                        .unwrap_or(color),
+                    opacity,
+                    CanonicalRasterTransform::output(transform),
+                    work,
+                )?;
             }
         }
     }
-    Ok(pixels)
+    Ok(())
 }
 
 /// Allocates the single streaming accumulator for one modeled rasterization.
@@ -3140,6 +3479,7 @@ fn integral_dimension(value: f64) -> Result<u32, RenderError> {
 /// # Errors
 ///
 /// Returns cancellation before further local pixel mutation.
+#[allow(dead_code)] // Retained legacy 8x8 circle AA for bounded reference checks.
 fn composite_circle(
     pixels: &mut [PremultipliedLinearPixel],
     width: u32,
@@ -3176,18 +3516,19 @@ fn composite_circle(
     Ok(())
 }
 
-/// Rasterizes one generalized canonical mark with the fixed 8x8 coverage contract.
+/// Rasterizes one generalized canonical mark with the active consumer's coverage policy.
 ///
 /// Closed paths are deterministically flattened to at most one sixty-fourth of
-/// a native output pixel before even-odd sampling; clipping remains the pixel
-/// bounds supplied by the final renderer consumer.
+/// an output pixel before even-odd sampling. The normal raster consumer uses
+/// fixed 8x8 antialiasing; occupancy uses its center-sampled Off policy.
+/// Clipping remains the pixel bounds supplied by the final renderer consumer.
 ///
 /// # Errors
 ///
 /// Returns cancellation, numeric flattening, or request-wide edge-limit diagnostics.
 #[allow(clippy::too_many_arguments)]
-fn composite_canonical_mark(
-    pixels: &mut [PremultipliedLinearPixel],
+fn composite_canonical_mark<P: RasterPixelSink>(
+    pixels: &mut P,
     width: u32,
     height: u32,
     mark: &CanonicalMark,
@@ -3232,15 +3573,11 @@ fn composite_canonical_mark(
                     if coverage == 0.0 {
                         continue;
                     }
-                    let source = PremultipliedLinearPixel {
-                        red: color.red * color.alpha * opacity * coverage,
-                        green: color.green * color.alpha * opacity * coverage,
-                        blue: color.blue * color.alpha * opacity * coverage,
-                        alpha: color.alpha * opacity * coverage,
-                    };
-                    source_over(
-                        &mut pixels[y as usize * width as usize + x as usize],
-                        source,
+                    pixels.paint_shape(
+                        y as usize * width as usize + x as usize,
+                        coverage,
+                        color,
+                        opacity,
                     );
                 }
             }
@@ -3256,8 +3593,8 @@ fn composite_canonical_mark(
 /// Returns cancellation, flattening, or request-wide edge-limit diagnostics without changing the
 /// already-closed region ring or constructing renderer topology.
 #[allow(clippy::too_many_arguments)]
-fn composite_canonical_region(
-    pixels: &mut [PremultipliedLinearPixel],
+fn composite_canonical_region<P: RasterPixelSink>(
+    pixels: &mut P,
     width: u32,
     height: u32,
     region: &toniator_geometry::CanonicalRegion,
@@ -3283,14 +3620,11 @@ fn composite_canonical_region(
             if coverage == 0.0 {
                 continue;
             }
-            source_over(
-                &mut pixels[y as usize * width as usize + x as usize],
-                PremultipliedLinearPixel {
-                    red: color.red * color.alpha * opacity * coverage,
-                    green: color.green * color.alpha * opacity * coverage,
-                    blue: color.blue * color.alpha * opacity * coverage,
-                    alpha: color.alpha * opacity * coverage,
-                },
+            pixels.paint_shape(
+                y as usize * width as usize + x as usize,
+                coverage,
+                color,
+                opacity,
             );
         }
     }
@@ -3304,8 +3638,8 @@ fn composite_canonical_region(
 /// Returns cancellation or finite raster bounds errors without changing the
 /// canonical centerline or splitting it at the canvas boundary.
 #[allow(clippy::too_many_arguments)]
-fn composite_canonical_stroke(
-    pixels: &mut [PremultipliedLinearPixel],
+fn composite_canonical_stroke<P: RasterPixelSink>(
+    pixels: &mut P,
     width: u32,
     height: u32,
     stroke: &CanonicalStroke,
@@ -3380,15 +3714,11 @@ fn composite_canonical_stroke(
         for (x, covered) in covered.iter().copied() {
             let coverage = f64::from(covered) / f64::from(samples * samples);
             if coverage > 0.0 {
-                let source = PremultipliedLinearPixel {
-                    red: color.red * color.alpha * opacity * coverage,
-                    green: color.green * color.alpha * opacity * coverage,
-                    blue: color.blue * color.alpha * opacity * coverage,
-                    alpha: color.alpha * opacity * coverage,
-                };
-                source_over(
-                    &mut pixels[y as usize * width as usize + x as usize],
-                    source,
+                pixels.paint_shape(
+                    y as usize * width as usize + x as usize,
+                    coverage,
+                    color,
+                    opacity,
                 );
             }
         }
@@ -3964,8 +4294,8 @@ fn polygon_coverage_nonzero(
 ///
 /// Returns cancellation while traversing bounded rows or subpixel samples.
 #[allow(clippy::too_many_arguments)]
-fn composite_ellipse(
-    pixels: &mut [PremultipliedLinearPixel],
+fn composite_ellipse<P: RasterPixelSink>(
+    pixels: &mut P,
     width: u32,
     height: u32,
     center_x: f64,
@@ -3999,13 +4329,12 @@ fn composite_ellipse(
             if coverage == 0.0 {
                 continue;
             }
-            let source_alpha = (color.alpha * opacity * coverage).clamp(0.0, 1.0);
-            let destination = &mut pixels[y as usize * width as usize + x as usize];
-            let remaining = 1.0 - source_alpha;
-            destination.red = color.red * source_alpha + destination.red * remaining;
-            destination.green = color.green * source_alpha + destination.green * remaining;
-            destination.blue = color.blue * source_alpha + destination.blue * remaining;
-            destination.alpha = source_alpha + destination.alpha * remaining;
+            pixels.paint_ellipse(
+                y as usize * width as usize + x as usize,
+                coverage,
+                color,
+                opacity,
+            );
         }
     }
     Ok(())
@@ -4059,6 +4388,7 @@ fn ellipse_coverage(
 /// # Errors
 ///
 /// Returns cancellation while traversing subpixel samples.
+#[allow(dead_code)] // Retained legacy 8x8 circle AA for bounded reference checks.
 fn circle_coverage(
     mark: &CanonicalCircleMark,
     x: u32,
@@ -4074,6 +4404,7 @@ fn circle_coverage(
 ///
 /// Returns cancellation while traversing bounded pixels or subpixel samples.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // Retained legacy 8x8 circle AA for bounded reference checks.
 fn composite_circle_transformed(
     pixels: &mut [PremultipliedLinearPixel],
     width: u32,
@@ -4128,6 +4459,7 @@ fn composite_circle_transformed(
 /// # Errors
 ///
 /// Returns cancellation while traversing subpixel samples.
+#[allow(dead_code)] // Retained legacy 8x8 circle AA for bounded reference checks.
 fn circle_coverage_at(
     center_x: f64,
     center_y: f64,
@@ -4157,6 +4489,7 @@ fn circle_coverage_at(
 /// # Errors
 ///
 /// Returns cancellation while traversing subpixel samples.
+#[allow(dead_code)] // Retained legacy 8x8 circle AA for bounded reference checks.
 fn circle_coverage_clipped(
     center_x: f64,
     center_y: f64,
@@ -4490,7 +4823,11 @@ fn write_svg_channel_group(
     document.push_str("</g>\n");
 }
 
-/// Writes editable canonical circle or cubic path geometry without resolving document resources.
+/// Serializes validated canonical geometry without resolving document resources.
+///
+/// This SVG boundary omits circles whose original radius is exactly zero while preserving each
+/// positive circle's nonzero radius, original enumeration ID, and paint index. All other geometry
+/// and numeric attributes retain their canonical values and existing formatting.
 fn write_svg_geometry(
     document: &mut String,
     geometry: &GeometryOutput,
@@ -4502,6 +4839,9 @@ fn write_svg_geometry(
     match geometry {
         GeometryOutput::CircularMarks(marks) => {
             for (index, mark) in marks.iter().enumerate() {
+                if mark.radius == 0.0 {
+                    continue;
+                }
                 let paint = layer.map_or_else(String::new, |layer| {
                     format!(
                         " fill=\"{}\"",
@@ -4526,12 +4866,15 @@ fn write_svg_geometry(
                     "<circle{id} cx=\"{}\" cy=\"{}\" r=\"{}\"{paint}{opacity}/>\n",
                     compact_number(mark.center.x),
                     compact_number(mark.center.y),
-                    compact_number(mark.radius)
+                    compact_circle_radius(mark.radius)
                 ));
             }
         }
         GeometryOutput::CanonicalMarks(marks) => {
             for (index, mark) in marks.iter().enumerate() {
+                if matches!(mark, CanonicalMark::Circle { radius, .. } if *radius == 0.0) {
+                    continue;
+                }
                 let paint = layer.map_or_else(String::new, |layer| {
                     format!(
                         " fill=\"{}\"",
@@ -4554,7 +4897,7 @@ fn write_svg_geometry(
                         let id = layer.map_or_else(String::new, |_| {
                             format!(" id=\"channel-{channel_id}-mark-{index}\"")
                         });
-                        document.push_str(&format!("<circle{id} cx=\"{}\" cy=\"{}\" r=\"{}\"{paint} fill-rule=\"evenodd\"{opacity}/>\n", compact_number(center.x), compact_number(center.y), compact_number(*radius)))
+                        document.push_str(&format!("<circle{id} cx=\"{}\" cy=\"{}\" r=\"{}\"{paint} fill-rule=\"evenodd\"{opacity}/>\n", compact_number(center.x), compact_number(center.y), compact_circle_radius(*radius)))
                     }
                     CanonicalMark::ClosedPath(mark) => {
                         let mut data = String::new();
@@ -4785,6 +5128,196 @@ fn compact_number(value: f64) -> String {
         text.pop();
     }
     text
+}
+
+/// Keeps positive circle radii nonzero in SVG without changing other compact numeric attributes.
+fn compact_circle_radius(radius: f64) -> String {
+    let compact = compact_number(radius);
+    if radius > 0.0 && compact == "0" {
+        radius.to_string()
+    } else {
+        compact
+    }
+}
+
+#[cfg(test)]
+mod ton013_svg_circle_serialization_tests {
+    use super::*;
+    use toniator_domain::PatternMechanismId;
+    use toniator_geometry::{
+        FamilySiteId, FamilySiteProvenance, GuideInstanceId, GuideIntersectionProvenance, SiteId,
+        SiteScope,
+    };
+
+    /// Builds a source-colored legacy circle while preserving its fixture enumeration identity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the small fixture ordinal cannot convert to a guide index or invalid circle
+    /// fixture data is supplied.
+    fn source_color_circle(radius: f64, ordinal: u64, paint: ColorValue) -> SourceColorCircle {
+        SourceColorCircle {
+            mark: CanonicalCircleMark::new(
+                SiteId {
+                    first_dimension_id: 1,
+                    first_index: i64::try_from(ordinal).expect("fixture ordinal is small"),
+                    second_dimension_id: 2,
+                    second_index: i64::try_from(ordinal).expect("fixture ordinal is small"),
+                },
+                Point2::new(10.0 + ordinal as f64, 12.0),
+                radius,
+                SiteScope::Canvas,
+                GuideIntersectionProvenance {
+                    contributors: vec![
+                        GuideInstanceId::new(toniator_domain::GuideDimensionId(1), 0),
+                        GuideInstanceId::new(toniator_domain::GuideDimensionId(2), 0),
+                    ],
+                },
+            )
+            .expect("finite nonnegative source circle validates"),
+            paint,
+        }
+    }
+
+    /// Builds one canonical circle with a stable ordinal and caller-specified radius.
+    fn canonical_circle(radius: f64, ordinal: usize) -> CanonicalMark {
+        CanonicalMark::Circle {
+            source_site_id: FamilySiteId {
+                mechanism_id: PatternMechanismId(77),
+                ordinal,
+            },
+            center: Point2::new(10.0 + ordinal as f64, 12.0),
+            radius,
+            scope: SiteScope::Canvas,
+            provenance: FamilySiteProvenance::Random {
+                candidate_ordinal: ordinal,
+                accepted_ordinal: ordinal,
+                exclusion_neighbor_ordinal: None,
+            },
+            fill_rule: CanonicalFillRule::EvenOdd,
+        }
+    }
+
+    /// Builds the distinct paint sequence used to detect paint-index shifts after zero omission.
+    fn indexed_paints() -> Vec<ColorValue> {
+        [
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (1.0, 1.0, 0.0),
+            (0.0, 1.0, 1.0),
+        ]
+        .into_iter()
+        .map(|(red, green, blue)| ColorValue {
+            red,
+            green,
+            blue,
+            alpha: 1.0,
+        })
+        .collect()
+    }
+
+    /// Writes one layer's first geometry using the same IDs and sampled paints as SVG export.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a test fixture layer does not contain its required first output.
+    fn svg_for_layer(layer: &RenderLayer) -> String {
+        let mut svg = String::new();
+        let output = &layer.outputs()[0];
+        write_svg_geometry(
+            &mut svg,
+            output.geometry(),
+            layer.channel_id.0,
+            Some(layer),
+            Some(output),
+            &CanvasSpec {
+                width: 100.0,
+                height: 100.0,
+            },
+        );
+        svg
+    }
+
+    /// Proves source-colored SVG omits only signed zero and retains every positive radius and index.
+    ///
+    /// # Panics
+    ///
+    /// Panics when zero circles serialize, tiny positives round to zero, or omission shifts paint or
+    /// mark IDs away from their original enumerated positions.
+    #[test]
+    fn source_color_svg_omits_signed_zero_and_preserves_tiny_positive_circles() {
+        let radii = [0.0, 1.25, -0.0, 1.0e-7, 4.0e-7];
+        let paints = indexed_paints();
+        let layer = RenderLayer::new_source_color(
+            ChannelId(9),
+            true,
+            1.0,
+            radii
+                .into_iter()
+                .enumerate()
+                .map(|(index, radius)| {
+                    source_color_circle(radius, index as u64, paints[index].clone())
+                })
+                .collect(),
+        )
+        .expect("source-colored circle layer validates");
+
+        let circles = svg_for_layer(&layer)
+            .lines()
+            .filter(|line| line.starts_with("<circle"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(circles.len(), 3);
+        assert!(circles[0].contains("id=\"channel-9-mark-1\""));
+        assert!(circles[0].contains("r=\"1.25\""));
+        assert!(circles[0].contains("fill=\"#00ff00\""));
+        assert!(circles[1].contains("id=\"channel-9-mark-3\""));
+        assert!(circles[1].contains("r=\"0.0000001\""));
+        assert!(circles[1].contains("fill=\"#ffff00\""));
+        assert!(circles[2].contains("id=\"channel-9-mark-4\""));
+        assert!(circles[2].contains("r=\"0.0000004\""));
+        assert!(circles[2].contains("fill=\"#00ffff\""));
+    }
+
+    /// Proves canonical SVG omits only signed zero and retains every positive radius and index.
+    ///
+    /// # Panics
+    ///
+    /// Panics when zero circles serialize, tiny positives round to zero, or omission shifts paint or
+    /// mark IDs away from their original enumerated positions.
+    #[test]
+    fn canonical_svg_omits_signed_zero_and_preserves_tiny_positive_circles() {
+        let radii = [0.0, 1.25, -0.0, 1.0e-7, 4.0e-7];
+        let layer = RenderLayer::new_source_color_geometry(
+            ChannelId(9),
+            true,
+            1.0,
+            radii
+                .into_iter()
+                .enumerate()
+                .map(|(index, radius)| canonical_circle(radius, index))
+                .collect(),
+            indexed_paints(),
+        )
+        .expect("canonical circle layer validates");
+
+        let circles = svg_for_layer(&layer)
+            .lines()
+            .filter(|line| line.starts_with("<circle"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(circles.len(), 3);
+        assert!(circles[0].contains("id=\"channel-9-mark-1\""));
+        assert!(circles[0].contains("r=\"1.25\""));
+        assert!(circles[0].contains("fill=\"#00ff00\""));
+        assert!(circles[1].contains("id=\"channel-9-mark-3\""));
+        assert!(circles[1].contains("r=\"0.0000001\""));
+        assert!(circles[1].contains("fill=\"#ffff00\""));
+        assert!(circles[2].contains("id=\"channel-9-mark-4\""));
+        assert!(circles[2].contains("r=\"0.0000004\""));
+        assert!(circles[2].contains("fill=\"#00ffff\""));
+    }
 }
 
 fn xml_escape(value: &str) -> String {

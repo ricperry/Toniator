@@ -47,6 +47,7 @@ fn ordered_authored_outputs_round_trip_without_document_resource_ids() {
     )
     .expect("ordered Curve Motif validates");
     let preset = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "ordered-authored-v4".into(),
             name: "Ordered Authored v4".into(),
@@ -142,6 +143,7 @@ fn authored_closed_shape_preset_round_trips_as_embedded_recipe_geometry() {
     )
     .expect("the bow-tie fixture is a finite closed shape");
     let preset = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "shape-round-trip".into(),
             name: "Shape Round Trip".into(),
@@ -188,6 +190,7 @@ fn generic_guide_preset_round_trips_without_document_resource_ids() {
     )
     .expect("open generic guide payload validates");
     let preset = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "generic-guide-v4".into(),
             name: "Generic Guide v4".into(),
@@ -344,6 +347,7 @@ fn preset_v4_root_authored_resources_validate_aliases_and_references() {
 fn preset_round_trips_through_versioned_standalone_io() {
     let directory = validation_directory();
     let preset = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "io-round-trip".into(),
             name: "IO Round Trip".into(),
@@ -374,6 +378,7 @@ fn preset_round_trips_through_versioned_standalone_io() {
 #[test]
 fn parametric_recipe_round_trips_without_a_preset_format_bump() {
     let preset = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "parametric-v4".into(),
             name: "Parametric v4".into(),
@@ -648,6 +653,7 @@ fn preset_io_rejects_invalid_serialized_and_save_inputs() {
     assert!(load_preset(&unknown).is_err());
     let invalid_path = directory.join("invalid-save.preset.json");
     let invalid_metadata = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: " ".into(),
             name: "Invalid".into(),
@@ -668,6 +674,7 @@ fn preset_io_rejects_invalid_serialized_and_save_inputs() {
     assert!(save_preset(&invalid_path, &invalid_metadata).is_err());
     assert!(!invalid_path.exists());
     let invalid_recipe = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "invalid-recipe".into(),
             name: "Invalid Recipe".into(),

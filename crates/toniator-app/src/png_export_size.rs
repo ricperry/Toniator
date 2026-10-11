@@ -1,5 +1,7 @@
 //! Runtime-only output-size choices resolved from authoritative document dimensions.
 
+use std::fmt;
+
 use toniator_domain::CanvasSpec;
 use toniator_engine::OutputRasterTarget;
 
@@ -17,6 +19,121 @@ enum SizeChoice {
     Quadruple,
     Eightfold,
     Custom,
+}
+
+/// Carries positive whole pixel dimensions before the shared renderer budget is applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OutputDimensions {
+    width: u32,
+    height: u32,
+}
+
+/// Distinguishes malformed size input from a valid request over the renderer's pixel budget.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OutputSizeError {
+    Invalid(String),
+    RendererLimit(String),
+}
+
+impl OutputSizeError {
+    /// Returns the user-facing explanation for this size outcome.
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            Self::Invalid(message) | Self::RendererLimit(message) => message,
+        }
+    }
+
+    /// Reports whether the requested dimensions are valid but exceed Toniator's raster budget.
+    pub(crate) const fn is_render_limit(&self) -> bool {
+        matches!(self, Self::RendererLimit(_))
+    }
+
+    /// Provides concise preview guidance without duplicating the detailed size error.
+    pub(crate) const fn preview_status(&self) -> Option<&'static str> {
+        match self {
+            Self::Invalid(_) => None,
+            Self::RendererLimit(_) => Some("Preview unavailable at this output size"),
+        }
+    }
+}
+
+impl From<String> for OutputSizeError {
+    /// Classifies parser and preparation diagnostics as invalid-input outcomes.
+    fn from(message: String) -> Self {
+        Self::Invalid(message)
+    }
+}
+
+impl fmt::Display for OutputSizeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl OutputDimensions {
+    /// Returns the requested output width in pixels.
+    #[cfg(test)]
+    pub(crate) const fn width(self) -> u32 {
+        self.width
+    }
+
+    /// Returns the requested output height in pixels.
+    #[cfg(test)]
+    pub(crate) const fn height(self) -> u32 {
+        self.height
+    }
+
+    /// Returns the exact requested output pixel count.
+    pub(crate) const fn pixel_count(self) -> u64 {
+        self.width as u64 * self.height as u64
+    }
+
+    /// Formats requested dimensions and decimal megapixels for the export summary.
+    pub(crate) fn summary(self) -> String {
+        format!(
+            "{} × {} pixels ({:.1} MP)",
+            format_pixel_count(u64::from(self.width)),
+            format_pixel_count(u64::from(self.height)),
+            self.pixel_count() as f64 / 1_000_000.0
+        )
+    }
+
+    /// Checks these requested dimensions through the renderer's final-output authority.
+    ///
+    /// # Errors
+    /// Returns Toniator's pixel-budget diagnostic when the request exceeds the renderer bound.
+    pub(crate) fn target(self) -> Result<OutputRasterTarget, OutputSizeError> {
+        OutputRasterTarget::new(self.width, self.height)
+            .map_err(|_| OutputSizeError::RendererLimit(self.render_limit_message()))
+    }
+
+    /// Returns a precise diagnostic when these dimensions exceed the renderer's pixel budget.
+    pub(crate) fn render_limit_message(self) -> String {
+        format!(
+            "Toniator's current raster rendering limit is {} pixels ({:.1} MP); requested output is {}.",
+            format_pixel_count(OutputRasterTarget::maximum_pixels()),
+            OutputRasterTarget::maximum_pixels() as f64 / 1_000_000.0,
+            self.summary()
+        )
+    }
+}
+
+/// Formats a requested-but-not-renderable PNG target for the live size summary.
+pub(crate) fn requested_png_summary(dimensions: OutputDimensions) -> String {
+    format!("Requested PNG: {}", dimensions.summary())
+}
+
+/// Formats an unsigned pixel count with stable thousands separators.
+fn format_pixel_count(value: u64) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            formatted.push(',');
+        }
+        formatted.push(digit);
+    }
+    formatted
 }
 
 const PNG_CHOICES: [SizeChoice; 5] = [
@@ -58,6 +175,7 @@ impl VideoOutputSize {
 ///
 /// The source canvas remains the authority for artwork aspect. The secondary axis uses nearest
 /// whole-pixel rounding after the limiting axis is floored to its maximum.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PrintFit {
     target: OutputRasterTarget,
@@ -67,6 +185,63 @@ pub(crate) struct PrintFit {
     physical_height_mm: f64,
 }
 
+/// Carries print-derived output dimensions before the renderer admits their pixel count.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PrintFitDimensions {
+    dimensions: OutputDimensions,
+    target_dpi: f64,
+    pixels_per_metre: u32,
+    physical_width_mm: f64,
+    physical_height_mm: f64,
+}
+
+impl PrintFitDimensions {
+    /// Returns requested dimensions derived from the physical box and target DPI.
+    pub(crate) const fn dimensions(self) -> OutputDimensions {
+        self.dimensions
+    }
+
+    /// Returns the requested density before conversion to PNG's integer pixels-per-metre value.
+    pub(crate) const fn target_dpi(self) -> f64 {
+        self.target_dpi
+    }
+
+    /// Returns the equal horizontal and vertical density encoded in PNG pixels per metre.
+    pub(crate) const fn pixels_per_metre(self) -> u32 {
+        self.pixels_per_metre
+    }
+
+    /// Returns the fitted physical dimensions at the requested DPI.
+    pub(crate) const fn physical_size_mm(self) -> (f64, f64) {
+        (self.physical_width_mm, self.physical_height_mm)
+    }
+
+    /// Checks the requested print dimensions through the renderer's final-output authority.
+    ///
+    /// # Errors
+    /// Returns Toniator's pixel-budget diagnostic without changing the requested print size.
+    pub(crate) fn target(self) -> Result<OutputRasterTarget, OutputSizeError> {
+        match self.dimensions.target() {
+            Err(OutputSizeError::RendererLimit(_)) => {
+                Err(OutputSizeError::RendererLimit(self.render_limit_message()))
+            }
+            result => result,
+        }
+    }
+
+    /// Describes an over-budget print fit while retaining the selected area and DPI.
+    pub(crate) fn render_limit_message(self) -> String {
+        format!(
+            "Requested print output is {} at {:.1} DPI, above Toniator's current raster rendering limit of {} pixels ({:.1} MP). The requested print area and DPI are unchanged.",
+            self.dimensions.summary(),
+            self.target_dpi,
+            format_pixel_count(OutputRasterTarget::maximum_pixels()),
+            OutputRasterTarget::maximum_pixels() as f64 / 1_000_000.0
+        )
+    }
+}
+
+#[cfg(test)]
 impl PrintFit {
     /// Returns final pixel dimensions admitted by the shared renderer budget.
     pub(crate) fn target(self) -> OutputRasterTarget {
@@ -102,12 +277,37 @@ impl PrintFit {
 /// Rejects nonintegral or invalid source dimensions, nonpositive or unrepresentable DPI/metadata,
 /// nonpositive or subpixel physical bounds, unrepresentable output dimensions, and renderer-budget
 /// violations.
+#[cfg(test)]
 pub(crate) fn fit_print_box(
     canvas: &CanvasSpec,
     width_mm: f64,
     height_mm: f64,
     target_dpi: f64,
 ) -> Result<PrintFit, String> {
+    let fit = fit_print_box_dimensions(canvas, width_mm, height_mm, target_dpi)?;
+    let target = fit.target().map_err(|error| error.message().to_owned())?;
+    Ok(PrintFit {
+        target,
+        target_dpi: fit.target_dpi,
+        pixels_per_metre: fit.pixels_per_metre,
+        physical_width_mm: fit.physical_width_mm,
+        physical_height_mm: fit.physical_height_mm,
+    })
+}
+
+/// Resolves print-derived dimensions before checking the renderer's independent pixel budget.
+///
+/// The physical box and requested DPI remain authoritative even when the renderer later rejects
+/// the requested dimensions. This lets the UI report the exact resolution without reducing it.
+///
+/// # Errors
+/// Rejects invalid source dimensions, print bounds, DPI/metadata, and unrepresentable pixel axes.
+pub(crate) fn fit_print_box_dimensions(
+    canvas: &CanvasSpec,
+    width_mm: f64,
+    height_mm: f64,
+    target_dpi: f64,
+) -> Result<PrintFitDimensions, String> {
     let valid_source_dimension = |value: f64| {
         value.is_finite() && value > 0.0 && value.fract() == 0.0 && value <= f64::from(u32::MAX)
     };
@@ -159,11 +359,9 @@ pub(crate) fn fit_print_box(
     };
     let width = checked_dimension(width)?;
     let height = checked_dimension(height)?;
-    let target = OutputRasterTarget::new(width, height)
-        .map_err(|_| "This print image exceeds the renderer pixel budget.".to_owned())?;
 
-    Ok(PrintFit {
-        target,
+    Ok(PrintFitDimensions {
+        dimensions: OutputDimensions { width, height },
         target_dpi,
         pixels_per_metre,
         physical_width_mm: f64::from(width) * 25.4 / target_dpi,
@@ -218,13 +416,28 @@ pub(crate) fn video_custom_selected(position: u32) -> bool {
 ///
 /// # Errors
 /// Returns malformed custom dimensions, invalid native canvas dimensions, or output-budget errors.
+#[cfg(test)]
 pub(crate) fn target(
     canvas: &CanvasSpec,
     position: u32,
     custom: &str,
 ) -> Result<OutputRasterTarget, String> {
+    requested_png_dimensions(canvas, position, custom)?
+        .target()
+        .map_err(|error| error.message().to_owned())
+}
+
+/// Resolves selected PNG dimensions before applying the final renderer pixel budget.
+///
+/// # Errors
+/// Rejects malformed dimensions, invalid native canvas dimensions, and unrepresentable axes.
+pub(crate) fn requested_png_dimensions(
+    canvas: &CanvasSpec,
+    position: u32,
+    custom: &str,
+) -> Result<OutputDimensions, String> {
     let choice = selected_choice(SizeMenu::Png, position)?;
-    resolve_target(canvas, choice, custom)
+    resolve_dimensions(canvas, choice, custom)
 }
 
 /// Resolves a temporal size choice and keeps 1x on the existing native raster route.
@@ -240,10 +453,13 @@ pub(crate) fn video_output_size(
     custom: &str,
 ) -> Result<VideoOutputSize, String> {
     let choice = selected_choice(SizeMenu::Temporal, position)?;
-    let dimensions = resolve_target(canvas, choice, custom)?;
+    let dimensions = resolve_dimensions(canvas, choice, custom)?;
+    let target = dimensions
+        .target()
+        .map_err(|error| error.message().to_owned())?;
     Ok(VideoOutputSize {
-        dimensions,
-        target: (choice != SizeChoice::Native).then_some(dimensions),
+        dimensions: target,
+        target: (choice != SizeChoice::Native).then_some(target),
     })
 }
 
@@ -277,33 +493,28 @@ fn menu_choices(menu: SizeMenu) -> &'static [SizeChoice] {
     }
 }
 
-/// Resolves one scale or custom choice through the final renderer target authority.
+/// Resolves one scale or custom choice without applying the renderer's pixel budget.
 ///
 /// # Errors
-/// Rejects malformed custom dimensions, invalid native dimensions, scaling overflow, and targets
-/// outside the shared output pixel budget.
-fn resolve_target(
+/// Rejects malformed custom dimensions, invalid native dimensions, and scaling overflow.
+fn resolve_dimensions(
     canvas: &CanvasSpec,
     choice: SizeChoice,
     custom: &str,
-) -> Result<OutputRasterTarget, String> {
+) -> Result<OutputDimensions, String> {
     if choice == SizeChoice::Custom {
-        return crate::parse_output_target(custom)
-            .map_err(|error| {
-                if error.contains("pixel count exceeds") {
-                    "This image is too large to export. Choose a smaller size.".to_owned()
-                } else {
-                    "Enter dimensions as WIDTHxHEIGHT using positive whole numbers.".to_owned()
-                }
+        let (width, height) = crate::parse_output_dimensions(custom)
+            .map_err(|_| {
+                "Enter dimensions as WIDTHxHEIGHT using positive whole numbers.".to_owned()
             })?
-            .ok_or_else(|| "Enter custom dimensions as WIDTHxHEIGHT.".to_owned());
+            .ok_or_else(|| "Enter custom dimensions as WIDTHxHEIGHT.".to_owned())?;
+        return Ok(OutputDimensions { width, height });
     }
 
     let (width, height) = native_dimensions(canvas, choice)?;
     let width = u32::try_from(width).map_err(|_| "Output width is too large.")?;
     let height = u32::try_from(height).map_err(|_| "Output height is too large.")?;
-    OutputRasterTarget::new(width, height)
-        .map_err(|_| "This image is too large to export. Choose a smaller size.".to_owned())
+    Ok(OutputDimensions { width, height })
 }
 
 /// Validates positive integral document dimensions, then applies one exact positive scale.
@@ -493,6 +704,69 @@ mod tests {
                 ""
             )
             .is_err()
+        );
+    }
+
+    /// Keeps valid over-budget dimensions visible while the renderer rejects their target.
+    ///
+    /// # Panics
+    /// Panics if resolution, summary, preview guidance, or the renderer-owned limit changes.
+    #[test]
+    fn over_budget_png_request_retains_dimensions_and_names_renderer_limit() {
+        let canvas = canvas(2048.0, 1164.0);
+        let requested = requested_png_dimensions(&canvas, 3, "").unwrap();
+        assert_eq!((requested.width(), requested.height()), (16_384, 9_312));
+        assert_eq!(requested.pixel_count(), 152_567_808);
+        assert_eq!(requested.summary(), "16,384 × 9,312 pixels (152.6 MP)");
+        assert_eq!(
+            requested_png_summary(requested),
+            "Requested PNG: 16,384 × 9,312 pixels (152.6 MP)"
+        );
+        assert_eq!(OutputRasterTarget::maximum_pixels(), 67_108_864);
+        let error = requested.target().unwrap_err();
+        assert!(matches!(error, OutputSizeError::RendererLimit(_)));
+        assert_eq!(
+            error.message(),
+            "Toniator's current raster rendering limit is 67,108,864 pixels (67.1 MP); requested output is 16,384 × 9,312 pixels (152.6 MP)."
+        );
+        assert_eq!(
+            error.preview_status(),
+            Some("Preview unavailable at this output size")
+        );
+
+        let recovery = requested_png_dimensions(&canvas, 2, "").unwrap();
+        assert_eq!((recovery.width(), recovery.height()), (8192, 4656));
+        assert_eq!(recovery.pixel_count(), 38_141_952);
+        assert!(recovery.target().is_ok());
+
+        let malformed = requested_png_dimensions(&canvas, 4, "dimensions").unwrap_err();
+        let error = OutputSizeError::Invalid(malformed);
+        assert!(!error.is_render_limit());
+        assert_eq!(error.preview_status(), None);
+    }
+
+    /// Retains print-area and DPI-derived dimensions when the renderer cannot admit the target.
+    ///
+    /// # Panics
+    /// Panics if the print fit silently changes its requested resolution or loses the limit reason.
+    #[test]
+    fn over_budget_print_fit_reports_requested_resolution_without_downscaling() {
+        let fit = fit_print_box_dimensions(&canvas(2048.0, 1164.0), 1000.0, 1000.0, 300.0).unwrap();
+        let dimensions = fit.dimensions();
+        assert_eq!((dimensions.width(), dimensions.height()), (11_811, 6713));
+        assert_eq!(fit.target_dpi(), 300.0);
+        let target_error = fit.target().unwrap_err();
+        assert!(matches!(target_error, OutputSizeError::RendererLimit(_)));
+        assert_eq!(target_error.message(), fit.render_limit_message());
+        let message = fit.render_limit_message();
+        assert!(message.contains("11,811 × 6,713 pixels (79.3 MP)"));
+        assert!(message.contains("at 300.0 DPI"));
+        assert!(message.contains("67,108,864 pixels (67.1 MP)"));
+        assert!(message.contains("print area and DPI are unchanged"));
+        assert!(target_error.is_render_limit());
+        assert_eq!(
+            target_error.preview_status(),
+            Some("Preview unavailable at this output size")
         );
     }
 

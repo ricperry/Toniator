@@ -67,9 +67,9 @@ impl VariableWidthOutlineLimits {
 ///
 /// Width samples are validated against the supplied authored path, preserve segment boundaries
 /// and zero-width run boundaries, and are only simplified by the caller's already adaptive
-/// profile. The builder deterministically simplifies center and half-width independently within
-/// `tolerance`, while preserving segment boundaries, zero transitions, closed seams, and tangent
-/// discontinuities.
+/// profile. The builder simplifies centers within `tolerance` and each positive sampled
+/// half-width within the smaller of `tolerance` or 2% of that half-width. Segment boundaries,
+/// zero transitions, closed seams, and tangent discontinuities remain explicit.
 /// Open runs receive true cubic round caps, while closed positive paths use opposite-winding
 /// rails without endpoint caps. Self-overlap deliberately remains a deterministic nonzero fill.
 ///
@@ -160,7 +160,8 @@ pub fn build_variable_width_outline_cancellable(
         } else {
             end
         };
-        let run = simplify_positive_run(path, &samples[run_start..run_end], tolerance)?;
+        let run =
+            simplify_positive_run(path, &samples[run_start..run_end], tolerance, is_cancelled)?;
         if run.len() == 1 {
             contours.push(single_sample_disc(
                 path,
@@ -375,27 +376,30 @@ fn build_closed_rail(
     Ok(CanonicalOutlineContour { segments })
 }
 
-/// Simplifies one positive run with independent center and half-width error bounds.
+/// Simplifies one positive run with independent absolute center and local relative width bounds.
 ///
-/// Segment transitions are mandatory retain points, so explicit seams and tangent discontinuities
-/// survive even when their centers coincide. The recursive RDP pass keeps a sample whenever the
-/// center chord or half-width interpolation differs by more than `tolerance`.
+/// Segment transitions, zero run endpoints, and tangent discontinuities remain mandatory. The
+/// iterative pass keeps the largest normalized violation until both bounds hold.
 ///
 /// # Errors
 ///
-/// Propagates exact centerline evaluation failures without accepting an inferred sample position.
+/// Propagates cancellation, allocation, or exact centerline failures without a partial outline.
 fn simplify_positive_run(
     path: &CurvePath,
     samples: &[VariableWidthPathSample],
     tolerance: f64,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<VariableWidthPathSample>, CurveError> {
-    if samples.len() <= 2 {
-        return Ok(samples.to_vec());
-    }
-    let mut keep = vec![false; samples.len()];
+    let mut keep = Vec::new();
+    keep.try_reserve_exact(samples.len())
+        .map_err(|_| simplification_allocation_error())?;
+    keep.resize(samples.len(), false);
     keep[0] = true;
     keep[samples.len() - 1] = true;
     for index in 1..samples.len() - 1 {
+        if index & 63 == 0 && is_cancelled() {
+            return Err(cancelled());
+        }
         if samples[index - 1].location.segment_index() != samples[index].location.segment_index()
             || samples[index].location.segment_index()
                 != samples[index + 1].location.segment_index()
@@ -403,26 +407,47 @@ fn simplify_positive_run(
             keep[index] = true;
         }
     }
-    let mandatory = keep
-        .iter()
-        .enumerate()
-        .filter_map(|(index, retained)| retained.then_some(index))
-        .collect::<Vec<_>>();
-    for pair in mandatory.windows(2) {
-        retain_simplification(path, samples, pair[0], pair[1], tolerance, &mut keep)?;
+    let mut stack = Vec::new();
+    let mut previous = 0;
+    for index in 1..samples.len() {
+        if index == samples.len() - 1
+            || samples[index - 1].location.segment_index()
+                != samples[index].location.segment_index()
+            || samples[index].location.segment_index()
+                != samples[index + 1].location.segment_index()
+        {
+            retain_simplification(
+                path,
+                samples,
+                previous,
+                index,
+                tolerance,
+                &mut keep,
+                &mut stack,
+                is_cancelled,
+            )?;
+            previous = index;
+        }
     }
-    Ok(samples
-        .iter()
-        .enumerate()
-        .filter_map(|(index, sample)| keep[index].then_some(*sample))
-        .collect())
+    let mut retained = Vec::new();
+    retained
+        .try_reserve_exact(keep.iter().filter(|retained| **retained).count())
+        .map_err(|_| simplification_allocation_error())?;
+    retained.extend(
+        samples
+            .iter()
+            .enumerate()
+            .filter_map(|(index, sample)| keep[index].then_some(*sample)),
+    );
+    Ok(retained)
 }
 
-/// Recursively retains the maximal center or half-width deviation in one stable sample interval.
+/// Iteratively retains the maximal normalized center or half-width violation in stable intervals.
 ///
 /// # Errors
 ///
-/// Propagates exact path evaluation failures while preserving the no-partial-result outline rule.
+/// Propagates cancellation, allocation, or exact path failures without publishing partial geometry.
+#[allow(clippy::too_many_arguments)]
 fn retain_simplification(
     path: &CurvePath,
     samples: &[VariableWidthPathSample],
@@ -430,46 +455,81 @@ fn retain_simplification(
     end: usize,
     tolerance: f64,
     keep: &mut [bool],
+    stack: &mut Vec<(usize, usize)>,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CurveError> {
-    if end <= start + 1 {
-        return Ok(());
-    }
-    let first = path.point_at(samples[start].location)?;
-    let last = path.point_at(samples[end].location)?;
-    let mut greatest = 0.0_f64;
-    let mut retained = None;
-    for index in start + 1..end {
+    stack
+        .try_reserve(1)
+        .map_err(|_| simplification_allocation_error())?;
+    stack.push((start, end));
+    while let Some((start, end)) = stack.pop() {
+        if is_cancelled() {
+            return Err(cancelled());
+        }
+        if end <= start + 1 {
+            continue;
+        }
+        let first = path.point_at(samples[start].location)?;
+        let last = path.point_at(samples[end].location)?;
         let start_measure = sample_measure(samples[start].location);
         let end_measure = sample_measure(samples[end].location);
-        let fraction = if end_measure > start_measure {
-            (sample_measure(samples[index].location) - start_measure)
-                / (end_measure - start_measure)
-        } else {
-            0.5
-        };
-        let expected = Point2::new(
-            first.x + (last.x - first.x) * fraction,
-            first.y + (last.y - first.y) * fraction,
-        );
-        let actual = path.point_at(samples[index].location)?;
-        let center_error =
-            ((actual.x - expected.x).powi(2) + (actual.y - expected.y).powi(2)).sqrt();
-        let expected_half_width =
-            (samples[start].width + (samples[end].width - samples[start].width) * fraction) * 0.5;
-        let width_error = (samples[index].width * 0.5 - expected_half_width).abs();
-        let error = center_error.max(width_error);
-        if error > greatest {
-            greatest = error;
-            retained = Some(index);
+        let mut greatest = 1.0_f64;
+        let mut retained = None;
+        for index in start + 1..end {
+            if index & 63 == 0 && is_cancelled() {
+                return Err(cancelled());
+            }
+            let fraction = if end_measure > start_measure {
+                (sample_measure(samples[index].location) - start_measure)
+                    / (end_measure - start_measure)
+            } else {
+                0.5
+            };
+            let expected = Point2::new(
+                first.x + (last.x - first.x) * fraction,
+                first.y + (last.y - first.y) * fraction,
+            );
+            let actual = path.point_at(samples[index].location)?;
+            let center_error =
+                ((actual.x - expected.x).powi(2) + (actual.y - expected.y).powi(2)).sqrt();
+            let expected_half_width = (samples[start].width
+                + (samples[end].width - samples[start].width) * fraction)
+                * 0.5;
+            let width_error = (samples[index].width * 0.5 - expected_half_width).abs();
+            let width_bound = tolerance.min(0.02 * (samples[index].width * 0.5));
+            let width_violation = if width_bound == 0.0 {
+                if width_error == 0.0 {
+                    0.0
+                } else {
+                    f64::INFINITY
+                }
+            } else {
+                width_error / width_bound
+            };
+            let violation = (center_error / tolerance).max(width_violation);
+            if violation > greatest {
+                greatest = violation;
+                retained = Some(index);
+            }
+        }
+        if let Some(index) = retained {
+            keep[index] = true;
+            stack
+                .try_reserve(2)
+                .map_err(|_| simplification_allocation_error())?;
+            stack.push((index, end));
+            stack.push((start, index));
         }
     }
-    if greatest > tolerance {
-        let index = retained.expect("nonempty simplification interval");
-        keep[index] = true;
-        retain_simplification(path, samples, start, index, tolerance, keep)?;
-        retain_simplification(path, samples, index, end, tolerance, keep)?;
-    }
     Ok(())
+}
+
+/// Returns the stable allocation failure for a bounded outline simplification request.
+fn simplification_allocation_error() -> CurveError {
+    CurveError::new(
+        "curve.outline.allocation",
+        "variable-width outline simplification allocation failed",
+    )
 }
 
 /// Maps one exact path location to a stable authored-order interpolation coordinate.
@@ -727,6 +787,146 @@ struct OutlineVertex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    /// Constructs ordered exact samples on one straight centerline for simplification witnesses.
+    fn line_samples(widths: &[f64]) -> Vec<VariableWidthPathSample> {
+        widths
+            .iter()
+            .enumerate()
+            .map(|(index, width)| VariableWidthPathSample {
+                location: PathLocation::new(0, index as f64 / (widths.len() - 1) as f64)
+                    .expect("finite line location"),
+                width: *width,
+            })
+            .collect()
+    }
+
+    /// Proves a descending subpixel valley survives and every omitted positive width meets 2%.
+    #[test]
+    fn relative_compaction_retains_near_zero_valley() {
+        let path =
+            CurvePath::line(Point2::new(0.0, 0.0), Point2::new(10.0, 0.0)).expect("finite line");
+        let samples = line_samples(&[0.02, 0.01, 0.0008, 0.001, 0.02]);
+        let retained = simplify_positive_run(&path, &samples, 0.125, &|| false)
+            .expect("relative simplification");
+        assert!(
+            retained.contains(&samples[2]),
+            "narrow valley remains explicit"
+        );
+        for pair in retained.windows(2) {
+            let start = samples
+                .iter()
+                .position(|sample| sample == &pair[0])
+                .expect("retained start");
+            let end = samples
+                .iter()
+                .position(|sample| sample == &pair[1])
+                .expect("retained end");
+            for (index, sample) in samples.iter().enumerate().take(end).skip(start + 1) {
+                let fraction = (index - start) as f64 / (end - start) as f64;
+                let expected = pair[0].width + (pair[1].width - pair[0].width) * fraction;
+                let half_error = (sample.width - expected).abs() * 0.5;
+                assert!(half_error <= (0.02 * sample.width * 0.5).min(0.125));
+            }
+        }
+    }
+
+    /// Proves straight-path relative selection is scale-invariant below the absolute bound.
+    #[test]
+    fn relative_compaction_scales_with_positive_width() {
+        let path =
+            CurvePath::line(Point2::new(0.0, 0.0), Point2::new(10.0, 0.0)).expect("finite line");
+        let widths = [0.02, 0.01, 0.0008, 0.001, 0.02];
+        let base = line_samples(&widths);
+        let scaled = line_samples(&widths.map(|width| width * 10.0));
+        let base = simplify_positive_run(&path, &base, 0.125, &|| false).expect("base");
+        let scaled = simplify_positive_run(&path, &scaled, 0.125, &|| false).expect("scaled");
+        assert_eq!(
+            base.iter()
+                .map(|sample| sample.location)
+                .collect::<Vec<_>>(),
+            scaled
+                .iter()
+                .map(|sample| sample.location)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Proves constant-width outlines match two-endpoint geometry and zeros still split runs.
+    #[test]
+    fn relative_compaction_preserves_constant_outline_and_zero_break() {
+        let path =
+            CurvePath::line(Point2::new(0.0, 0.0), Point2::new(10.0, 0.0)).expect("finite line");
+        let build = |samples: &[VariableWidthPathSample]| {
+            build_variable_width_outline_cancellable(
+                &path,
+                samples,
+                toniator_domain::PathStrokeStyle::default(),
+                0.0,
+                0.125,
+                VariableWidthOutlineLimits::new(128).expect("segment limit"),
+                &|| false,
+            )
+            .expect("outline")
+        };
+        assert_eq!(
+            build(&line_samples(&[2.0, 2.0, 2.0, 2.0, 2.0])),
+            build(&line_samples(&[2.0, 2.0]))
+        );
+        let split = build(&line_samples(&[2.0, 0.0, 2.0]));
+        assert_eq!(split.contours.len(), 2);
+    }
+
+    /// Proves a curved center still exceeds the unchanged absolute tolerance and survives.
+    #[test]
+    fn relative_compaction_retains_curved_center() {
+        let path = CurvePath::new(
+            vec![CurveSegment::CubicBezier(
+                CubicBezierSegment::new(
+                    Point2::new(0.0, 0.0),
+                    Point2::new(0.0, 4.0),
+                    Point2::new(10.0, 4.0),
+                    Point2::new(10.0, 0.0),
+                )
+                .expect("finite cubic"),
+            )],
+            PathClosure::Open,
+        )
+        .expect("curved path");
+        let samples = line_samples(&[2.0, 2.0, 2.0]);
+        let retained = simplify_positive_run(&path, &samples, 0.125, &|| false)
+            .expect("curved simplification");
+        assert_eq!(retained, samples);
+    }
+
+    /// Proves a long scan observes cancellation and a tighter segment budget fails atomically.
+    #[test]
+    fn relative_compaction_cancels_during_scan_and_observes_segment_limit() {
+        let path =
+            CurvePath::line(Point2::new(0.0, 0.0), Point2::new(10.0, 0.0)).expect("finite line");
+        let samples = line_samples(&vec![0.01; 512]);
+        let calls = Cell::new(0);
+        let cancelled = || {
+            calls.set(calls.get() + 1);
+            calls.get() >= 9
+        };
+        let error =
+            simplify_positive_run(&path, &samples, 0.125, &cancelled).expect_err("scan cancels");
+        assert_eq!(error.path(), "evaluation.cancelled");
+        assert_eq!(calls.get(), 9, "cancellation reaches the interval scan");
+        let error = build_variable_width_outline_cancellable(
+            &path,
+            &line_samples(&[0.01, 0.01, 0.01]),
+            toniator_domain::PathStrokeStyle::default(),
+            0.0,
+            0.125,
+            VariableWidthOutlineLimits::new(1).expect("segment limit"),
+            &|| false,
+        )
+        .expect_err("outline does not publish partial geometry");
+        assert_eq!(error.path(), "curve.outline.segment_limit");
+    }
 
     /// Proves either 90-degree exterior corner and an endpoint cap remain compact local arcs.
     #[test]

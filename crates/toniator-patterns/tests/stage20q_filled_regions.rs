@@ -12,10 +12,13 @@ use toniator_geometry::{
     RegionTreatmentLimits, build_canonical_regions,
 };
 use toniator_patterns::{
-    OutputCapability, OutputCapabilityPayload, StructuralProductCapability,
-    realize_region_output_cancellable,
+    CoverageCurve, CoverageKnot, GeometryResponseInput, OutputCapability, OutputCapabilityPayload,
+    StructuralProductCapability, realize_region_output_cancellable,
+    realize_region_output_with_response_cancellable,
 };
-use toniator_sampling::{RegionSamplingLimits, SourceField, SourceFormatHint, decode_source};
+use toniator_sampling::{
+    RegionSamplingLimits, SourceField, SourceFormatHint, decode_source, sample_region_area_average,
+};
 
 /// Builds one untreated square, its region capability, and its producer reference.
 fn stage20s_region_input() -> (CanonicalRegionSet, OutputCapability, Vec<RegionReference>) {
@@ -57,6 +60,89 @@ fn stage20s_region_input() -> (CanonicalRegionSet, OutputCapability, Vec<RegionR
         point: Point2::new(1.0, 1.0),
     }];
     (untreated, capability, references)
+}
+
+/// Accepts shuffled valid references while rejecting duplicate and foreign canonical IDs.
+///
+/// # Panics
+/// Panics if producer identity validation changes or complete source-free treatment fails.
+#[test]
+fn region_references_validate_identity_without_order_assumptions() {
+    let (single, capability, _) = stage20s_region_input();
+    let output = capability.layer_id;
+    let square = |left: f64| {
+        CurvePath::polyline(
+            vec![
+                Point2::new(left, 0.0),
+                Point2::new(left + 2.0, 0.0),
+                Point2::new(left + 2.0, 2.0),
+                Point2::new(left, 2.0),
+            ],
+            PathClosure::Closed,
+        )
+        .expect("finite square")
+    };
+    let untreated = build_canonical_regions(CanonicalRegionProposal {
+        output_layer_id: output,
+        source_groups: vec![CanonicalRegionSourceGroup {
+            source_id: single.regions()[0].id.source_id.clone(),
+            components: vec![square(0.0), square(3.0)],
+        }],
+    })
+    .expect("two canonical components");
+    assert_eq!(untreated.regions().len(), 2);
+    let references = vec![
+        RegionReference {
+            region_id: untreated.regions()[1].id.clone(),
+            point: Point2::new(4.0, 1.0),
+        },
+        RegionReference {
+            region_id: untreated.regions()[0].id.clone(),
+            point: Point2::new(1.0, 1.0),
+        },
+    ];
+    let realize = |references: &[RegionReference]| {
+        realize_region_output_with_response_cancellable(
+            &capability,
+            &stage20s_response(
+                RegionResizeAlgorithm::Scale,
+                RegionSamplingStrategy::ReferencePoint,
+                0.0,
+                1.0,
+            ),
+            &untreated,
+            references,
+            None,
+            &CanvasSpec {
+                width: 5.0,
+                height: 2.0,
+            },
+            SourceMapping::canonical(SourceMappingComponent::Luminance),
+            &ChannelPaint::Solid(toniator_domain::ColorValue {
+                red: 0.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0,
+            }),
+            RegionSamplingLimits::default(),
+            RegionTreatmentLimits::default(),
+            GeometryResponseInput::ConstantProbe(1.0),
+            &|| false,
+        )
+    };
+    assert_eq!(realize(&references).unwrap().regions.regions().len(), 2);
+    let mut duplicate = references.clone();
+    duplicate[1].region_id = duplicate[0].region_id.clone();
+    assert_eq!(
+        realize(&duplicate).unwrap_err().path(),
+        "region.treatment.identity.reference"
+    );
+    let mut foreign = references;
+    foreign[1].region_id.component_ordinal = 99;
+    assert_eq!(
+        realize(&foreign).unwrap_err().path(),
+        "region.treatment.identity.reference"
+    );
 }
 
 /// Decodes one immutable project-wide source fixture for normalized-fill sampling.
@@ -115,6 +201,91 @@ fn stage20s_realize(
         &|| false,
     )
     .expect("normalized region realization succeeds")
+}
+
+/// Inverts one completed AreaAverage response after full-pixel selection and averaging.
+///
+/// The resulting Scale region equals a geometry-only probe at inverse(mean); this witness uses
+/// different source pixels so a per-pixel nonlinear transfer would choose a different size.
+///
+/// # Panics
+/// Panics if the current complete-region sampler or bounded region treatment rejects the fixture.
+#[test]
+fn ton018_region_area_average_precedes_inverse_transfer() {
+    let (untreated, capability, references) = stage20s_region_input();
+    let source = SourceField::from_straight_rgba8(
+        2,
+        2,
+        vec![0, 0, 0, 255, 85, 0, 0, 255, 170, 0, 0, 255, 255, 0, 0, 255],
+    )
+    .unwrap();
+    let canvas = CanvasSpec {
+        width: 2.0,
+        height: 2.0,
+    };
+    let mapping = SourceMapping::canonical(SourceMappingComponent::Red);
+    let mean = sample_region_area_average(
+        &source,
+        &untreated.regions()[0].ring,
+        &canvas,
+        mapping,
+        RegionSamplingLimits::default(),
+        &|| false,
+    )
+    .unwrap()
+    .response;
+    let curve = CoverageCurve::new(vec![
+        CoverageKnot {
+            response: 0.0,
+            coverage: 0.0,
+        },
+        CoverageKnot {
+            response: 0.75,
+            coverage: 0.5,
+        },
+        CoverageKnot {
+            response: 1.0,
+            coverage: 1.0,
+        },
+    ])
+    .unwrap();
+    let setting = stage20s_response(
+        RegionResizeAlgorithm::Scale,
+        RegionSamplingStrategy::AreaAverage,
+        0.0,
+        1.0,
+    );
+    let paint = ChannelPaint::Solid(toniator_domain::ColorValue {
+        red: 0.0,
+        green: 0.0,
+        blue: 0.0,
+        alpha: 1.0,
+    });
+    let run = |source, input| {
+        realize_region_output_with_response_cancellable(
+            &capability,
+            &setting,
+            &untreated,
+            &references,
+            source,
+            &canvas,
+            mapping,
+            &paint,
+            RegionSamplingLimits::default(),
+            RegionTreatmentLimits::default(),
+            input,
+            &|| false,
+        )
+        .unwrap()
+        .regions
+    };
+    let calibrated = run(Some(&source), GeometryResponseInput::Calibrated(&curve));
+    let probe = run(
+        None,
+        GeometryResponseInput::ConstantProbe(curve.inverse(mean).unwrap()),
+    );
+    assert_eq!(calibrated, probe);
+    assert_eq!(calibrated.regions().len(), 1);
 }
 
 /// Proves both immutable project-wide source fixtures preserve the exact natural boundary at fill one.

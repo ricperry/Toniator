@@ -6,14 +6,18 @@ use std::{
     cell::RefCell,
     path::{Path, PathBuf},
     rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
 };
 
 use gtk::prelude::*;
 use toniator_domain::{Document, DocumentConfiguration, Revision};
 use toniator_io::{
-    DocumentPresetError, DocumentPresetWriteGuard, capture_document_preset_destination,
-    load_document_preset, save_document_preset,
+    DocumentPresetError, DocumentPresetWriteGuard, StagedDocumentPreset,
+    capture_document_preset_destination, load_document_preset_staged, save_document_preset,
 };
 
 use crate::{AppState, InspectorTarget, PreviewModel, Workspace, app_events::AppEvent};
@@ -108,6 +112,7 @@ pub(crate) enum Phase {
     SaveChooser,
     SaveInspect,
     SaveConfirm,
+    SaveCalibrate,
     SaveWrite,
 }
 
@@ -117,6 +122,7 @@ pub(crate) struct OperationState {
     serial: u64,
     pending: Option<(RequestId, Phase)>,
     last_directory: Option<PathBuf>,
+    cancellation: Option<(RequestId, Arc<AtomicBool>)>,
 }
 
 impl OperationState {
@@ -161,9 +167,23 @@ impl OperationState {
     fn finish(&mut self, id: RequestId) -> bool {
         if self.pending.is_some_and(|(current, _)| current == id) {
             self.pending = None;
+            if let Some((owner, cancelled)) = self.cancellation.take()
+                && owner == id
+            {
+                cancelled.store(true, Ordering::Release);
+            }
             true
         } else {
             false
+        }
+    }
+
+    /// Associates cooperative cancellation with one captured file/calibration operation.
+    fn set_cancellation(&mut self, id: RequestId, cancelled: Arc<AtomicBool>) {
+        if self.pending.is_some_and(|(current, _)| current == id) {
+            self.cancellation = Some((id, cancelled));
+        } else {
+            cancelled.store(true, Ordering::Release);
         }
     }
 }
@@ -171,6 +191,13 @@ impl OperationState {
 /// Captures every authored binding input and revision before opening a load chooser.
 #[derive(Clone)]
 pub(crate) struct LoadCapture {
+    base: Document,
+    revision: Revision,
+}
+
+/// Captures the main workspace root for one immutable Preset-save candidate.
+#[derive(Clone)]
+pub(crate) struct SaveCapture {
     base: Document,
     revision: Revision,
 }
@@ -186,8 +213,16 @@ pub(crate) enum Completion {
     Destination {
         id: RequestId,
         path: PathBuf,
+        capture: SaveCapture,
         configuration: DocumentConfiguration,
         result: Result<DocumentPresetWriteGuard, String>,
+    },
+    SavePrepared {
+        id: RequestId,
+        path: PathBuf,
+        capture: SaveCapture,
+        guard: DocumentPresetWriteGuard,
+        result: Result<DocumentConfiguration, String>,
     },
     Saved {
         id: RequestId,
@@ -327,15 +362,30 @@ fn load_filters() -> gio::ListStore {
 
 /// Reads and validates both input formats off-thread while Cancel retains the existing document.
 fn start_read(state: &Rc<RefCell<AppState>>, id: RequestId, path: PathBuf, capture: LoadCapture) {
+    let cancelled = Arc::new(AtomicBool::new(false));
     let sender = {
         let mut app = state.borrow_mut();
         app.document_presets.advance(id, Phase::LoadRead);
         app.document_presets.last_directory = path.parent().map(Path::to_path_buf);
+        app.document_presets
+            .set_cancellation(id, Arc::clone(&cancelled));
         app.event_sender.clone()
     };
     show_progress(state, id, "Loading preset…");
     thread::spawn(move || {
-        let result = load_document_preset(&path, &capture.base).map_err(file_error_message);
+        let result = load_document_preset_staged(&path, &capture.base)
+            .map_err(file_error_message)
+            .and_then(|staged| {
+                let configuration = match staged {
+                    StagedDocumentPreset::Current(configuration) => configuration,
+                    StagedDocumentPreset::PendingRaw(pending) =>
+                        toniator_engine::prepare_pending_raw_preset(
+                            pending, &capture.base, toniator_engine::EvaluationLimits::default(),
+                            &|| cancelled.load(Ordering::Acquire),
+                        ).map_err(|error| error.to_string())?,
+                };
+                prepare_configuration(&capture.base, configuration, &cancelled)
+            });
         let _ = sender.send_blocking(AppEvent::DocumentPreset(Completion::Read {
             id,
             path,
@@ -345,9 +395,50 @@ fn start_read(state: &Rc<RefCell<AppState>>, id: RequestId, path: PathBuf, captu
     });
 }
 
+/// Resolves missing saved companions on a complete configuration without mutating its root.
+///
+/// Exact existing project or Preset artifacts are reused. The worker measures only missing
+/// complete bindings and attaches the entire result set to a disposable document before capture.
+///
+/// # Errors
+/// Returns bind, cancellation, calibration, attachment, or complete-document diagnostics.
+fn prepare_configuration(
+    base: &Document,
+    configuration: DocumentConfiguration,
+    cancelled: &AtomicBool,
+) -> Result<DocumentConfiguration, String> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err("Preset preparation cancelled.".to_owned());
+    }
+    let mut candidate = configuration
+        .bind(base)
+        .map_err(|error| error.to_string())?;
+    let artifacts = crate::calibration_preparation::prepare(
+        &candidate,
+        &crate::authoritative_channel_ids(&candidate),
+        false,
+        false,
+        cancelled,
+    )?;
+    for entry in artifacts.active {
+        candidate = candidate
+            .with_saved_calibration(entry.channel_id, entry.artifact)
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(artifact) = artifacts.baseline {
+        candidate = candidate
+            .with_saved_baseline_calibration(artifact)
+            .map_err(|error| error.to_string())?;
+    }
+    if cancelled.load(Ordering::Acquire) {
+        return Err("Preset preparation cancelled.".to_owned());
+    }
+    Ok(DocumentConfiguration::capture(&candidate))
+}
+
 /// Opens a native Save chooser for an immutable committed configuration, including source-less New.
 pub(crate) fn choose_save(state: &Rc<RefCell<AppState>>) {
-    let (id, configuration, parent) = {
+    let (id, configuration, capture, parent) = {
         let mut app = state.borrow_mut();
         if crate::lifecycle_is_busy(&app) || private_editor_open(&app) {
             return;
@@ -356,12 +447,16 @@ pub(crate) fn choose_save(state: &Rc<RefCell<AppState>>) {
             return;
         };
         let configuration = DocumentConfiguration::capture(workspace.document());
+        let capture = SaveCapture {
+            base: workspace.document().clone(),
+            revision: workspace.history.revision(),
+        };
         let generation = app.workspace_generation;
         let Some(id) = app.document_presets.begin(generation, Phase::SaveChooser) else {
             return;
         };
         crate::sync_ui(&mut app);
-        (id, configuration, app.window.clone())
+        (id, configuration, capture, app.window.clone())
     };
     let dialog = gtk::FileDialog::new();
     dialog.set_title("Save preset");
@@ -390,7 +485,9 @@ pub(crate) fn choose_save(state: &Rc<RefCell<AppState>>) {
         }
         match result {
             Ok(file) => match file.path() {
-                Some(path) => inspect_destination(&state, id, preset_path(path), configuration),
+                Some(path) => {
+                    inspect_destination(&state, id, preset_path(path), capture, configuration)
+                }
                 None => fail(&state, id, "Choose a local folder for the Preset.".into()),
             },
             Err(error) if dismissed(&error) => {
@@ -452,6 +549,7 @@ fn inspect_destination(
     state: &Rc<RefCell<AppState>>,
     id: RequestId,
     path: PathBuf,
+    capture: SaveCapture,
     configuration: DocumentConfiguration,
 ) {
     let sender = {
@@ -466,10 +564,89 @@ fn inspect_destination(
         let _ = sender.send_blocking(AppEvent::DocumentPreset(Completion::Destination {
             id,
             path,
+            capture,
             configuration,
             result,
         }));
     });
+}
+
+/// Measures any missing exact bindings before the captured configuration reaches its guarded file write.
+///
+/// The current workspace remains edit-blocked during this phase. The destination fingerprint stays
+/// captured until `start_write`, where the existing atomic file guard remains authoritative.
+fn start_save_calibration(
+    state: &Rc<RefCell<AppState>>,
+    id: RequestId,
+    path: PathBuf,
+    capture: SaveCapture,
+    configuration: DocumentConfiguration,
+    guard: DocumentPresetWriteGuard,
+) {
+    if !save_capture_is_current(state, id, &capture) {
+        fail(
+            state,
+            id,
+            "The workspace changed while the Preset was prepared. Save again.".into(),
+        );
+        return;
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let sender = {
+        let mut app = state.borrow_mut();
+        app.document_presets.advance(id, Phase::SaveCalibrate);
+        app.document_presets
+            .set_cancellation(id, Arc::clone(&cancelled));
+        app.event_sender.clone()
+    };
+    show_progress(state, id, "Preparing Pattern calibration…");
+    thread::spawn(move || {
+        let result = prepare_configuration(&capture.base, configuration, &cancelled);
+        let _ = sender.send_blocking(AppEvent::DocumentPreset(Completion::SavePrepared {
+            id,
+            path,
+            capture,
+            guard,
+            result,
+        }));
+    });
+}
+
+/// Checks the exact captured workspace root before any prepared Preset can be written.
+///
+/// Workspace generation, document content, and history revision are all retained: equal authored
+/// content at a later revision is still a stale operation, and a replaced workspace never accepts
+/// the old file result.
+fn save_capture_is_current(
+    state: &Rc<RefCell<AppState>>,
+    id: RequestId,
+    capture: &SaveCapture,
+) -> bool {
+    let app = state.borrow();
+    app.workspace.as_ref().is_some_and(|workspace| {
+        save_capture_matches(
+            capture,
+            id,
+            app.workspace_generation,
+            workspace.document(),
+            workspace.history.revision(),
+        )
+    })
+}
+
+/// Matches one Preset save against the exact workspace generation, document, and history revision.
+///
+/// Equal content at a later revision stays stale, preserving the original operation's authority.
+fn save_capture_matches(
+    capture: &SaveCapture,
+    id: RequestId,
+    workspace_generation: u64,
+    document: &Document,
+    revision: Revision,
+) -> bool {
+    id.workspace == workspace_generation
+        && document == &capture.base
+        && revision == capture.revision
 }
 
 /// Publishes the captured snapshot while allowing ordinary edits; completion never changes savepoints.
@@ -477,9 +654,18 @@ fn start_write(
     state: &Rc<RefCell<AppState>>,
     id: RequestId,
     path: PathBuf,
+    capture: SaveCapture,
     configuration: DocumentConfiguration,
     guard: DocumentPresetWriteGuard,
 ) {
+    if !save_capture_is_current(state, id, &capture) {
+        fail(
+            state,
+            id,
+            "The workspace changed before Preset save began. Save again.".into(),
+        );
+        return;
+    }
     close_progress(state);
     let sender = {
         let mut app = state.borrow_mut();
@@ -520,6 +706,7 @@ pub(crate) fn complete(state: &Rc<RefCell<AppState>>, completion: Completion) {
         Completion::Destination {
             id,
             path,
+            capture,
             configuration,
             result,
         } => {
@@ -529,13 +716,41 @@ pub(crate) fn complete(state: &Rc<RefCell<AppState>>, completion: Completion) {
             close_progress(state);
             match result {
                 Ok(guard) if guard.is_existing() => {
-                    confirm_overwrite(state, id, path, configuration, guard)
+                    confirm_overwrite(state, id, path, capture, configuration, guard)
                 }
-                Ok(guard) => start_write(state, id, path, configuration, guard),
+                Ok(guard) => start_save_calibration(state, id, path, capture, configuration, guard),
                 Err(error) => fail(
                     state,
                     id,
                     format!("Couldn’t prepare the Preset destination. {error}"),
+                ),
+            }
+        }
+        Completion::SavePrepared {
+            id,
+            path,
+            capture,
+            guard,
+            result,
+        } => {
+            if !accepts(state, id, Phase::SaveCalibrate) {
+                return;
+            }
+            close_progress(state);
+            if !save_capture_is_current(state, id, &capture) {
+                fail(
+                    state,
+                    id,
+                    "The workspace changed during Preset calibration. Save again.".into(),
+                );
+                return;
+            }
+            match result {
+                Ok(configuration) => start_write(state, id, path, capture, configuration, guard),
+                Err(error) => fail(
+                    state,
+                    id,
+                    format!("Couldn’t prepare the Preset calibration. {error}"),
                 ),
             }
         }
@@ -669,6 +884,7 @@ fn confirm_overwrite(
     state: &Rc<RefCell<AppState>>,
     id: RequestId,
     path: PathBuf,
+    capture: SaveCapture,
     configuration: DocumentConfiguration,
     guard: DocumentPresetWriteGuard,
 ) {
@@ -694,7 +910,7 @@ fn confirm_overwrite(
             return;
         }
         if response == Ok(1) {
-            start_write(&state, id, path, configuration, guard);
+            start_save_calibration(&state, id, path, capture, configuration, guard);
         } else {
             finish(&state, id);
         }
@@ -796,17 +1012,74 @@ mod tests {
     fn document_preset_operations_reject_stale_callbacks_and_gate_edits() {
         let mut state = OperationState::default();
         let old = state.begin(4, Phase::LoadChooser).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        state.set_cancellation(old, Arc::clone(&cancelled));
         assert!(state.blocks_edits());
         assert!(state.begin(4, Phase::SaveChooser).is_none());
         assert!(!state.accepts(old, Phase::LoadChooser, 5));
         state.advance(old, Phase::LoadRead);
         assert!(!state.accepts(old, Phase::LoadChooser, 4));
         assert!(state.finish(old));
+        assert!(cancelled.load(Ordering::Acquire));
         let new = state.begin(4, Phase::SaveChooser).unwrap();
         assert!(!state.finish(old));
         state.advance(new, Phase::SaveWrite);
         assert!(state.busy());
         assert!(!state.blocks_edits());
+    }
+
+    /// Rejects stale Preset writes even after Undo restores equal content at a later revision.
+    ///
+    /// # Panics
+    /// Panics if a valid workspace fixture or reversible whole-Pattern rotation cannot be built.
+    #[test]
+    fn preset_save_guard_keeps_generation_document_and_revision() {
+        let mut workspace = Workspace::from_new().expect("default workspace validates");
+        let capture = SaveCapture {
+            base: workspace.document().clone(),
+            revision: workspace.history.revision(),
+        };
+        let id = RequestId {
+            serial: 1,
+            workspace: 7,
+        };
+        assert!(save_capture_matches(
+            &capture,
+            id,
+            7,
+            workspace.document(),
+            workspace.history.revision(),
+        ));
+        assert!(!save_capture_matches(
+            &capture,
+            id,
+            8,
+            workspace.document(),
+            workspace.history.revision(),
+        ));
+
+        let channel = crate::authoritative_channel_ids(workspace.document())[0];
+        let command = workspace
+            .document()
+            .set_channel_pattern_rotation_for_effective(channel, 21.0)
+            .expect("rotation validates");
+        workspace.history.apply(&command).expect("rotation applies");
+        assert!(!save_capture_matches(
+            &capture,
+            id,
+            7,
+            workspace.document(),
+            workspace.history.revision(),
+        ));
+        workspace.history.undo().expect("rotation undo succeeds");
+        assert_eq!(workspace.document(), &capture.base);
+        assert!(!save_capture_matches(
+            &capture,
+            id,
+            7,
+            workspace.document(),
+            workspace.history.revision(),
+        ));
     }
 
     /// Verifies exact workspace retention, savepoint history and no-op redo across both immutable sources.

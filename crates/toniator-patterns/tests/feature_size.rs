@@ -1,15 +1,18 @@
 use std::fs;
 
 use toniator_domain::{
-    CanvasSpec, CoveragePolicy, CurveWinding, DensityMetric2D, GuideRepetition, MarkOrientation,
-    MarkPrototype, ParametricCurve, PathStrokeStyle, PatternDefinition, PatternDefinitionId,
-    PatternFamily, PatternMechanism, PatternMechanismId, PatternModulation, PatternOutputLayer,
-    PatternOutputLayerId, PatternOutputRealization, RandomSiteCharacter, ResolvedDensityMetric2D,
-    SiteDensityModulation, SiteExclusionPolicy, SpiralCurve, SpiralShape,
+    CanvasSpec, ConnectionAdjacencyIntent, ConnectionProgram, CoveragePolicy, CurveWinding,
+    DensityMetric2D, GuideRepetition, MarkOrientation, MarkPrototype, ParametricCurve,
+    PathStrokeStyle, PatternDefinition, PatternDefinitionId, PatternFamily, PatternMechanism,
+    PatternMechanismId, PatternModulation, PatternOutputLayer, PatternOutputLayerId,
+    PatternOutputRealization, RandomSiteCharacter, ResolvedDensityMetric2D, SiteDensityModulation,
+    SiteExclusionPolicy, SpiralCurve, SpiralShape,
 };
 use toniator_patterns::{
-    GridInspectRequest, StructuralProductCapability,
-    evaluate_typed_family_product_with_source_cancellable, resolve_pattern_pipeline,
+    ConnectionPathLimits, GridInspectRequest, SiteAdjacencyLimits, StructuralProductCapability,
+    evaluate_typed_connection_paths_with_source_cancellable,
+    evaluate_typed_family_product_with_source_cancellable, maximum_nominal_cell_diameter,
+    resolve_connection_program_for_feature_size, resolve_pattern_pipeline,
 };
 use toniator_sampling::{SourceFormatHint, decode_source};
 
@@ -127,6 +130,119 @@ fn parametric_definition(with_sites: bool) -> PatternDefinition {
     }
 }
 
+/// Proves parametric support encloses rounded tangent-normal diagonals at reference densities.
+///
+/// # Panics
+/// Panics if the source-independent spiral family cannot resolve or any site exceeds its advertised bound.
+#[test]
+fn parametric_mark_support_bounds_actual_nominal_diagonal() {
+    let mut definition = parametric_definition(true);
+    for mechanism in &mut definition.mechanisms {
+        match mechanism {
+            PatternMechanism::ParametricCurveSource {
+                curve: ParametricCurve::Spiral(spiral),
+                ..
+            } => spiral.radial_spacing = 16.0,
+            PatternMechanism::AlongParametricCurveSites { interval, .. } => *interval = 16.0,
+            _ => {}
+        }
+    }
+    for phase in [0.0, 37.0, 137.0] {
+        if let PatternMechanism::ParametricCurveSource {
+            curve: ParametricCurve::Spiral(spiral),
+            ..
+        } = &mut definition.mechanisms[0]
+        {
+            spiral.phase_degrees = phase;
+        }
+        let plan = resolve_pattern_pipeline(&definition).unwrap();
+        for side in [32.0, 64.0] {
+            let request = GridInspectRequest {
+                canvas: CanvasSpec {
+                    width: 1024.0,
+                    height: 1024.0,
+                },
+                density: ResolvedDensityMetric2D {
+                    across_x: side,
+                    across_y: side,
+                },
+                rotation_degrees: 0.0,
+                translation_x: 0.0,
+                translation_y: 0.0,
+                guard_steps: 1,
+                support_radius: 1.0,
+                max_family_candidates: 200_000,
+            };
+            let bound =
+                maximum_nominal_cell_diameter(&plan.family, &request.canvas, &request.density)
+                    .expect("finite parametric support");
+            let family = evaluate_typed_family_product_with_source_cancellable(
+                &plan.family,
+                &request,
+                None,
+                &|| false,
+            )
+            .expect("parametric family");
+            let maximum = family
+                .site_set()
+                .iter()
+                .map(|site| site.nominal_cell_basis.diameter())
+                .fold(0.0_f64, f64::max);
+            assert!(maximum > 0.0);
+            assert!(
+                maximum <= bound,
+                "phase={phase} side={side}: {maximum} > {bound}"
+            );
+            assert!(bound - maximum <= maximum * 16.0 * f64::EPSILON);
+        }
+    }
+}
+
+/// Proves Feature size resolves both the graph reach and the selected path program from authored intent.
+///
+/// # Panics
+/// Panics if the random connection family fails or its topology uses an unscaled distance.
+#[test]
+fn connection_reach_and_guard_follow_feature_size() {
+    let plan = resolve_pattern_pipeline(&random_definition(RandomSiteCharacter::RawUniform))
+        .expect("random family resolves");
+    let program = ConnectionProgram::RandomLinks {
+        adjacency: ConnectionAdjacencyIntent {
+            maximum_degree: 3,
+            maximum_distance: 24.0,
+        },
+        minimum_degree: 1,
+        seed: 17,
+    };
+    for feature_size in [1.0, 0.25] {
+        let mut request = request_for_feature_size(feature_size);
+        request.support_radius = 2.0;
+        let resolved = resolve_connection_program_for_feature_size(
+            &program,
+            &request.canvas,
+            &request.density,
+        )
+        .expect("finite connection reach");
+        assert!((resolved.adjacency().maximum_distance - 24.0 * feature_size).abs() < 1.0e-12);
+        assert_eq!(program.adjacency().maximum_distance, 24.0);
+        let output = evaluate_typed_connection_paths_with_source_cancellable(
+            &plan.family,
+            &request,
+            None,
+            PatternOutputLayerId(815),
+            &program,
+            SiteAdjacencyLimits::default(),
+            ConnectionPathLimits::default(),
+            &|| false,
+        )
+        .expect("scaled connection family and graph evaluate");
+        assert!((output.graph.policy().maximum_distance() - 24.0 * feature_size).abs() < 1.0e-12);
+        assert!(
+            (output.family.planned_support_radius() - (2.0 + 24.0 * feature_size)).abs() < 1.0e-12
+        );
+    }
+}
+
 /// Decodes both immutable project artwork inputs at their natural source dimensions.
 ///
 /// # Panics
@@ -148,7 +264,7 @@ fn baseline_sources() -> Vec<toniator_sampling::SourceField> {
     .collect()
 }
 
-/// Proves random-site population follows Feature size for both immutable artwork inputs.
+/// Proves the offered spatial population follows Feature size for both immutable inputs.
 ///
 /// # Panics
 /// Panics if family evaluation fails or finer density does not increase population.
@@ -173,17 +289,17 @@ fn random_sites_follow_feature_size_for_both_baseline_sources() {
                 .expect("random family evaluates")
             })
             .collect::<Vec<_>>();
-        let requested = outputs
+        let offered = outputs
             .iter()
             .map(|output| {
                 output
                     .random_diagnostics()
                     .expect("random diagnostics")
-                    .requested_sites
+                    .offered_candidates
             })
             .collect::<Vec<_>>();
-        assert!(requested[0] > requested[1]);
-        assert!(requested[1] > requested[2]);
+        assert!(offered[0] > offered[1]);
+        assert!(offered[1] > offered[2]);
         assert!(outputs[0].site_set().len() > outputs[2].site_set().len());
     }
 }
@@ -249,11 +365,11 @@ fn even_spacing_and_exclusion_follow_feature_size() {
         PatternMechanismId(844),
         PatternOutputLayerId(845),
         RandomSiteCharacter::Even {
-            minimum_center_distance: 0.5,
+            minimum_center_distance: 5.0,
         },
         0x2345_6789,
         SiteDensityModulation::Uniform,
-        SiteExclusionPolicy::MinimumCenterDistance { minimum: 0.5 },
+        SiteExclusionPolicy::MinimumCenterDistance { minimum: 5.0 },
         200_000,
         20_000_000,
         CoveragePolicy {
@@ -262,7 +378,7 @@ fn even_spacing_and_exclusion_follow_feature_size() {
         },
     );
     let plan = resolve_pattern_pipeline(&definition).expect("even family resolves");
-    for (feature_size, expected_minimum) in [(0.5, 0.25), (1.0, 0.5), (2.0, 1.0)] {
+    for (feature_size, expected_minimum) in [(0.5, 2.5), (1.0, 5.0), (2.0, 10.0)] {
         let output = evaluate_typed_family_product_with_source_cancellable(
             &plan.family,
             &request_for_feature_size(feature_size),
@@ -272,7 +388,7 @@ fn even_spacing_and_exclusion_follow_feature_size() {
         .expect("even family evaluates");
         let sites = output.site_set().sites();
         assert!(
-            sites.len() > 100,
+            sites.len() > 20,
             "fixture should retain a useful site population"
         );
         let minimum = sites

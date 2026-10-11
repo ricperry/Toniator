@@ -29,6 +29,7 @@ fn temporary_directory(label: &str) -> PathBuf {
 /// Builds one valid personal preset-v4 record without using a bundled registry.
 fn preset(id: &str, name: &str) -> PresetRecord {
     PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: id.into(),
             name: name.into(),

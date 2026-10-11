@@ -1,7 +1,7 @@
 # Toniator desktop packages
 
 Download the x86_64 AppImage or Flatpak from the
-[0.4.0 prerelease](https://github.com/ricperry/Toniator/releases/tag/v0.4.0).
+[0.4.1 prerelease](https://github.com/ricperry/Toniator/releases/tag/v0.4.1).
 Both include the GUI and headless CLI. Packages, checksums, and build provenance
 are release attachments; `dist/` is a local output directory, not tracked source.
 
@@ -10,14 +10,14 @@ are release attachments; `dist/` is a local output directory, not tracked source
 ### AppImage
 
 ```sh
-chmod +x Toniator-0.4.0-x86_64.AppImage
-./Toniator-0.4.0-x86_64.AppImage
+chmod +x Toniator-0.4.1-x86_64.AppImage
+./Toniator-0.4.1-x86_64.AppImage
 ```
 
 If FUSE mounting is unavailable:
 
 ```sh
-APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.0-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.1-x86_64.AppImage
 ```
 
 Use `--cli --help` to invoke the bundled CLI. The AppImage bundles GTK,
@@ -29,7 +29,7 @@ development environment; broad distribution compatibility is not established.
 ### Flatpak
 
 ```sh
-flatpak install --user ./Toniator-0.4.0-x86_64.flatpak
+flatpak install --user ./Toniator-0.4.1-x86_64.flatpak
 flatpak run io.github.ricperry.Toniator
 ```
 
@@ -70,7 +70,7 @@ Download `SHA256SUMS` with the package, then run:
 sha256sum --ignore-missing -c SHA256SUMS
 ```
 
-The 0.4.0 source includes the headless advisory garment preflight and an
+The published 0.4.0 source includes the headless advisory garment preflight and an
 optional, default-off prepared PNG export. Preparation can change pixels only
 in that export; it does not certify print safety. Automated private-Sway checks
 do not establish exhaustive GNOME/Mutter or production-portal behavior. See
@@ -102,8 +102,8 @@ metadata, and builds the Flatpak. `appimage.py` bundles those SDK-built binaries
 and libraries using checksum-pinned appimagetool. Previous staging directories
 are retained under `target/packaging/`.
 
-Outputs: `dist/Toniator-0.4.0-x86_64.AppImage`,
-`dist/Toniator-0.4.0-x86_64.flatpak`, `dist/build-info.json`, and `dist/SHA256SUMS`.
+Outputs: `dist/Toniator-0.4.1-x86_64.AppImage`,
+`dist/Toniator-0.4.1-x86_64.flatpak`, `dist/build-info.json`, and `dist/SHA256SUMS`.
 Build provenance records the source commit, runtime/SDK identities, and icon
 hashes. This is a repeatable procedure, not a bit-for-bit reproducibility claim.
 Follow [release instructions](../docs/RELEASING.md) to publish.

@@ -77,6 +77,10 @@ mod main_shell {
         #[template_child]
         pub inspector_status: gtk::TemplateChild<gtk::Label>,
         #[template_child]
+        pub cancel_pattern_calibration: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub process_memory_status: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
         pub model_selector: gtk::TemplateChild<gtk::DropDown>,
         #[template_child]
         pub channel_segments: gtk::TemplateChild<gtk::Box>,
@@ -292,6 +296,16 @@ impl ToniatorMainShell {
     /// Returns the template-owned sidebar status label.
     pub fn inspector_status(&self) -> gtk::Label {
         self.imp().inspector_status.get()
+    }
+
+    /// Returns the temporary action that cancels pending inspector calibration.
+    pub fn cancel_pattern_calibration(&self) -> gtk::Button {
+        self.imp().cancel_pattern_calibration.get()
+    }
+
+    /// Returns the compact process-memory status label.
+    pub fn process_memory_status(&self) -> gtk::Label {
+        self.imp().process_memory_status.get()
     }
 
     /// Returns the template-owned model selector.
@@ -723,6 +737,8 @@ mod advanced_settings_shell {
         #[template_child]
         pub advanced_reset: gtk::TemplateChild<gtk::Button>,
         #[template_child]
+        pub advanced_recalibrate: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
         pub advanced_status: gtk::TemplateChild<gtk::Label>,
         #[template_child]
         pub advanced_preview: gtk::TemplateChild<gtk::Picture>,
@@ -770,6 +786,11 @@ impl ToniatorAdvancedSettingsShell {
     /// Returns the scoped defaults action; document commands retain reset authority.
     pub fn reset(&self) -> gtk::Button {
         self.imp().advanced_reset.get()
+    }
+
+    /// Returns the explicit private-draft Pattern calibration action.
+    pub fn recalibrate(&self) -> gtk::Button {
+        self.imp().advanced_recalibrate.get()
     }
 
     /// Returns the private draft status presentation.
@@ -825,6 +846,8 @@ mod pattern_wizard_shell {
         pub wizard_controls: gtk::TemplateChild<gtk::Box>,
         #[template_child]
         pub wizard_preview: gtk::TemplateChild<gtk::Picture>,
+        #[template_child]
+        pub wizard_preview_description: gtk::TemplateChild<gtk::Label>,
         #[template_child]
         pub wizard_guide_overlay: gtk::TemplateChild<gtk::DrawingArea>,
         #[template_child]
@@ -920,6 +943,11 @@ impl ToniatorPatternWizardShell {
     /// Returns the private canonical preview paintable surface.
     pub fn preview(&self) -> gtk::Picture {
         self.imp().wizard_preview.get()
+    }
+
+    /// Returns the visible role note for neutral pattern and weighting previews.
+    pub fn preview_description(&self) -> gtk::Label {
+        self.imp().wizard_preview_description.get()
     }
 
     /// Returns the noninteractive guide overlay, separate from the pattern picture and exports.

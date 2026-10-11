@@ -19,15 +19,19 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use toniator_domain::{
-    ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure,
+    AttachedCalibration, CALIBRATION_PROFILE_MEAN, CalibrationBinding, CalibrationKnot,
+    CalibrationVariation, SavedCalibration,
+    UniformCalibration, ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure,
     AuthoredStructureDraft, AuthoredStructureId, AuthoredStructureKind, CanvasSpec,
-    ChannelAppearance, ChannelGeometryResponseDelta, ChannelId, ChannelPaint,
-    ChannelPatternInstance, ChannelPatternLayoutDelta, ChannelSourceMapping, ChannelState,
-    ChannelTopology, ColorValue, ConnectedGeometryResponse, ConnectedGeometryResponseDelta,
-    CoveragePolicy, CurveWinding, DensityMetric2D, DensityMetricDelta2D, Document,
-    DocumentConfiguration, DocumentId, DocumentPatternSettings, GeneralizedSiteProductDraft,
-    GenericGuideDimensionDraft, GenericGuidePrototypeDraft, GuideDimension, GuideDimensionDraft,
-    GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel, HalftoneChannelRole,
+    ChannelAppearance, ChannelGeometryResponseDelta, ChannelId, ChannelOutputResponse,
+    ChannelPaint, ChannelPatternInstance, ChannelPatternLayoutDelta, ChannelResponseOverride,
+    ChannelSourceMapping, ChannelState, ChannelTopology, ColorValue, ConnectedGeometryResponse,
+    ConnectedGeometryResponseDelta, CoveragePolicy, CurveWinding, DensityMetric2D,
+    DensityMetricDelta2D, Document, DocumentConfiguration, DocumentId, DocumentPatternSettings,
+    DocumentResponseSettings, PendingRawPresetImport, PropertyFieldId, TemporalEndOverride,
+    GeneralizedSiteProductDraft, GenericGuideDimensionDraft,
+    GenericGuidePrototypeDraft, GuideDimension, GuideDimensionDraft, GuideDimensionId,
+    GuidePrototype, GuideRepetition, HalftoneChannelModel, HalftoneChannelRole, MarkDensityMode,
     MarkGeometryResponse, MarkGeometryResponseDelta, MarkOrientation, MarkOrientationDraft,
     MarkPrototype, MazeProgram, ModeledChannelState, ParametricCurve, ParametricCurveSiteDraft,
     PathStrokeStyle, PatternDefinition, PatternDefinitionBundle, PatternDefinitionDraft,
@@ -49,8 +53,9 @@ mod document_presets;
 /// Current-only XDG personal preset and authored-resource library authority.
 pub mod personal_library;
 pub use document_presets::{
-    DocumentPresetError, DocumentPresetSaveOutcome, DocumentPresetWriteGuard,
-    capture_document_preset_destination, load_document_preset, save_document_preset,
+    DocumentPresetError, DocumentPresetSaveOutcome, DocumentPresetWriteGuard, StagedDocumentPreset,
+    capture_document_preset_destination, load_document_preset, load_document_preset_staged,
+    save_document_preset,
 };
 pub mod export_defaults;
 /// Recent source/project metadata for frontend startup navigation.
@@ -68,15 +73,14 @@ use media::MediaManifestDto;
 pub use media::SourceMediaManifest;
 
 pub const CONTAINER_VERSION: u32 = 2;
-pub const DOCUMENT_SCHEMA_VERSION: u32 = 11;
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 17;
 /// Frozen schema for the source-free v3 document Preset field shape.
-pub const DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION: u32 = 10;
-const PREVIOUS_DOCUMENT_SCHEMA_VERSION: u32 = 10;
+pub const DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION: u32 = 16;
 /// Current source-free document Preset archive envelope version.
 pub const DOCUMENT_PRESET_FORMAT_VERSION: u32 = 3;
 /// Standalone pure-schema preset JSON format version. It is deliberately
 /// independent from the `.toniator` container and document schema versions.
-pub const PRESET_FORMAT_VERSION: u32 = 5;
+pub const PRESET_FORMAT_VERSION: u32 = 8;
 pub const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
@@ -121,7 +125,12 @@ pub fn save_preset(path: &Path, preset: &PresetRecord) -> Result<(), PresetIoErr
     })
 }
 
-/// Loads and validates one standalone current-version pure-schema preset.
+/// Loads one current-format Preset, dropping only recognized obsolete optional numeric caches.
+///
+/// Authored recipe and source bytes remain untouched; unknown numeric profiles still reject.
+///
+/// # Errors
+/// Returns file, format, recipe, or unsupported-artifact diagnostics without modifying the file.
 pub fn load_preset(path: &Path) -> Result<PresetRecord, PresetIoError> {
     let bytes = fs::read(path).map_err(|error| PresetIoError {
         context: format!("{}: {error}", path.display()),
@@ -131,7 +140,7 @@ pub fn load_preset(path: &Path) -> Result<PresetRecord, PresetIoError> {
             context: "preset JSON exceeds the 4 MiB limit".into(),
         });
     }
-    let envelope: PresetEnvelopeDto =
+    let mut envelope: PresetEnvelopeDto =
         serde_json::from_slice(&bytes).map_err(|error| PresetIoError {
             context: error.to_string(),
         })?;
@@ -143,11 +152,68 @@ pub fn load_preset(path: &Path) -> Result<PresetRecord, PresetIoError> {
             ),
         });
     }
+    // A current-format source-free Pattern keeps authored variation even when its optional
+    // former seed-specific numeric companion is obsolete under the seed-neutral contract.
+    if envelope.saved_calibration.is_some() {
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| PresetIoError {
+            context: error.to_string(),
+        })?;
+        if value.get("saved_calibration").is_some_and(|companion| {
+            obsolete_seeded_v4_companion(companion)
+                || obsolete_guide_faces_v4_companion(companion)
+        }) {
+            envelope.saved_calibration = None;
+        }
+    }
     let preset = envelope.into_domain()?;
     toniator_domain::validate_preset_record(&preset).map_err(|error| PresetIoError {
         context: error.to_string(),
     })?;
     Ok(preset)
+}
+
+/// Recognizes only former v4 measurements whose typed recipe contains variation seeds.
+///
+/// Invalid or unknown payloads remain untouched so strict current artifact validation rejects
+/// them. This helper never changes the authored Pattern recipe or an on-disk Preset byte.
+fn obsolete_seeded_v4_companion(value: &serde_json::Value) -> bool {
+    const SEED_SPECIFIC_V4: [&str; 3] = [
+        "ton018-reference-fixed-canvas1024-spacings32-v4",
+        "ton018-reference-fixed-canvas1024-spacings64-v4",
+        "ton018-reference-fixed-canvas1024-spacings32-64-mean-v4",
+    ];
+    if !value.get("profile").and_then(serde_json::Value::as_str)
+        .is_some_and(|profile| SEED_SPECIFIC_V4.contains(&profile)) {
+        return false;
+    }
+    former_companion_binding(value).is_some_and(|binding| binding.has_variation_seed())
+}
+
+/// Recognizes only former generic v4 measurements of a typed Guide Faces output.
+///
+/// Malformed and future artifacts remain untouched for strict current-domain rejection.
+fn obsolete_guide_faces_v4_companion(value: &serde_json::Value) -> bool {
+    const FORMER_GUIDE_FACES: [&str; 2] = [
+        "ton018-reference-fixed-canvas1024-spacings32-v4",
+        "ton018-reference-fixed-canvas1024-spacings64-v4",
+    ];
+    value
+        .get("profile")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|profile| FORMER_GUIDE_FACES.contains(&profile))
+        && former_companion_binding(value).is_some_and(|binding| binding.uses_guide_faces())
+}
+
+/// Decodes only the complete typed identity needed to classify an obsolete optional cache.
+///
+/// Failure never authorizes deletion; normal strict artifact parsing will report the error.
+fn former_companion_binding(value: &serde_json::Value) -> Option<CalibrationBinding> {
+    let recipe = value.get("binding_recipe")?;
+    let recipe = serde_json::from_value::<PresetRecipeDto>(recipe.clone()).ok()?;
+    let recipe = recipe.into_domain().ok()?;
+    let aspect = value.get("density_aspect")?.as_f64()?;
+    let rotation = value.get("shape_rotation_degrees")?.as_f64()?;
+    CalibrationBinding::new(recipe, aspect, rotation).ok()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -628,8 +694,7 @@ fn declared_zip_entry_count(file: &mut File, length: u64) -> Result<usize, LoadE
     Ok(scanned_entries)
 }
 
-/// Loads strict project schema 11 or supported prechange schema 10 with
-/// portable media from container 2; other schema versions are rejected.
+/// Loads the current project schema with portable media from container 2; other schema versions are rejected.
 ///
 /// Raw central-directory cardinality is retained before `zip` can collapse duplicate names;
 /// topology, limits, integrity, and current-domain validation then complete transactionally.
@@ -646,7 +711,7 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
     load_opened(path, file)
 }
 
-/// Loads a strict schema-11 or supported schema-10 project from an opened file.
+/// Loads a project with the current strict schema from an opened file.
 ///
 /// This internal seam lets archive-kind dispatch retain the exact no-follow
 /// file identity it inspected instead of reopening a potentially replaced
@@ -782,31 +847,7 @@ fn load_opened(path: &Path, mut file: File) -> Result<LoadedDocument, LoadError>
         DOCUMENT_SCHEMA_VERSION => {
             let mut ignored = Vec::new();
             let mut deserializer = serde_json::Deserializer::from_slice(&document_bytes);
-            let stored: StoredDocumentDtoV11 =
-                serde_ignored::deserialize(&mut deserializer, |path| {
-                    ignored.push(path.to_string())
-                })
-                .map_err(|error| LoadError::Json {
-                    context: error.to_string(),
-                })?;
-            deserializer.end().map_err(|error| LoadError::Json {
-                context: error.to_string(),
-            })?;
-            if !ignored.is_empty() {
-                return Err(LoadError::Json {
-                    context: format!("unknown field at {}", ignored.join(", ")),
-                });
-            }
-            (
-                stored.document.into_domain().map_err(domain_error)?,
-                stored.sources,
-                stored.media,
-            )
-        }
-        PREVIOUS_DOCUMENT_SCHEMA_VERSION => {
-            let mut ignored = Vec::new();
-            let mut deserializer = serde_json::Deserializer::from_slice(&document_bytes);
-            let stored: StoredDocumentDtoV9 =
+            let stored: StoredDocumentDtoV13 =
                 serde_ignored::deserialize(&mut deserializer, |path| {
                     ignored.push(path.to_string())
                 })
@@ -870,7 +911,7 @@ fn ensure_supported_file_compression(
     })
 }
 
-/// Saves one fully source-backed schema-11 document with a deterministic
+/// Saves one fully source-backed document with the current schema and a deterministic
 /// container-2 media manifest.
 ///
 /// # Errors
@@ -901,7 +942,7 @@ pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<
             context: "document must reference the primary media source".into(),
         });
     }
-    let dto = StoredDocumentDtoV11::from_domain(document, sources)?;
+    let dto = StoredDocumentDtoV13::from_domain(document, sources)?;
     let mut document_json = serde_json::to_vec(&dto).map_err(|error| SaveError::Archive {
         context: error.to_string(),
     })?;
@@ -1118,6 +1159,8 @@ struct PresetEnvelopeDto {
     preset_format_version: u32,
     metadata: PresetMetadataDto,
     recipe: PresetRecipeDto,
+    #[serde(default)]
+    saved_calibration: Option<SavedCalibrationDto>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1175,6 +1218,7 @@ enum PresetStructureRecipeDto {
         name: String,
         coverage: CoverageDtoV6,
         character: RandomSiteCharacterDtoV6,
+        nominal_spacing: Option<f64>,
         seed: u32,
         density_modulation: SiteDensityModulationDtoV6,
         exclusion: SiteExclusionPolicyDtoV6,
@@ -1345,54 +1389,50 @@ struct SourceManifestDto {
     sha256: String,
     display_name: Option<String>,
 }
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredDocumentDtoV9 {
-    container_version: u32,
-    document_schema_version: u32,
-    document: DocumentDtoV9,
-    sources: Vec<SourceManifestDto>,
-    media: MediaManifestDto,
-}
-/// Current project envelope adds print intent without changing the embedded-source container.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredDocumentDtoV11 {
-    container_version: u32,
-    document_schema_version: u32,
-    document: DocumentDtoV11,
+/// Unpublished shared project fields projected before the schema-versioned envelope.
+struct StoredDocumentParts {
+    document: DocumentDtoBase,
     sources: Vec<SourceManifestDto>,
     media: MediaManifestDto,
 }
 
-impl StoredDocumentDtoV11 {
-    /// Projects current document authority while retaining the v10 source manifest shape.
+/// The current project envelope stores last-ALL Appearance and channel response intent.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredDocumentDtoV13 {
+    container_version: u32,
+    document_schema_version: u32,
+    document: DocumentDtoV13,
+    sources: Vec<SourceManifestDto>,
+    media: MediaManifestDto,
+}
+
+impl StoredDocumentDtoV13 {
+    /// Projects current document authority and source identity into the strict project envelope.
     ///
     /// # Errors
-    /// Returns a save error before publication if source or document projection fails.
+    /// Returns a save error before publication if source, configuration, or media projection fails.
     fn from_domain(document: &Document, sources: &SourceBundle) -> Result<Self, SaveError> {
-        let old = StoredDocumentDtoV9::from_domain(document, sources)?;
+        let parts = StoredDocumentParts::from_domain(document, sources)?;
         Ok(Self {
             container_version: CONTAINER_VERSION,
             document_schema_version: DOCUMENT_SCHEMA_VERSION,
-            document: DocumentDtoV11::from_domain(document, old.document),
-            sources: old.sources,
-            media: old.media,
+            document: DocumentDtoV13::from_base(document, parts.document),
+            sources: parts.sources,
+            media: parts.media,
         })
     }
 }
 
-impl StoredDocumentDtoV9 {
-    /// Projects shared v10 document fields and source manifest for schema-11 packaging.
+impl StoredDocumentParts {
+    /// Projects common document fields and the source manifest before current-schema packaging.
     ///
     /// # Errors
     ///
     /// Returns a save error when the document cannot be represented by current persistence.
     fn from_domain(document: &Document, sources: &SourceBundle) -> Result<Self, SaveError> {
         Ok(Self {
-            container_version: CONTAINER_VERSION,
-            document_schema_version: DOCUMENT_SCHEMA_VERSION,
-            document: DocumentDtoV9::from_domain(document)?,
+            document: DocumentDtoBase::from_domain(document)?,
             sources: sources
                 .entries()
                 .enumerate()
@@ -1414,56 +1454,86 @@ impl StoredDocumentDtoV9 {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DocumentDtoV9 {
+/// Shared current project fields before project-only print intent is attached.
+struct DocumentDtoBase {
     id: u64,
     canvas: CanvasDto,
     source_reference_id: String,
     project_timing: ProjectTimingDto,
-    #[serde(flatten)]
-    configuration: DocumentConfigurationDtoV9,
+    configuration: DocumentConfigurationDtoV12,
 }
 
-/// Required project-only intent in schema 11; source-free Presets keep schema 10.
+impl DocumentDtoBase {
+    /// Projects current authored configuration without runtime frame state.
+    ///
+    /// # Errors
+    /// Rejects an unassigned source or incoherent channel configuration before an archive is written.
+    fn from_domain(document: &Document) -> Result<Self, SaveError> {
+        let source_reference_id = match document.source() {
+            SourceReference::Assigned(id) => id.as_str().to_owned(),
+            SourceReference::Unassigned => {
+                return Err(SaveError::SourceDocumentMismatch {
+                    context: "saving requires an assigned document source".into(),
+                });
+            }
+        };
+        Ok(Self {
+            id: document.id().0,
+            canvas: CanvasDto {
+                width: document.canvas().width,
+                height: document.canvas().height,
+            },
+            source_reference_id,
+            project_timing: ProjectTimingDto::from_domain(document.project_timing()),
+            configuration: DocumentConfigurationDtoV12::from_domain(document)?,
+        })
+    }
+}
+
+/// Required project-only print intent accompanies the current shared configuration.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DocumentDtoV11 {
+struct DocumentDtoV13 {
     id: u64,
     canvas: CanvasDto,
     source_reference_id: String,
     project_timing: ProjectTimingDto,
     print_preparation: PrintPreparationDto,
     #[serde(flatten)]
-    configuration: DocumentConfigurationDtoV9,
+    configuration: DocumentConfigurationDtoV12,
 }
 
-impl DocumentDtoV11 {
-    /// Projects validated print intent alongside unchanged document configuration fields.
-    fn from_domain(document: &Document, old: DocumentDtoV9) -> Self {
+impl DocumentDtoV13 {
+    /// Adds project print intent to the validated current shared configuration fields.
+    fn from_base(document: &Document, base: DocumentDtoBase) -> Self {
         Self {
-            id: old.id,
-            canvas: old.canvas,
-            source_reference_id: old.source_reference_id,
-            project_timing: old.project_timing,
+            id: base.id,
+            canvas: base.canvas,
+            source_reference_id: base.source_reference_id,
+            project_timing: base.project_timing,
             print_preparation: PrintPreparationDto::from_domain(document.print_preparation()),
-            configuration: old.configuration,
+            configuration: base.configuration,
         }
     }
 
-    /// Restores schema-11 print intent after the shared v10 document fields validate.
+    /// Rebuilds the current strict-schema document before a loaded archive commits.
     ///
     /// # Errors
-    /// Rejects malformed physical dimensions and thresholds without publishing a document.
+    /// Returns source, configuration, temporal, or print-intent validation diagnostics without publishing partial state.
     fn into_domain(self) -> Result<Document, ValidationError> {
-        let old = DocumentDtoV9 {
-            id: self.id,
-            canvas: self.canvas,
-            source_reference_id: self.source_reference_id,
-            project_timing: self.project_timing,
-            configuration: self.configuration,
-        };
-        old.into_domain()?
+        let source = SourceReference::Assigned(dto_source_id(&self.source_reference_id)?);
+        let timing = self.project_timing.into_domain()?;
+        let document = self.configuration.into_document(
+            DocumentId(self.id),
+            CanvasSpec {
+                width: self.canvas.width,
+                height: self.canvas.height,
+            },
+            source,
+        )?;
+        let overrides = document.temporal_end_overrides().to_vec();
+        document
+            .with_temporal_authority(timing, overrides)?
             .with_print_preparation(self.print_preparation.into_domain()?)
     }
 }
@@ -1478,7 +1548,7 @@ struct PrintPreparationDto {
     minimum_negative_gap_width_mm: f64,
 }
 
-/// Requires an explicit nullable field so schema-11 archives cannot omit placement intent.
+/// Requires an explicit nullable field so current project archives cannot omit placement intent.
 ///
 /// # Errors
 /// Returns the field decoder's error for a non-object or malformed placement.
@@ -1542,16 +1612,347 @@ impl PhysicalPrintSizeDto {
     }
 }
 
-/// The shared current-v9 configuration includes End overrides without project timing or Start copies.
+/// The shared current-v11 configuration stores Start intent and End overrides without project timing.
 #[derive(Serialize, Deserialize)]
-struct DocumentConfigurationDtoV9 {
+struct DocumentConfigurationDtoV12 {
     pattern_definition_bundles: Vec<PatternDefinitionBundleDtoV6>,
     pattern_settings: DocumentPatternSettingsDto,
+    response_settings: DocumentResponseSettingsDto,
+    channel_response_overrides: Vec<ChannelResponseOverrideDto>,
+    appearance_baseline: DocumentAppearanceBaselineDto,
     channel_configuration: ChannelConfigurationDto,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     authored_structures: Vec<AuthoredStructureDtoV6>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     end_overrides: Vec<EndOverrideDto>,
+    saved_calibrations: Vec<AttachedCalibrationDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    baseline_saved_calibration: Option<SavedCalibrationDto>,
+}
+
+/// Current-only persisted calibration for one modeled channel.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttachedCalibrationDto {
+    channel_id: u64,
+    #[serde(flatten)]
+    calibration: SavedCalibrationDto,
+}
+
+/// Standalone or channel-attached source-independent measurement payload.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedCalibrationDto {
+    profile: String,
+    binding_recipe: PresetRecipeDto,
+    density_aspect: f64,
+    shape_rotation_degrees: f64,
+    raw: Vec<CalibrationKnotDto>,
+    uniform: Option<UniformCalibrationDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    variation: Option<CalibrationVariationDto>,
+}
+
+/// Typed empirical transfer maxima required only by the stochastic mean profile.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CalibrationVariationDto {
+    raw_absolute: f64,
+    raw_fraction_of_span: f64,
+    normalized_tone_absolute: f64,
+    low_tone_relative: f64,
+    uniform_tone_absolute: Option<f64>,
+    uniform_low_tone_relative: Option<f64>,
+}
+
+/// One exact numeric response observation.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CalibrationKnotDto { input: f64, coverage: f64 }
+
+/// Optional Uniform footprint and probability-to-coverage observations.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UniformCalibrationDto {
+    radius_per_nominal_spacing: f64,
+    inverse: Vec<CalibrationKnotDto>,
+}
+
+impl AttachedCalibrationDto {
+    /// Projects a validated domain artifact without reinterpreting its structural binding.
+    fn from_domain(value: &AttachedCalibration) -> Self {
+        Self {
+            channel_id: value.channel_id.0,
+            calibration: SavedCalibrationDto::from_domain(&value.artifact),
+        }
+    }
+
+    /// Restores one channel association with a validated standalone measurement.
+    ///
+    /// # Errors
+    /// Rejects invalid binding or measured payloads before publication.
+    fn into_domain(self) -> Result<AttachedCalibration, ValidationError> {
+        Ok(AttachedCalibration {
+            channel_id: ChannelId(self.channel_id),
+            artifact: self.calibration.into_domain()?,
+        })
+    }
+}
+
+impl SavedCalibrationDto {
+    /// Serializes the exact typed binding and immutable numeric observations.
+    fn from_domain(value: &SavedCalibration) -> Self {
+        let binding = value.binding();
+        Self {
+            profile: value.profile().to_owned(),
+            binding_recipe: PresetRecipeDto::from_domain(binding.recipe()),
+            density_aspect: binding.density_aspect(),
+            shape_rotation_degrees: binding.shape_rotation_degrees(),
+            raw: value.raw().iter().map(CalibrationKnotDto::from_domain).collect(),
+            uniform: value.uniform().map(|uniform| UniformCalibrationDto {
+                radius_per_nominal_spacing: uniform.radius_per_nominal_spacing(),
+                inverse: uniform.inverse().iter().map(CalibrationKnotDto::from_domain).collect(),
+            }),
+            variation: value.variation().map(|variation| CalibrationVariationDto {
+                raw_absolute: variation.raw_absolute(),
+                raw_fraction_of_span: variation.raw_fraction_of_span(),
+                normalized_tone_absolute: variation.normalized_tone_absolute(),
+                low_tone_relative: variation.low_tone_relative(),
+                uniform_tone_absolute: variation.uniform_tone_absolute(),
+                uniform_low_tone_relative: variation.uniform_low_tone_relative(),
+            }),
+        }
+    }
+
+    /// Revalidates saved numbers and typed recipe before exposing a measurement.
+    ///
+    /// # Errors
+    /// Rejects invalid recipe, binding, or numeric payload without returning a partial entry.
+    fn into_domain(self) -> Result<SavedCalibration, ValidationError> {
+        let recipe = self.binding_recipe.into_domain().map_err(|_| ValidationError::new("calibration.recipe", "saved calibration recipe is invalid"))?;
+        let binding = CalibrationBinding::new(recipe, self.density_aspect, self.shape_rotation_degrees)?;
+        let uniform = self.uniform.map(|uniform| UniformCalibration::new(
+            uniform.radius_per_nominal_spacing,
+            uniform.inverse.into_iter().map(CalibrationKnotDto::into_domain).collect(),
+        )).transpose()?;
+        let raw = self.raw.into_iter().map(CalibrationKnotDto::into_domain).collect();
+        match self.variation {
+            Some(variation) if self.profile == CALIBRATION_PROFILE_MEAN => {
+                let variation = CalibrationVariation::new(
+                    variation.raw_absolute, variation.raw_fraction_of_span,
+                    variation.normalized_tone_absolute, variation.low_tone_relative,
+                    variation.uniform_tone_absolute, variation.uniform_low_tone_relative,
+                )?;
+                SavedCalibration::with_mean_profile(binding, raw, uniform, variation)
+            }
+            Some(_) => Err(ValidationError::new("calibration.variation",
+                "deterministic profile cannot carry stochastic variation")),
+            None => SavedCalibration::with_profile(self.profile, binding, raw, uniform),
+        }
+    }
+}
+
+impl CalibrationKnotDto {
+    /// Copies one validated numeric observation into its current archive field pair.
+    fn from_domain(value: &CalibrationKnot) -> Self { Self { input: value.input, coverage: value.coverage } }
+    /// Restores one numeric pair for aggregate monotonic validation.
+    fn into_domain(self) -> CalibrationKnot { CalibrationKnot { input: self.input, coverage: self.coverage } }
+}
+
+/// Current reusable ALL response intent, including dormant output kinds.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DocumentResponseSettingsDto {
+    marks_minimum_fill: f64,
+    marks_maximum_fill: f64,
+    mark_density_mode: MarkDensityModeDto,
+    mark_size_scale: f64,
+    connected_minimum_thickness: f64,
+    connected_maximum_thickness: f64,
+    regions_minimum_fill: f64,
+    regions_maximum_fill: f64,
+    region_sampling: RegionSamplingStrategyDtoV6,
+}
+
+/// One named channel's absolute response intent, independent of Pattern preset data.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChannelResponseOverrideDto {
+    channel_id: u64,
+    output_layer_id: u64,
+    response: ChannelOutputResponseDto,
+}
+
+/// Typed response values; structural alignment and resize stay in the Pattern bundle.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ChannelOutputResponseDto {
+    Marks {
+        minimum_fill: Option<f64>,
+        maximum_fill: Option<f64>,
+        density_mode: Option<MarkDensityModeDto>,
+        size_scale: Option<f64>,
+    },
+    Connected {
+        minimum_thickness: Option<f64>,
+        maximum_thickness: Option<f64>,
+    },
+    Regions {
+        minimum_fill: Option<f64>,
+        maximum_fill: Option<f64>,
+        sampling: Option<RegionSamplingStrategyDtoV6>,
+    },
+}
+
+/// Current document-owned mark-density vocabulary; old schemas are rejected by version gate.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MarkDensityModeDto {
+    Contextual,
+    Uniform,
+    Variable,
+}
+
+impl MarkDensityModeDto {
+    /// Converts one domain density choice without consulting a Pattern recipe.
+    fn from_domain(value: MarkDensityMode) -> Self {
+        match value {
+            MarkDensityMode::Contextual => Self::Contextual,
+            MarkDensityMode::Uniform => Self::Uniform,
+            MarkDensityMode::Variable => Self::Variable,
+        }
+    }
+
+    /// Restores a current-schema density choice for domain validation.
+    fn into_domain(self) -> MarkDensityMode {
+        match self {
+            Self::Contextual => MarkDensityMode::Contextual,
+            Self::Uniform => MarkDensityMode::Uniform,
+            Self::Variable => MarkDensityMode::Variable,
+        }
+    }
+}
+
+impl DocumentResponseSettingsDto {
+    /// Projects all typed ALL intent without consulting the active Pattern kind.
+    fn from_domain(value: &DocumentResponseSettings) -> Self {
+        Self {
+            marks_minimum_fill: value.marks.minimum_fill,
+            marks_maximum_fill: value.marks.maximum_fill,
+            mark_density_mode: MarkDensityModeDto::from_domain(value.mark_density_mode),
+            mark_size_scale: value.mark_size_scale,
+            connected_minimum_thickness: value.connected_minimum_thickness,
+            connected_maximum_thickness: value.connected_maximum_thickness,
+            regions_minimum_fill: value.regions_minimum_fill,
+            regions_maximum_fill: value.regions_maximum_fill,
+            region_sampling: RegionSamplingStrategyDtoV6::from_domain(value.region_sampling),
+        }
+    }
+
+    /// Rebuilds stored ALL intent for domain-owned range validation.
+    fn into_domain(self) -> DocumentResponseSettings {
+        DocumentResponseSettings {
+            marks: MarkGeometryResponse {
+                minimum_fill: self.marks_minimum_fill,
+                maximum_fill: self.marks_maximum_fill,
+            },
+            mark_density_mode: self.mark_density_mode.into_domain(),
+            mark_size_scale: self.mark_size_scale,
+            connected_minimum_thickness: self.connected_minimum_thickness,
+            connected_maximum_thickness: self.connected_maximum_thickness,
+            regions_minimum_fill: self.regions_minimum_fill,
+            regions_maximum_fill: self.regions_maximum_fill,
+            region_sampling: self.region_sampling.into_domain(),
+        }
+    }
+}
+
+impl ChannelResponseOverrideDto {
+    /// Projects one named response without storing a Pattern recipe response.
+    fn from_domain(value: &ChannelResponseOverride) -> Self {
+        Self {
+            channel_id: value.channel_id.0,
+            output_layer_id: value.output_layer_id.0,
+            response: ChannelOutputResponseDto::from_domain(&value.response),
+        }
+    }
+
+    /// Rebuilds a named response for document-wide ID and kind validation.
+    fn into_domain(self) -> ChannelResponseOverride {
+        ChannelResponseOverride {
+            channel_id: ChannelId(self.channel_id),
+            output_layer_id: PatternOutputLayerId(self.output_layer_id),
+            response: self.response.into_domain(),
+        }
+    }
+}
+
+impl ChannelOutputResponseDto {
+    /// Projects only the response fields of a named channel.
+    fn from_domain(value: &ChannelOutputResponse) -> Self {
+        match value {
+            ChannelOutputResponse::Marks {
+                minimum_fill,
+                maximum_fill,
+                density_mode,
+                size_scale,
+            } => Self::Marks {
+                minimum_fill: *minimum_fill,
+                maximum_fill: *maximum_fill,
+                density_mode: density_mode.map(MarkDensityModeDto::from_domain),
+                size_scale: *size_scale,
+            },
+            ChannelOutputResponse::Connected {
+                minimum_thickness,
+                maximum_thickness,
+            } => Self::Connected {
+                minimum_thickness: *minimum_thickness,
+                maximum_thickness: *maximum_thickness,
+            },
+            ChannelOutputResponse::Regions {
+                minimum_fill,
+                maximum_fill,
+                sampling,
+            } => Self::Regions {
+                minimum_fill: *minimum_fill,
+                maximum_fill: *maximum_fill,
+                sampling: sampling.map(RegionSamplingStrategyDtoV6::from_domain),
+            },
+        }
+    }
+
+    /// Rebuilds the typed named intent without deriving a structural response.
+    fn into_domain(self) -> ChannelOutputResponse {
+        match self {
+            Self::Marks {
+                minimum_fill,
+                maximum_fill,
+                density_mode,
+                size_scale,
+            } => ChannelOutputResponse::Marks {
+                minimum_fill,
+                maximum_fill,
+                density_mode: density_mode.map(MarkDensityModeDto::into_domain),
+                size_scale,
+            },
+            Self::Connected {
+                minimum_thickness,
+                maximum_thickness,
+            } => ChannelOutputResponse::Connected {
+                minimum_thickness,
+                maximum_thickness,
+            },
+            Self::Regions {
+                minimum_fill,
+                maximum_fill,
+                sampling,
+            } => ChannelOutputResponse::Regions {
+                minimum_fill,
+                maximum_fill,
+                sampling: sampling.map(RegionSamplingStrategyDtoV6::into_domain),
+            },
+        }
+    }
 }
 
 /// Current-v7 persistence representation of one document-owned authored structure.
@@ -1694,6 +2095,7 @@ enum PatternMechanismDtoV6 {
     RandomSiteProcess {
         id: u64,
         character: RandomSiteCharacterDtoV6,
+        nominal_spacing: Option<f64>,
         seed: u32,
     },
     SiteDensityModulation {
@@ -2201,6 +2603,7 @@ impl PresetEnvelopeDto {
                 thumbnail: value.metadata.thumbnail.clone(),
             },
             recipe: PresetRecipeDto::from_domain(&value.recipe),
+            saved_calibration: value.saved_calibration.as_ref().map(SavedCalibrationDto::from_domain),
         }
     }
 
@@ -2240,6 +2643,7 @@ impl PresetEnvelopeDto {
             });
         }
         Ok(PresetRecord {
+            saved_calibration: self.saved_calibration.map(SavedCalibrationDto::into_domain).transpose().map_err(|error| PresetIoError { context: error.to_string() })?,
             metadata,
             recipe: self.recipe.into_domain()?,
         })
@@ -2346,6 +2750,7 @@ impl PresetStructureRecipeDto {
                 name,
                 coverage: definition_coverage,
                 character,
+                nominal_spacing,
                 seed,
                 density_modulation,
                 exclusion,
@@ -2356,6 +2761,7 @@ impl PresetStructureRecipeDto {
                 name: name.clone(),
                 coverage: coverage(definition_coverage),
                 character: RandomSiteCharacterDtoV6::from_domain(character),
+                nominal_spacing: *nominal_spacing,
                 seed: *seed,
                 density_modulation: SiteDensityModulationDtoV6::from_domain(density_modulation),
                 exclusion: SiteExclusionPolicyDtoV6::from_domain(exclusion),
@@ -2512,6 +2918,7 @@ impl PresetStructureRecipeDto {
                 name,
                 coverage: stored_coverage,
                 character,
+                nominal_spacing,
                 seed,
                 density_modulation,
                 exclusion,
@@ -2522,6 +2929,7 @@ impl PresetStructureRecipeDto {
                 name,
                 coverage: coverage_from(stored_coverage),
                 character: character.into_domain(),
+                nominal_spacing,
                 seed,
                 density_modulation: density_modulation.into_domain(),
                 exclusion: exclusion.into_domain(),
@@ -2828,6 +3236,47 @@ struct DocumentPatternSettingsDto {
     pattern_rotation_degrees: f64,
     shape_rotation_degrees: f64,
 }
+
+/// Sparse persisted effective Start values retained as last-ALL authoring intent.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DocumentAppearanceBaselineDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    density: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    density_aspect: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pattern_rotation_degrees: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    translation_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    translation_y: Option<f64>,
+}
+
+impl DocumentAppearanceBaselineDto {
+    /// Copies validated domain-owned optional values without deriving them from channels.
+    fn from_domain(value: &toniator_domain::DocumentAppearanceBaseline) -> Self {
+        Self {
+            density: value.density,
+            density_aspect: value.density_aspect,
+            pattern_rotation_degrees: value.pattern_rotation_degrees,
+            translation_x: value.translation_x,
+            translation_y: value.translation_y,
+        }
+    }
+
+    /// Rebuilds the sparse domain value; the complete document validates its numeric bounds.
+    fn into_domain(self) -> toniator_domain::DocumentAppearanceBaseline {
+        toniator_domain::DocumentAppearanceBaseline {
+            density: self.density,
+            density_aspect: self.density_aspect,
+            pattern_rotation_degrees: self.pattern_rotation_degrees,
+            translation_x: self.translation_x,
+            translation_y: self.translation_y,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChannelPatternInstanceDto {
@@ -2850,23 +3299,17 @@ struct PatternOutputResponseDeltaDtoV6 {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum PatternGeometryResponseDto {
-    Marks { response: MarkResponseDto },
-    Connected { response: ConnectedResponseDto },
-    Regions { response: RegionResponseDtoV6 },
-}
-
-/// Current-v7 region response with one positive-geometry resize algorithm and shared fills.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RegionResponseDtoV6 {
-    algorithm: RegionResizeAlgorithmDtoV6,
-    sampling: RegionSamplingStrategyDtoV6,
-    minimum_fill: f64,
-    maximum_fill: f64,
+    Marks,
+    Connected {
+        bias: f64,
+    },
+    Regions {
+        algorithm: RegionResizeAlgorithmDtoV6,
+    },
 }
 
 /// Current-v7 positive-geometry region resize selector.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
 enum RegionResizeAlgorithmDtoV6 {
@@ -2875,7 +3318,7 @@ enum RegionResizeAlgorithmDtoV6 {
 }
 
 /// Current v7 sampling selector; absence is intentionally rejected by serde.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
 enum RegionSamplingStrategyDtoV6 {
@@ -2899,29 +3342,39 @@ struct RegionResponseDeltaDtoV6 {
 }
 
 impl PatternGeometryResponseDto {
-    /// Projects one typed base response without resolving channel deltas.
+    /// Projects only Pattern-owned alignment or resize construction.
     fn from_domain(value: &PatternGeometryResponse) -> Self {
         match value {
-            PatternGeometryResponse::Marks(response) => Self::Marks {
-                response: MarkResponseDto::from_domain(response),
-            },
-            PatternGeometryResponse::Connected(response) => Self::Connected {
-                response: ConnectedResponseDto::from_domain(response),
-            },
-            PatternGeometryResponse::Regions(response) => Self::Regions {
-                response: RegionResponseDtoV6::from_domain(response),
+            PatternGeometryResponse::Marks(_) => Self::Marks,
+            PatternGeometryResponse::Connected(value) => Self::Connected { bias: value.bias },
+            PatternGeometryResponse::Regions(value) => Self::Regions {
+                algorithm: RegionResizeAlgorithmDtoV6::from_domain(value.algorithm),
             },
         }
     }
 
-    /// Rebuilds one typed base response for domain-owned bundle validation.
+    /// Rebuilds a neutral response shell for structural bundle validation.
     fn into_domain(self) -> PatternGeometryResponse {
         match self {
-            Self::Marks { response } => PatternGeometryResponse::Marks(response.into_domain()),
-            Self::Connected { response } => {
-                PatternGeometryResponse::Connected(response.into_domain())
+            Self::Marks => PatternGeometryResponse::Marks(MarkGeometryResponse {
+                minimum_fill: 0.0,
+                maximum_fill: 1.0,
+            }),
+            Self::Connected { bias } => {
+                PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                    minimum_thickness: 0.0,
+                    maximum_thickness: 1.0,
+                    bias,
+                })
             }
-            Self::Regions { response } => PatternGeometryResponse::Regions(response.into_domain()),
+            Self::Regions { algorithm } => {
+                PatternGeometryResponse::Regions(RegionGeometryResponse {
+                    algorithm: algorithm.into_domain(),
+                    sampling: RegionSamplingStrategy::AreaAverage,
+                    minimum_fill: 0.0,
+                    maximum_fill: 1.0,
+                })
+            }
         }
     }
 }
@@ -2950,28 +3403,6 @@ impl ChannelGeometryResponseDeltaDto {
                 ChannelGeometryResponseDelta::Connected(delta.into_domain())
             }
             Self::Regions { delta } => ChannelGeometryResponseDelta::Regions(delta.into_domain()),
-        }
-    }
-}
-
-impl RegionResponseDtoV6 {
-    /// Projects current authored region resize intent without resolving effective channel values.
-    fn from_domain(value: &RegionGeometryResponse) -> Self {
-        Self {
-            algorithm: RegionResizeAlgorithmDtoV6::from_domain(value.algorithm),
-            sampling: RegionSamplingStrategyDtoV6::from_domain(value.sampling),
-            minimum_fill: value.minimum_fill,
-            maximum_fill: value.maximum_fill,
-        }
-    }
-
-    /// Rebuilds one current authored region response for domain validation.
-    fn into_domain(self) -> RegionGeometryResponse {
-        RegionGeometryResponse {
-            algorithm: self.algorithm.into_domain(),
-            sampling: self.sampling.into_domain(),
-            minimum_fill: self.minimum_fill,
-            maximum_fill: self.maximum_fill,
         }
     }
 }
@@ -3053,14 +3484,6 @@ struct MarkResponseDeltaDto {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ConnectedResponseDto {
-    minimum_thickness: f64,
-    maximum_thickness: f64,
-    #[serde(default)]
-    bias: f64,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ConnectedResponseDeltaDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     minimum_thickness_delta: Option<f64>,
@@ -3081,12 +3504,6 @@ struct AppearanceDto {
     visible: bool,
     color: ColorDto,
     opacity: f64,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MarkResponseDto {
-    minimum_fill: f64,
-    maximum_fill: f64,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3228,57 +3645,70 @@ dto_enum!(
     }
 );
 
-impl DocumentDtoV9 {
-    /// Projects authored Start settings, End overrides and timing without runtime frame state.
+impl DocumentConfigurationDtoV12 {
+    /// Separates former raw response authority from a current, neutral calibration shell.
+    ///
+    /// The shell can be bound for exact structural calibration but is never returned as a
+    /// publishable configuration. Inactive response kinds receive current coverage defaults;
+    /// the former values remain typed in the pending record until engine conversion.
     ///
     /// # Errors
-    ///
-    /// Returns a save error for an unassigned source or incoherent channel configuration before an
-    /// archive is written; no intermediate evaluated frames are persisted.
-    fn from_domain(document: &Document) -> Result<Self, SaveError> {
-        let source_reference_id = match document.source() {
-            SourceReference::Assigned(id) => id.as_str().to_owned(),
-            SourceReference::Unassigned => {
-                return Err(SaveError::SourceDocumentMismatch {
-                    context: "v7 saving requires an assigned document source".into(),
-                });
-            }
-        };
-        Ok(Self {
-            id: document.id().0,
-            canvas: CanvasDto {
-                width: document.canvas().width,
-                height: document.canvas().height,
-            },
-            source_reference_id,
-            project_timing: ProjectTimingDto::from_domain(document.project_timing()),
-            configuration: DocumentConfigurationDtoV9::from_domain(document)?,
-        })
-    }
-    /// Rebuilds and validates the complete authoritative document before a loaded archive commits.
-    ///
-    /// # Errors
-    ///
-    /// Returns stable domain validation diagnostics for authored IDs, coordinates, topology, bounds,
-    /// or existing document state; no partially rebuilt document escapes this boundary.
-    fn into_domain(self) -> Result<Document, ValidationError> {
-        let source = SourceReference::Assigned(dto_source_id(&self.source_reference_id)?);
-        let timing = self.project_timing.into_domain()?;
-        let document = self.configuration.into_document(
-            DocumentId(self.id),
-            CanvasSpec {
-                width: self.canvas.width,
-                height: self.canvas.height,
-            },
-            source,
-        )?;
-        let overrides = document.temporal_end_overrides().to_vec();
-        document.with_temporal_authority(timing, overrides)
-    }
-}
+    /// Rejects invalid raw fields, malformed End tracks, or an invalid neutral shell.
+    fn into_pending_raw_import(
+        mut self,
+        destination: &Document,
+    ) -> Result<PendingRawPresetImport, ValidationError> {
+        let raw_start = self.response_settings.into_domain();
+        let raw_named = std::mem::take(&mut self.channel_response_overrides)
+            .into_iter().map(ChannelResponseOverrideDto::into_domain).collect::<Vec<_>>();
+        let raw_end = std::mem::take(&mut self.end_overrides)
+            .into_iter().map(EndOverrideDto::into_domain)
+            .collect::<Result<Vec<_>, _>>()?;
 
-impl DocumentConfigurationDtoV9 {
-    /// Projects reusable Start settings and End intent using current-v9 authority.
+        let mut neutral = raw_start.clone();
+        let default = DocumentResponseSettings::default();
+        neutral.marks = default.marks;
+        neutral.connected_minimum_thickness = default.connected_minimum_thickness;
+        neutral.connected_maximum_thickness = default.connected_maximum_thickness;
+        neutral.regions_minimum_fill = default.regions_minimum_fill;
+        neutral.regions_maximum_fill = default.regions_maximum_fill;
+        self.response_settings = DocumentResponseSettingsDto::from_domain(&neutral);
+        self.channel_response_overrides = raw_named.iter().filter_map(|entry| {
+            let mut entry = entry.clone();
+            match &mut entry.response {
+                ChannelOutputResponse::Marks { minimum_fill, maximum_fill, .. }
+                | ChannelOutputResponse::Regions { minimum_fill, maximum_fill, .. } => {
+                    *minimum_fill = None;
+                    *maximum_fill = None;
+                }
+                ChannelOutputResponse::Connected { minimum_thickness, maximum_thickness } => {
+                    *minimum_thickness = None;
+                    *maximum_thickness = None;
+                }
+            }
+            let empty = match &entry.response {
+                ChannelOutputResponse::Marks { minimum_fill, maximum_fill, density_mode, size_scale } =>
+                    minimum_fill.is_none() && maximum_fill.is_none() && density_mode.is_none() && size_scale.is_none(),
+                ChannelOutputResponse::Connected { minimum_thickness, maximum_thickness } =>
+                    minimum_thickness.is_none() && maximum_thickness.is_none(),
+                ChannelOutputResponse::Regions { minimum_fill, maximum_fill, sampling } =>
+                    minimum_fill.is_none() && maximum_fill.is_none() && sampling.is_none(),
+            };
+            (!empty).then(|| ChannelResponseOverrideDto::from_domain(&entry))
+        }).collect();
+        self.end_overrides = raw_end.iter().filter(|entry| !matches!(entry,
+            TemporalEndOverride::Scalar(value) if matches!(value.field,
+                PropertyFieldId::MarkMinimumFill | PropertyFieldId::MarkMaximumFill
+                | PropertyFieldId::ConnectedMinimumThickness | PropertyFieldId::ConnectedMaximumThickness
+                | PropertyFieldId::RegionMinimumFill | PropertyFieldId::RegionMaximumFill)
+        )).map(|entry| EndOverrideDto::from_domain(entry).map_err(|_| ValidationError::new(
+            "preset.raw_end", "former non-response End track could not be preserved"
+        ))).collect::<Result<Vec<_>, _>>()?;
+        let neutral = self.into_domain_configuration(destination)?;
+        PendingRawPresetImport::new(neutral, raw_start, raw_named, raw_end)
+    }
+
+    /// Projects reusable Start settings, last-ALL Appearance, channel response, and End intent using current authority.
     ///
     /// # Errors
     ///
@@ -3288,7 +3718,7 @@ impl DocumentConfigurationDtoV9 {
         Self::from_configuration(&DocumentConfiguration::capture(document))
     }
 
-    /// Projects source-free Start settings and End intent into the shared current-v9 field shape.
+    /// Projects source-free Start settings, last-ALL Appearance, channel response, and End intent into the current configuration schema.
     ///
     /// # Errors
     ///
@@ -3326,6 +3756,17 @@ impl DocumentConfigurationDtoV9 {
             pattern_settings: DocumentPatternSettingsDto::from_domain(
                 configuration.pattern_settings(),
             ),
+            response_settings: DocumentResponseSettingsDto::from_domain(
+                configuration.response_settings(),
+            ),
+            channel_response_overrides: configuration
+                .channel_response_overrides()
+                .iter()
+                .map(ChannelResponseOverrideDto::from_domain)
+                .collect(),
+            appearance_baseline: DocumentAppearanceBaselineDto::from_domain(
+                configuration.appearance_baseline(),
+            ),
             channel_configuration,
             authored_structures: configuration
                 .authored_structures()
@@ -3337,6 +3778,10 @@ impl DocumentConfigurationDtoV9 {
                 .iter()
                 .map(EndOverrideDto::from_domain)
                 .collect::<Result<_, _>>()?,
+            saved_calibrations: configuration.saved_calibrations()
+                .iter().map(AttachedCalibrationDto::from_domain).collect(),
+            baseline_saved_calibration: configuration.baseline_saved_calibration()
+                .map(SavedCalibrationDto::from_domain),
         })
     }
 
@@ -3352,6 +3797,13 @@ impl DocumentConfigurationDtoV9 {
         canvas: CanvasSpec,
         source: SourceReference,
     ) -> Result<Document, ValidationError> {
+        let appearance_baseline = self.appearance_baseline.into_domain();
+        let response_settings = self.response_settings.into_domain();
+        let channel_response_overrides = self
+            .channel_response_overrides
+            .into_iter()
+            .map(ChannelResponseOverrideDto::into_domain)
+            .collect();
         let definitions = self
             .pattern_definition_bundles
             .into_iter()
@@ -3399,8 +3851,15 @@ impl DocumentConfigurationDtoV9 {
                     authored_structures,
                 )
             }
-        }?;
-        document.with_temporal_authority(toniator_domain::ProjectTiming::default(), end_overrides)
+        }?
+        .with_appearance_baseline(appearance_baseline)?
+        .with_response_authority(response_settings, channel_response_overrides)?;
+        let document = document.with_temporal_authority(toniator_domain::ProjectTiming::default(), end_overrides)?;
+        let calibrations = self.saved_calibrations.into_iter()
+            .map(AttachedCalibrationDto::into_domain).collect::<Result<Vec<_>, _>>()?;
+        let baseline = self.baseline_saved_calibration
+            .map(SavedCalibrationDto::into_domain).transpose()?;
+        document.with_saved_calibration_authority(calibrations, baseline)
     }
 
     /// Rebuilds and captures one reusable configuration against a destination's validation context.
@@ -3781,10 +4240,12 @@ impl PatternMechanismDtoV6 {
             toniator_domain::PatternMechanism::RandomSiteProcess {
                 id,
                 character,
+                nominal_spacing,
                 seed,
             } => Self::RandomSiteProcess {
                 id: id.0,
                 character: RandomSiteCharacterDtoV6::from_domain(character),
+                nominal_spacing: *nominal_spacing,
                 seed: *seed,
             },
             toniator_domain::PatternMechanism::SiteDensityModulation {
@@ -3897,10 +4358,12 @@ impl PatternMechanismDtoV6 {
             Self::RandomSiteProcess {
                 id,
                 character,
+                nominal_spacing,
                 seed,
             } => toniator_domain::PatternMechanism::RandomSiteProcess {
                 id: PatternMechanismId(id),
                 character: character.into_domain(),
+                nominal_spacing,
                 seed,
             },
             Self::SiteDensityModulation {
@@ -4578,42 +5041,6 @@ impl AppearanceDto {
         }
     }
 }
-impl MarkResponseDto {
-    /// Projects the accepted mark-response branch without shape rotation.
-    fn from_domain(value: &MarkGeometryResponse) -> Self {
-        Self {
-            minimum_fill: value.minimum_fill,
-            maximum_fill: value.maximum_fill,
-        }
-    }
-    /// Rebuilds the accepted mark-response branch for domain validation.
-    fn into_domain(self) -> MarkGeometryResponse {
-        MarkGeometryResponse {
-            minimum_fill: self.minimum_fill,
-            maximum_fill: self.maximum_fill,
-        }
-    }
-}
-
-impl ConnectedResponseDto {
-    /// Projects the persisted normalized stroke response without resolving channel inheritance.
-    fn from_domain(value: &ConnectedGeometryResponse) -> Self {
-        Self {
-            minimum_thickness: value.minimum_thickness,
-            maximum_thickness: value.maximum_thickness,
-            bias: value.bias,
-        }
-    }
-    /// Rebuilds the connected response for domain-owned validation.
-    fn into_domain(self) -> ConnectedGeometryResponse {
-        ConnectedGeometryResponse {
-            minimum_thickness: self.minimum_thickness,
-            maximum_thickness: self.maximum_thickness,
-            bias: self.bias,
-        }
-    }
-}
-
 impl ConnectedResponseDeltaDto {
     /// Projects optional additive stroke response intent without materializing effective values.
     fn from_domain(value: &ConnectedGeometryResponseDelta) -> Self {
@@ -4942,6 +5369,7 @@ mod stage20r_tests {
     #[test]
     fn ordered_composite_preset_round_trips_deterministically() {
         let record = PresetRecord {
+            saved_calibration: None,
             metadata: PresetMetadata {
                 id: "stage-20r-ordered".into(),
                 name: "Stage 20R ordered".into(),
@@ -5103,10 +5531,10 @@ mod source_weighting_persistence_tests {
         })
         .unwrap()
         .0;
-        let dto = DocumentConfigurationDtoV9::from_domain(&document).unwrap();
+        let dto = DocumentConfigurationDtoV12::from_domain(&document).unwrap();
         let json = serde_json::to_string(&dto).unwrap();
         assert!(json.contains("\"weighting\""));
-        let restored = serde_json::from_str::<DocumentConfigurationDtoV9>(&json)
+        let restored = serde_json::from_str::<DocumentConfigurationDtoV12>(&json)
             .unwrap()
             .into_domain_configuration(&document)
             .unwrap();

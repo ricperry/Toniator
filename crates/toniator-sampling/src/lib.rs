@@ -1991,9 +1991,41 @@ fn decode_svg(bytes: &[u8]) -> Result<SourceField, SamplingError> {
     decode_svg_with_system_fonts(bytes, true)
 }
 
+/// Creates SVG parsing options and optionally loads the current system font database.
+///
+/// The shared decoder verifies the configured generic sans-serif query and applies only a
+/// fontdb-confirmed named-family fallback when that generic mapping is broken.
+///
+/// # Errors
+///
+/// Returns the same format, font-policy, SVG parsing, dimension, or allocation diagnostics as the
+/// caller-prepared SVG decoder.
 fn decode_svg_with_system_fonts(
     bytes: &[u8],
     load_system_fonts: bool,
+) -> Result<SourceField, SamplingError> {
+    let mut options = usvg::Options {
+        font_family: "sans-serif".to_owned(),
+        ..usvg::Options::default()
+    };
+    if load_system_fonts {
+        options.fontdb_mut().load_system_fonts();
+    }
+    decode_svg_with_options(bytes, &mut options)
+}
+
+/// Decodes one SVG using caller-prepared options and the shared source-text/font policy.
+///
+/// A generic sans-serif query remains authoritative when it succeeds. The database alias changes
+/// only after an exact named-family query proves an installed fallback is available.
+///
+/// # Errors
+///
+/// Returns stable source-format, missing-font, malformed-SVG, dimension, or unsafe-allocation
+/// diagnostics without changing any global font configuration.
+fn decode_svg_with_options(
+    bytes: &[u8],
+    options: &mut usvg::Options<'_>,
 ) -> Result<SourceField, SamplingError> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| SamplingError::new("source.format", "bytes do not match SVG hint"))?;
@@ -2004,24 +2036,13 @@ fn decode_svg_with_system_fonts(
         ));
     }
     let has_live_text_node = text.contains("<text") || text.contains(":text");
-    let mut options = usvg::Options {
-        font_family: "sans-serif".to_owned(),
-        ..usvg::Options::default()
-    };
-    if load_system_fonts {
-        options.fontdb_mut().load_system_fonts();
-    }
-    let sans_query = usvg::fontdb::Query {
-        families: &[usvg::fontdb::Family::SansSerif],
-        ..usvg::fontdb::Query::default()
-    };
-    if options.fontdb_mut().query(&sans_query).is_none() {
+    if !ensure_fontdb_sans_serif(options.fontdb_mut()) {
         return Err(SamplingError::new(
             "source.svg.font_policy",
             "no usable system sans-serif font is available",
         ));
     }
-    let tree = usvg::Tree::from_data(bytes, &options)
+    let tree = usvg::Tree::from_data(bytes, options)
         .map_err(|_| SamplingError::new("source.decode", "malformed SVG source"))?;
     let size = tree.size();
     let width = size.width().round() as u32;
@@ -2041,7 +2062,7 @@ fn decode_svg_with_system_fonts(
     let rendered_glyph_coverage = if has_live_text_node {
         let without_text = strip_text_nodes(text);
         let textless_tree =
-            usvg::Tree::from_data(without_text.as_bytes(), &options).map_err(|_| {
+            usvg::Tree::from_data(without_text.as_bytes(), options).map_err(|_| {
                 SamplingError::new("source.decode", "could not inspect SVG text coverage")
             })?;
         let mut textless = tiny_skia::Pixmap::new(width, height).ok_or(SamplingError::new(
@@ -2072,6 +2093,39 @@ fn decode_svg_with_system_fonts(
         },
         pixels,
     })
+}
+
+const SANS_SERIF_FALLBACKS: [&str; 4] = ["DejaVu Sans", "Noto Sans", "Liberation Sans", "FreeSans"];
+
+/// Finds the first exact installed family in the bounded deterministic sans-serif fallback list.
+fn installed_sans_serif_fallback(fontdb: &usvg::fontdb::Database) -> Option<&'static str> {
+    SANS_SERIF_FALLBACKS.iter().copied().find(|family| {
+        let families = [usvg::fontdb::Family::Name(family)];
+        let query = usvg::fontdb::Query {
+            families: &families,
+            ..usvg::fontdb::Query::default()
+        };
+        fontdb.query(&query).is_some()
+    })
+}
+
+/// Preserves a working generic sans-serif mapping or repairs it only to a queried installed family.
+///
+/// Returns `false` when neither the current generic alias nor any exact named fallback exists; in
+/// that case the database alias remains unchanged.
+fn ensure_fontdb_sans_serif(fontdb: &mut usvg::fontdb::Database) -> bool {
+    let sans_query = usvg::fontdb::Query {
+        families: &[usvg::fontdb::Family::SansSerif],
+        ..usvg::fontdb::Query::default()
+    };
+    if fontdb.query(&sans_query).is_some() {
+        return true;
+    }
+    if let Some(family) = installed_sans_serif_fallback(fontdb) {
+        fontdb.set_sans_serif_family(family);
+        return true;
+    }
+    false
 }
 
 fn strip_text_nodes(svg: &str) -> String {
@@ -2294,6 +2348,129 @@ impl Error for SamplingError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Proves an existing queried generic family remains selected without applying fallback policy.
+    ///
+    /// # Panics
+    ///
+    /// Panics when system fonts provide no named fallback or a valid generic query is changed.
+    #[test]
+    fn ton014_existing_fontdb_sans_serif_mapping_is_preserved() {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let mut installed = SANS_SERIF_FALLBACKS.iter().copied().filter(|family| {
+            let families = [usvg::fontdb::Family::Name(family)];
+            fontdb
+                .query(&usvg::fontdb::Query {
+                    families: &families,
+                    ..usvg::fontdb::Query::default()
+                })
+                .is_some()
+        });
+        let first = installed
+            .next()
+            .expect("the focused host installs one supported sans-serif family");
+        let family = installed
+            .next()
+            .expect("the focused host installs a distinct second supported sans-serif family");
+        assert_ne!(family, first);
+        fontdb.set_sans_serif_family(family);
+        let selected_before = fontdb
+            .query(&usvg::fontdb::Query {
+                families: &[usvg::fontdb::Family::SansSerif],
+                ..usvg::fontdb::Query::default()
+            })
+            .expect("the explicitly selected named family resolves generically");
+        assert!(ensure_fontdb_sans_serif(&mut fontdb));
+        assert_eq!(fontdb.family_name(&usvg::fontdb::Family::SansSerif), family);
+        assert_eq!(
+            fontdb.query(&usvg::fontdb::Query {
+                families: &[usvg::fontdb::Family::SansSerif],
+                ..usvg::fontdb::Query::default()
+            }),
+            Some(selected_before)
+        );
+    }
+
+    /// Exercises the broken-alias fallback on the live text asset and confirms PNG decoding is stable.
+    ///
+    /// The SVG uses the same caller-prepared font database as production, while the raster field is
+    /// compared before and after the local font alias changes.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no focused-host sans family is available, fallback fails to restore text glyphs,
+    /// or the unrelated immutable PNG field changes.
+    #[test]
+    fn ton014_broken_fontdb_sans_alias_falls_back_for_svg_and_keeps_png_unchanged() {
+        let raster_bytes = asset("raster-sample.png");
+        let raster_before = decode_source(&raster_bytes, SourceFormatHint::Png)
+            .expect("immutable raster decodes before SVG font configuration");
+        let mut options = usvg::Options {
+            font_family: "sans-serif".to_owned(),
+            ..usvg::Options::default()
+        };
+        options.fontdb_mut().load_system_fonts();
+        let expected_fallback = installed_sans_serif_fallback(options.fontdb_mut())
+            .expect("the focused host installs one supported sans-serif family");
+        options
+            .fontdb_mut()
+            .set_sans_serif_family("Toniator Missing Sans Alias");
+        assert!(
+            options
+                .fontdb_mut()
+                .query(&usvg::fontdb::Query {
+                    families: &[usvg::fontdb::Family::SansSerif],
+                    ..usvg::fontdb::Query::default()
+                })
+                .is_none(),
+            "the fixture begins with a broken generic alias"
+        );
+
+        let svg = decode_svg_with_options(&asset("vector-sample.svg"), &mut options)
+            .expect("installed named fallback decodes the immutable live-text SVG");
+        assert_eq!((svg.identity().width, svg.identity().height), (900, 620));
+        let diagnostic = svg
+            .identity()
+            .svg_text
+            .as_ref()
+            .expect("immutable vector fixture retains live text diagnostics");
+        assert!(diagnostic.has_live_text_node);
+        assert!(diagnostic.rendered_glyph_coverage);
+        assert_eq!(
+            options
+                .fontdb_mut()
+                .family_name(&usvg::fontdb::Family::SansSerif),
+            expected_fallback
+        );
+
+        let raster_after = decode_source(&raster_bytes, SourceFormatHint::Png)
+            .expect("immutable raster decodes after local SVG fallback");
+        assert_eq!(raster_after, raster_before);
+    }
+
+    /// Preserves the explicit font-policy error when no sans-serif face can be queried.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an empty font database unexpectedly admits the immutable SVG text.
+    #[test]
+    fn ton014_no_eligible_fontdb_sans_face_keeps_font_policy_error() {
+        let mut options = usvg::Options {
+            font_family: "sans-serif".to_owned(),
+            ..usvg::Options::default()
+        };
+        options
+            .fontdb_mut()
+            .set_sans_serif_family("Toniator Missing Sans Alias");
+        let error = decode_svg_with_options(&asset("vector-sample.svg"), &mut options)
+            .expect_err("no system or named sans face must fail before SVG rendering");
+        assert_eq!(error.path(), "source.svg.font_policy");
+        assert_eq!(
+            error.message(),
+            "no usable system sans-serif font is available"
+        );
+    }
 
     fn asset(name: &str) -> Vec<u8> {
         std::fs::read(format!(

@@ -2,6 +2,7 @@
 
 //! The shared mutable-document boundary for headless Toniator frontends.
 
+use sha2::{Digest, Sha256};
 use std::cell::Cell;
 #[cfg(test)]
 use std::cell::RefCell;
@@ -19,14 +20,20 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[allow(dead_code)] // Retained explicit transient fitter for isolated diagnostics; ordinary evaluation uses saved data.
+mod coverage;
+mod coverage_output;
 pub mod export;
 mod media;
 mod media_import;
 /// Bounded advisory analysis of one actual final transparent output raster.
 pub mod print_preflight;
+/// Experimental, explicit reference-response measurement; ordinary evaluation never calls it.
+pub mod reference_calibration;
 mod scheduler;
 #[cfg(test)]
 mod temporal_tests;
+mod uniform_density;
 
 pub use media::{frame_evaluation_request, open_source_media};
 pub use media_import::{
@@ -42,9 +49,12 @@ pub use scheduler::{
 };
 
 use toniator_domain::{
-    CanvasSpec, ChannelId, EvaluationSnapshot, EvaluationToken, PatternDefinition,
+    CalibrationBinding, CanvasSpec, ChannelId, ChannelOutputResponse, ChannelResponseOverride,
+    Document, DocumentConfiguration, DocumentResponseSettings, EvaluationSnapshot,
+    EvaluationToken, PendingRawPresetImport, PatternDefinition, PatternGeometryResponse,
     PatternMechanism, PatternOutputLayer, PatternOutputRealization, RegionGeometryResponse,
-    SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    PropertyFieldId, PropertyTarget, SavedCalibration, ScalarEndOverride,
+    SourceComponent, SourcePlacement, SourceReference, SourceReferenceId, TemporalEndOverride,
 };
 use toniator_domain::{
     ChannelPaint, DocumentEvaluationSnapshot, DocumentEvaluationToken, DocumentSession,
@@ -66,6 +76,7 @@ use toniator_patterns::{
     evaluate_typed_maze_walls_from_family_cancellable, family_requires_decoded_source,
     maximum_emitted_guide_spacing, maximum_nominal_cell_diameter, realize_circular_marks,
     realize_region_output_with_progress_cancellable, voronoi_region_references,
+    resolve_connection_program_for_feature_size,
 };
 pub use toniator_patterns::{
     CanonicalCircleMark, CanonicalMark, CanonicalMarkRealization, CanonicalStrokeRealization,
@@ -95,6 +106,8 @@ pub use toniator_patterns::{GridError, GridInspectRequest};
 
 /// The accepted mark-response ceiling reserved by family coverage so fill edits remain realization-only.
 const MAXIMUM_NORMALIZED_MARK_FILL: f64 = 2.0;
+/// Conservative family envelope for a 99.9% baseline at artistic scale at most two.
+const UNIFORM_MARK_SUPPORT_FILL: f64 = 8.0;
 
 /// Resolves source identity through the accepted sampling decoder.
 ///
@@ -987,14 +1000,17 @@ mod stage20q_region_cache_tests {
         })
     }
 
-    /// Proves resize envelopes use the shared normalized fill maximum for both algorithms.
+    /// Proves both resize algorithms reserve the raw size-two support independent of coverage.
+    ///
+    /// # Panics
+    /// Panics if a current desired coverage edit changes the canonical family envelope.
     #[test]
     fn region_support_uses_outward_normalized_fill_extrema() {
         let scale = RegionGeometryResponse {
             algorithm: toniator_domain::RegionResizeAlgorithm::Scale,
             sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
             minimum_fill: 0.0,
-            maximum_fill: 1.75,
+            maximum_fill: 1.0,
         };
         let unit_offset = RegionGeometryResponse {
             algorithm: toniator_domain::RegionResizeAlgorithm::UniformOffset,
@@ -1004,11 +1020,11 @@ mod stage20q_region_cache_tests {
         };
         assert_eq!(
             region_treatment_outward_support(&scale, 10.0).expect("finite scale support"),
-            7.5
+            10.0
         );
         assert_eq!(
-            region_treatment_outward_support(&unit_offset, 10.0).expect("unit fill has no growth"),
-            0.0
+            region_treatment_outward_support(&unit_offset, 10.0).expect("raw size-two support"),
+            10.0
         );
     }
 
@@ -1234,7 +1250,7 @@ struct RasterCacheKey {
     max_flattened_raster_edges: usize,
 }
 
-const TRANSPARENT_RASTER_CONTRACT_ID: &str = "toniator-render-transparent-raster-v1";
+const TRANSPARENT_RASTER_CONTRACT_ID: &str = "toniator-render-transparent-raster-area-v2";
 
 #[derive(Clone)]
 struct DerivedCacheSnapshot {
@@ -1689,6 +1705,23 @@ fn evaluate_stage<T>(
     result.map_err(EvaluationRunError::Evaluation)
 }
 
+/// Runs one cancellable calibration substage through the normal realization error boundary.
+///
+/// # Errors
+/// Converts an observed cancellation path or stale cancellation token to `Cancelled`; other
+/// producer, numerical, and geometry failures retain their stable evaluation diagnostics.
+fn evaluate_calibration_stage<T>(
+    cancellation: &dyn CancellationProbe,
+    evaluate: impl FnOnce() -> Result<T, EvaluationError>,
+) -> Result<T, EvaluationRunError> {
+    match evaluate_stage(EvaluationStage::Realization, cancellation, evaluate) {
+        Err(EvaluationRunError::Evaluation(error)) if error.path() == "evaluation.cancelled" => {
+            Err(EvaluationRunError::Cancelled)
+        }
+        result => result,
+    }
+}
+
 /// Evaluates one structural family with cancellation and optional unit progress.
 ///
 /// # Errors
@@ -2047,10 +2080,13 @@ fn family_definition_key(value: &PatternDefinition) -> FamilyDefinitionKey {
 fn resolved_source_weighting(
     family: &FamilyCapability,
 ) -> Option<toniator_domain::SourceWeighting> {
-    family
-        .random
-        .as_ref()
-        .and_then(|random| match &random.density_modulation {
+    family.random.as_ref().and_then(|random| {
+        if random.full_population_for_uniform_marks {
+            return (random.refinement.enabled && random.refinement.density_weighted)
+                .then_some(random.refinement_weighting)
+                .flatten();
+        }
+        match &random.density_modulation {
             toniator_patterns::ResolvedSiteDensityModulation::Uniform => random
                 .refinement
                 .enabled
@@ -2067,7 +2103,8 @@ fn resolved_source_weighting(
                 strength: *strength,
                 response: *response,
             }),
-        })
+        }
+    })
 }
 
 /// Captures the versioned geometry algorithm and fixed limits when a definition uses normal offsets.
@@ -2346,6 +2383,307 @@ impl EvaluationError {
     }
 }
 
+/// Interpolates a validated saved raw zero-to-two curve at one former authored size.
+///
+/// # Errors
+/// Rejects old raw values outside the measured size domain without clamping old intent.
+fn preset_raw_coverage(saved: &SavedCalibration, size: f64) -> Result<f64, EvaluationError> {
+    if !size.is_finite() || !(0.0..=2.0).contains(&size) {
+        return Err(EvaluationError::new("preset.raw_response", "former raw response is outside the measured zero-to-two size range"));
+    }
+    let points = saved.raw();
+    let upper = points.partition_point(|point| point.input < size);
+    if points[upper].input == size {
+        return Ok(points[upper].coverage);
+    }
+    let left = &points[upper - 1];
+    let right = &points[upper];
+    Ok(left.coverage + (size - left.input) / (right.input - left.input) * (right.coverage - left.coverage))
+}
+
+/// Selects the two coverage endpoints owned by one single-output response kind.
+fn preset_response_fields(response: &PatternGeometryResponse) -> [PropertyFieldId; 2] {
+    match response {
+        PatternGeometryResponse::Marks(_) => [PropertyFieldId::MarkMinimumFill, PropertyFieldId::MarkMaximumFill],
+        PatternGeometryResponse::Connected(_) => [PropertyFieldId::ConnectedMinimumThickness, PropertyFieldId::ConnectedMaximumThickness],
+        PatternGeometryResponse::Regions(_) => [PropertyFieldId::RegionMinimumFill, PropertyFieldId::RegionMaximumFill],
+    }
+}
+
+/// Reads one typed ALL endpoint without confusing raw size with mark scale or stroke bias.
+fn preset_all_endpoint(settings: &DocumentResponseSettings, field: PropertyFieldId) -> f64 {
+    match field {
+        PropertyFieldId::MarkMinimumFill => settings.marks.minimum_fill,
+        PropertyFieldId::MarkMaximumFill => settings.marks.maximum_fill,
+        PropertyFieldId::ConnectedMinimumThickness => settings.connected_minimum_thickness,
+        PropertyFieldId::ConnectedMaximumThickness => settings.connected_maximum_thickness,
+        PropertyFieldId::RegionMinimumFill => settings.regions_minimum_fill,
+        PropertyFieldId::RegionMaximumFill => settings.regions_maximum_fill,
+        _ => unreachable!("only coverage endpoint fields are passed to preset_all_endpoint"),
+    }
+}
+
+/// Writes one converted ALL endpoint while leaving inactive response kinds at current defaults.
+fn set_preset_all_endpoint(settings: &mut DocumentResponseSettings, field: PropertyFieldId, value: f64) {
+    match field {
+        PropertyFieldId::MarkMinimumFill => settings.marks.minimum_fill = value,
+        PropertyFieldId::MarkMaximumFill => settings.marks.maximum_fill = value,
+        PropertyFieldId::ConnectedMinimumThickness => settings.connected_minimum_thickness = value,
+        PropertyFieldId::ConnectedMaximumThickness => settings.connected_maximum_thickness = value,
+        PropertyFieldId::RegionMinimumFill => settings.regions_minimum_fill = value,
+        PropertyFieldId::RegionMaximumFill => settings.regions_maximum_fill = value,
+        _ => unreachable!("only coverage endpoint fields are passed to set_preset_all_endpoint"),
+    }
+}
+
+/// Reads one explicitly named former raw endpoint, retaining `None` inheritance distinctly.
+fn preset_named_endpoint(response: &ChannelOutputResponse, field: PropertyFieldId) -> Option<f64> {
+    match (response, field) {
+        (ChannelOutputResponse::Marks { minimum_fill, .. }, PropertyFieldId::MarkMinimumFill)
+        | (ChannelOutputResponse::Regions { minimum_fill, .. }, PropertyFieldId::RegionMinimumFill) => *minimum_fill,
+        (ChannelOutputResponse::Marks { maximum_fill, .. }, PropertyFieldId::MarkMaximumFill)
+        | (ChannelOutputResponse::Regions { maximum_fill, .. }, PropertyFieldId::RegionMaximumFill) => *maximum_fill,
+        (ChannelOutputResponse::Connected { minimum_thickness, .. }, PropertyFieldId::ConnectedMinimumThickness) => *minimum_thickness,
+        (ChannelOutputResponse::Connected { maximum_thickness, .. }, PropertyFieldId::ConnectedMaximumThickness) => *maximum_thickness,
+        _ => None,
+    }
+}
+
+/// Writes a converted named endpoint only when explicit intent or a distinct curve requires it.
+fn set_preset_named_endpoint(response: &mut ChannelOutputResponse, field: PropertyFieldId, value: Option<f64>) {
+    match (response, field) {
+        (ChannelOutputResponse::Marks { minimum_fill, .. }, PropertyFieldId::MarkMinimumFill)
+        | (ChannelOutputResponse::Regions { minimum_fill, .. }, PropertyFieldId::RegionMinimumFill) => *minimum_fill = value,
+        (ChannelOutputResponse::Marks { maximum_fill, .. }, PropertyFieldId::MarkMaximumFill)
+        | (ChannelOutputResponse::Regions { maximum_fill, .. }, PropertyFieldId::RegionMaximumFill) => *maximum_fill = value,
+        (ChannelOutputResponse::Connected { minimum_thickness, .. }, PropertyFieldId::ConnectedMinimumThickness) => *minimum_thickness = value,
+        (ChannelOutputResponse::Connected { maximum_thickness, .. }, PropertyFieldId::ConnectedMaximumThickness) => *maximum_thickness = value,
+        _ => unreachable!("named response kind was validated against the active output"),
+    }
+}
+
+/// Reuses an exact active, hidden ALL, or bundled companion before bounded fitting.
+///
+/// # Errors
+/// Returns a real calibration or cancellation diagnostic; never substitutes a nearby recipe.
+fn preset_companion(
+    binding: &CalibrationBinding,
+    pool: &mut Vec<SavedCalibration>,
+    limits: EvaluationLimits,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<SavedCalibration, EvaluationError> {
+    if is_cancelled() {
+        return Err(EvaluationError::new("preset.calibration.cancelled", "Preset preparation cancelled"));
+    }
+    if let Some(saved) = pool.iter().find(|saved| saved.binding() == binding) {
+        return Ok(saved.clone());
+    }
+    if let Some(saved) = toniator_patterns::PresetRegistry::bundled().entries().iter()
+        .filter_map(|record| record.saved_calibration.as_ref())
+        .find(|saved| saved.binding() == binding)
+    {
+        pool.push(saved.clone());
+        return Ok(saved.clone());
+    }
+    let saved = reference_calibration::calibrate_saved_binding(binding, limits, is_cancelled)?;
+    if is_cancelled() {
+        return Err(EvaluationError::new("preset.calibration.cancelled", "Preset preparation cancelled"));
+    }
+    pool.push(saved.clone());
+    Ok(saved)
+}
+
+/// Converts one source-free former raw Preset with exact binding-specific coverage measurements.
+///
+/// The neutral shell stays private throughout. Active and hidden ALL companions are reused or
+/// measured before a current configuration is built, and no caller can observe a partial result.
+///
+/// # Errors
+/// Returns destination, cancellation, bounded calibration, raw-domain, or current-domain errors
+/// without mutating the destination or source-free Preset bytes.
+pub fn prepare_pending_raw_preset(
+    pending: PendingRawPresetImport,
+    destination: &Document,
+    limits: EvaluationLimits,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<DocumentConfiguration, EvaluationError> {
+    let (neutral, raw_start, raw_named, raw_end) = pending.into_parts();
+    let mut candidate = neutral.bind(destination).map_err(EvaluationError::from_domain)?;
+    let active_ids: Vec<ChannelId> = if let Some(channels) = candidate.channels() {
+        channels.iter().map(|channel| channel.id).collect()
+    } else if let Some(topology) = candidate.channel_topology() {
+        topology.channels().iter().map(|channel| channel.id).collect()
+    } else {
+        return Err(EvaluationError::new("preset.channels", "Preset has no supported channel authority"));
+    };
+    for entry in &raw_named {
+        if !active_ids.contains(&entry.channel_id) {
+            return Err(EvaluationError::new("preset.raw_response.named", "former named response targets a foreign channel"));
+        }
+        let effective = candidate.effective_channel_pattern(entry.channel_id).map_err(EvaluationError::from_domain)?;
+        if effective.output_settings.len() != 1 || effective.output_settings[0].output_layer_id != entry.output_layer_id {
+            return Err(EvaluationError::new("preset.raw_response.named", "former named response targets a foreign output"));
+        }
+    }
+    let mut end_keys = BTreeSet::new();
+    for entry in &raw_end {
+        let TemporalEndOverride::Scalar(value) = entry else { continue };
+        if !is_preset_coverage_field(value.field) { continue; }
+        if !end_keys.insert((value.target, value.field)) {
+            return Err(EvaluationError::new("preset.raw_end.duplicate", "former response End tracks must have unique targets and fields"));
+        }
+        let PropertyTarget::ChannelOutput(channel_id, output_id) = value.target else {
+            return Err(EvaluationError::new("preset.raw_end.target", "former response End must target a channel output"));
+        };
+        if !active_ids.contains(&channel_id) {
+            return Err(EvaluationError::new("preset.raw_end.target", "former response End targets a foreign channel"));
+        }
+        let effective = candidate.effective_channel_pattern(channel_id).map_err(EvaluationError::from_domain)?;
+        if effective.output_settings.len() != 1
+            || effective.output_settings[0].output_layer_id != output_id
+            || !preset_response_fields(&effective.output_settings[0].response).contains(&value.field)
+        {
+            return Err(EvaluationError::new("preset.raw_end.target", "former response End targets a foreign or incompatible output"));
+        }
+    }
+    let mut pool = candidate.saved_calibrations().iter().map(|entry| entry.artifact.clone()).collect::<Vec<_>>();
+    if let Some(saved) = candidate.baseline_saved_calibration().map_err(EvaluationError::from_domain)? {
+        pool.push(saved.clone());
+    }
+    for channel_id in active_ids.iter().copied() {
+        let binding = CalibrationBinding::for_channel(&candidate, channel_id).map_err(EvaluationError::from_domain)?;
+        let saved = preset_companion(&binding, &mut pool, limits, is_cancelled)?;
+        candidate = candidate.with_saved_calibration(channel_id, saved).map_err(EvaluationError::from_domain)?;
+    }
+    let baseline_binding = candidate.baseline_calibration_binding().map_err(EvaluationError::from_domain)?;
+    let baseline = preset_companion(&baseline_binding, &mut pool, limits, is_cancelled)?;
+    candidate = candidate.with_saved_baseline_calibration(baseline.clone()).map_err(EvaluationError::from_domain)?;
+
+    let baseline_response = &baseline_binding.recipe().output_settings[0].response;
+    let mut converted_all = raw_start.clone();
+    let default = DocumentResponseSettings::default();
+    converted_all.marks = default.marks;
+    converted_all.connected_minimum_thickness = default.connected_minimum_thickness;
+    converted_all.connected_maximum_thickness = default.connected_maximum_thickness;
+    converted_all.regions_minimum_fill = default.regions_minimum_fill;
+    converted_all.regions_maximum_fill = default.regions_maximum_fill;
+    for field in preset_response_fields(baseline_response) {
+        let value = preset_raw_coverage(&baseline, preset_all_endpoint(&raw_start, field))?;
+        set_preset_all_endpoint(&mut converted_all, field, value);
+    }
+
+    let mut converted_named = Vec::<ChannelResponseOverride>::new();
+    for channel_id in active_ids.iter().copied() {
+        if is_cancelled() {
+            return Err(EvaluationError::new("preset.calibration.cancelled", "Preset preparation cancelled"));
+        }
+        let effective = candidate.effective_channel_pattern(channel_id).map_err(EvaluationError::from_domain)?;
+        let [output] = effective.output_settings.as_slice() else {
+            return Err(EvaluationError::new("preset.output", "former response Preset requires exactly one active output"));
+        };
+        let saved = candidate.saved_calibration_for(channel_id).map_err(EvaluationError::from_domain)?
+            .ok_or(EvaluationError::new("preset.calibration", "active Preset calibration is missing"))?;
+        let original = raw_named.iter().find(|entry| entry.channel_id == channel_id && entry.output_layer_id == output.output_layer_id);
+        let mut response = original.map(|entry| entry.response.clone()).unwrap_or_else(|| match &output.response {
+            PatternGeometryResponse::Marks(_) => ChannelOutputResponse::Marks { minimum_fill: None, maximum_fill: None, density_mode: None, size_scale: None },
+            PatternGeometryResponse::Connected(_) => ChannelOutputResponse::Connected { minimum_thickness: None, maximum_thickness: None },
+            PatternGeometryResponse::Regions(_) => ChannelOutputResponse::Regions { minimum_fill: None, maximum_fill: None, sampling: None },
+        });
+        let mut needs_entry = original.is_some();
+        for field in preset_response_fields(&output.response) {
+            let explicit = original.and_then(|entry| preset_named_endpoint(&entry.response, field));
+            let raw = explicit.unwrap_or_else(|| preset_all_endpoint(&raw_start, field));
+            let converted = preset_raw_coverage(saved, raw)?;
+            let inherited = preset_all_endpoint(&converted_all, field);
+            let needed = explicit.is_some() || converted != inherited;
+            needs_entry |= needed;
+            set_preset_named_endpoint(&mut response, field, needed.then_some(converted));
+        }
+        if needs_entry {
+            converted_named.push(ChannelResponseOverride { channel_id, output_layer_id: output.output_layer_id, response });
+        }
+    }
+    candidate = candidate.with_response_authority(converted_all, converted_named).map_err(EvaluationError::from_domain)?;
+    let converted_end = convert_preset_raw_end(&candidate, &raw_start, &raw_end, is_cancelled)?;
+    let timing = candidate.project_timing().clone();
+    candidate = candidate.with_temporal_authority(timing, converted_end)
+        .map_err(EvaluationError::from_domain)?;
+    candidate.require_saved_calibration_authority().map_err(EvaluationError::from_domain)?;
+    Ok(DocumentConfiguration::capture(&candidate))
+}
+
+/// Recognizes only former raw-size response End fields, leaving paint and structure tracks intact.
+const fn is_preset_coverage_field(field: PropertyFieldId) -> bool {
+    matches!(field,
+        PropertyFieldId::MarkMinimumFill | PropertyFieldId::MarkMaximumFill
+        | PropertyFieldId::ConnectedMinimumThickness | PropertyFieldId::ConnectedMaximumThickness
+        | PropertyFieldId::RegionMinimumFill | PropertyFieldId::RegionMaximumFill)
+}
+
+/// Rewrites initialized former raw End authority through the appropriate exact saved curve.
+///
+/// A valid former response End targets a channel output and stores an additive delta from ALL
+/// Start. Its effective old endpoint is ALL Start plus that delta. Distinct channel curves
+/// therefore receive separately converted named End deltas with their original easing.
+///
+/// # Errors
+/// Rejects foreign response End targets, unavailable active companions, and old raw endpoints
+/// outside the measured domain rather than clipping or publishing a partial temporal state.
+fn convert_preset_raw_end(
+    candidate: &Document,
+    raw_start: &DocumentResponseSettings,
+    raw_end: &[TemporalEndOverride],
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<TemporalEndOverride>, EvaluationError> {
+    let mut converted = raw_end.iter().filter(|entry| !matches!(entry,
+        TemporalEndOverride::Scalar(value) if is_preset_coverage_field(value.field)
+    )).cloned().collect::<Vec<_>>();
+    for entry in raw_end {
+        let TemporalEndOverride::Scalar(value) = entry else { continue };
+        if !is_preset_coverage_field(value.field) { continue; }
+        if !matches!(value.target, PropertyTarget::ChannelOutput(_, _)) {
+            return Err(EvaluationError::new("preset.raw_end.target", "former response End has an unsupported target"));
+        }
+    }
+    let active_ids: Vec<ChannelId> = if let Some(channels) = candidate.channels() {
+        channels.iter().map(|channel| channel.id).collect()
+    } else {
+        candidate.channel_topology().ok_or(EvaluationError::new("preset.channels", "Preset has no supported channel authority"))?
+            .channels().iter().map(|channel| channel.id).collect()
+    };
+    for channel_id in active_ids {
+        if is_cancelled() {
+            return Err(EvaluationError::new("preset.calibration.cancelled", "Preset preparation cancelled"));
+        }
+        let effective = candidate.effective_channel_pattern(channel_id).map_err(EvaluationError::from_domain)?;
+        let [output] = effective.output_settings.as_slice() else {
+            return Err(EvaluationError::new("preset.output", "former response Preset requires exactly one active output"));
+        };
+        let saved = candidate.saved_calibration_for(channel_id).map_err(EvaluationError::from_domain)?
+            .ok_or(EvaluationError::new("preset.calibration", "active Preset calibration is missing"))?;
+        for field in preset_response_fields(&output.response) {
+            let named_end = raw_end.iter().find_map(|entry| match entry {
+                TemporalEndOverride::Scalar(value)
+                    if value.target == PropertyTarget::ChannelOutput(channel_id, output.output_layer_id)
+                        && value.field == field => Some(value),
+                _ => None,
+            });
+            let Some(named_end) = named_end else { continue };
+            let raw_base_start = preset_all_endpoint(raw_start, field);
+            let raw_delta_end = named_end.end;
+            let effective_end = preset_raw_coverage(saved, raw_base_start + raw_delta_end)?;
+            let converted_base_end = preset_all_endpoint(candidate.response_settings(), field);
+            converted.push(TemporalEndOverride::Scalar(ScalarEndOverride {
+                target: PropertyTarget::ChannelOutput(channel_id, output.output_layer_id),
+                field,
+                end: effective_end - converted_base_end,
+                easing: named_end.easing,
+            }));
+        }
+    }
+    Ok(converted)
+}
+
 impl fmt::Display for EvaluationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}: {}", self.path, self.message)
@@ -2391,6 +2729,7 @@ pub struct EvaluationRequest {
     snapshot: DocumentEvaluationSnapshot,
     source: ResolvedSource,
     raster_request: RasterRequest,
+    structural_preview: bool,
 }
 
 /// Selects one final raster consumer without adding another document or geometry authority.
@@ -2411,6 +2750,7 @@ impl EvaluationRequest {
             snapshot,
             source,
             raster_request: RasterRequest::Native,
+            structural_preview: false,
         }
     }
 
@@ -2425,12 +2765,22 @@ impl EvaluationRequest {
             snapshot,
             source,
             raster_request: RasterRequest::Preview(preview_target),
+            structural_preview: false,
         }
     }
 
     /// Selects a bounded transparent preview while preserving frame materialization and identity.
     pub fn for_preview(mut self, target: PreviewRasterTarget) -> Self {
         self.raster_request = RasterRequest::Preview(target);
+        self
+    }
+
+    /// Requests the Pattern Wizard's disposable structural illustration.
+    ///
+    /// It uses the caller's neutral response document without saved-coverage lookup or Uniform
+    /// population thinning. This purpose does not alter authoritative project rendering.
+    pub fn for_structural_preview(mut self) -> Self {
+        self.structural_preview = true;
         self
     }
 
@@ -3741,6 +4091,7 @@ fn evaluate_cached_document_impl(
         return Err(EvaluationRunError::Cancelled);
     }
     let document = request.snapshot.document();
+    let structural_preview = request.structural_preview;
     document
         .validate()
         .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
@@ -3788,12 +4139,29 @@ fn evaluate_cached_document_impl(
                     "evaluation.pattern_definition",
                     "channel resolves a missing pattern definition",
                 ))?;
-            let plan = toniator_patterns::resolve_document_pattern_pipeline_for_channel(
+            let mut plan = toniator_patterns::resolve_document_pattern_pipeline_for_channel(
                 document,
                 definition,
                 channel.weighting,
             )
             .map_err(EvaluationError::from_pipeline)?;
+            let uniform_marks = !structural_preview && plan
+                .ordered_outputs
+                .iter()
+                .filter(|output| output.marks().is_some())
+                .map(|output| document.effective_mark_density(channel.id, output.layer_id))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(EvaluationError::from_domain)?
+                .iter()
+                .any(|density| density.mode == toniator_domain::MarkDensityMode::Uniform);
+            if uniform_marks && let Some(random) = &mut plan.family.random {
+                random.full_population_for_uniform_marks = true;
+                // Ordinary weighting is consumed only by later thinning. Keep the
+                // ArtworkWeighted structure while removing inactive channel metadata
+                // from the frozen family's truthful provenance and cache identity.
+                random.density_modulation =
+                    toniator_patterns::ResolvedSiteDensityModulation::ArtworkWeightedUnbound;
+            }
             Ok::<_, EvaluationRunError>((channel, effective, definition, plan))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -3884,6 +4252,10 @@ fn evaluate_cached_document_impl(
     let mut layers = Vec::with_capacity(topology.channels().len());
     let mut families = Vec::with_capacity(topology.channels().len());
     let mut realizations = Vec::with_capacity(topology.channels().len());
+    // Only curves used by this completed evaluation enter its transaction. Geometry edits cannot
+    // grow an unbounded history of inactive measurement tables across accepted snapshots.
+    let mut coverage_curves = Vec::new();
+    let mut uniform_density_fits = Vec::new();
     let mut family_dispositions = Vec::with_capacity(topology.channels().len());
     let mut realization_dispositions = Vec::with_capacity(topology.channels().len());
     let mut output_realization_dispositions = Vec::with_capacity(topology.channels().len());
@@ -4091,7 +4463,7 @@ fn evaluate_cached_document_impl(
                     }],
                 );
             }
-            let realization_key = document_realization_cache_key(
+            let mut realization_key = document_realization_cache_key(
                 document,
                 definition,
                 channel,
@@ -4103,6 +4475,133 @@ fn evaluate_cached_document_impl(
                 referenced_usage,
                 limits,
             )?;
+            let authored_output = definition
+                .output_layers
+                .iter()
+                .find(|output| output.id == output_capability.layer_id)
+                .ok_or(EvaluationError::new(
+                    "evaluation.output_binding",
+                    "output capability targets a missing authored output",
+                ))?;
+            let mark_output = matches!(
+                authored_output.realization,
+                PatternOutputRealization::MarkPrototype { .. }
+                    | PatternOutputRealization::CircularMarks { .. }
+            );
+            let uniform_density = mark_output
+                .then(|| document.effective_mark_density(channel.id, output_capability.layer_id))
+                .transpose()
+                .map_err(EvaluationError::from_domain)?;
+            let uniform_marks = !structural_preview && uniform_density
+                .is_some_and(|density| density.mode == toniator_domain::MarkDensityMode::Uniform);
+            let uniform_fit = if uniform_marks {
+                let saved = document.saved_calibration_for(channel.id)
+                    .map_err(EvaluationError::from_domain)?
+                    .ok_or(EvaluationError::new("calibration.missing", "Pattern geometry needs a saved calibration; Recalibrate"))?;
+                realization_key.uniform_calibration = Some(saved.clone());
+                let uniform = saved.uniform().ok_or(EvaluationError::new(
+                    "calibration.uniform.missing", "Uniform marks need a saved population calibration; Recalibrate",
+                ))?;
+                let fit_key = DocumentUniformFitCacheKey {
+                    family_content: key.content.clone(),
+                    family_fingerprint: family.family_fingerprint().to_owned(),
+                    output_layer_id: output_capability.layer_id,
+                    source_filter: output_capability.source_filter,
+                    referenced_usage_fingerprint: referenced_usage
+                        .map(|usage| usage.fingerprint().to_owned()),
+                    shape_content: resolved_shape_content_identity(
+                        document,
+                        definition,
+                        output_capability.layer_id,
+                    )?,
+                    shape_rotation: effective.shape_rotation_degrees.to_bits(),
+                    transformed_segment_limit: remaining_transformed_curve_segment_instances,
+                    contract: "ton018-uniform-density-v1",
+                    calibration: saved.clone(),
+                };
+                let fit = match uniform_density_fits
+                    .iter()
+                    .chain(accepted.uniform_density_fits.iter())
+                    .find(|(candidate, _)| *candidate == fit_key)
+                {
+                    Some((_, fit)) => Arc::clone(fit),
+                    None => {
+                        let nominal_spacing = maximum_nominal_cell_diameter(
+                            &plan.family, document.canvas(), &effective.resolved_density,
+                        ).map_err(EvaluationError::from_pipeline)? / 2.0_f64.sqrt();
+                        Arc::new(uniform_density::UniformDensityFit::from_saved(uniform, nominal_spacing)?)
+                    },
+                };
+                if !uniform_density_fits
+                    .iter()
+                    .any(|(candidate, _)| *candidate == fit_key)
+                {
+                    uniform_density_fits.push((fit_key, Arc::clone(&fit)));
+                }
+                Some(fit)
+            } else {
+                None
+            };
+            let dependent_output = output_capability.maze_walls().is_some()
+                || output_capability.connection_paths().is_some()
+                || output_capability.regions().is_some()
+                || matches!(
+                    authored_output.realization,
+                    PatternOutputRealization::CurveMotifPaths { .. }
+                );
+            let structural_output = matches!(
+                authored_output.realization,
+                PatternOutputRealization::GuidePaths { .. }
+                    | PatternOutputRealization::ParametricPaths { .. }
+            );
+            let calibrate = !structural_preview
+                && plan.ordered_outputs.len() == 1
+                && ((mark_output && !uniform_marks) || dependent_output || structural_output);
+            let calibration_limits = if calibrate
+                && matches!(
+                    output_setting.response,
+                    toniator_domain::PatternGeometryResponse::Connected(_)
+                ) {
+                limits
+                    .with_max_stroke_profile_samples(remaining_stroke_profile_samples)?
+                    .with_max_stroke_outline_segments(remaining_stroke_outline_segments)?
+            } else {
+                limits
+            };
+            let mut prepared_coverage = None;
+            let calibrated_curve = if calibrate {
+                let saved = document.saved_calibration_for(channel.id)
+                    .map_err(EvaluationError::from_domain)?
+                    .ok_or(EvaluationError::new("calibration.missing", "Pattern geometry needs a saved calibration; Recalibrate"))?;
+                let coverage_key = document_coverage_cache_key(&realization_key, &source, saved);
+                let curve = match coverage_curves
+                    .iter()
+                    .chain(accepted.coverage_curves.iter())
+                    .find(|(key, _)| *key == coverage_key)
+                {
+                    Some((_, curve)) => curve.clone(),
+                    None => {
+                        let (minimum, maximum) = match &output_setting.response {
+                            toniator_domain::PatternGeometryResponse::Marks(value) =>
+                                (value.minimum_fill, value.maximum_fill),
+                            toniator_domain::PatternGeometryResponse::Connected(value) =>
+                                (value.minimum_thickness, value.maximum_thickness),
+                            toniator_domain::PatternGeometryResponse::Regions(value) =>
+                                (value.minimum_fill, value.maximum_fill),
+                        };
+                        Some(Arc::new(coverage::from_saved(saved, minimum, maximum)?))
+                    },
+                };
+                if !coverage_curves.iter().any(|(key, _)| *key == coverage_key) {
+                    coverage_curves.push((coverage_key, curve.clone()));
+                }
+                realization_key.coverage_application = true;
+                realization_key.coverage_curve_fingerprint =
+                    Some(coverage_curve_fingerprint(curve.as_deref()));
+                curve
+            } else {
+                None
+            };
             let realization_started = Instant::now();
             cancellation.report_progress(
                 EvaluationProgressStage::RealizingOutputs,
@@ -4136,7 +4635,79 @@ fn evaluate_cached_document_impl(
             {
                 Some((_, realization)) => (Arc::clone(realization), CacheDisposition::Hit, None),
                 None => {
-                    let (realization, region_performance) =
+                    let response_input = calibrated_curve
+                        .as_deref()
+                        .map(|fit| {
+                            let (minimum, maximum) = fit.target_range
+                                .expect("persisted coverage transfer retains desired endpoints");
+                            toniator_patterns::GeometryResponseInput::AbsoluteCoverage {
+                                curve: &fit.curve,
+                                minimum,
+                                maximum,
+                            }
+                        })
+                        .unwrap_or(toniator_patterns::GeometryResponseInput::Identity);
+                    if calibrate && dependent_output && prepared_coverage.is_none() {
+                        prepared_coverage = evaluate_calibration_stage(cancellation, || {
+                            coverage_output::prepare(
+                                document,
+                                definition,
+                                effective,
+                                &filtered_family,
+                                plan,
+                                output_capability,
+                                calibration_limits,
+                                &|| cancellation.is_cancelled(),
+                            )
+                        })?;
+                    }
+                    let (realization, region_performance) = if let Some(fit) = &uniform_fit {
+                        let size_scale = uniform_density
+                            .expect("uniform output resolved density")
+                            .size_scale;
+                        let realization = evaluate_calibration_stage(cancellation, || {
+                            realize_uniform_mark_output(
+                                document,
+                                channel,
+                                effective,
+                                &source,
+                                &filtered_family,
+                                plan,
+                                output_capability,
+                                output_setting,
+                                fit,
+                                size_scale,
+                                remaining_transformed_curve_segment_instances,
+                                &|| cancellation.is_cancelled(),
+                            )
+                        })?;
+                        (realization, None)
+                    } else if let Some(prepared) = &prepared_coverage {
+                        let (realization, usage) =
+                            evaluate_calibration_stage(cancellation, || {
+                                prepared.realize(
+                                    output_capability,
+                                    output_setting,
+                                    &source,
+                                    document.canvas(),
+                                    channel.mapping,
+                                    &channel.paint,
+                                    calibration_limits,
+                                    response_input,
+                                    &|| cancellation.is_cancelled(),
+                                )
+                            })?;
+                        (
+                            DocumentOutputRealization {
+                                output_layer_id: output_capability.layer_id,
+                                capability: output_capability.clone(),
+                                setting: output_setting.clone(),
+                                realization,
+                                usage,
+                            },
+                            None,
+                        )
+                    } else {
                         match evaluate_stage(EvaluationStage::Realization, cancellation, || {
                             evaluate_document_output(
                                 document,
@@ -4160,6 +4731,7 @@ fn evaluate_cached_document_impl(
                                 limits.region_sampling_limits(),
                                 limits.region_treatment_limits(),
                                 collect_performance,
+                                response_input,
                                 &|| cancellation.is_cancelled(),
                                 &report_output_progress,
                             )
@@ -4170,7 +4742,8 @@ fn evaluate_cached_document_impl(
                                 return Err(EvaluationRunError::Cancelled);
                             }
                             result => result?,
-                        };
+                        }
+                    };
                     (
                         Arc::new(realization),
                         CacheDisposition::Miss,
@@ -4566,6 +5139,8 @@ fn evaluate_cached_document_impl(
                 .map(|(key, family, _)| (key, family))
                 .collect(),
             realizations,
+            coverage_curves,
+            uniform_density_fits,
             scene: (scene_disposition == CacheDisposition::Miss).then_some((scene_key, scene)),
             raster: (raster_disposition == CacheDisposition::Miss).then_some((raster_key, raster)),
         },
@@ -4901,6 +5476,7 @@ fn evaluate_document_output(
     region_sampling_limits: RegionSamplingLimits,
     region_treatment_limits: RegionTreatmentLimits,
     profiled: bool,
+    response_input: toniator_patterns::GeometryResponseInput<'_>,
     is_cancelled: &(dyn Fn() -> bool + Sync),
     progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<
@@ -4935,6 +5511,7 @@ fn evaluate_document_output(
         region_sampling_limits,
         region_treatment_limits,
         profiled,
+        response_input,
         is_cancelled,
         progress,
     )?;
@@ -4948,6 +5525,285 @@ fn evaluate_document_output(
         },
         performance,
     ))
+}
+
+/// Measures one frozen solid-paint mark output without rebuilding its family or reading source tone.
+///
+/// Both current mapped circles and generalized circle/closed-shape marks pass the same transient
+/// post-sampling response. The renderer receives their unmodified canonical output geometry.
+///
+/// # Errors
+/// Returns binding, probe, geometry, raster/vector, cancellation, or unresolved-fit diagnostics.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // Retained diagnostic producer; saved artifacts own ordinary response.
+fn fit_mark_output_curve(
+    document: &toniator_domain::Document,
+    definition: &PatternDefinition,
+    effective: &toniator_domain::EffectiveChannelPatternInstance,
+    source: &SourceField,
+    family: &TypedFamilyOutput,
+    plan: &toniator_patterns::PatternPipelinePlan,
+    capability: &toniator_patterns::OutputCapability,
+    setting: &toniator_domain::EffectivePatternOutputSettings,
+    mapping: toniator_domain::SourceMapping,
+    max_transformed_curve_segment_instances: usize,
+    pool: &rayon::ThreadPool,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<coverage::CoverageFit>, EvaluationError> {
+    let authored = definition
+        .output_layers
+        .iter()
+        .find(|output| output.id == capability.layer_id)
+        .ok_or(EvaluationError::new(
+            "evaluation.output_binding",
+            "mark output is missing",
+        ))?;
+    let mut output_plan = plan.clone();
+    output_plan.ordered_outputs = vec![capability.clone()];
+    output_plan.evaluation_order = vec![capability.layer_id];
+    let produce = |q: f64| -> Result<GeometryOutput, EvaluationError> {
+        let response_input = toniator_patterns::GeometryResponseInput::ConstantProbe(q);
+        match authored.realization {
+            PatternOutputRealization::MarkPrototype { .. } => {
+                let output = toniator_patterns::realize_typed_canonical_mark_output_with_response_cancellable(
+                    document, family, &output_plan, capability, setting, source,
+                    document.canvas(), mapping, false, effective.shape_rotation_degrees,
+                    max_transformed_curve_segment_instances, response_input, is_cancelled,
+                ).map_err(EvaluationError::from_pipeline)?;
+                Ok(GeometryOutput::CanonicalMarks(
+                    output.realization.output.marks,
+                ))
+            }
+            _ => {
+                let output =
+                    toniator_patterns::realize_typed_mapped_output_with_response_cancellable(
+                        family,
+                        &output_plan,
+                        capability,
+                        setting,
+                        source,
+                        document.canvas(),
+                        mapping,
+                        effective.shape_rotation_degrees,
+                        response_input,
+                        is_cancelled,
+                    )
+                    .map_err(EvaluationError::from_pipeline)?;
+                Ok(GeometryOutput::CircularMarks(
+                    output.realization.output.marks,
+                ))
+            }
+        }
+    };
+    coverage::fit_curve(document.canvas(), &produce, pool, is_cancelled)
+}
+
+/// Fits canonical full-population mark footprints without source sampling or artistic scale.
+///
+/// The same circle or authored closed-shape walker produces both histogram probes and final
+/// marks. The requested maximum baseline radius reserves the full 0..=2 artistic scale range.
+///
+/// # Errors
+/// Returns binding, canonical geometry, fit, support, or cancellation diagnostics.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // Retained diagnostic producer; explicit reference calibration owns publication.
+fn fit_uniform_mark_output(
+    document: &toniator_domain::Document,
+    effective: &toniator_domain::EffectiveChannelPatternInstance,
+    source: &SourceField,
+    family: &TypedFamilyOutput,
+    plan: &toniator_patterns::PatternPipelinePlan,
+    capability: &toniator_patterns::OutputCapability,
+    setting: &toniator_domain::EffectivePatternOutputSettings,
+    mapping: toniator_domain::SourceMapping,
+    max_transformed_curve_segment_instances: usize,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<uniform_density::UniformDensityFit, EvaluationError> {
+    let mut output_plan = plan.clone();
+    output_plan.ordered_outputs = vec![capability.clone()];
+    output_plan.evaluation_order = vec![capability.layer_id];
+    let produce = |radius| {
+        let output =
+            toniator_patterns::realize_typed_canonical_mark_output_with_response_cancellable(
+                document,
+                family,
+                &output_plan,
+                capability,
+                setting,
+                source,
+                document.canvas(),
+                mapping,
+                false,
+                effective.shape_rotation_degrees,
+                max_transformed_curve_segment_instances,
+                toniator_patterns::GeometryResponseInput::UniformRadiusProbe(radius),
+                is_cancelled,
+            )
+            .map_err(EvaluationError::from_pipeline)?;
+        Ok(GeometryOutput::CanonicalMarks(
+            output.realization.output.marks,
+        ))
+    };
+    uniform_density::fit(
+        document.canvas(),
+        family.planned_support_radius() / 2.0,
+        &produce,
+        is_cancelled,
+    )
+}
+
+/// Realizes one uniformly sized mark output after stable full-population thinning.
+///
+/// Weighting samples affect only selection; the sampling authority already premultiplies
+/// non-alpha component responses by source alpha once. Positive RGB paints opaquely apart
+/// from channel opacity, while the canonical consumer suppresses exact-zero alpha paint.
+///
+/// # Errors
+/// Returns sampling, inverse, selection, canonical geometry, support, or cancellation diagnostics.
+#[allow(clippy::too_many_arguments)]
+fn realize_uniform_mark_output(
+    document: &toniator_domain::Document,
+    channel: &ModeledChannelState,
+    effective: &toniator_domain::EffectiveChannelPatternInstance,
+    source: &SourceField,
+    family: &TypedFamilyOutput,
+    plan: &toniator_patterns::PatternPipelinePlan,
+    capability: &toniator_patterns::OutputCapability,
+    setting: &toniator_domain::EffectivePatternOutputSettings,
+    fit: &uniform_density::UniformDensityFit,
+    size_scale: f64,
+    max_transformed_curve_segment_instances: usize,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<DocumentOutputRealization, EvaluationError> {
+    fit.validate_for_reuse()?;
+    let sampled = matches!(channel.paint, ChannelPaint::SampledSource);
+    let selected = family
+        .thinned_for_uniform_marks(
+            channel.id.0 ^ capability.layer_id.0,
+            &|site| {
+                let weight = toniator_patterns::completed_artwork_site_weight(
+                    source,
+                    document.canvas(),
+                    site.position,
+                    channel.weighting,
+                )?;
+                fit.probability(weight)
+                    .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
+            },
+            is_cancelled,
+        )
+        .map_err(EvaluationError::from_pipeline)?;
+    let radius = fit.radius * size_scale;
+    if !radius.is_finite() || radius > family.planned_support_radius() {
+        return Err(EvaluationError::new(
+            "density.uniform.support",
+            "calibrated mark and artistic scale exceed the frozen family support",
+        ));
+    }
+    let mut output_plan = plan.clone();
+    output_plan.ordered_outputs = vec![capability.clone()];
+    output_plan.evaluation_order = vec![capability.layer_id];
+    let output = toniator_patterns::realize_typed_canonical_mark_output_with_response_cancellable(
+        document,
+        &selected,
+        &output_plan,
+        capability,
+        setting,
+        source,
+        document.canvas(),
+        channel.mapping,
+        sampled,
+        effective.shape_rotation_degrees,
+        max_transformed_curve_segment_instances,
+        toniator_patterns::GeometryResponseInput::UniformRadius(radius),
+        is_cancelled,
+    )
+    .map_err(EvaluationError::from_pipeline)?;
+    let realization = cache_canonical_mark_realization(output.realization);
+    let usage = mark_site_usage(&selected, &realization)?;
+    Ok(DocumentOutputRealization {
+        output_layer_id: capability.layer_id,
+        capability: capability.clone(),
+        setting: setting.clone(),
+        realization,
+        usage,
+    })
+}
+
+/// Fits one dependent maze, connection, or region response on its single prepared producer.
+///
+/// # Errors
+/// Returns producer realization, numerical consumer, cancellation, or fit diagnostics.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // Retained diagnostic producer; saved artifacts own ordinary response.
+fn fit_prepared_output_curve(
+    prepared: &coverage_output::PreparedCoverageOutput,
+    capability: &toniator_patterns::OutputCapability,
+    setting: &toniator_domain::EffectivePatternOutputSettings,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: toniator_domain::SourceMapping,
+    limits: EvaluationLimits,
+    pool: &rayon::ThreadPool,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<coverage::CoverageFit>, EvaluationError> {
+    let produce = |q| {
+        prepared.probe(
+            capability,
+            setting,
+            source,
+            canvas,
+            mapping,
+            limits,
+            q,
+            is_cancelled,
+        )
+    };
+    coverage::fit_curve(canvas, &produce, pool, is_cancelled)
+}
+
+/// Fits one guide or parametric stroke output on the already-frozen structural family paths.
+///
+/// # Errors
+/// Returns binding, profile, outline, numerical consumer, cancellation, or fit diagnostics.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // Retained diagnostic producer; saved artifacts own ordinary response.
+fn fit_structural_stroke_curve(
+    family: &TypedFamilyOutput,
+    plan: &toniator_patterns::PatternPipelinePlan,
+    capability: &toniator_patterns::OutputCapability,
+    setting: &toniator_domain::EffectivePatternOutputSettings,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: toniator_domain::SourceMapping,
+    limits: EvaluationLimits,
+    pool: &rayon::ThreadPool,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<coverage::CoverageFit>, EvaluationError> {
+    let mut output_plan = plan.clone();
+    output_plan.ordered_outputs = vec![capability.clone()];
+    output_plan.evaluation_order = vec![capability.layer_id];
+    let produce = |q| {
+        let output =
+            toniator_patterns::realize_typed_canonical_stroke_output_with_response_cancellable(
+                family,
+                &output_plan,
+                capability,
+                setting,
+                source,
+                canvas,
+                mapping,
+                limits.max_stroke_profile_samples(),
+                limits.max_stroke_outline_segments(),
+                toniator_patterns::GeometryResponseInput::ConstantProbe(q),
+                is_cancelled,
+            )
+            .map_err(EvaluationError::from_pipeline)?;
+        Ok(GeometryOutput::CanonicalStrokes(
+            output.realization.output.strokes,
+        ))
+    };
+    coverage::fit_curve(canvas, &produce, pool, is_cancelled)
 }
 
 /// Aggregates ordered output fingerprints without rewriting existing one-output identities.
@@ -5235,6 +6091,7 @@ fn realize_document_region_output(
     sampling_limits: RegionSamplingLimits,
     treatment_limits: RegionTreatmentLimits,
     profiled: bool,
+    response_input: toniator_patterns::GeometryResponseInput<'_>,
     is_cancelled: &(dyn Fn() -> bool + Sync),
     progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<
@@ -5244,6 +6101,27 @@ fn realize_document_region_output(
     ),
     EvaluationError,
 > {
+    if !matches!(
+        response_input,
+        toniator_patterns::GeometryResponseInput::Identity
+    ) {
+        return toniator_patterns::realize_region_output_with_response_cancellable(
+            capability,
+            setting,
+            untreated,
+            references,
+            Some(source),
+            canvas,
+            mapping,
+            paint,
+            sampling_limits,
+            treatment_limits,
+            response_input,
+            is_cancelled,
+        )
+        .map(|realization| (realization, None))
+        .map_err(|error| EvaluationError::new(error.path(), error.message()));
+    }
     #[cfg(test)]
     if region_evaluation_evidence_enabled() {
         let (realization, evidence) = realize_region_output_with_evidence_cancellable(
@@ -5329,6 +6207,7 @@ fn evaluate_document_channel(
     region_sampling_limits: RegionSamplingLimits,
     region_treatment_limits: RegionTreatmentLimits,
     profiled: bool,
+    response_input: toniator_patterns::GeometryResponseInput<'_>,
     is_cancelled: &(dyn Fn() -> bool + Sync),
     progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<
@@ -5392,6 +6271,7 @@ fn evaluate_document_channel(
                     region_sampling_limits,
                     region_treatment_limits,
                     profiled,
+                    response_input,
                     is_cancelled,
                     progress,
                 )?;
@@ -5479,6 +6359,7 @@ fn evaluate_document_channel(
                     region_sampling_limits,
                     region_treatment_limits,
                     profiled,
+                    response_input,
                     is_cancelled,
                     progress,
                 )?;
@@ -5586,8 +6467,8 @@ fn evaluate_document_channel(
         drop(members_by_vertex);
         return Ok((
             cache_stroke_realization(
-                toniator_patterns::realize_owned_maze_canonical_strokes_cancellable(
-                    maze,
+                toniator_patterns::realize_maze_canonical_strokes_with_response_cancellable(
+                    &maze,
                     source,
                     document.canvas(),
                     channel.mapping,
@@ -5599,6 +6480,7 @@ fn evaluate_document_channel(
                     style,
                     max_stroke_profile_samples,
                     max_stroke_outline_segments,
+                    response_input,
                     is_cancelled,
                 )
                 .map_err(EvaluationError::from_pipeline)?,
@@ -5628,7 +6510,13 @@ fn evaluate_document_channel(
                 "connection realization requires a connected response",
             ));
         };
-        let adjacency = program.adjacency();
+        let resolved_program = resolve_connection_program_for_feature_size(
+            program,
+            document.canvas(),
+            &effective.resolved_density,
+        )
+        .map_err(EvaluationError::from_pipeline)?;
+        let adjacency = resolved_program.adjacency();
         let base_support = required_connection_base_support(
             document.canvas(),
             effective,
@@ -5649,7 +6537,7 @@ fn evaluate_document_channel(
         let paths = build_connection_paths_cancellable(
             output_capability.layer_id,
             &graph,
-            program,
+            &resolved_program,
             connection_limits,
             is_cancelled,
         )
@@ -5666,8 +6554,8 @@ fn evaluate_document_channel(
         .map_err(EvaluationError::from_pipeline)?;
         return Ok((
             cache_stroke_realization(
-                toniator_patterns::realize_owned_connection_canonical_strokes_cancellable(
-                    paths,
+                toniator_patterns::realize_connection_canonical_strokes_with_response_cancellable(
+                    &paths,
                     source,
                     document.canvas(),
                     channel.mapping,
@@ -5679,6 +6567,7 @@ fn evaluate_document_channel(
                     style,
                     max_stroke_profile_samples,
                     max_stroke_outline_segments,
+                    response_input,
                     is_cancelled,
                 )
                 .map_err(EvaluationError::from_pipeline)?,
@@ -5729,28 +6618,30 @@ fn evaluate_document_channel(
                 "Curve Motif output requires a valid document-owned open path",
             )
         })?;
-        let realization = toniator_patterns::realize_curve_motif_canonical_strokes_cancellable(
-            family.family_fingerprint(),
-            family.site_set(),
-            &motif,
-            structure_id,
-            style,
-            mirror_alternate_rows,
-            alternate_row_phase,
-            source,
-            document.canvas(),
-            channel.mapping,
-            toniator_patterns::StrokeResponse {
-                minimum_thickness: response.minimum_thickness,
-                maximum_thickness: response.maximum_thickness,
-                bias: response.bias,
-            },
-            max_stroke_profile_samples,
-            max_stroke_outline_segments,
-            is_cancelled,
-            progress,
-        )
-        .map_err(EvaluationError::from_pipeline)?;
+        let realization =
+            toniator_patterns::realize_curve_motif_canonical_strokes_with_response_cancellable(
+                family.family_fingerprint(),
+                family.site_set(),
+                &motif,
+                structure_id,
+                style,
+                mirror_alternate_rows,
+                alternate_row_phase,
+                source,
+                document.canvas(),
+                channel.mapping,
+                toniator_patterns::StrokeResponse {
+                    minimum_thickness: response.minimum_thickness,
+                    maximum_thickness: response.maximum_thickness,
+                    bias: response.bias,
+                },
+                max_stroke_profile_samples,
+                max_stroke_outline_segments,
+                response_input,
+                is_cancelled,
+                progress,
+            )
+            .map_err(EvaluationError::from_pipeline)?;
         return Ok((
             cache_stroke_realization(realization),
             SiteUsageSet::empty_non_site(),
@@ -5779,7 +6670,7 @@ fn evaluate_document_channel(
         };
         return Ok((
             cache_stroke_realization(
-                toniator_patterns::realize_typed_canonical_stroke_output_cancellable(
+                toniator_patterns::realize_typed_canonical_stroke_output_with_response_cancellable(
                     family,
                     plan,
                     output_capability,
@@ -5789,6 +6680,7 @@ fn evaluate_document_channel(
                     channel.mapping,
                     max_stroke_profile_samples,
                     max_stroke_outline_segments,
+                    response_input,
                     is_cancelled,
                 )
                 .map_err(EvaluationError::from_pipeline)?
@@ -5804,7 +6696,7 @@ fn evaluate_document_channel(
         PatternOutputRealization::MarkPrototype { .. }
     ) {
         cache_canonical_mark_realization(
-            toniator_patterns::realize_typed_canonical_mark_output_cancellable(
+            toniator_patterns::realize_typed_canonical_mark_output_with_response_cancellable(
                 document,
                 family,
                 plan,
@@ -5816,6 +6708,7 @@ fn evaluate_document_channel(
                 matches!(channel.paint, ChannelPaint::SampledSource),
                 effective.shape_rotation_degrees,
                 max_transformed_curve_segment_instances,
+                response_input,
                 is_cancelled,
             )
             .map_err(EvaluationError::from_pipeline)?
@@ -5824,7 +6717,7 @@ fn evaluate_document_channel(
     } else {
         match channel.paint {
             ChannelPaint::Solid(_) => cache_mapped_realization(
-                toniator_patterns::realize_typed_mapped_output_cancellable(
+                toniator_patterns::realize_typed_mapped_output_with_response_cancellable(
                     family,
                     plan,
                     output_capability,
@@ -5833,6 +6726,7 @@ fn evaluate_document_channel(
                     document.canvas(),
                     channel.mapping,
                     effective.shape_rotation_degrees,
+                    response_input,
                     is_cancelled,
                 )
                 .map_err(EvaluationError::from_pipeline)?
@@ -6226,9 +7120,16 @@ fn required_support_radius_for_output(
     output: &toniator_patterns::OutputCapability,
 ) -> Result<f64, EvaluationError> {
     if let Some((_site_mechanism_id, program, _style)) = output.connection_paths() {
+        let resolved_program = resolve_connection_program_for_feature_size(
+            program,
+            canvas,
+            &effective.resolved_density,
+        )
+        .map_err(EvaluationError::from_pipeline)?;
         return Ok(
             required_connection_base_support(canvas, effective, definition, family)?
-                + f64::from(definition.coverage.guard_steps) * program.adjacency().maximum_distance,
+                + f64::from(definition.coverage.guard_steps)
+                    * resolved_program.adjacency().maximum_distance,
         );
     }
     if output.maze_walls().is_some() || output.guide_paths().is_some() {
@@ -6286,10 +7187,108 @@ fn required_support_radius_for_output(
     required_support_radius_from_fill(
         canvas,
         &effective.resolved_density,
-        MAXIMUM_NORMALIZED_MARK_FILL,
+        if family
+            .random
+            .as_ref()
+            .is_some_and(|random| random.full_population_for_uniform_marks)
+            && output.marks().is_some()
+        {
+            UNIFORM_MARK_SUPPORT_FILL
+        } else {
+            MAXIMUM_NORMALIZED_MARK_FILL
+        },
         definition.coverage.additional_margin,
         family,
     )
+}
+
+#[cfg(test)]
+mod spatial_scatter_support_tests {
+    use super::*;
+
+    /// Proves strict mark spacing reserves the same maximum raw support across Advanced
+    /// fill-range edits, so response changes cannot silently alter structural population.
+    ///
+    /// # Panics
+    /// Panics if a valid strict random document fails or support changes with fill bounds.
+    #[test]
+    fn strict_margin_population_support_is_independent_of_response_bounds() {
+        use toniator_domain::{
+            CanvasSpec, ChannelId, CoveragePolicy, Document, DocumentCommand, PatternDefinition,
+            PatternMechanismId, PatternOutputLayerId, RandomSiteCharacter, SiteDensityModulation,
+            SiteExclusionPolicy, SourceReference, SourceReferenceId,
+        };
+
+        let source = SourceReference::Assigned(SourceReferenceId::new("strict-support").unwrap());
+        let base = Document::new_default_document(
+            CanvasSpec {
+                width: 160.0,
+                height: 120.0,
+            },
+            source,
+        )
+        .unwrap();
+        let definition = PatternDefinition::random_sites(
+            base.pattern_settings().definition_id,
+            "Strict support",
+            PatternMechanismId(1),
+            PatternMechanismId(2),
+            PatternMechanismId(3),
+            PatternMechanismId(4),
+            PatternOutputLayerId(1),
+            RandomSiteCharacter::RawUniform,
+            19,
+            SiteDensityModulation::Uniform,
+            SiteExclusionPolicy::VisibleMarkMargin { margin: 1.0 },
+            16_000_000,
+            16_000_000,
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        let mut bundle = base.pattern_definition_bundles()[0].clone();
+        bundle.definition = definition;
+        let document = Document::with_source_and_topology(
+            base.id(),
+            base.canvas().clone(),
+            base.source().clone(),
+            vec![bundle],
+            base.pattern_settings().clone(),
+            base.channel_model().unwrap(),
+            base.channel_topology().unwrap().clone(),
+        )
+        .unwrap();
+        let mut edited = document.response_settings().clone();
+        edited.marks.minimum_fill = 0.1;
+        edited.marks.maximum_fill = 1.5;
+        let changed = document
+            .apply_command(&DocumentCommand::SetAllResponseSettings {
+                base: document.response_settings().clone(),
+                settings: edited,
+            })
+            .unwrap()
+            .0;
+        let support = |document: &Document| {
+            let effective = document.effective_channel_pattern(ChannelId(1)).unwrap();
+            let definition = &document
+                .pattern_definition_bundles()
+                .iter()
+                .find(|bundle| bundle.definition.id == effective.definition_id)
+                .unwrap()
+                .definition;
+            let plan = toniator_patterns::resolve_pattern_pipeline(definition).unwrap();
+            required_support_radius_for_output(
+                document.canvas(),
+                &effective,
+                definition,
+                &plan.family,
+                &plan.ordered_outputs[0],
+            )
+            .unwrap()
+        };
+        assert_eq!(support(&document), support(&changed));
+    }
 }
 
 /// Resolves the one effective region response paired with an ordered structural output.
@@ -6319,11 +7318,11 @@ fn region_response_for_output(
     }
 }
 
-/// Computes a conservative response-owned positive-region outward envelope without geometry work.
+/// Computes a conservative full-raw positive-region outward envelope without geometry work.
 ///
-/// Both resize algorithms use the same normalized radius multiplier. The producer's nominal
-/// extent is therefore scaled only by `maximum_fill - 1`, never by an inter-region gap or a
-/// complement-space measurement.
+/// Both resize algorithms may be asked for any raw size through an absolute coverage inverse.
+/// The effective response retains desired coverage units; only the raw size-two support ceiling
+/// contributes to the envelope, independent of authored coverage edits.
 ///
 /// # Errors
 ///
@@ -6345,7 +7344,7 @@ fn region_treatment_outward_support(
             "region maximum fill must be finite",
         ));
     }
-    let outward = (response.maximum_fill - 1.0).max(0.0) * nominal_extent;
+    let outward = (2.0 - 1.0) * nominal_extent;
     if !outward.is_finite() {
         return Err(EvaluationError::new(
             "region.treatment.coverage.support",
@@ -6423,7 +7422,86 @@ struct DocumentRealizationCacheKey {
     source_identity: Option<RealizationSourceIdentity>,
     mapping: Option<String>,
     response: DocumentResponseIdentity,
+    uniform_weighting: Option<String>,
     sampled_paint: bool,
+    coverage_contract: &'static str,
+    coverage_application: bool,
+    coverage_curve_fingerprint: Option<String>,
+    uniform_calibration: Option<toniator_domain::SavedCalibration>,
+}
+
+/// Hashes the exact validated inverse knots used by one realization cache entry.
+fn coverage_curve_fingerprint(fit: Option<&coverage::CoverageFit>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"ton018-absolute-coverage-v1");
+    if let Some(fit) = fit {
+        if let Some((minimum, maximum)) = fit.target_range {
+            digest.update(minimum.to_bits().to_le_bytes());
+            digest.update(maximum.to_bits().to_le_bytes());
+        }
+        for knot in fit.curve.knots() {
+            digest.update(knot.response.to_bits().to_le_bytes());
+            digest.update(knot.coverage.to_bits().to_le_bytes());
+        }
+        for (q, backend, resolution, primary, check) in &fit.provenance {
+            digest.update(q.to_bits().to_le_bytes());
+            digest.update([u8::from(*backend == coverage::Backend::Vector)]);
+            digest.update(resolution.to_le_bytes());
+            digest.update(primary.to_bits().to_le_bytes());
+            digest.update(check.to_bits().to_le_bytes());
+        }
+    } else {
+        digest.update(b"not-applicable-fixed-or-empty");
+    }
+    format!("{:x}", digest.finalize())
+}
+
+/// Source-tone-independent identity of one frozen geometry response measurement.
+///
+/// Source pixel dimensions remain because stroke profile cadence consumes the pixel footprint;
+/// family content already retains source identity when weighting changes placement.
+#[derive(Clone, Debug, PartialEq)]
+struct DocumentCoverageCacheKey {
+    geometry: DocumentRealizationCacheKey,
+    source_dimensions: (u32, u32),
+    calibration: toniator_domain::SavedCalibration,
+}
+
+/// Source-free baseline identity after output dependency filtering and canonical shape binding.
+#[derive(Clone, Debug, PartialEq)]
+struct DocumentUniformFitCacheKey {
+    family_content: DocumentFamilyContentKey,
+    family_fingerprint: String,
+    output_layer_id: toniator_domain::PatternOutputLayerId,
+    source_filter: toniator_domain::SiteUseFilter,
+    referenced_usage_fingerprint: Option<String>,
+    shape_content: String,
+    shape_rotation: u64,
+    transformed_segment_limit: usize,
+    contract: &'static str,
+    calibration: toniator_domain::SavedCalibration,
+}
+
+/// Removes ordinary source tone, component, paint, and decoded-pixel identity from a curve key.
+///
+/// The remaining realization contract, filtered family, output geometry, bounds, and numerical
+/// policy identity are exact cache authority for one completed opaque-union curve.
+fn document_coverage_cache_key(
+    realization: &DocumentRealizationCacheKey,
+    source: &SourceField,
+    calibration: &toniator_domain::SavedCalibration,
+) -> DocumentCoverageCacheKey {
+    let mut geometry = realization.clone();
+    geometry.source_identity = None;
+    geometry.mapping = None;
+    geometry.sampled_paint = false;
+    geometry.coverage_application = false;
+    geometry.coverage_curve_fingerprint = None;
+    DocumentCoverageCacheKey {
+        geometry,
+        source_dimensions: (source.identity().width, source.identity().height),
+        calibration: calibration.clone(),
+    }
 }
 
 /// Constructs the independent cache identity for one ordered output realization.
@@ -6484,16 +7562,22 @@ fn document_realization_cache_key(
         }),
         response: match &output_setting.response {
             toniator_domain::PatternGeometryResponse::Marks(response) => {
+                let density = document
+                    .effective_mark_density(channel.id, output_setting.output_layer_id)
+                    .map_err(EvaluationError::from_domain)?;
                 DocumentResponseIdentity::Marks {
                     minimum: response.minimum_fill.to_bits(),
                     maximum: response.maximum_fill.to_bits(),
                     shape_rotation: effective.shape_rotation_degrees.to_bits(),
+                    density_mode: density.mode,
+                    size_scale: density.size_scale.to_bits(),
                 }
             }
             toniator_domain::PatternGeometryResponse::Connected(response) => {
                 DocumentResponseIdentity::Connected {
                     minimum: response.minimum_thickness.to_bits(),
                     maximum: response.maximum_thickness.to_bits(),
+                    bias: response.bias.to_bits(),
                     shape_rotation: effective.shape_rotation_degrees.to_bits(),
                     outline_contract: toniator_patterns::CANONICAL_STROKE_OUTLINE_CONTRACT_ID,
                     profile_limit: limits.max_stroke_profile_samples(),
@@ -6545,6 +7629,16 @@ fn document_realization_cache_key(
             },
         },
         sampled_paint: matches!(channel.paint, ChannelPaint::SampledSource),
+        uniform_weighting: family
+            .family()
+            .random
+            .as_ref()
+            .is_some_and(|random| random.full_population_for_uniform_marks)
+            .then(|| format!("{:?}", channel.weighting)),
+        coverage_contract: "ton018-mixed-coverage-v1",
+        coverage_application: false,
+        coverage_curve_fingerprint: None,
+        uniform_calibration: None,
     })
 }
 
@@ -6654,10 +7748,13 @@ enum DocumentResponseIdentity {
         minimum: u64,
         maximum: u64,
         shape_rotation: u64,
+        density_mode: toniator_domain::MarkDensityMode,
+        size_scale: u64,
     },
     Connected {
         minimum: u64,
         maximum: u64,
+        bias: u64,
         shape_rotation: u64,
         outline_contract: &'static str,
         profile_limit: usize,
@@ -6729,6 +7826,11 @@ struct DocumentDerivedCache {
     decoded_source: Option<(SourceCacheKey, Arc<SourceField>)>,
     families: Vec<(DocumentFamilyCacheKey, Arc<TypedFamilyOutput>)>,
     realizations: Vec<(DocumentRealizationCacheKey, Arc<DocumentOutputRealization>)>,
+    coverage_curves: Vec<(DocumentCoverageCacheKey, Option<Arc<coverage::CoverageFit>>)>,
+    uniform_density_fits: Vec<(
+        DocumentUniformFitCacheKey,
+        Arc<uniform_density::UniformDensityFit>,
+    )>,
     scene: Option<(String, Arc<RenderScene>)>,
     raster: Option<(String, Arc<RasterSurface>)>,
 }
@@ -6738,6 +7840,11 @@ struct DocumentCacheTransaction {
     decoded_source: Option<(SourceCacheKey, Arc<SourceField>)>,
     families: Vec<(DocumentFamilyCacheKey, Arc<TypedFamilyOutput>)>,
     realizations: Vec<(DocumentRealizationCacheKey, Arc<DocumentOutputRealization>)>,
+    coverage_curves: Vec<(DocumentCoverageCacheKey, Option<Arc<coverage::CoverageFit>>)>,
+    uniform_density_fits: Vec<(
+        DocumentUniformFitCacheKey,
+        Arc<uniform_density::UniformDensityFit>,
+    )>,
     scene: Option<(String, Arc<RenderScene>)>,
     raster: Option<(String, Arc<RasterSurface>)>,
 }
@@ -6759,6 +7866,8 @@ impl DocumentDerivedCache {
         }
         self.families = transaction.families;
         self.realizations = transaction.realizations;
+        self.coverage_curves = transaction.coverage_curves;
+        self.uniform_density_fits = transaction.uniform_density_fits;
         if let Some(scene) = transaction.scene {
             self.scene = Some(scene);
         }
@@ -6860,6 +7969,338 @@ pub(crate) mod test_support {
         scheduler.shutdown().unwrap();
     }
 
+    /// Reuses one accepted curve across identical modeled channels and tone edits, then rekeys a
+    /// changed layout without retaining an unbounded history of obsolete curves.
+    ///
+    /// # Panics
+    /// Panics if a current RGB document fails evaluation or accepted curve cache identity drifts.
+    #[test]
+    fn ton018_curve_cache_shares_geometry_and_rekeys_rotation() {
+        use toniator_domain::ModeledMappingFieldEdit;
+        let scheduler = EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
+        let mut session = modeled_document_session();
+        let bytes = valid_document_bytes();
+        scheduler
+            .submit(document_request(&session, Arc::clone(&bytes)))
+            .unwrap();
+        let initial = wait_for_document_completion(&scheduler);
+        assert!(initial.result().is_some(), "{:?}", initial.error());
+        assert!(scheduler.accept_completion(&initial, &session).unwrap());
+        let first = {
+            let state = scheduler.state.lock().unwrap();
+            assert_eq!(state.cache.coverage_curves.len(), 1);
+            Arc::clone(state.cache.coverage_curves[0].1.as_ref().unwrap())
+        };
+        session
+            .apply(&DocumentCommand::SetModeledMappingField {
+                channel_id: CHANNEL_ID,
+                edit: ModeledMappingFieldEdit::Gamma(1.2),
+            })
+            .unwrap();
+        scheduler
+            .submit(document_request(&session, Arc::clone(&bytes)))
+            .unwrap();
+        let tone = wait_for_document_completion(&scheduler);
+        assert!(tone.result().is_some(), "{:?}", tone.error());
+        assert!(scheduler.accept_completion(&tone, &session).unwrap());
+        {
+            let state = scheduler.state.lock().unwrap();
+            assert_eq!(state.cache.coverage_curves.len(), 1);
+            assert!(Arc::ptr_eq(
+                &first,
+                state.cache.coverage_curves[0].1.as_ref().unwrap()
+            ));
+        }
+        let rotate = session
+            .document()
+            .set_channel_pattern_rotation_for_effective(CHANNEL_ID, 19.0)
+            .unwrap();
+        session.apply(&rotate).unwrap();
+        scheduler.submit(document_request(&session, bytes)).unwrap();
+        let rotated = wait_for_document_completion(&scheduler);
+        assert!(rotated.result().is_some(), "{:?}", rotated.error());
+        assert!(scheduler.accept_completion(&rotated, &session).unwrap());
+        {
+            let state = scheduler.state.lock().unwrap();
+            assert_eq!(state.cache.coverage_curves.len(), 2);
+            assert!(
+                state
+                    .cache
+                    .coverage_curves
+                    .iter()
+                    .any(|(_, curve)| !Arc::ptr_eq(&first, curve.as_ref().unwrap()))
+            );
+        }
+        scheduler.shutdown().unwrap();
+    }
+
+    /// Exercises the real 1024-square straight-circle document through the 128-square source
+    /// proxy and 420×240 private-preview consumer across adjacent authored mark response ranges.
+    ///
+    /// # Panics
+    /// Panics if current RGB calibration rejects a supported range or fails to retain an inverse.
+    #[test]
+    fn ton018_extended_mark_range_calibrates_small_preview() {
+        use toniator_domain::{DocumentResponseFieldEdit, MarkDensityMode};
+        coverage::FIT_ENTRY_COUNT.store(0, Ordering::Relaxed);
+        uniform_density::FIT_ENTRY_COUNT.store(0, Ordering::Relaxed);
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let bytes = fs::read(root.join("assets/raster-sample.png")).unwrap();
+        let proxy =
+            toniator_sampling::reduced_preview_png(&bytes, SourceFormatHint::Png, 128).unwrap();
+        assert_eq!((proxy.width, proxy.height), (128, 128));
+        let proxy_bytes = Arc::<[u8]>::from(proxy.png_bytes);
+        let source_id = SourceReferenceId::new("ton018-preview-proxy").unwrap();
+        for (maximum, density) in [(1.0, 100.0), (1.0, 400.0), (1.2, 100.0), (1.5, 400.0), (2.0, 100.0)] {
+            let document = Document::new_default_document(
+                CanvasSpec {
+                    width: 1024.0,
+                    height: 1024.0,
+                },
+                SourceReference::Assigned(source_id.clone()),
+            )
+            .unwrap();
+            let mut history = DocumentHistory::new(DocumentSession::new(document).unwrap());
+            if density != 100.0 {
+                let base = history.document().pattern_settings().clone();
+                let mut settings = base.clone();
+                settings.density.density = density;
+                history.apply(&DocumentCommand::SetDocumentPatternSettings { base, settings }).unwrap();
+            }
+            history
+                .apply(&DocumentCommand::SetAllResponseField {
+                    base: history.document().response_settings().clone(),
+                    edit: DocumentResponseFieldEdit::MarkDensityMode(MarkDensityMode::Variable),
+                })
+                .unwrap();
+            if maximum != 1.0 {
+                history
+                    .apply(&DocumentCommand::SetAllResponseField {
+                        base: history.document().response_settings().clone(),
+                        edit: DocumentResponseFieldEdit::MarkMaximumFill(maximum),
+                    })
+                    .unwrap();
+            }
+            let source = ResolvedSource::new(
+                source_id.clone(),
+                Arc::clone(&proxy_bytes),
+                SourceFormatHint::Png,
+            )
+            .unwrap();
+            let request = EvaluationRequest::with_preview_target(
+                history.session().document_evaluation_snapshot(),
+                source,
+                PreviewRasterTarget::new(420, 240).unwrap(),
+            );
+            let scheduler =
+                EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
+            let start = Instant::now();
+            scheduler.submit(request).unwrap();
+            let completion = loop {
+                if let Some(completion) = scheduler.try_receive_latest().unwrap() {
+                    break completion;
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(120),
+                    "Maximum fill {maximum} timed out"
+                );
+                thread::yield_now();
+            };
+            assert!(
+                completion.result().is_some(),
+                "Maximum fill {maximum}: {:?}",
+                completion.error()
+            );
+            assert_eq!(
+                scheduler.state.lock().unwrap().cache.coverage_curves.len(),
+                0
+            );
+            assert!(
+                scheduler
+                    .accept_completion(&completion, history.session())
+                    .unwrap()
+            );
+            let state = scheduler.state.lock().unwrap();
+            assert_eq!(state.cache.coverage_curves.len(), 1);
+            let knots = state.cache.coverage_curves[0]
+                .1
+                .as_ref()
+                .unwrap()
+                .provenance
+                .len();
+            assert!(knots <= 64, "Maximum fill {maximum} retained {knots} knots");
+            drop(state);
+            scheduler.shutdown().unwrap();
+        }
+        assert_eq!(coverage::FIT_ENTRY_COUNT.load(Ordering::Relaxed), 0);
+        assert_eq!(uniform_density::FIT_ENTRY_COUNT.load(Ordering::Relaxed), 0);
+    }
+
+    /// Proves manual calibration replacement changes cache authority without invoking a transient fit.
+    ///
+    /// # Panics
+    /// Panics if accepted geometry keeps an obsolete inverse or any ordinary render enters a fitter.
+    #[test]
+    fn ton018_saved_artifact_replacement_rekeys_coverage() {
+        coverage::FIT_ENTRY_COUNT.store(0, Ordering::Relaxed);
+        let source_id = SourceReferenceId::new("saved-artifact-replacement").unwrap();
+        let document = Document::new_default_document(
+            CanvasSpec { width: 1024.0, height: 1024.0 },
+            SourceReference::Assigned(source_id),
+        ).unwrap();
+        let mut history = DocumentHistory::new(DocumentSession::new(document).unwrap());
+        let bytes = valid_document_bytes();
+        let scheduler = EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
+        scheduler.submit(document_request_for_source(history.session(), "saved-artifact-replacement", Arc::clone(&bytes))).unwrap();
+        let first = wait_for_document_completion(&scheduler);
+        assert!(first.result().is_some(), "{:?}", first.error());
+        assert!(scheduler.accept_completion(&first, history.session()).unwrap());
+        let original = Arc::clone(scheduler.state.lock().unwrap().cache.coverage_curves[0].1.as_ref().unwrap());
+
+        let prior = history.document().saved_calibration_for(ChannelId(1)).unwrap().unwrap().clone();
+        let mut raw = prior.raw().to_vec();
+        raw[26].coverage = (raw[26].coverage + raw[27].coverage) / 2.0;
+        let replacement = toniator_domain::SavedCalibration::new(prior.binding().clone(), raw, None).unwrap();
+        let base = history.document().clone();
+        let revision = history.revision();
+        history.attach_saved_calibration(&base, revision, ChannelId(1), replacement).unwrap();
+        scheduler.submit(document_request_for_source(history.session(), "saved-artifact-replacement", bytes)).unwrap();
+        let second = wait_for_document_completion(&scheduler);
+        assert!(second.result().is_some(), "{:?}", second.error());
+        assert!(scheduler.accept_completion(&second, history.session()).unwrap());
+        let changed = Arc::clone(scheduler.state.lock().unwrap().cache.coverage_curves[0].1.as_ref().unwrap());
+        assert!(!Arc::ptr_eq(&original, &changed));
+        assert_ne!(original.curve.knots(), changed.curve.knots());
+        assert_eq!(coverage::FIT_ENTRY_COUNT.load(Ordering::Relaxed), 0);
+        scheduler.shutdown().unwrap();
+    }
+
+    /// Proves Uniform replacement changes realized geometry authority before accepted-cache lookup.
+    ///
+    /// # Panics
+    /// Panics if an old Uniform realization survives a changed saved radius or a transient fit runs.
+    #[test]
+    fn ton018_uniform_replacement_rekeys_realization() {
+        use toniator_domain::{CalibrationKnot, MarkDensityMode, PatternStructureRecipe,
+            SiteDensityModulation, UniformCalibration};
+        uniform_density::FIT_ENTRY_COUNT.store(0, Ordering::Relaxed);
+        let source_id = SourceReferenceId::new("saved-uniform-replacement").unwrap();
+        let document = Document::new_default_document(
+            CanvasSpec { width: 1024.0, height: 1024.0 },
+            SourceReference::Assigned(source_id),
+        ).unwrap();
+        let mut history = DocumentHistory::new(DocumentSession::new(document).unwrap());
+        let mut recipe = toniator_patterns::PresetRegistry::bundled()
+            .reconstruct("even-random-circles").unwrap();
+        if let PatternStructureRecipe::RandomSites { density_modulation, .. } = &mut recipe.structure {
+            *density_modulation = SiteDensityModulation::ArtworkWeighted;
+        } else {
+            panic!("even-random-circles must remain a random-site Pattern");
+        }
+        let base_definition = history.document().pattern_definition_for(ChannelId(1)).unwrap().clone();
+        history.apply(&DocumentCommand::ReplaceChannelPatternDefinitionOverrideRecipe {
+            base: history.document().pattern_settings().clone(),
+            channel_id: ChannelId(1),
+            base_definition,
+            recipe,
+        }).unwrap();
+        let base = history.document().response_settings().clone();
+        history.apply(&DocumentCommand::SetAllResponseField {
+            base,
+            edit: toniator_domain::DocumentResponseFieldEdit::MarkDensityMode(MarkDensityMode::Uniform),
+        }).unwrap();
+        let output_id = history.document().effective_channel_pattern(ChannelId(1)).unwrap()
+            .output_settings[0].output_layer_id;
+        assert_eq!(history.document().effective_mark_density(ChannelId(1), output_id).unwrap().mode, MarkDensityMode::Uniform);
+        let binding = toniator_domain::CalibrationBinding::for_channel(history.document(), ChannelId(1)).unwrap();
+        let raw = vec![
+            CalibrationKnot { input: 0.0, coverage: 0.0 },
+            CalibrationKnot { input: 2.0, coverage: 1.0 },
+        ];
+        let uniform = |radius| UniformCalibration::new(radius, vec![
+            CalibrationKnot { input: 0.0, coverage: 0.0 },
+            CalibrationKnot { input: 1.0, coverage: 1.0 },
+        ]).unwrap();
+        let artifact = toniator_domain::SavedCalibration::new(binding.clone(), raw.clone(), Some(uniform(0.3))).unwrap();
+        let base = history.document().clone();
+        history.attach_saved_calibration(&base, history.revision(), ChannelId(1), artifact).unwrap();
+        let scheduler = EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
+        let bytes = valid_document_bytes();
+        scheduler.submit(document_request_for_source(history.session(), "saved-uniform-replacement", Arc::clone(&bytes))).unwrap();
+        let first = wait_for_document_completion(&scheduler);
+        assert!(first.result().is_some(), "{:?}", first.error());
+        assert!(scheduler.accept_completion(&first, history.session()).unwrap());
+        let before = {
+            let state = scheduler.state.lock().unwrap();
+            Arc::clone(&state.cache.realizations.iter()
+                .find(|(key, _)| key.uniform_calibration.is_some())
+                .expect("Uniform mode must carry saved identity").1)
+        };
+        let replacement = toniator_domain::SavedCalibration::new(binding, raw, Some(uniform(0.45))).unwrap();
+        let base = history.document().clone();
+        history.attach_saved_calibration(&base, history.revision(), ChannelId(1), replacement).unwrap();
+        scheduler.submit(document_request_for_source(history.session(), "saved-uniform-replacement", bytes)).unwrap();
+        let second = wait_for_document_completion(&scheduler);
+        assert!(second.result().is_some(), "{:?}", second.error());
+        assert!(scheduler.accept_completion(&second, history.session()).unwrap());
+        let state = scheduler.state.lock().unwrap();
+        let (key, after) = state.cache.realizations.iter()
+            .find(|(key, _)| key.uniform_calibration.is_some()).unwrap();
+        assert!(!Arc::ptr_eq(&before, after), "Uniform realization cache reused an obsolete artifact");
+        assert_eq!(key.uniform_calibration.as_ref().unwrap().uniform().unwrap().radius_per_nominal_spacing(), 0.45);
+        drop(state);
+        scheduler.submit(document_request_for_source(history.session(),
+            "saved-uniform-replacement", flat_document_bytes())).unwrap();
+        let artwork_edit = wait_for_document_completion(&scheduler);
+        assert!(artwork_edit.result().is_some(), "{:?}", artwork_edit.error());
+        assert!(scheduler.accept_completion(&artwork_edit, history.session()).unwrap());
+        assert_eq!(uniform_density::FIT_ENTRY_COUNT.load(Ordering::Relaxed), 0);
+        scheduler.shutdown().unwrap();
+    }
+
+    /// Keeps a stale calibrated candidate outside accepted cache and publishes only its successor.
+    ///
+    /// # Panics
+    /// Panics if a pending curve survives rejection or the current modeled edit fails evaluation.
+    #[test]
+    fn ton018_stale_calibration_transaction_does_not_publish_curve() {
+        use toniator_domain::ModeledMappingFieldEdit;
+        let scheduler = EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
+        let mut session = modeled_document_session();
+        let bytes = valid_document_bytes();
+        scheduler
+            .submit(document_request(&session, Arc::clone(&bytes)))
+            .unwrap();
+        let stale = wait_for_document_completion(&scheduler);
+        assert!(stale.result().is_some(), "{:?}", stale.error());
+        session
+            .apply(&DocumentCommand::SetModeledMappingField {
+                channel_id: CHANNEL_ID,
+                edit: ModeledMappingFieldEdit::Gamma(1.3),
+            })
+            .unwrap();
+        assert!(!scheduler.accept_completion(&stale, &session).unwrap());
+        assert!(
+            scheduler
+                .state
+                .lock()
+                .unwrap()
+                .cache
+                .coverage_curves
+                .is_empty()
+        );
+        scheduler.submit(document_request(&session, bytes)).unwrap();
+        let current = wait_for_document_completion(&scheduler);
+        assert!(current.result().is_some(), "{:?}", current.error());
+        assert!(scheduler.accept_completion(&current, &session).unwrap());
+        assert_eq!(
+            scheduler.state.lock().unwrap().cache.coverage_curves.len(),
+            1
+        );
+        scheduler.shutdown().unwrap();
+    }
+
     /// Converts evaluator-facing across-axis frequencies into current density/aspect authority.
     fn authored_density(canvas: &CanvasSpec, across_x: f64, across_y: f64) -> DensityMetric2D {
         DensityMetric2D::from_resolved(canvas, &ResolvedDensityMetric2D { across_x, across_y })
@@ -6925,6 +8366,9 @@ pub(crate) mod test_support {
     }
 
     /// Builds one current-authority diagnostic request from caller-supplied immutable source bytes.
+    ///
+    /// The Pattern bundle stays structural; document response settings retain the fixture's
+    /// effective 0.2..0.9 mark range through the current history command authority.
     fn request_with_bytes(bytes: Arc<[u8]>) -> ChannelDiagnosticRequest {
         let source_id = SourceReferenceId::new("cancellation-test-source").unwrap();
         let document = Document::with_source(
@@ -6934,7 +8378,7 @@ pub(crate) mod test_support {
                 height: 600.0,
             },
             SourceReference::Assigned(source_id.clone()),
-            vec![bundle_with_sole_response(
+            vec![bundle_from_test_definition(
                 PatternDefinition::supported_straight_grid(
                     PatternDefinitionId(1),
                     "straight-grid",
@@ -6946,10 +8390,6 @@ pub(crate) mod test_support {
                         additional_margin: 4.5,
                     },
                 ),
-                PatternGeometryResponse::Marks(MarkGeometryResponse {
-                    minimum_fill: 0.2,
-                    maximum_fill: 0.9,
-                }),
             )],
             DocumentPatternSettings {
                 definition_id: PatternDefinitionId(1),
@@ -6993,9 +8433,18 @@ pub(crate) mod test_support {
             }],
         )
         .unwrap();
-        let session = DocumentSession::new(document).unwrap();
+        let mut history = DocumentHistory::new(DocumentSession::new(document).unwrap());
+        let base = history.document().response_settings().clone();
+        let mut settings = base.clone();
+        settings.marks = MarkGeometryResponse {
+            minimum_fill: 0.2,
+            maximum_fill: 0.9,
+        };
+        history
+            .apply(&DocumentCommand::SetAllResponseSettings { base, settings })
+            .unwrap();
         ChannelDiagnosticRequest::new(
-            session.evaluation_snapshot(CHANNEL_ID).unwrap(),
+            history.session().evaluation_snapshot(CHANNEL_ID).unwrap(),
             ResolvedSource::new(source_id, bytes, SourceFormatHint::Png).unwrap(),
         )
     }
@@ -13004,12 +14453,16 @@ mod cache_key_tests {
         );
     }
 
-    /// Keeps ordinary connected guide/parametric cache identities independent of connection-only limits.
+    /// Keeps ordinary connected identities independent of connection limits but sensitive to bias.
+    ///
+    /// # Panics
+    /// Panics if a changed response input incorrectly retains the same realization identity.
     #[test]
     fn ordinary_connected_response_key_omits_connection_limits_and_contracts() {
         let ordinary = DocumentResponseIdentity::Connected {
             minimum: 0.25_f64.to_bits(),
             maximum: 1.0_f64.to_bits(),
+            bias: 0.0_f64.to_bits(),
             shape_rotation: 0.0_f64.to_bits(),
             outline_contract: toniator_patterns::CANONICAL_STROKE_OUTLINE_CONTRACT_ID,
             profile_limit: 128,
@@ -13018,6 +14471,20 @@ mod cache_key_tests {
             maze_contracts: Box::new(None),
         };
         assert_eq!(ordinary, ordinary.clone());
+        assert_ne!(
+            ordinary,
+            DocumentResponseIdentity::Connected {
+                minimum: 0.25_f64.to_bits(),
+                maximum: 1.0_f64.to_bits(),
+                bias: 0.25_f64.to_bits(),
+                shape_rotation: 0.0_f64.to_bits(),
+                outline_contract: toniator_patterns::CANONICAL_STROKE_OUTLINE_CONTRACT_ID,
+                profile_limit: 128,
+                outline_segment_limit: 256,
+                connection_contracts: Box::new(None),
+                maze_contracts: Box::new(None),
+            }
+        );
         let connection = ConnectionCacheContracts {
             site_adjacency: SITE_ADJACENCY_CONTRACT_ID,
             path_selection: CONNECTION_PATH_CONTRACT_ID,
@@ -13038,6 +14505,7 @@ mod cache_key_tests {
             DocumentResponseIdentity::Connected {
                 minimum: 0.25_f64.to_bits(),
                 maximum: 1.0_f64.to_bits(),
+                bias: 0.0_f64.to_bits(),
                 shape_rotation: 0.0_f64.to_bits(),
                 outline_contract: toniator_patterns::CANONICAL_STROKE_OUTLINE_CONTRACT_ID,
                 profile_limit: 128,
@@ -13195,5 +14663,652 @@ mod cache_key_tests {
         );
         assert_eq!(shaped_key.resolved_source_weighting, Some(shaped_weighting));
         assert_ne!(red_key, shaped_key);
+    }
+
+    /// Exercises production full-population fitting, alpha thinning, and source-independent reuse.
+    ///
+    /// # Panics
+    /// Fails if a current SourceColorAlpha mark output misses its endpoint, emits alpha-zero
+    /// paint, gives a grossly nonlinear half tone, or rebuilds its source-free family and fit.
+    #[test]
+    fn ton018_uniform_source_alpha_full_half_zero_and_fit_reuse() {
+        use toniator_domain::{
+            ChannelTopology, ChannelTopologyTemplate, CoveragePolicy, DensityMetric2D, Document,
+            MarkDensityMode, MarkGeometryResponse, PatternDefinitionBundle, PatternDefinitionId,
+            PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
+            PatternOutputSettings, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
+            SourceMappingComponent, SourceWeightingFieldEdit,
+        };
+
+        let source_id = SourceReferenceId::new("uniform-alpha-test").unwrap();
+        let canvas = CanvasSpec {
+            width: 100.0,
+            height: 100.0,
+        };
+        let base = Document::new_default_document(
+            canvas.clone(),
+            SourceReference::Assigned(source_id.clone()),
+        )
+        .unwrap();
+        let output_id = PatternOutputLayerId(1);
+        let definition = PatternDefinition::random_sites(
+            PatternDefinitionId(1),
+            "uniform random marks",
+            PatternMechanismId(11),
+            PatternMechanismId(12),
+            PatternMechanismId(13),
+            PatternMechanismId(14),
+            output_id,
+            RandomSiteCharacter::RawUniform,
+            907,
+            SiteDensityModulation::ArtworkWeighted,
+            SiteExclusionPolicy::None,
+            10_000,
+            10_000,
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        let template = ChannelTopologyTemplate {
+            pattern_instance: base.channel_topology().unwrap().channels()[0]
+                .pattern_instance
+                .clone(),
+        };
+        let topology =
+            ChannelTopology::canonical(HalftoneChannelModel::SourceColorAlpha, template).unwrap();
+        let mut settings = base.pattern_settings().clone();
+        settings.density = DensityMetric2D {
+            density: 20.0,
+            aspect: 1.0,
+        };
+        let document = Document::with_source_and_topology(
+            base.id(),
+            canvas.clone(),
+            base.source().clone(),
+            vec![PatternDefinitionBundle {
+                definition,
+                output_settings: vec![PatternOutputSettings {
+                    output_layer_id: output_id,
+                    response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                        minimum_fill: 0.0,
+                        maximum_fill: 1.0,
+                    }),
+                }],
+            }],
+            settings,
+            HalftoneChannelModel::SourceColorAlpha,
+            topology,
+        )
+        .unwrap();
+        assert_eq!(
+            document
+                .effective_mark_density(
+                    document.channel_topology().unwrap().channels()[0].id,
+                    output_id
+                )
+                .unwrap()
+                .mode,
+            MarkDensityMode::Uniform
+        );
+        let session = DocumentSession::new(document).unwrap();
+        let flat = |alpha| {
+            let surface = RasterSurface::new(1, 1, vec![255, 255, 255, alpha]).unwrap();
+            Arc::<[u8]>::from(encode_png(&surface).unwrap())
+        };
+        let request = |alpha| {
+            EvaluationRequest::new(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(source_id.clone(), flat(alpha), SourceFormatHint::Png).unwrap(),
+            )
+        };
+        let full = evaluate_cached_document(
+            request(255),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .unwrap();
+        assert_eq!(full.transaction.uniform_density_fits.len(), 1);
+        let fit = Arc::clone(&full.transaction.uniform_density_fits[0].1);
+        assert!(fit.full_coverage >= 0.999, "full={}", fit.full_coverage);
+        assert!(fit.radius_probes <= 22);
+        let mut cache = DocumentDerivedCache::default();
+        cache.commit(full.transaction);
+        let half = evaluate_cached_document(
+            request(128),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        assert_eq!(half.diagnostics.channels[0].family, CacheDisposition::Hit);
+        assert!(Arc::ptr_eq(
+            &fit,
+            &half.transaction.uniform_density_fits[0].1
+        ));
+        let half_geometry = half.transaction.realizations[0].1.realization.geometry();
+        let half_fraction = toniator_render::rasterize_geometry_occupancy(
+            half_geometry,
+            &canvas,
+            OutputRasterTarget::new(256, 256).unwrap(),
+            toniator_render::RasterizationLimits::default(),
+            &|| false,
+        )
+        .unwrap()
+        .fraction();
+        assert!(
+            (0.38..=0.62).contains(&half_fraction),
+            "half={half_fraction}"
+        );
+        let paints = half.transaction.realizations[0]
+            .1
+            .realization
+            .primitive_paints()
+            .unwrap();
+        assert!(paints.iter().all(|paint| paint.alpha == 1.0));
+        let zero = evaluate_cached_document(
+            request(0),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        assert!(
+            matches!(zero.transaction.realizations[0].1.realization.geometry().as_ref(), GeometryOutput::CanonicalMarks(marks) if marks.is_empty())
+        );
+        let channel_id = session.document().channel_topology().unwrap().channels()[0].id;
+        let (red_document, change) = session
+            .document()
+            .apply_command(&toniator_domain::DocumentCommand::SetSourceWeightingField {
+                channel_id,
+                edit: SourceWeightingFieldEdit::Component(SourceMappingComponent::Red),
+            })
+            .unwrap();
+        assert_eq!(
+            change.invalidation,
+            Some(toniator_domain::InvalidationLevel::Realization)
+        );
+        let red_session = DocumentSession::new(red_document).unwrap();
+        let red_request = EvaluationRequest::new(
+            red_session.document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), flat(128), SourceFormatHint::Png).unwrap(),
+        );
+        let red = evaluate_cached_document(
+            red_request,
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        assert_eq!(red.diagnostics.channels[0].family, CacheDisposition::Hit);
+        assert!(Arc::ptr_eq(
+            &fit,
+            &red.transaction.uniform_density_fits[0].1
+        ));
+        assert_eq!(
+            half.transaction.realizations[0].1.realization.geometry(),
+            red.transaction.realizations[0].1.realization.geometry(),
+            "white Red weighting at fractional alpha must select exactly the Alpha sites"
+        );
+        for scale in [0.0, 2.0] {
+            let scale_command = session
+                .document()
+                .set_channel_mark_size_scale_for_effective(channel_id, output_id, scale)
+                .unwrap();
+            let (scaled_document, change) =
+                session.document().apply_command(&scale_command).unwrap();
+            assert_eq!(
+                change.invalidation,
+                Some(toniator_domain::InvalidationLevel::Realization)
+            );
+            let scaled_session = DocumentSession::new(scaled_document).unwrap();
+            let scaled = evaluate_cached_document(
+                EvaluationRequest::new(
+                    scaled_session.document_evaluation_snapshot(),
+                    ResolvedSource::new(source_id.clone(), flat(255), SourceFormatHint::Png)
+                        .unwrap(),
+                ),
+                EvaluationLimits::default(),
+                &cache,
+                &NeverCancelled,
+            )
+            .unwrap();
+            assert_eq!(scaled.diagnostics.channels[0].family, CacheDisposition::Hit);
+            assert!(Arc::ptr_eq(
+                &fit,
+                &scaled.transaction.uniform_density_fits[0].1
+            ));
+            if scale == 0.0 {
+                assert!(
+                    matches!(scaled.transaction.realizations[0].1.realization.geometry().as_ref(), GeometryOutput::CanonicalMarks(marks) if marks.is_empty())
+                );
+            }
+        }
+    }
+
+    /// Exercises four production site populations and a canonical authored-shape footprint.
+    ///
+    /// # Panics
+    /// Fails if bounded fitting, independent low-tone heldouts, or reserved scale support break.
+    #[test]
+    fn ton018_uniform_generators_shape_and_low_tone_heldouts() {
+        use toniator_domain::{
+            AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureId,
+            AuthoredStructureKind, ChannelTopology, ChannelTopologyTemplate, CoveragePolicy,
+            DensityMetric2D, Document, MarkGeometryResponse, MarkPrototype,
+            PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse,
+            PatternMechanismId, PatternOutputLayerId, PatternOutputRealization,
+            PatternOutputSettings, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
+        };
+
+        let source_id = SourceReferenceId::new("uniform-generator-test").unwrap();
+        let canvas = CanvasSpec {
+            width: 100.0,
+            height: 100.0,
+        };
+        let base = Document::new_default_document(
+            canvas.clone(),
+            SourceReference::Assigned(source_id.clone()),
+        )
+        .unwrap();
+        let output_id = PatternOutputLayerId(1);
+        let cases = [
+            ("raw", RandomSiteCharacter::RawUniform, false),
+            (
+                "even",
+                RandomSiteCharacter::Even {
+                    minimum_center_distance: 2.0,
+                },
+                false,
+            ),
+            (
+                "clustered",
+                RandomSiteCharacter::Clustered {
+                    cluster_density: 12.0,
+                    cluster_spread: 3.0,
+                    cluster_strength: 0.7,
+                },
+                false,
+            ),
+            (
+                "stratified",
+                RandomSiteCharacter::Stratified { jitter: 0.7 },
+                false,
+            ),
+            ("authored-square", RandomSiteCharacter::RawUniform, true),
+        ];
+        for (label, character, authored_shape) in cases {
+            let seeds: &[u32] = if authored_shape {
+                &[907]
+            } else {
+                &[3, 907, 1847]
+            };
+            for &seed in seeds {
+                let mut definition = PatternDefinition::random_sites(
+                    PatternDefinitionId(1),
+                    label,
+                    PatternMechanismId(11),
+                    PatternMechanismId(12),
+                    PatternMechanismId(13),
+                    PatternMechanismId(14),
+                    output_id,
+                    character.clone(),
+                    seed,
+                    SiteDensityModulation::ArtworkWeighted,
+                    SiteExclusionPolicy::None,
+                    10_000,
+                    10_000,
+                    CoveragePolicy {
+                        guard_steps: 1,
+                        additional_margin: 0.0,
+                    },
+                );
+                let structures = if authored_shape {
+                    let PatternOutputRealization::MarkPrototype { prototype, .. } =
+                        &mut definition.output_layers[0].realization
+                    else {
+                        unreachable!()
+                    };
+                    *prototype = MarkPrototype::AuthoredClosedShape {
+                        structure_id: AuthoredStructureId(1),
+                    };
+                    let points = [
+                        AuthoredPoint2 { x: -1.0, y: -1.0 },
+                        AuthoredPoint2 { x: 1.0, y: -1.0 },
+                        AuthoredPoint2 { x: 1.0, y: 1.0 },
+                        AuthoredPoint2 { x: -1.0, y: 1.0 },
+                    ];
+                    vec![
+                        AuthoredStructure::new(
+                            AuthoredStructureId(1),
+                            AuthoredStructureKind::ClosedShape,
+                            (0..points.len())
+                                .map(|index| AuthoredCurveSegment::Line {
+                                    start: points[index],
+                                    end: points[(index + 1) % points.len()],
+                                })
+                                .collect(),
+                        )
+                        .unwrap(),
+                    ]
+                } else {
+                    Vec::new()
+                };
+                let template = ChannelTopologyTemplate {
+                    pattern_instance: base.channel_topology().unwrap().channels()[0]
+                        .pattern_instance
+                        .clone(),
+                };
+                let topology =
+                    ChannelTopology::canonical(HalftoneChannelModel::SourceColorAlpha, template)
+                        .unwrap();
+                let mut settings = base.pattern_settings().clone();
+                settings.density = DensityMetric2D {
+                    density: 20.0,
+                    aspect: 1.0,
+                };
+                let document = Document::with_source_topology_and_authored_structures(
+                    base.id(),
+                    canvas.clone(),
+                    base.source().clone(),
+                    vec![PatternDefinitionBundle {
+                        definition,
+                        output_settings: vec![PatternOutputSettings {
+                            output_layer_id: output_id,
+                            response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                                minimum_fill: 0.0,
+                                maximum_fill: 1.0,
+                            }),
+                        }],
+                    }],
+                    settings,
+                    HalftoneChannelModel::SourceColorAlpha,
+                    topology,
+                    structures,
+                )
+                .unwrap();
+                let session = DocumentSession::new(document).unwrap();
+                let request = |alpha| {
+                    EvaluationRequest::new(
+                        session.document_evaluation_snapshot(),
+                        ResolvedSource::new(
+                            source_id.clone(),
+                            Arc::<[u8]>::from(
+                                encode_png(
+                                    &RasterSurface::new(1, 1, vec![180, 80, 40, alpha]).unwrap(),
+                                )
+                                .unwrap(),
+                            ),
+                            SourceFormatHint::Png,
+                        )
+                        .unwrap(),
+                    )
+                };
+                let evaluated = evaluate_cached_document(
+                    request(255),
+                    EvaluationLimits::default(),
+                    &DocumentDerivedCache::default(),
+                    &NeverCancelled,
+                )
+                .unwrap();
+                let fit = Arc::clone(&evaluated.transaction.uniform_density_fits[0].1);
+                eprintln!(
+                    "{label}/{seed}: radius={:.5} full={:.6} probes={} max_abs={:.6} max_relative={:.4}",
+                    fit.radius,
+                    fit.full_coverage,
+                    fit.radius_probes,
+                    fit.heldout_max_absolute_error,
+                    fit.heldout_max_relative_error
+                );
+                assert!(fit.full_coverage >= 0.999, "{label}");
+                assert!(fit.radius_probes <= 22, "{label}");
+                assert!(fit.heldout_max_absolute_error <= 0.0025, "{label}");
+                assert!(fit.heldout_max_relative_error <= 0.1, "{label}");
+                let mut cache = DocumentDerivedCache::default();
+                cache.commit(evaluated.transaction);
+                let half = evaluate_cached_document(
+                    request(128),
+                    EvaluationLimits::default(),
+                    &cache,
+                    &NeverCancelled,
+                )
+                .unwrap();
+                assert_eq!(half.diagnostics.channels[0].family, CacheDisposition::Hit);
+                assert!(Arc::ptr_eq(
+                    &fit,
+                    &half.transaction.uniform_density_fits[0].1
+                ));
+                let fraction = toniator_render::rasterize_geometry_occupancy(
+                    half.transaction.realizations[0].1.realization.geometry(),
+                    &canvas,
+                    OutputRasterTarget::new(256, 256).unwrap(),
+                    toniator_render::RasterizationLimits::default(),
+                    &|| false,
+                )
+                .unwrap()
+                .fraction();
+                eprintln!("{label}/{seed}: selected half-tone union={fraction:.6}");
+                assert!(
+                    (0.35..=0.65).contains(&fraction),
+                    "{label}/{seed} half={fraction}"
+                );
+                let zero = evaluate_cached_document(
+                    request(0),
+                    EvaluationLimits::default(),
+                    &cache,
+                    &NeverCancelled,
+                )
+                .unwrap();
+                assert!(
+                    matches!(zero.transaction.realizations[0].1.realization.geometry().as_ref(),
+                GeometryOutput::CanonicalMarks(marks) if marks.is_empty()),
+                    "{label}/{seed}"
+                );
+            }
+        }
+    }
+
+    /// Retains source-dependent weighted Lloyd movement even with full-population thinning.
+    ///
+    /// # Panics
+    /// Fails if distinct source mass fields reuse or freeze a weighted-refinement family.
+    #[test]
+    fn ton018_uniform_weighted_lloyd_keeps_source_dependent_family() {
+        use toniator_domain::{
+            ChannelTopology, ChannelTopologyTemplate, CoveragePolicy, DensityMetric2D, Document,
+            MarkGeometryResponse, PatternDefinitionBundle, PatternDefinitionId,
+            PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
+            PatternOutputSettings, RandomSiteCharacter, RandomSiteRefinement,
+            SiteDensityModulation, SiteExclusionPolicy,
+        };
+
+        let source_id = SourceReferenceId::new("uniform-lloyd-test").unwrap();
+        let canvas = CanvasSpec {
+            width: 100.0,
+            height: 100.0,
+        };
+        let base = Document::new_default_document(
+            canvas.clone(),
+            SourceReference::Assigned(source_id.clone()),
+        )
+        .unwrap();
+        let output_id = PatternOutputLayerId(1);
+        let definition = PatternDefinition::random_sites_with_refinement(
+            PatternDefinitionId(1),
+            "weighted Lloyd marks",
+            PatternMechanismId(11),
+            PatternMechanismId(12),
+            PatternMechanismId(13),
+            PatternMechanismId(14),
+            output_id,
+            RandomSiteCharacter::RawUniform,
+            907,
+            SiteDensityModulation::ArtworkWeighted,
+            SiteExclusionPolicy::None,
+            10_000,
+            10_000,
+            RandomSiteRefinement {
+                enabled: true,
+                density_weighted: true,
+                iterations: 1,
+            },
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        let template = ChannelTopologyTemplate {
+            pattern_instance: base.channel_topology().unwrap().channels()[0]
+                .pattern_instance
+                .clone(),
+        };
+        let topology =
+            ChannelTopology::canonical(HalftoneChannelModel::SourceColorAlpha, template).unwrap();
+        let mut settings = base.pattern_settings().clone();
+        settings.density = DensityMetric2D {
+            density: 20.0,
+            aspect: 1.0,
+        };
+        let document = Document::with_source_and_topology(
+            base.id(),
+            canvas,
+            base.source().clone(),
+            vec![PatternDefinitionBundle {
+                definition,
+                output_settings: vec![PatternOutputSettings {
+                    output_layer_id: output_id,
+                    response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                        minimum_fill: 0.0,
+                        maximum_fill: 1.0,
+                    }),
+                }],
+            }],
+            settings,
+            HalftoneChannelModel::SourceColorAlpha,
+            topology,
+        )
+        .unwrap();
+        let session = DocumentSession::new(document).unwrap();
+        let request = |left: u8, right: u8| {
+            EvaluationRequest::new(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(
+                    source_id.clone(),
+                    Arc::<[u8]>::from(
+                        encode_png(
+                            &RasterSurface::new(
+                                2,
+                                1,
+                                vec![255, 255, 255, left, 255, 255, 255, right],
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap(),
+                    ),
+                    SourceFormatHint::Png,
+                )
+                .unwrap(),
+            )
+        };
+        let first = evaluate_cached_document(
+            request(255, 0),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .unwrap();
+        let first_family = Arc::clone(&first.transaction.families[0].1);
+        let mut cache = DocumentDerivedCache::default();
+        cache.commit(first.transaction);
+        let second = evaluate_cached_document(
+            request(0, 255),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        assert_eq!(
+            second.diagnostics.channels[0].family,
+            CacheDisposition::Miss
+        );
+        assert_ne!(
+            first_family.site_set().sites(),
+            second.transaction.families[0].1.site_set().sites()
+        );
+    }
+
+    /// Measures one native density-160 cold fit and a source-weighting edit using accepted caches.
+    ///
+    /// # Panics
+    /// Fails if the opt-in stage fixture is absent or weighting rebuilds its source-free family.
+    #[test]
+    #[ignore = "requires the opt-in native TON-018 project fixture"]
+    fn ton018_uniform_native_cold_and_weighting_edit_timing() {
+        use std::{path::PathBuf, time::Instant};
+        use toniator_domain::{
+            DocumentCommand, InvalidationLevel, SourceMappingComponent, SourceWeightingFieldEdit,
+        };
+
+        let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/validation/ton018-uniform-density-production-20261009/native/raster-rgb-density160-native.toniator");
+        let loaded = toniator_io::load(&project).expect("current native fixture loads");
+        let source = loaded
+            .sources()
+            .entries()
+            .next()
+            .expect("one embedded source");
+        let source_id = source.id().clone();
+        let bytes = source.shared_bytes();
+        let session =
+            DocumentSession::new(loaded.document().clone()).expect("fixture session validates");
+        let request = |snapshot| {
+            EvaluationRequest::new(
+                snapshot,
+                ResolvedSource::new(source_id.clone(), Arc::clone(&bytes), SourceFormatHint::Png)
+                    .unwrap(),
+            )
+        };
+        let started = Instant::now();
+        let cold = evaluate_cached_document(
+            request(session.document_evaluation_snapshot()),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .unwrap();
+        let cold_elapsed = started.elapsed();
+        let cold_fit = Arc::clone(&cold.transaction.uniform_density_fits[0].1);
+        let mut cache = DocumentDerivedCache::default();
+        cache.commit(cold.transaction);
+        let channel_id = session.document().channel_topology().unwrap().channels()[0].id;
+        let (edited_document, result) = session
+            .document()
+            .apply_command(&DocumentCommand::SetSourceWeightingField {
+                channel_id,
+                edit: SourceWeightingFieldEdit::Component(SourceMappingComponent::Green),
+            })
+            .unwrap();
+        assert_eq!(result.invalidation, Some(InvalidationLevel::Realization));
+        let edited_session = DocumentSession::new(edited_document).unwrap();
+        let started = Instant::now();
+        let edited = evaluate_cached_document(
+            request(edited_session.document_evaluation_snapshot()),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        let edit_elapsed = started.elapsed();
+        assert_eq!(edited.diagnostics.channels[0].family, CacheDisposition::Hit);
+        assert!(Arc::ptr_eq(
+            &cold_fit,
+            &edited.transaction.uniform_density_fits[0].1
+        ));
+        eprintln!(
+            "native raster RGB density160 cold={:.3}s weighting_edit={:.3}s family=Hit fit=Hit",
+            cold_elapsed.as_secs_f64(),
+            edit_elapsed.as_secs_f64()
+        );
     }
 }

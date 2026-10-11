@@ -132,7 +132,10 @@ enum Destination {
     /// Delivers a completion to the main workspace preview route.
     Main,
     /// Delivers a completion to one captured Pattern Editor epoch.
-    Draft { epoch: u64 },
+    Draft {
+        epoch: u64,
+        structural_preview: bool,
+    },
 }
 
 /// Owns one worker and one replaceable pending request; native decoder iterators never cross threads.
@@ -159,11 +162,39 @@ impl Worker {
     ///
     /// # Errors
     /// Returns the operating-system thread-spawn diagnostic without creating a live worker.
+    #[cfg(test)]
     pub(crate) fn new_for_pattern_editor(
         sender: async_channel::Sender<crate::AppEvent>,
         epoch: u64,
     ) -> Result<Self, String> {
-        Self::new_with_destination(sender, Destination::Draft { epoch })
+        Self::new_with_destination(
+            sender,
+            Destination::Draft {
+                epoch,
+                structural_preview: false,
+            },
+        )
+    }
+
+    /// Starts a Pattern Editor worker for a disposable structural preview projection.
+    ///
+    /// Workspace editors retain actual artwork and response intent while bypassing fit for their
+    /// preview. Wizard editors use this purpose after projecting their child into a neutral response
+    /// document.
+    ///
+    /// # Errors
+    /// Returns the operating-system thread-spawn diagnostic without creating a live worker.
+    pub(crate) fn new_for_structural_pattern_editor(
+        sender: async_channel::Sender<crate::AppEvent>,
+        epoch: u64,
+    ) -> Result<Self, String> {
+        Self::new_with_destination(
+            sender,
+            Destination::Draft {
+                epoch,
+                structural_preview: true,
+            },
+        )
     }
 
     /// Starts one source worker for an explicit completion destination.
@@ -236,6 +267,17 @@ impl Worker {
                         )
                         .map_err(|error| error.to_string())?
                         .for_preview(job.target);
+                        let request = match destination {
+                            Destination::Draft {
+                                structural_preview: true,
+                                ..
+                            } => request.for_structural_preview(),
+                            Destination::Main
+                            | Destination::Draft {
+                                structural_preview: false,
+                                ..
+                            } => request,
+                        };
                         Ok(PreparedFrame { request, source })
                     })();
                     if !cancelled() {
@@ -245,7 +287,7 @@ impl Worker {
                         };
                         let event = match destination {
                             Destination::Main => crate::AppEvent::MediaPreview(completion),
-                            Destination::Draft { epoch } => {
+                            Destination::Draft { epoch, .. } => {
                                 crate::AppEvent::DraftMediaPreview { epoch, completion }
                             }
                         };

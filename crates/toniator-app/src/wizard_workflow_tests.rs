@@ -606,3 +606,163 @@ fn gtk_current_pattern_edit_switch_review_apply() {
     let window = state.borrow().window.clone();
     window.close();
 }
+
+/// Keeps Apply calibration feedback intact across late preview completions and a failed fit.
+///
+/// A real preview completion arrives after an injected private Draft Apply failure. The
+/// worker-result handler restores the exact error without publishing the captured candidate.
+///
+/// # Panics
+/// Panics if preview completion replaces Apply feedback, pending controls stay locked, or failure publishes.
+#[test]
+#[ignore = "requires private GTK Wayland session; run scripts/test-pattern-wizard --gtk"]
+fn gtk_draft_calibration_status_survives_late_preview_and_failure() {
+    register_resources();
+    glib::set_application_name("Toniator");
+    gtk::init().unwrap();
+    let app = gtk::Application::builder()
+        .application_id("io.github.ricperry.Toniator.DraftCalibrationStatus")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    app.register(None::<&gio::Cancellable>).unwrap();
+    let state = build_window(&app);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/vector-sample.svg");
+    let workspace = load_workspace(&path).unwrap();
+    let base_document = workspace.document().clone();
+    let base_revision = workspace.history.revision();
+    let can_undo = workspace.history.can_undo();
+    state.borrow_mut().workspace = Some(workspace);
+    state.borrow().window.present();
+    open_pattern_wizard(&state, gtk::Button::with_label("Change…"));
+    wait_until("wizard preview source", 90, || {
+        state
+            .borrow()
+            .pattern_wizard
+            .as_ref()
+            .is_some_and(|surface| {
+                matches!(surface.preview_source, WizardPreviewSource::Ready { .. })
+            })
+    });
+
+    let candidate_id = "clustered-dispersion-random-links";
+    let epoch = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .expect("Pattern Wizard opens")
+        .epoch;
+    select_wizard_preset_candidate(&state, epoch, Some(candidate_id.to_owned()));
+    let (candidate_draft, workspace_generation) = {
+        let app_state = state.borrow();
+        let surface = app_state.pattern_wizard.as_ref().unwrap();
+        assert!(surface.gallery_panel.is_visible());
+        assert_eq!(surface.candidate.as_deref(), Some(candidate_id));
+        let workspace = app_state.workspace.as_ref().unwrap();
+        let draft = build_wizard_gallery_candidate_draft(
+            &workspace.history,
+            &app_state.catalog,
+            surface.target,
+            candidate_id,
+            &surface.initial_document,
+        )
+        .unwrap();
+        (draft, app_state.workspace_generation)
+    };
+    let candidate_document = candidate_draft.document().clone();
+    let candidate_revision = candidate_draft.revision();
+    {
+        let mut app_state = state.borrow_mut();
+        let surface = app_state.pattern_wizard.as_mut().unwrap();
+        surface.draft = Rc::new(RefCell::new(candidate_draft));
+        surface.gallery_panel.set_visible(false);
+    }
+    refresh_wizard_route(&state, epoch).unwrap();
+    show_wizard_review_page(&state, epoch);
+    wizard_validation::request(&state, epoch);
+    wait_until("draft construction check", 90, || {
+        state
+            .borrow()
+            .pattern_wizard
+            .as_ref()
+            .is_some_and(|surface| {
+                let draft = surface.draft.borrow();
+                surface
+                    .validation
+                    .ready(draft.document(), draft.revision().0)
+            })
+    });
+    let id = calibration_preparation::TaskId(u64::MAX);
+    let error = "fixture fit failure: calibration worker rejected the candidate";
+    submit_wizard_preview(&state, epoch);
+    let preview_ticket = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .unwrap()
+        .preview_submission
+        .expect("pending-state preview is submitted");
+    {
+        let mut app_state = state.borrow_mut();
+        let surface = app_state.pattern_wizard.as_mut().unwrap();
+        let index = surface
+            .route
+            .iter()
+            .position(|page| *page == WizardRoutePage::Review)
+            .unwrap();
+        surface.route_index = index;
+        surface.calibration_task = Some(WizardCalibrationTask {
+            id,
+            epoch,
+            workspace_generation,
+            base_document: base_document.clone(),
+            base_revision,
+            candidate_document,
+            candidate_revision,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            publication: WizardCalibrationPublication::DraftApply,
+        });
+        set_wizard_calibration_pending(surface, true);
+        assert_eq!(surface.status.text(), "Measuring Pattern calibration…");
+        assert!(!surface.apply.is_sensitive());
+        assert!(surface.cancel.is_sensitive());
+    }
+    handle_wizard_calibration(&state, id, Err(error.to_owned()));
+
+    {
+        let app_state = state.borrow();
+        let surface = app_state.pattern_wizard.as_ref().unwrap();
+        assert!(surface.calibration_task.is_none());
+        assert!(surface.page_panel.is_sensitive());
+        assert!(surface.cancel.is_sensitive());
+        assert!(surface.apply.is_sensitive());
+        assert_eq!(surface.status.text(), error);
+        let workspace = app_state.workspace.as_ref().unwrap();
+        assert_eq!(workspace.document(), &base_document);
+        assert_eq!(workspace.history.revision(), base_revision);
+        assert_eq!(workspace.history.can_undo(), can_undo);
+    }
+
+    wait_until("late preview after failed calibration", 90, || {
+        state
+            .borrow()
+            .pattern_wizard
+            .as_ref()
+            .is_some_and(|surface| {
+                surface.preview_submission != Some(preview_ticket)
+                    && surface.preview_status.text() == "Pattern preview updated."
+            })
+    });
+    assert_eq!(
+        state
+            .borrow()
+            .pattern_wizard
+            .as_ref()
+            .unwrap()
+            .status
+            .text(),
+        error
+    );
+
+    let window = state.borrow().window.clone();
+    window.close();
+}

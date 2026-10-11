@@ -366,6 +366,7 @@ fn connection_preset(
     program: ConnectionProgram,
 ) -> PresetRecord {
     PresetRecord {
+        saved_calibration: None,
         metadata: preset_metadata(id),
         recipe: PatternDefinitionRecipe::connected(PatternStructureRecipe::ConnectionPaths {
             definition: Box::new(definition.structure),
@@ -378,6 +379,7 @@ fn connection_preset(
 /// Wraps one legal two- or three-guide intersection recipe with typed conventional maze intent.
 fn maze_preset(id: &str, definition: PatternDefinitionRecipe, seed: u32) -> PresetRecord {
     PresetRecord {
+        saved_calibration: None,
         metadata: preset_metadata(id),
         recipe: PatternDefinitionRecipe::connected(PatternStructureRecipe::MazeWalls {
             definition: Box::new(definition.structure),
@@ -584,6 +586,7 @@ fn preset_v3_round_trips_connection_programs_and_eligible_families() {
 fn preset_v3_straight_grid_serialization_is_deterministic() {
     let temporary = TemporaryDirectory::new("preset-witness");
     let preset = PresetRecord {
+        saved_calibration: None,
         metadata: PresetMetadata {
             id: "stable-grid".into(),
             name: "Stable Grid".into(),

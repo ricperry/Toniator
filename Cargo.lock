@@ -264,9 +264,9 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "cfg_aliases"
-version = "0.2.2"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
+checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "clap"
@@ -1007,6 +1007,48 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "i_float"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ecaff1ce29bcacd72cdf581ba6fce636ef4c4e0b2da7e7846dd0137d98141e2"
+dependencies = [
+ "libm",
+]
+
+[[package]]
+name = "i_key_sort"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c6c58d0c60705e66264ce0f788a69a2f21472aeb8188559e7c8c619dbdc10fa"
+
+[[package]]
+name = "i_overlay"
+version = "9.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a518dce2d7cf7e3758159747e7175c8b86ccdcd8d333dfcb7dbeb3eac2e324fc"
+dependencies = [
+ "i_float",
+ "i_key_sort",
+ "i_shape",
+ "i_tree",
+]
+
+[[package]]
+name = "i_shape"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa1878f91ef7921feaf1b2346253ebc5e661878b22d5715195c1d5dcf0f20ae5"
+dependencies = [
+ "i_float",
+]
+
+[[package]]
+name = "i_tree"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e9d4a992a9fe83130f41ceacceac3bb116a4355dfc9c8d6ecea4f1e4b4c6caf"
 
 [[package]]
 name = "image"
@@ -1875,7 +1917,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "toniator-app"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-channel",
  "gio",
@@ -1893,7 +1935,7 @@ dependencies = [
 
 [[package]]
 name = "toniator-cli"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "clap",
  "ctrlc",
@@ -1909,14 +1951,14 @@ dependencies = [
 
 [[package]]
 name = "toniator-domain"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "toniator-engine"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "image",
  "rayon",
@@ -1927,11 +1969,12 @@ dependencies = [
  "toniator-patterns",
  "toniator-render",
  "toniator-sampling",
+ "zip",
 ]
 
 [[package]]
 name = "toniator-geometry"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "rayon",
  "serde",
@@ -1941,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "toniator-io"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "libc",
  "rustix",
@@ -1950,13 +1993,14 @@ dependencies = [
  "serde_json",
  "sha2",
  "toniator-domain",
+ "toniator-patterns",
  "toniator-windows-fs",
  "zip",
 ]
 
 [[package]]
 name = "toniator-patterns"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "image",
  "rayon",
@@ -1970,9 +2014,11 @@ dependencies = [
 
 [[package]]
 name = "toniator-render"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
+ "i_overlay",
  "image",
+ "kurbo",
  "png",
  "rayon",
  "toniator-domain",
@@ -1981,7 +2027,7 @@ dependencies = [
 
 [[package]]
 name = "toniator-sampling"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "image",
  "rayon",
@@ -1996,7 +2042,7 @@ dependencies = [
 
 [[package]]
 name = "toniator-windows-fs"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "getrandom",
  "windows-sys",
