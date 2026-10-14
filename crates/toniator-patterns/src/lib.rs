@@ -14727,6 +14727,7 @@ const fn source_format_identity_code(format: toniator_sampling::SourceFormat) ->
         toniator_sampling::SourceFormat::OpenExr => 7,
         toniator_sampling::SourceFormat::Avif => 8,
         toniator_sampling::SourceFormat::RawRgba => 9,
+        toniator_sampling::SourceFormat::JpegXl => 10,
     }
 }
 

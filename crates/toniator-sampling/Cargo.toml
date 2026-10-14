@@ -1,12 +1,13 @@
 [package]
 name = "toniator-sampling"
-version = "0.4.2"
+version = "0.4.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
 image.workspace = true
+jxl-oxide = { version = "=0.12.6", features = ["moxcms"] }
 rayon.workspace = true
 resvg.workspace = true
 serde.workspace = true

@@ -50,6 +50,7 @@ pub enum SourceFormat {
     Tiff,
     OpenExr,
     Avif,
+    JpegXl,
     #[serde(rename = "raw-rgba")]
     RawRgba,
 }
@@ -65,6 +66,7 @@ pub enum SourceFormatHint {
     Tiff,
     OpenExr,
     Avif,
+    JpegXl,
     Unsupported,
 }
 
@@ -1415,6 +1417,9 @@ fn translate_polygon_moments(moments: PolygonMoments, origin: Point2) -> Polygon
 }
 
 /// Decodes a source only from supplied bytes and an explicit supported-format hint.
+///
+/// # Errors
+/// Rejects empty, malformed, oversized, unsupported, or animated still-only input.
 pub fn decode_source(bytes: &[u8], hint: SourceFormatHint) -> Result<SourceField, SamplingError> {
     if bytes.is_empty() {
         return Err(SamplingError::new(
@@ -1431,6 +1436,7 @@ pub fn decode_source(bytes: &[u8], hint: SourceFormatHint) -> Result<SourceField
         SourceFormatHint::Tiff => decode_raster(bytes, ImageFormat::Tiff, SourceFormat::Tiff),
         SourceFormatHint::OpenExr => decode_openexr(bytes),
         SourceFormatHint::Avif => decode_avif(bytes),
+        SourceFormatHint::JpegXl => media::jpegxl::decode_still(bytes),
         SourceFormatHint::Unsupported => Err(SamplingError::new(
             "source.format",
             "unsupported source format",

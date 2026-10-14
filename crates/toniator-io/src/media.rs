@@ -72,6 +72,7 @@ impl SourceMediaManifest {
                         | EmbeddedSourceFormat::Png
                         | EmbeddedSourceFormat::Webp
                         | EmbeddedSourceFormat::Avif
+                        | EmbeddedSourceFormat::JpegXl
                 ),
                 Self::Video { .. } => format == EmbeddedSourceFormat::Video,
             };

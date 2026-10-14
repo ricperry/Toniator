@@ -824,6 +824,7 @@ fn source_format_name(value: toniator_engine::SourceFormat) -> &'static str {
         toniator_engine::SourceFormat::Tiff => "tiff",
         toniator_engine::SourceFormat::OpenExr => "openexr",
         toniator_engine::SourceFormat::Avif => "avif",
+        toniator_engine::SourceFormat::JpegXl => "jpegxl",
         toniator_engine::SourceFormat::RawRgba => "raw_rgba",
     }
 }

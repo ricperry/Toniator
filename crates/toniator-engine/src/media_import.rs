@@ -199,6 +199,7 @@ fn import_format(path: &std::path::Path) -> Result<EmbeddedSourceFormat, SourceE
             Some("tif" | "tiff") => EmbeddedSourceFormat::Tiff,
             Some("exr") => EmbeddedSourceFormat::OpenExr,
             Some("avif" | "avifs") => EmbeddedSourceFormat::Avif,
+            Some("jxl") => EmbeddedSourceFormat::JpegXl,
             Some("gif") => EmbeddedSourceFormat::Gif,
             Some(
                 "mp4" | "m4v" | "mov" | "mkv" | "webm" | "avi" | "ogv" | "mpeg" | "mpg" | "ts",

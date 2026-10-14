@@ -13,8 +13,8 @@ Built with Rust and GTK4, Toniator includes a visual Pattern Wizard, a personal
 Pattern library, and a headless command-line renderer. It is free software under
 the [GPL-3.0-only license](LICENSE).
 
-**Current prerelease: 0.4.2.**
-[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.4.2) ·
+**Current prerelease: 0.4.3.**
+[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.4.3) ·
 [Windows development build (0.3.2)](https://github.com/ricperry/Toniator/releases/tag/v0.3.2-windows-dev.20260927) ·
 [native Windows build instructions](docs/windows-build.md) ·
 [known issues](ISSUES.md).
@@ -36,7 +36,7 @@ See [example settings and reproduction commands](docs/examples/README.md).
 ## Download and run
 
 Download **one** of the x86_64 Linux packages from the
-[0.4.2 release](https://github.com/ricperry/Toniator/releases/tag/v0.4.2).
+[0.4.3 release](https://github.com/ricperry/Toniator/releases/tag/v0.4.3).
 Both include the graphical app and CLI, with application ID
 `io.github.ricperry.Toniator`.
 
@@ -52,8 +52,8 @@ until you have recovered any settings or personal Patterns you need.
 In the folder containing your download:
 
 ```bash
-chmod +x Toniator-0.4.2-x86_64.AppImage
-./Toniator-0.4.2-x86_64.AppImage
+chmod +x Toniator-0.4.3-x86_64.AppImage
+./Toniator-0.4.3-x86_64.AppImage
 ```
 
 The AppImage's recorded minimum glibc version is in the attached
@@ -62,7 +62,7 @@ broad distribution compatibility is not established. If FUSE mounting is
 unavailable, run it with:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.2-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.3-x86_64.AppImage
 ```
 
 ### Flatpak
@@ -70,7 +70,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.2-x86_64.AppImage
 With Flatpak installed, run:
 
 ```bash
-flatpak install --user ./Toniator-0.4.2-x86_64.flatpak
+flatpak install --user ./Toniator-0.4.3-x86_64.flatpak
 flatpak run io.github.ricperry.Toniator
 ```
 
@@ -87,7 +87,7 @@ Download `SHA256SUMS` alongside the packages to verify their integrity with
 
 The separate [Windows development release](https://github.com/ricperry/Toniator/releases/tag/v0.3.2-windows-dev.20260927)
 contains unsigned portable GUI and CLI binaries built as version 0.3.2. It is
-not a Windows build of this 0.4.2 prerelease; no 0.4.2 Windows package is
+not a Windows build of this 0.4.3 prerelease; no 0.4.3 Windows package is
 provided. To build the current source natively with MSVC and without WSL, follow
 the [Windows build instructions](docs/windows-build.md). The portable package
 has no installer or signing, and video tools require the optional
@@ -193,7 +193,12 @@ Undo and Redo operate on document edits. **Close** returns to startup; **Exit**
 quits. Both prompt when a document has unsaved changes. The app follows the
 system light/dark preference where supported.
 
-Supported still-image inputs: PNG, SVG, JPEG, WebP, BMP, TIFF, OpenEXR, and AVIF.
+Supported still-image inputs: PNG, SVG, JPEG, WebP, BMP, TIFF, OpenEXR, AVIF,
+and JPEG XL (`.jxl`). JPEG XL decoding is native Rust and retains the original
+encoded source in saved projects. ICC conversion, grayscale, 16-bit inputs,
+orientation, and straight alpha normalize to Toniator's existing straight-sRGB8
+source representation; this does not preserve HDR or high-bit-depth output.
+Primary associated/premultiplied alpha is rejected with a straight-alpha diagnostic.
 PNG exports offer background, antialiasing, and **1x, 2x, 4x, 8x, or Custom**
 output sizes based on the document canvas, independent of preview zoom. SVG
 exports keep a transparent background. RGB PNG defaults to black, CMYK to
@@ -208,6 +213,9 @@ preserves an existing destination file.
 ### Animate artwork
 
 Toniator supports a Start/End animation workflow and silent video exports.
+JPEG XL animations retain frame timing and blended frames for one finite source
+pass; embedded loop counts do not repeat playback. Image sequences accept JPEG XL
+stills and reject animated entries.
 
 1. Start a project with a video or animated image, or use **New → Import image
    sequence…** to review an ordered image list and its frame rate. Still images
@@ -232,8 +240,9 @@ Save the `.toniator` project to retain its source media and animation settings.
 Project Preset loading keeps the current artwork and timing. Audio is retained
 inside the original source but exports are silent. Variable-rate sources are
 sampled at the displayed project rate; frames may repeat or be skipped.
-Development builds need FFmpeg and ffprobe on PATH for moving media and video
-export. The AppImage and Flatpak bundle their own software tools;
+Development builds need FFmpeg and ffprobe on PATH for video input, GIF and
+animated AVIF decoding, and video export; native JPEG XL decoding does not need those tools. The AppImage and
+Flatpak bundle their own software tools;
 see [the packaging guide](packaging/README.md).
 
 ## Build from source
@@ -286,7 +295,7 @@ Use an `.svg` output filename for vector export. Render a saved project using
 its stored settings with `toniator render -i artwork.toniator -o artwork.svg`.
 Run `toniator --help` or `toniator render --help` for the supported commands.
 
-In an AppImage, prepend `./Toniator-0.4.2-x86_64.AppImage --cli` in place of
+In an AppImage, prepend `./Toniator-0.4.3-x86_64.AppImage --cli` in place of
 `toniator`. The Flatpak CLI is available through
 `flatpak run --command=toniator io.github.ricperry.Toniator`; direct CLI file paths must be
 accessible inside its sandbox.
@@ -382,7 +391,9 @@ container **2**, Document Preset format **3** with configuration schema **16**,
 and standalone Pattern format **8**. Projects and Document Presets persist saved
 Pattern calibration. Supported older Document Presets have a deterministic
 conversion path that preserves the original bytes; ordinary projects remain
-current-only, and superseded project schemas are rejected.
+current-only, and superseded project schemas are rejected. These format versions
+are unchanged in 0.4.3, but projects containing JPEG XL sources require 0.4.3 or
+later and cannot be opened by older binaries.
 
 The published 0.4.0 source includes a headless, advisory garment preflight. For
 example:
@@ -436,8 +447,8 @@ exhaustive GNOME/Mutter or native file-portal acceptance.
 - [Pattern Wizard regression checks](docs/PATTERN_WIZARD_TESTING.md)
 - [Example artwork and reproduction commands](docs/examples/README.md)
 - [Package installation and build guide](packaging/README.md)
-- [Release notes](docs/releases/v0.4.2.md)
-- [Previous release notes](docs/releases/v0.3.3.md)
+- [Release notes](docs/releases/v0.4.3.md)
+- [Previous release notes](docs/releases/v0.4.2.md)
 - [Architecture and design specifications](Project%20Specification/ArchitectureSchema.md)
 
 The [Addendum](Project%20Specification/Addendum.md) takes precedence over other

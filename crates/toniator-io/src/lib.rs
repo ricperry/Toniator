@@ -246,6 +246,7 @@ pub enum EmbeddedSourceFormat {
     Tiff,
     OpenExr,
     Avif,
+    JpegXl,
     Gif,
     Video,
 }
@@ -262,6 +263,7 @@ impl EmbeddedSourceFormat {
             Self::Tiff => "tiff",
             Self::OpenExr => "exr",
             Self::Avif => "avif",
+            Self::JpegXl => "jxl",
             Self::Gif => "gif",
             Self::Video => "video",
         }
@@ -278,6 +280,7 @@ impl EmbeddedSourceFormat {
             "tif" | "tiff" => Some(Self::Tiff),
             "exr" => Some(Self::OpenExr),
             "avif" => Some(Self::Avif),
+            "jxl" => Some(Self::JpegXl),
             "gif" => Some(Self::Gif),
             "mp4" | "m4v" | "mov" | "mkv" | "webm" | "avi" | "ogv" | "mpeg" | "mpg" | "ts"
             | "m2ts" | "video" => Some(Self::Video),
@@ -3588,6 +3591,7 @@ enum EmbeddedSourceFormatDto {
     Tiff,
     OpenExr,
     Avif,
+    JpegXl,
     Gif,
     Video,
 }
@@ -3603,6 +3607,7 @@ impl From<EmbeddedSourceFormat> for EmbeddedSourceFormatDto {
             EmbeddedSourceFormat::Tiff => Self::Tiff,
             EmbeddedSourceFormat::OpenExr => Self::OpenExr,
             EmbeddedSourceFormat::Avif => Self::Avif,
+            EmbeddedSourceFormat::JpegXl => Self::JpegXl,
             EmbeddedSourceFormat::Gif => Self::Gif,
             EmbeddedSourceFormat::Video => Self::Video,
         }
@@ -3620,6 +3625,7 @@ impl From<EmbeddedSourceFormatDto> for EmbeddedSourceFormat {
             EmbeddedSourceFormatDto::Tiff => Self::Tiff,
             EmbeddedSourceFormatDto::OpenExr => Self::OpenExr,
             EmbeddedSourceFormatDto::Avif => Self::Avif,
+            EmbeddedSourceFormatDto::JpegXl => Self::JpegXl,
             EmbeddedSourceFormatDto::Gif => Self::Gif,
             EmbeddedSourceFormatDto::Video => Self::Video,
         }

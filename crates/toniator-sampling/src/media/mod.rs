@@ -3,6 +3,7 @@
 mod animated_image;
 mod frame_source;
 mod image_sequence;
+pub(crate) mod jpegxl;
 mod still;
 mod video;
 

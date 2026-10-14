@@ -1170,9 +1170,10 @@ fn source_hint(path: &std::path::Path) -> Result<SourceFormatHint, CliError> {
         Some("tif" | "tiff") => Ok(SourceFormatHint::Tiff),
         Some("exr") => Ok(SourceFormatHint::OpenExr),
         Some("avif") => Ok(SourceFormatHint::Avif),
+        Some("jxl") => Ok(SourceFormatHint::JpegXl),
         _ => Err(CliError::new(
             "source.format",
-            "source extension must be .png, .svg, .jpg/.jpeg, .webp, .bmp, .tif/.tiff, .exr, or .avif",
+            "source extension must be .png, .svg, .jpg/.jpeg, .webp, .bmp, .tif/.tiff, .exr, .avif, or .jxl",
         )),
     }
 }

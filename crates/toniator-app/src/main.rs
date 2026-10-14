@@ -137,7 +137,7 @@ const DEFAULT_CANVAS: CanvasSpec = CanvasSpec {
     width: 1024.0,
     height: 1024.0,
 };
-const OPEN_FILTER_LABELS: [&str; 10] = [
+const OPEN_FILTER_LABELS: [&str; 11] = [
     "All supported files",
     "Toniator documents (.toniator)",
     "PNG artwork",
@@ -148,6 +148,7 @@ const OPEN_FILTER_LABELS: [&str; 10] = [
     "TIFF artwork",
     "OpenEXR artwork",
     "AVIF artwork",
+    "JPEG XL artwork",
 ];
 const SAVE_FILTER_LABEL: &str = "Toniator documents (.toniator)";
 const EXPORT_FILTER_LABELS: [&str; 2] = ["PNG image", "SVG vector image"];
@@ -684,6 +685,7 @@ fn embedded_format(format: SourceFormatHint) -> Result<EmbeddedSourceFormat, Str
         SourceFormatHint::Tiff => Ok(EmbeddedSourceFormat::Tiff),
         SourceFormatHint::OpenExr => Ok(EmbeddedSourceFormat::OpenExr),
         SourceFormatHint::Avif => Ok(EmbeddedSourceFormat::Avif),
+        SourceFormatHint::JpegXl => Ok(EmbeddedSourceFormat::JpegXl),
         SourceFormatHint::Unsupported => Err("source.format: unsupported source format".to_owned()),
     }
 }
@@ -699,6 +701,7 @@ const fn source_format_hint(format: EmbeddedSourceFormat) -> SourceFormatHint {
         EmbeddedSourceFormat::Tiff => SourceFormatHint::Tiff,
         EmbeddedSourceFormat::OpenExr => SourceFormatHint::OpenExr,
         EmbeddedSourceFormat::Avif => SourceFormatHint::Avif,
+        EmbeddedSourceFormat::JpegXl => SourceFormatHint::JpegXl,
         EmbeddedSourceFormat::Gif | EmbeddedSourceFormat::Video => SourceFormatHint::Unsupported,
     }
 }
@@ -24762,8 +24765,8 @@ fn open_filters() -> gio::ListStore {
     all.add_pattern("*.toniator");
     for pattern in [
         "*.png", "*.svg", "*.jpg", "*.jpeg", "*.webp", "*.bmp", "*.tif", "*.tiff", "*.exr",
-        "*.avif", "*.avifs", "*.apng", "*.gif", "*.mp4", "*.m4v", "*.mov", "*.mkv", "*.webm",
-        "*.avi", "*.ogv", "*.mpeg", "*.mpg", "*.ts",
+        "*.jxl", "*.avif", "*.avifs", "*.apng", "*.gif", "*.mp4", "*.m4v", "*.mov", "*.mkv",
+        "*.webm", "*.avi", "*.ogv", "*.mpeg", "*.mpg", "*.ts",
     ] {
         all.add_pattern(pattern);
     }
@@ -24776,6 +24779,7 @@ fn open_filters() -> gio::ListStore {
         "image/tiff",
         "image/x-exr",
         "image/avif",
+        "image/jxl",
         "image/gif",
         "video/mp4",
         "video/quicktime",
@@ -24815,6 +24819,11 @@ fn open_filters() -> gio::ListStore {
     filters.append(&tiff);
     filters.append(&exr);
     filters.append(&avif);
+    filters.append(&image_open_filter(
+        OPEN_FILTER_LABELS[10],
+        "image/jxl",
+        &["*.jxl"],
+    ));
     filters
 }
 
@@ -27744,7 +27753,8 @@ fn format_hint_for_path(path: &Path) -> Result<SourceFormatHint, String> {
         Some(extension) if extension.eq_ignore_ascii_case("tif") || extension.eq_ignore_ascii_case("tiff") => Ok(SourceFormatHint::Tiff),
         Some(extension) if extension.eq_ignore_ascii_case("exr") => Ok(SourceFormatHint::OpenExr),
         Some(extension) if extension.eq_ignore_ascii_case("avif") => Ok(SourceFormatHint::Avif),
-        _ => Err("source.format: supported inputs are .toniator, PNG, SVG, JPEG, WebP, BMP, TIFF, OpenEXR, and AVIF".to_owned()),
+        Some(extension) if extension.eq_ignore_ascii_case("jxl") => Ok(SourceFormatHint::JpegXl),
+        _ => Err("source.format: supported inputs are .toniator, PNG, SVG, JPEG, WebP, BMP, TIFF, OpenEXR, AVIF, and JPEG XL".to_owned()),
     }
 }
 
@@ -32651,6 +32661,9 @@ mod tests {
     }
 
     /// Verifies startup path parsing and the complete current still-source suffix vocabulary.
+    ///
+    /// # Panics
+    /// Panics if argument validation or explicit source-extension mapping drifts.
     #[test]
     fn startup_inputs_and_extensions_are_stable() {
         assert_eq!(parse_args(vec![]).unwrap(), None);
@@ -32669,6 +32682,7 @@ mod tests {
             ("x.TIFF", SourceFormatHint::Tiff),
             ("x.exr", SourceFormatHint::OpenExr),
             ("x.avif", SourceFormatHint::Avif),
+            ("x.JXL", SourceFormatHint::JpegXl),
         ] {
             assert_eq!(format_hint_for_path(Path::new(path)).unwrap(), expected);
         }
@@ -33465,7 +33479,8 @@ mod tests {
                 "BMP artwork",
                 "TIFF artwork",
                 "OpenEXR artwork",
-                "AVIF artwork"
+                "AVIF artwork",
+                "JPEG XL artwork"
             ]
         );
         assert_eq!(SAVE_FILTER_LABEL, "Toniator documents (.toniator)");

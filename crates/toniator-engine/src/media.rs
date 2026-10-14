@@ -95,6 +95,7 @@ pub fn open_source_media(
                 EmbeddedSourceFormat::Png => AnimatedImageFormat::Png,
                 EmbeddedSourceFormat::Webp => AnimatedImageFormat::Webp,
                 EmbeddedSourceFormat::Avif => AnimatedImageFormat::Avif,
+                EmbeddedSourceFormat::JpegXl => AnimatedImageFormat::JpegXl,
                 _ => {
                     return Err(SourceError::new(
                         "source.media.format",
@@ -151,6 +152,7 @@ pub(crate) fn still_hint(format: EmbeddedSourceFormat) -> Result<SourceFormatHin
         EmbeddedSourceFormat::Tiff => SourceFormatHint::Tiff,
         EmbeddedSourceFormat::OpenExr => SourceFormatHint::OpenExr,
         EmbeddedSourceFormat::Avif => SourceFormatHint::Avif,
+        EmbeddedSourceFormat::JpegXl => SourceFormatHint::JpegXl,
         EmbeddedSourceFormat::Gif | EmbeddedSourceFormat::Video => {
             return Err(SourceError::new(
                 "source.media.format",

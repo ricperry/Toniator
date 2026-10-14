@@ -76,6 +76,12 @@ def payload(prefix):
             install(ROOT / 'vendor' / crate / name,
                     prefix / 'share/licenses' / APP_ID / crate / name)
 
+    # Ship exact native JPEG XL decoder and transitive dependency license texts.
+    for notice in sorted((ROOT / "THIRD_PARTY_LICENSES" / "jpegxl").rglob("*")):
+        if notice.is_file():
+            install(notice, prefix / "share/licenses" / APP_ID / "jpegxl" /
+                    notice.relative_to(ROOT / "THIRD_PARTY_LICENSES" / "jpegxl"))
+
 
 def flatpak_bundle():
     """Finalize a local application tree and export an installable single-file Flatpak bundle."""
@@ -87,7 +93,7 @@ def flatpak_bundle():
     run('flatpak', 'build-finish', '--command=toniator-app', '--socket=wayland',
         '--socket=fallback-x11', '--share=ipc', '--device=dri', build)
     run('flatpak', 'build-export', '--disable-sandbox', WORK / 'repo', build, 'stable')
-    bundle = DIST / 'Toniator-0.4.2-x86_64.flatpak'
+    bundle = DIST / 'Toniator-0.4.3-x86_64.flatpak'
     temporary = DIST / ('.Toniator-' + str(time.time_ns()) + '.flatpak')
     run('flatpak', 'build-bundle', WORK / 'repo', temporary, APP_ID, 'stable',
         '--runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo')
@@ -107,7 +113,7 @@ def main():
     if not args.skip_build:
         sdk_build()
     bundle = flatpak_bundle()
-    record = {'version': '0.4.2', 'app_id': APP_ID,
+    record = {'version': '0.4.3', 'app_id': APP_ID,
               'base_commit': output('git', 'rev-parse', 'HEAD'),
               'packaging_diff': output('git', 'diff', '--', 'crates/toniator-app/src/main.rs',
                                         'crates/toniator-app/src/main_view_state.rs'),

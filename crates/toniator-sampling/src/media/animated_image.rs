@@ -19,15 +19,16 @@ pub enum AnimatedImageFormat {
     Webp,
     Gif,
     Avif,
+    JpegXl,
 }
 
-/// Detects animation using native PNG/WebP headers and the AVIF sequence brand.
+/// Detects animation using native PNG/WebP/JPEG XL headers and the AVIF sequence brand.
 ///
 /// This only selects a provider; that provider validates and decodes the complete finite source.
 /// AVIF's `avis` brand describes an image sequence even when its filename ends in `.avif`.
 ///
 /// # Errors
-/// Rejects oversized data and malformed PNG, WebP, or AVIF container headers.
+/// Rejects oversized data and malformed or unsupported PNG, WebP, JPEG XL, or AVIF headers.
 pub fn is_animated_image(
     bytes: &[u8],
     format: crate::SourceFormatHint,
@@ -55,11 +56,12 @@ pub fn is_animated_image(
             Ok(&brands[8..12] == b"avis"
                 || brands[16..].chunks_exact(4).any(|brand| brand == b"avis"))
         }
+        crate::SourceFormatHint::JpegXl => super::jpegxl::is_animated(bytes),
         _ => Ok(false),
     }
 }
 
-/// Uses mature image decoders for APNG/WebP and the bounded FFmpeg provider for GIF/AVIF.
+/// Uses mature native decoders for APNG/WebP/JPEG XL and bounded FFmpeg for GIF/AVIF.
 pub struct AnimatedImageSource {
     inner: AnimatedBackend,
 }
@@ -67,6 +69,7 @@ pub struct AnimatedImageSource {
 enum AnimatedBackend {
     Native(Box<NativeAnimation>),
     Process(Box<VideoSource>),
+    JpegXl(Box<super::jpegxl::JpegXlSource>),
 }
 
 struct NativeAnimation {
@@ -104,6 +107,14 @@ impl AnimatedImageSource {
         let bytes = bytes.into();
         validate_compressed_size(bytes.len())?;
         cancelled(is_cancelled)?;
+        if format == AnimatedImageFormat::JpegXl {
+            return Ok(Self {
+                inner: AnimatedBackend::JpegXl(Box::new(super::jpegxl::JpegXlSource::new(
+                    &bytes,
+                    is_cancelled,
+                )?)),
+            });
+        }
         if matches!(format, AnimatedImageFormat::Gif | AnimatedImageFormat::Avif) {
             return Ok(Self {
                 inner: AnimatedBackend::Process(Box::new(VideoSource::open(
@@ -177,6 +188,7 @@ impl FrameSource for AnimatedImageSource {
         match &self.inner {
             AnimatedBackend::Native(value) => &value.metadata,
             AnimatedBackend::Process(value) => value.metadata(),
+            AnimatedBackend::JpegXl(value) => value.metadata(),
         }
     }
 
@@ -189,6 +201,9 @@ impl FrameSource for AnimatedImageSource {
         position: RationalTime,
         is_cancelled: &dyn Fn() -> bool,
     ) -> Result<SourceFrame, SourceError> {
+        if let AnimatedBackend::JpegXl(value) = &mut self.inner {
+            return value.frame_at(position, is_cancelled);
+        }
         let AnimatedBackend::Native(value) = &mut self.inner else {
             let AnimatedBackend::Process(value) = &mut self.inner else {
                 unreachable!()

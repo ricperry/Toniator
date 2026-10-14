@@ -29,3 +29,18 @@ compilation is offline. Run `python packaging/build.py` afterward to compile
 Toniator with package-relative tool selection and build the Flatpak, then
 `python packaging/appimage.py` for AppImage. These commands create local
 artifacts; they do not publish or install a release.
+
+## Native JPEG XL decoder
+
+JPEG XL stills and animations are decoded inside Toniator by the pinned Rust
+`jxl-oxide 0.12.6` dependency with moxcms color conversion, independently of the
+bundled FFmpeg tools. jxl-oxide and its jxl-* dependencies are MIT OR Apache-2.0;
+the new transitive dependencies use BSD and MIT licenses. Original license texts,
+exact versions, registry checksums, and the alloc-stdlib upstream-license
+exception are recorded in
+[THIRD_PARTY_LICENSES/jpegxl/PROVENANCE.md](../THIRD_PARTY_LICENSES/jpegxl/PROVENANCE.md).
+`build.py` stages this complete notice tree under
+`share/licenses/io.github.ricperry.Toniator/jpegxl/` for both Linux packages.
+
+libjxl and Little CMS are used only by the checked-in synthetic JPEG XL fixture
+generator; they are not new Toniator build or runtime dependencies.

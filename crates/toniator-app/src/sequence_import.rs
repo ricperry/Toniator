@@ -313,7 +313,7 @@ fn choose_images(state: &Rc<RefCell<AppState>>) {
     filter.set_name(Some("Still images"));
     for pattern in [
         "*.png", "*.svg", "*.jpg", "*.jpeg", "*.webp", "*.bmp", "*.tif", "*.tiff", "*.exr",
-        "*.avif", "*.gif",
+        "*.avif", "*.gif", "*.jxl",
     ] {
         filter.add_pattern(pattern);
     }
