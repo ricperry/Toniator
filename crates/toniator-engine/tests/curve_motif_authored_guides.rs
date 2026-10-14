@@ -44,6 +44,9 @@ fn bend_converted_guide(
 
 /// Exercises the exact nested Guide Editor conversion through ordinary canonical evaluation.
 /// Both immutable sources retain intrinsic canvases; only current-gate derived artifacts are written.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn editable_curve_motif_guides_evaluate_both_intrinsic_sources() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -133,7 +136,7 @@ fn editable_curve_motif_guides_evaluate_both_intrinsic_sources() {
             .expect("native PNG artifact writes");
             fs::write(
                 output.join(format!("{variant}.svg")),
-                write_svg(result.scene()),
+                write_svg(result.scene()).expect("SVG serialization"),
             )
             .expect("native SVG artifact writes");
         }

@@ -6224,11 +6224,11 @@ fn normal_offset_absolute_index_limit(
     Ok(raw as i64)
 }
 
-/// Uniformly scales one centered authored guide through the local generation span.
+/// Uniformly scales one centered authored guide through its stable local canvas span.
 ///
 /// Guide-editor endpoints are fixed on opposite sides of a centered authoring frame. Rotation can
-/// require a longer finite guide than that frame supplies, so this applies one shape-preserving
-/// scale before any Single, Stacked, or Constant-gap repetition. Repetition pitch remains separate
+/// require a longer guide than that frame supplies, so this applies one shape-preserving
+/// scale independent of Feature-dependent generation padding before repetition. Repetition pitch remains separate
 /// domain intent and is never derived from the scaled path. Final canvas clipping remains a
 /// downstream consumer operation.
 ///
@@ -6272,6 +6272,11 @@ fn scale_authored_guide_to_generation_span(
     let scale = 1.0_f64
         .max((domain_minimum / terminal_minimum).max(1.0))
         .max((domain_maximum / terminal_maximum).max(1.0));
+    if std::env::var_os("TONIATOR_CALIBRATION_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "authored guide span: terminals=[{terminal_minimum:.17},{terminal_maximum:.17}] domain=[{domain_minimum:.17},{domain_maximum:.17}] scale={scale:.17}"
+        );
+    }
     let transform = AffineTransform2D::scale_then_rotate_about_then_translate(
         Point2::new(0.0, 0.0),
         scale,
@@ -6284,6 +6289,100 @@ fn scale_authored_guide_to_generation_span(
         "curved-guide coverage scale must remain finite and positive",
     ))?;
     path.transformed(transform).map_err(Into::into)
+}
+
+/// Extends only an authored guide's terminal rays to its padded generation span.
+///
+/// Every stable scaled source segment remains exact. Tangent continuation preserves first-order
+/// continuity when it reaches the required longitudinal bound within one domain diagonal;
+/// otherwise a bounded longitudinal ray covers the exterior without moving the authored core.
+/// Repetition pitch and final clipping remain separate authorities.
+///
+/// # Errors
+/// Returns finite-arithmetic, terminal-tangent, or canonical path-construction diagnostics.
+fn extend_authored_guide_to_generation_span(
+    path: &CurvePath,
+    domain: Bounds,
+) -> Result<CurvePath, PatternPipelineError> {
+    let chord = Vector2::new(path.end().x - path.start().x, path.end().y - path.start().y);
+    let length = chord.x.hypot(chord.y);
+    if !length.is_finite() {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.numeric_overflow",
+            "authored guide terminal span must remain finite",
+        ));
+    }
+    if length <= 1.0e-12 {
+        return Ok(path.clone());
+    }
+    let axis = chord.scale(length.recip());
+    let (minimum, maximum) = domain
+        .corners()
+        .into_iter()
+        .map(|point| point.dot(axis))
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), value| {
+            (lo.min(value), hi.max(value))
+        });
+    let maximum_extension = (domain.max.x - domain.min.x).hypot(domain.max.y - domain.min.y);
+    if !minimum.is_finite() || !maximum.is_finite() || !maximum_extension.is_finite() {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.numeric_overflow",
+            "authored guide extension domain must remain finite",
+        ));
+    }
+    let terminal = |point: Point2,
+                    tangent: Vector2,
+                    required: f64,
+                    sign: f64|
+     -> Result<Point2, PatternPipelineError> {
+        let projection = tangent.dot(axis);
+        let tangent_distance = required / projection;
+        let direction = if projection > 0.0
+            && tangent_distance.is_finite()
+            && tangent_distance <= maximum_extension
+        {
+            tangent.scale(tangent_distance)
+        } else {
+            axis.scale(required)
+        };
+        let result = Point2::new(point.x + sign * direction.x, point.y + sign * direction.y);
+        if !required.is_finite() || required > maximum_extension || !result.is_finite() {
+            return Err(PatternPipelineError::new(
+                "coverage.curved_guides.numeric_overflow",
+                "authored guide endpoint extension must remain finite and bounded",
+            ));
+        }
+        Ok(result)
+    };
+    let first = path.segments().first().ok_or(PatternPipelineError::new(
+        "coverage.curved_guides.proof",
+        "authored guide requires a finite source segment",
+    ))?;
+    let last = path.segments().last().ok_or(PatternPipelineError::new(
+        "coverage.curved_guides.proof",
+        "authored guide requires a finite source segment",
+    ))?;
+    let start = terminal(
+        path.start(),
+        first.limiting_unit_tangent_at(0.0)?,
+        (path.start().dot(axis) - minimum).max(0.0),
+        -1.0,
+    )?;
+    let end = terminal(
+        path.end(),
+        last.limiting_unit_tangent_at(1.0)?,
+        (maximum - path.end().dot(axis)).max(0.0),
+        1.0,
+    )?;
+    let mut segments = Vec::with_capacity(path.segments().len() + 2);
+    if start != path.start() {
+        segments.push(CurveSegment::Line(LineSegment::new(start, path.start())?));
+    }
+    segments.extend_from_slice(path.segments());
+    if end != path.end() {
+        segments.push(CurveSegment::Line(LineSegment::new(path.end(), end)?));
+    }
+    CurvePath::new(segments, path.closure()).map_err(Into::into)
 }
 
 /// Translates one authored segment for a tiled guide while forcing exact path continuity.
@@ -6713,6 +6812,9 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 "coverage.curved_guides.proof",
                 "curved-guide coverage could not prove a complete generation envelope",
             ))?;
+    let stable_authored_domain = channel_transform.inverse_bounds(canvas).ok_or(
+        PatternPipelineError::new("coverage.curved_guides.proof", "authored guide canvas frame must remain finite"),
+    )?;
     let mut guides = Vec::new();
     let mut guide_nominal_bases = BTreeMap::new();
     let mut grouped = Vec::<Vec<StructuralPathInstance>>::new();
@@ -6741,7 +6843,8 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
         ))?;
         let unscaled_base = prototype.transformed(baseline)?;
         let base = if matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { .. }) {
-            scale_authored_guide_to_generation_span(&unscaled_base, local_domain)?
+            let stable = scale_authored_guide_to_generation_span(&unscaled_base, stable_authored_domain)?;
+            extend_authored_guide_to_generation_span(&stable, local_domain)?
         } else {
             unscaled_base
         };

@@ -149,6 +149,9 @@ fn write_rgba_statistics(path: &Path, width: u32, height: u32, pixels: &[u8]) {
 }
 
 /// Evaluates one ordinary source/recipe pair and writes native PNG, raw SVG, and SVG raster evidence.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 fn write_variant(case: &SourceCase, label: &str, mirror: bool, phase: Option<f64>, output: &Path) {
     let stem = format!("{}-{label}", case.label);
     let png_path = output.join(format!("{stem}.png"));
@@ -168,7 +171,7 @@ fn write_variant(case: &SourceCase, label: &str, mirror: bool, phase: Option<f64
         encode_png(evaluated.raster()).expect("native PNG encodes"),
     )
     .expect("native PNG writes");
-    fs::write(&svg_path, write_svg(evaluated.scene())).expect("raw SVG writes");
+    fs::write(&svg_path, write_svg(evaluated.scene()).expect("SVG serialization"),).expect("raw SVG writes");
     write_rgba_statistics(
         &output.join(format!("{stem}-native-rgba-stats.txt")),
         evaluated.raster().width(),

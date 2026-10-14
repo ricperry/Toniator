@@ -90,6 +90,9 @@ fn pixel(raster: &toniator_render::RasterSurface, x: usize, y: usize) -> [u8; 4]
 }
 
 /// Accepts an empty treated region set and its exactly empty sampled-paint table without output.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn empty_treated_regions_accept_zero_paints_and_render_transparent() {
     let scene = sampled_region_scene(CanonicalRegionSet::empty(), Vec::new(), 1.0);
@@ -103,7 +106,7 @@ fn empty_treated_regions_accept_zero_paints_and_render_transparent() {
             .all(|pixel| pixel == [0, 0, 0, 0]),
         "empty treated geometry cannot leave coverage or hidden RGB"
     );
-    let svg = write_svg(&scene);
+    let svg = write_svg(&scene).expect("SVG serialization");
     assert!(svg.contains("clip-path=\"url(#canvas-clip)\""));
     assert!(!svg.contains("channel-20-region-"));
 }
@@ -163,6 +166,9 @@ fn strokes_reject_sampled_paint_even_for_empty_geometry() {
 }
 
 /// Renders sampled paint in canonical region order and applies channel opacity at final composition.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn sampled_region_paint_order_and_opacity_are_preserved_in_png_and_svg() {
     let scene = sampled_region_scene(
@@ -201,7 +207,7 @@ fn sampled_region_paint_order_and_opacity_are_preserved_in_png_and_svg() {
     assert_eq!(left[3], 128, "channel opacity halves first sampled alpha");
     assert_eq!(right[3], 128, "channel opacity halves second sampled alpha");
 
-    let svg = write_svg(&scene);
+    let svg = write_svg(&scene).expect("SVG serialization");
     assert!(svg.contains("id=\"channel-20-region-0\""));
     assert!(svg.contains("id=\"channel-20-region-1\""));
     assert!(svg.contains("fill=\"#ff0000\" fill-opacity=\"0.5\""));
@@ -210,6 +216,9 @@ fn sampled_region_paint_order_and_opacity_are_preserved_in_png_and_svg() {
 }
 
 /// Suppresses visible and hidden raster RGB when a sampled region paint has exact zero alpha.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn zero_alpha_sampled_region_has_no_raster_rgb_or_coverage() {
     let scene = sampled_region_scene(
@@ -225,10 +234,14 @@ fn zero_alpha_sampled_region_has_no_raster_rgb_or_coverage() {
     let raster = rasterize(&scene, RasterBackground::Transparent)
         .expect("transparent sampled paint has a valid final raster");
     assert_eq!(pixel(&raster, 1, 1), [0, 0, 0, 0]);
-    assert!(write_svg(&scene).contains("fill-opacity=\"0\""));
+    assert!(write_svg(&scene)
+            .expect("SVG serialization").contains("fill-opacity=\"0\""));
 }
 
 /// Keeps off-canvas treated geometry intact until the renderer's one final canvas clipping boundary.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn sampled_regions_use_final_canvas_clip_without_renderer_topology_repair() {
     let scene = sampled_region_scene(
@@ -244,7 +257,7 @@ fn sampled_regions_use_final_canvas_clip_without_renderer_topology_repair() {
     let raster = rasterize(&scene, RasterBackground::Transparent)
         .expect("unclipped canonical region rasterizes through final canvas consumer");
     assert!(raster.pixels().chunks_exact(4).all(|pixel| pixel[3] == 255));
-    let svg = write_svg(&scene);
+    let svg = write_svg(&scene).expect("SVG serialization");
     assert!(svg.contains("clip-path=\"url(#canvas-clip)\""));
     assert!(svg.contains("M 12 8 L -4 8 L -4 -4 L 12 -4 L 12 8 Z"));
     assert!(svg.contains(" Z\" fill-rule=\"nonzero\" fill=\"#89bce1\""));
@@ -277,6 +290,9 @@ fn malformed_region_geometry_is_rejected_upstream() {
 /// This validation-only witness intentionally depends on the Fedora-native Inkscape and
 /// ImageMagick command-line consumers. It writes only disposable Stage 20Q evidence below
 /// `target/validation` and never changes canonical geometry, SVG, or PNG production behavior.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 #[ignore = "validation artifact generator requires Inkscape and ImageMagick"]
 fn native_png_and_raw_svg_raster_have_bounded_channel_error() {
@@ -316,7 +332,7 @@ fn native_png_and_raw_svg_raster_have_bounded_channel_error() {
         .expect("sampled Region native PNG encodes"),
     )
     .expect("native validation PNG writes below target");
-    fs::write(&raw_svg, write_svg(&scene)).expect("raw validation SVG writes below target");
+    fs::write(&raw_svg, write_svg(&scene).expect("SVG serialization")).expect("raw validation SVG writes below target");
     let inkscape = Command::new("inkscape")
         .arg(&raw_svg)
         .arg("--export-type=png")

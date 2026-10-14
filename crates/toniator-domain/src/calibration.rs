@@ -11,6 +11,8 @@ mod default_calibration;
 
 /// Fixed square canvas side used to materialize and measure one structural reference.
 pub const CALIBRATION_REFERENCE_CANVAS_SIDE: f64 = 1024.0;
+/// Bounds retained raw knots while admitting measured steep saturation under the strict criterion.
+pub const MAX_SAVED_CALIBRATION_KNOTS: usize = 144;
 /// Current geometry and 32-spacing reference-window contract for a saved measurement.
 pub const CALIBRATION_PROFILE: &str = "ton018-reference-fixed-canvas1024-spacings32-v4";
 /// Current geometry and 64-spacing reference-window contract after independent population retry.
@@ -52,6 +54,80 @@ pub struct CalibrationBinding {
 }
 
 impl CalibrationBinding {
+    /// Adds only current typed geometry-producer revisions to one recognized reference profile.
+    ///
+    /// Source, presentation, scalar Density, Feature size, and authored response remain outside
+    /// measured identity. Numeric callers still validate the selected reference-window contract.
+    pub fn profile_for_reference(&self, reference_profile: &str) -> String {
+        let suffix = self.geometry_profile_suffix();
+        format!("{reference_profile}{suffix}")
+    }
+
+    /// Recognizes former numeric companions affected by a corrected typed geometry producer.
+    ///
+    /// Only known unmarked reference profiles qualify; malformed bindings and unknown future
+    /// profile identifiers never authorize removal or conversion.
+    pub fn is_obsolete_geometry_profile(&self, profile: &str) -> bool {
+        !self.geometry_profile_suffix().is_empty()
+            && (self.supports_strict_reference_profile(profile)
+                || (profile == CALIBRATION_PROFILE_MEAN
+                    && self.has_variation_seed()
+                    && self.supports_stochastic_mean()))
+    }
+
+    /// Classifies strict reference tiers by their existing typed producer and window authority.
+    fn supports_strict_reference_profile(&self, profile: &str) -> bool {
+        if self.uses_guide_faces() {
+            [
+                CALIBRATION_PROFILE_GUIDE_FACES,
+                CALIBRATION_PROFILE_GUIDE_FACES_64,
+            ]
+            .contains(&profile)
+        } else if self.has_variation_seed() {
+            [CALIBRATION_PROFILE_SEEDED, CALIBRATION_PROFILE_SEEDED_64].contains(&profile)
+        } else {
+            [CALIBRATION_PROFILE, CALIBRATION_PROFILE_64].contains(&profile)
+                || (profile == CALIBRATION_PROFILE_ROUND_INTERIOR && self.supports_round_interior())
+        }
+    }
+
+    /// Derives corrected producer provenance from the authoritative typed recipe once.
+    fn geometry_profile_suffix(&self) -> &'static str {
+        /// Finds authored guide prototypes through typed structural wrappers without using labels.
+        fn authored_guides(structure: &PatternStructureRecipe) -> bool {
+            match structure {
+                PatternStructureRecipe::GenericGuides { dimensions, .. } => {
+                    dimensions.iter().any(|dimension| {
+                        matches!(
+                            dimension.prototype,
+                            crate::GenericGuidePrototypeDraft::AuthoredOpenPathReference { .. }
+                        )
+                    })
+                }
+                PatternStructureRecipe::AuthoredResources { definition, .. }
+                | PatternStructureRecipe::ConnectionPaths { definition, .. }
+                | PatternStructureRecipe::MazeWalls { definition, .. }
+                | PatternStructureRecipe::AuthoredClosedShapeMarks { definition, .. }
+                | PatternStructureRecipe::CurveMotifPaths { definition, .. }
+                | PatternStructureRecipe::VoronoiRegions { definition }
+                | PatternStructureRecipe::GuideFaceRegions { definition, .. }
+                | PatternStructureRecipe::OrderedOutputs { definition, .. } => {
+                    authored_guides(definition)
+                }
+                _ => false,
+            }
+        }
+        let guide = authored_guides(&self.recipe.structure);
+        let inset = self.recipe.output_settings.iter().any(|setting| matches!(&setting.response,
+            PatternGeometryResponse::Regions(response) if response.algorithm == crate::RegionResizeAlgorithm::UniformOffset));
+        match (guide, inset) {
+            (false, false) => "",
+            (false, true) => "+convex-inset-v3",
+            (true, false) => "+guide-span-v2",
+            (true, true) => "+guide-span-v2+convex-inset-v3",
+        }
+    }
+
     /// Identifies the single active Guide Faces drawing output through the typed recipe.
     ///
     /// The normalized binding, not a Preset ID or stored label, determines which producer
@@ -254,7 +330,15 @@ impl CalibrationBinding {
         self.density_aspect
     }
 
-    /// Returns effective shape rotation, which can change closed-shape coverage.
+    /// Compares reusable structural intent while retaining measured rotation as provenance.
+    ///
+    /// Ordinary aspect and connected bias remain structural. Individual Shape rotation changes
+    /// appearance intentionally and never rewrites the saved numeric artifact or measured angle.
+    pub fn is_compatible_with(&self, current: &Self) -> bool {
+        self.recipe == current.recipe && self.density_aspect == current.density_aspect
+    }
+
+    /// Returns immutable measured shape rotation, independent of the current artistic angle.
     pub fn shape_rotation_degrees(&self) -> f64 {
         self.shape_rotation_degrees
     }
@@ -437,7 +521,7 @@ pub struct SavedCalibration {
 
 impl SavedCalibration {
     /// Validates raw zero-to-two coverage and optional Uniform data under the producer's
-    /// default strict profile, including the revised Guide Faces producer.
+    /// default strict profile, including current typed geometry-producer revisions.
     ///
     /// # Errors
     /// Rejects missing endpoints, nonfinite, unordered, or out-of-range observations.
@@ -453,11 +537,11 @@ impl SavedCalibration {
         } else {
             CALIBRATION_PROFILE
         };
-        Self::with_profile(profile.to_owned(), binding, raw, uniform)
+        Self::with_profile(binding.profile_for_reference(profile), binding, raw, uniform)
     }
 
     /// Restores a persisted measurement only under its typed producer's strict or eligible
-    /// covered-interior profile, rejecting former generic Guide Faces observations.
+    /// covered-interior profile, rejecting superseded typed producer observations.
     ///
     /// # Errors
     /// Rejects obsolete profiles and invalid measured payloads.
@@ -467,24 +551,27 @@ impl SavedCalibration {
         raw: Vec<CalibrationKnot>,
         uniform: Option<UniformCalibration>,
     ) -> Result<Self, ValidationError> {
-        let supported = if binding.uses_guide_faces() {
-            profile == CALIBRATION_PROFILE_GUIDE_FACES
-                || profile == CALIBRATION_PROFILE_GUIDE_FACES_64
-        } else if binding.has_variation_seed() {
-            profile == CALIBRATION_PROFILE_SEEDED || profile == CALIBRATION_PROFILE_SEEDED_64
-        } else {
-            profile == CALIBRATION_PROFILE
-                || profile == CALIBRATION_PROFILE_64
-                || (profile == CALIBRATION_PROFILE_ROUND_INTERIOR
-                    && binding.supports_round_interior())
-        };
+        let supported = [
+            CALIBRATION_PROFILE,
+            CALIBRATION_PROFILE_64,
+            CALIBRATION_PROFILE_GUIDE_FACES,
+            CALIBRATION_PROFILE_GUIDE_FACES_64,
+            CALIBRATION_PROFILE_SEEDED,
+            CALIBRATION_PROFILE_SEEDED_64,
+            CALIBRATION_PROFILE_ROUND_INTERIOR,
+        ]
+        .into_iter()
+        .any(|base| {
+            binding.supports_strict_reference_profile(base)
+                && profile == binding.profile_for_reference(base)
+        });
         if !supported {
             return Err(ValidationError::new(
                 "calibration.profile",
                 "saved calibration profile is unsupported; Recalibrate",
             ));
         }
-        validate_knots(&raw, 2.0, 128)?;
+        validate_knots(&raw, 2.0, MAX_SAVED_CALIBRATION_KNOTS)?;
         if raw.first().unwrap().coverage == raw.last().unwrap().coverage {
             return Err(ValidationError::new(
                 "calibration.raw.span",
@@ -510,7 +597,7 @@ impl SavedCalibration {
         uniform: Option<UniformCalibration>,
         variation: CalibrationVariation,
     ) -> Result<Self, ValidationError> {
-        validate_knots(&raw, 2.0, 128)?;
+        validate_knots(&raw, 2.0, MAX_SAVED_CALIBRATION_KNOTS)?;
         let span = raw.last().unwrap().coverage - raw.first().unwrap().coverage;
         if !binding.supports_stochastic_mean()
             || !binding.has_variation_seed()
@@ -525,7 +612,7 @@ impl SavedCalibration {
             ));
         }
         Ok(Self {
-            profile: CALIBRATION_PROFILE_MEAN.to_owned(),
+            profile: binding.profile_for_reference(CALIBRATION_PROFILE_MEAN),
             binding,
             raw,
             uniform,
@@ -555,7 +642,7 @@ impl SavedCalibration {
     }
 }
 
-/// One channel's persisted measurement; linked channels may require distinct bindings.
+/// One channel's independently owned measurement, even when another measured binding is equal.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AttachedCalibration {
     pub channel_id: ChannelId,

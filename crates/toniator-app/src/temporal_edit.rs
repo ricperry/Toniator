@@ -417,7 +417,7 @@ mod tests {
         for value in history
             .document()
             .materialize_frame(2)
-            .unwrap()
+            .unwrap().document()
             .channel_scalar_batch(PropertyFieldId::RotationDegrees)
             .unwrap()
             .values
@@ -433,7 +433,7 @@ mod tests {
             history
                 .document()
                 .materialize_frame(2)
-                .unwrap()
+                .unwrap().document()
                 .channel_scalar_batch(PropertyFieldId::RotationDegrees)
                 .unwrap()
                 .average,
@@ -487,7 +487,8 @@ mod tests {
         history
             .apply_temporal(&scalar_command(history.document(), channel, 45.0).unwrap())
             .unwrap();
-        let end = history.document().materialize_frame(2).unwrap();
+        let end_frame = history.document().materialize_frame(2).unwrap();
+        let end = end_frame.document();
         assert_eq!(
             end.effective_channel_pattern(ChannelId(1))
                 .unwrap()
@@ -512,7 +513,8 @@ mod tests {
                 false,
             ))
             .unwrap();
-        let middle = history.document().materialize_frame(1).unwrap();
+        let middle_frame = history.document().materialize_frame(1).unwrap();
+        let middle = middle_frame.document();
         assert_eq!(
             middle
                 .effective_channel_pattern(ChannelId(1))
@@ -534,7 +536,7 @@ mod tests {
             history
                 .document()
                 .materialize_frame(2)
-                .unwrap()
+                .unwrap().document()
                 .effective_channel_pattern(ChannelId(1))
                 .unwrap()
                 .pattern_rotation_degrees,
@@ -545,7 +547,7 @@ mod tests {
             history
                 .document()
                 .materialize_frame(2)
-                .unwrap()
+                .unwrap().document()
                 .effective_channel_pattern(ChannelId(1))
                 .unwrap()
                 .pattern_rotation_degrees,
@@ -557,7 +559,7 @@ mod tests {
             history
                 .document()
                 .materialize_frame(0)
-                .unwrap()
+                .unwrap().document()
                 .pattern_settings(),
             document.pattern_settings()
         );

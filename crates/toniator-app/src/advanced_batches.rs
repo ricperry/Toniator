@@ -1746,7 +1746,7 @@ mod tests {
             let end_frame = temporal_preview::Endpoint::End.frame(&candidate);
             let values = candidate
                 .materialize_frame(end_frame)
-                .unwrap()
+                .unwrap().document()
                 .channel_scalar_batch(PropertyFieldId::ModeledMappingGain)
                 .unwrap();
             assert_eq!(

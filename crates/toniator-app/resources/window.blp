@@ -240,6 +240,16 @@ template $ToniatorMainShell : Gtk.Box {
         }
       }
 
+      Gtk.Label end_rotation_warning {
+        visible: false;
+        label: "Rotating marks can change overlap and tone. The saved calibration stays fixed.";
+        xalign: 1;
+        wrap: true;
+        margin-start: 12;
+        margin-end: 12;
+        styles [ "dim-label" ]
+      }
+
       Gtk.Revealer main_banner_revealer {
         transition-type: crossfade;
         Gtk.Box {

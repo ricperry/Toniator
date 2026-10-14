@@ -86,6 +86,9 @@ fn voronoi_scene(width: f64, height: f64) -> RenderScene {
 }
 
 /// Proves the renderer fills ordinary canonical cells as a solid final-clipped output.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn ordinary_voronoi_regions_render() {
     let scene = voronoi_scene(64.0, 64.0);
@@ -95,10 +98,14 @@ fn ordinary_voronoi_regions_render() {
             .pixels()
             .is_empty()
     );
-    assert!(write_svg(&scene).contains("fill-rule=\"nonzero\""));
+    assert!(write_svg(&scene)
+            .expect("SVG serialization").contains("fill-rule=\"nonzero\""));
 }
 
 /// Generates intrinsic direct Voronoi PNG and raw SVG evidence for parent inspection.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 #[ignore = "validation artifact generator"]
 fn generate_intrinsic_voronoi_artifacts() {
@@ -116,6 +123,6 @@ fn generate_intrinsic_voronoi_artifacts() {
             encode_png(&raster).expect("png"),
         )
         .expect("write png");
-        std::fs::write(output.join(format!("{name}.svg")), write_svg(&scene)).expect("write svg");
+        std::fs::write(output.join(format!("{name}.svg")), write_svg(&scene).expect("SVG serialization"),).expect("write svg");
     }
 }

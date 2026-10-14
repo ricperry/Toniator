@@ -2,7 +2,7 @@
 
 use std::{
     fs::{self, File},
-    io::{Read, Write},
+    io::{Read, Seek, Write},
     path::{Path, PathBuf},
 };
 
@@ -586,7 +586,7 @@ fn migrate_legacy_preset(
     })
 }
 
-/// Removes recognized obsolete v2/v3, seed-specific v4, and Guide Faces v4 measurements.
+/// Removes recognized obsolete reference, seed-specific, Guide Faces, and geometry measurements.
 ///
 /// Pattern structure and every authored response remain unchanged; config16 desired endpoints
 /// are never remapped. The receiver must prepare each missing binding before publication.
@@ -611,22 +611,36 @@ fn migrate_former_calibration_profile(
         return Ok(None);
     };
     let mut changed = false;
-    if let Some(artifacts) = configuration.get_mut("saved_calibrations").and_then(Value::as_array_mut) {
+    if let Some(artifacts) = configuration
+        .get_mut("saved_calibrations")
+        .and_then(Value::as_array_mut)
+    {
         let original_count = artifacts.len();
-        artifacts.retain(|entry| !entry.get("profile").and_then(Value::as_str)
-            .is_some_and(|profile| FORMER_PROFILES.contains(&profile))
-            && !super::obsolete_seeded_v4_companion(entry)
-            && !super::obsolete_guide_faces_v4_companion(entry));
+        artifacts.retain(|entry| {
+            !entry
+                .get("profile")
+                .and_then(Value::as_str)
+                .is_some_and(|profile| FORMER_PROFILES.contains(&profile))
+                && !super::obsolete_seeded_v4_companion(entry)
+                && !super::obsolete_guide_faces_v4_companion(entry)
+                && !super::obsolete_geometry_companion(entry)
+        });
         changed |= artifacts.len() != original_count;
     }
-    if configuration.get("baseline_saved_calibration")
+    if configuration
+        .get("baseline_saved_calibration")
         .and_then(|entry| entry.get("profile"))
         .and_then(Value::as_str)
         .is_some_and(|profile| FORMER_PROFILES.contains(&profile))
-        || configuration.get("baseline_saved_calibration")
+        || configuration
+            .get("baseline_saved_calibration")
             .is_some_and(super::obsolete_seeded_v4_companion)
-        || configuration.get("baseline_saved_calibration")
+        || configuration
+            .get("baseline_saved_calibration")
             .is_some_and(super::obsolete_guide_faces_v4_companion)
+        || configuration
+            .get("baseline_saved_calibration")
+            .is_some_and(super::obsolete_geometry_companion)
     {
         configuration.insert("baseline_saved_calibration".into(), Value::Null);
         changed = true;
@@ -692,7 +706,13 @@ pub fn load_document_preset_staged(
             })?;
             Ok(StagedDocumentPreset::Current(configuration))
         }
-        ArchiveKind::DocumentPreset => load_source_free_preset(path, file, destination),
+        ArchiveKind::DocumentPreset => {
+            let length = file
+                .metadata()
+                .map_err(|error| filesystem_error(path, error.to_string()))?
+                .len();
+            load_source_free_preset(file, length, destination)
+        }
     }
 }
 
@@ -897,15 +917,11 @@ fn classify_archive(path: &Path) -> Result<(ArchiveKind, File), DocumentPresetEr
 /// Rejects every entry other than one bounded `preset.json`, unsupported ZIP
 /// features, ignored fields at any nested path, wrong kind/version, trailing
 /// JSON, and invalid destination-bound domain state.
-fn load_source_free_preset(
-    path: &Path,
-    mut file: File,
+pub(super) fn load_source_free_preset<R: Read + Seek>(
+    mut file: R,
+    length: u64,
     destination: &Document,
 ) -> Result<StagedDocumentPreset, DocumentPresetError> {
-    let length = file
-        .metadata()
-        .map_err(|error| filesystem_error(path, error.to_string()))?
-        .len();
     if length > MAX_DOCUMENT_BYTES {
         return Err(DocumentPresetError::Limits {
             context: "document Preset archive exceeds the 4 MiB limit".into(),
@@ -1259,6 +1275,83 @@ fn filesystem_error(path: &Path, context: impl Into<String>) -> DocumentPresetEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Encodes a disposable in-memory ZIP through the same writer used for ordinary source-free files.
+    ///
+    /// # Panics
+    /// Panics if a bounded test archive cannot be encoded.
+    fn memory_archive(json: &[u8], extra: bool) -> Vec<u8> {
+        let mut writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file(PRESET_ENTRY_NAME, SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(json).unwrap();
+        if extra {
+            writer
+                .start_file("source.png", SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"forbidden embedded source").unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    /// Checks embedded Cursor decoding shares topology, nested-field, trailing-JSON and size rejection.
+    ///
+    /// # Panics
+    /// Panics if the current embedded archive cannot decode or a malformed archive is accepted.
+    #[test]
+    fn embedded_reader_retains_strict_file_validation() {
+        let destination = Document::new_default_document(
+            toniator_domain::CanvasSpec {
+                width: 900.0,
+                height: 620.0,
+            },
+            toniator_domain::SourceReference::Unassigned,
+        )
+        .unwrap();
+        let builtin = crate::builtin_document_presets().first().unwrap();
+        let mut archive = ZipArchive::new(std::io::Cursor::new(builtin.archive_bytes())).unwrap();
+        let json = read_limited(&mut archive, 0, MAX_DOCUMENT_BYTES, PRESET_ENTRY_NAME).unwrap();
+        let extra = memory_archive(&json, true);
+        assert!(matches!(
+            load_source_free_preset(
+                std::io::Cursor::new(&extra),
+                extra.len() as u64,
+                &destination
+            ),
+            Err(DocumentPresetError::EntryTopology { .. })
+        ));
+        let mut unknown: Value = serde_json::from_slice(&json).unwrap();
+        unknown["configuration"]["unexpected"] = json!(true);
+        let unknown = memory_archive(&serde_json::to_vec(&unknown).unwrap(), false);
+        assert!(matches!(
+            load_source_free_preset(
+                std::io::Cursor::new(&unknown),
+                unknown.len() as u64,
+                &destination
+            ),
+            Err(DocumentPresetError::Json { .. })
+        ));
+        let mut trailing = json;
+        trailing.extend_from_slice(b" {}");
+        let trailing = memory_archive(&trailing, false);
+        assert!(matches!(
+            load_source_free_preset(
+                std::io::Cursor::new(&trailing),
+                trailing.len() as u64,
+                &destination
+            ),
+            Err(DocumentPresetError::Json { .. })
+        ));
+        assert!(matches!(
+            load_source_free_preset(
+                std::io::Cursor::new(builtin.archive_bytes()),
+                MAX_DOCUMENT_BYTES + 1,
+                &destination
+            ),
+            Err(DocumentPresetError::Limits { .. })
+        ));
+    }
 
     /// Confirms temporary archives use restrictive owner-only permissions on Unix.
     ///

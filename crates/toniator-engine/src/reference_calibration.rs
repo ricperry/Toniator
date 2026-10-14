@@ -14,7 +14,7 @@ use toniator_domain::{
     CALIBRATION_REFERENCE_CANVAS_SIDE, CalibrationBinding,
     CalibrationKnot, CalibrationVariation, ChannelId, DensityMetric2D, Document, DocumentCommand,
     MarkDensityMode, PatternDefinitionRecipe, PatternGeometryResponse, PatternStructureRecipe,
-    SavedCalibration, SourceReference, SourceReferenceId, SourceWeightingFieldEdit,
+    MAX_SAVED_CALIBRATION_KNOTS, SavedCalibration, SourceReference, SourceReferenceId, SourceWeightingFieldEdit,
     UniformCalibration,
 };
 use toniator_patterns::{GeometryResponseInput, PatternPipelinePlan, TypedFamilyOutput};
@@ -39,9 +39,9 @@ pub const RAW_SIZE_PROBES: [f64; 12] = [
     0.0, 0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0,
 ];
 /// Maximum retained raw knots; midpoint checks have their own derived work ceiling.
-const MAX_RAW_KNOTS: usize = 128;
+const MAX_RAW_KNOTS: usize = MAX_SAVED_CALIBRATION_KNOTS;
 /// Bounds raw logical-size probes, including passing midpoint checks; a mean probe visits both frozen populations.
-const MAX_RAW_MEASUREMENTS: usize = 255;
+const MAX_RAW_MEASUREMENTS: usize = 2 * MAX_RAW_KNOTS - 1;
 
 /// Exact scalar vector observations reusable after strict transfer, without caching geometry.
 #[derive(Default)]
@@ -609,20 +609,23 @@ impl FrozenCoverageProbe {
 fn fit_raw_curve_from_measure(
     measure: &mut impl FnMut(f64) -> Result<RawCoveragePoint, EvaluationError>,
 ) -> Result<RawCoverageCurve, EvaluationError> {
+    let diagnostics = std::env::var_os("TONIATOR_CALIBRATION_DIAGNOSTICS").is_some();
     let mut retained = RAW_SIZE_PROBES
         .iter()
         .map(|&size| measure(size))
         .collect::<Result<Vec<_>, _>>()?;
+    let mut measured = retained.len();
     let minimum_coverage = retained[0].coverage;
     let maximum_coverage = retained.last().unwrap().coverage;
     let span = maximum_coverage - minimum_coverage;
     let mut pending = retained
         .windows(2)
-        .map(|pair| (pair[0], pair[1]))
+        .map(|pair| (pair[0], pair[1], 0_usize))
         .collect::<Vec<_>>();
     while !pending.is_empty() {
         let mut next = Vec::new();
-        for (left, right) in pending {
+        let pending_count = pending.len();
+        for (left, right, depth) in pending {
             let midpoint = (left.size + right.size) / 2.0;
             if midpoint <= left.size || midpoint >= right.size {
                 return Err(EvaluationError::new(
@@ -631,6 +634,7 @@ fn fit_raw_curve_from_measure(
                 ));
             }
             let middle = measure(midpoint)?;
+            measured += 1;
             if middle.coverage + 0.005 * span < left.coverage
                 || right.coverage + 0.005 * span < middle.coverage
             {
@@ -656,6 +660,21 @@ fn fit_raw_curve_from_measure(
                 .min(maximum_coverage - middle.coverage)
                 .max(0.0001 * span);
             let tolerance = (0.0001 * span).min(0.02 * edge);
+            if diagnostics {
+                eprintln!(
+                    "reference interval: left={:.17} middle={:.17} right={:.17} coverage=[{:.17},{:.17},{:.17}] residual={:.17} tolerance={:.17} depth={depth} split={} retained={} measured={measured} pending={pending_count}",
+                    left.size,
+                    middle.size,
+                    right.size,
+                    left.coverage,
+                    middle.coverage,
+                    right.coverage,
+                    (middle.coverage - predicted).abs(),
+                    tolerance,
+                    (middle.coverage - predicted).abs() > tolerance,
+                    retained.len(),
+                );
+            }
             if (middle.coverage - predicted).abs() > tolerance {
                 if retained.len() >= MAX_RAW_KNOTS {
                     return Err(EvaluationError::new(
@@ -664,8 +683,8 @@ fn fit_raw_curve_from_measure(
                     ));
                 }
                 retained.push(middle);
-                next.push((left, middle));
-                next.push((middle, right));
+                next.push((left, middle, depth + 1));
+                next.push((middle, right, depth + 1));
             }
         }
         pending = next;
@@ -707,6 +726,14 @@ impl FrozenCoverageProbe {
             is_cancelled,
         )
         .map_err(EvaluationError::from_render)?;
+        if std::env::var_os("TONIATOR_CALIBRATION_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "reference measurement: size={size:.17} precision={precision:?} coverage={:.17} vertices={} seconds={:.6}",
+                measured.fraction,
+                measured.vertices,
+                started.elapsed().as_secs_f64(),
+            );
+        }
         Ok(RawCoveragePoint {
             size,
             coverage: measured.fraction,
@@ -1117,7 +1144,7 @@ pub fn calibrate_saved_binding(
         } else {
             CALIBRATION_PROFILE
         };
-        SavedCalibration::with_profile(profile.to_owned(), binding.clone(), knots, uniform)
+        SavedCalibration::with_profile(binding.profile_for_reference(profile), binding.clone(), knots, uniform)
             .map_err(EvaluationError::from_domain)
     }
 }
@@ -1964,8 +1991,12 @@ mod tests {
     /// Measures a concrete built-in Pattern once and attaches its validated raw result.
     ///
     /// # Panics
-    /// Panics if the fixed reference fails convergence or differs from checked-in numbers beyond
-    /// serialization precision.
+    /// Panics if the fixed reference fails convergence or changes the stored profile/knots.
+    /// Coverage stays numerically equivalent within absolute 1e-12: the same geometric profile
+    /// can round differently when Boolean union and clipping share one operation. This test
+    /// bound does not change fitter, inverse, transfer, or area acceptance gates or stored bytes.
+    /// Input comparison retains its original 1e-15 serialization bound; zero/full membership
+    /// stays exact at every knot so absolute inverse plateaus retain their authority.
     #[test]
     fn saved_default_calibration_is_attachable() {
         let document = toniator_domain::Document::new_default_document(
@@ -1998,16 +2029,17 @@ mod tests {
             .saved_calibration_for(toniator_domain::ChannelId(1))
             .unwrap()
             .unwrap();
+        assert_eq!(saved.profile(), checked_in.profile());
+        assert_eq!(saved.binding(), checked_in.binding());
         assert_eq!(saved.raw().len(), checked_in.raw().len());
+        assert_eq!(saved.raw().first(), checked_in.raw().first());
+        assert_eq!(saved.raw().last(), checked_in.raw().last());
         for (measured, stored) in saved.raw().iter().zip(checked_in.raw()) {
+            assert!((measured.input - stored.input).abs() <= 1e-15);
+            assert_eq!(measured.coverage == 0.0, stored.coverage == 0.0);
+            assert_eq!(measured.coverage == 1.0, stored.coverage == 1.0);
             assert!(
-                (measured.input - stored.input).abs() <= 1e-15,
-                "{}: stored input={}",
-                measured.input,
-                stored.input
-            );
-            assert!(
-                (measured.coverage - stored.coverage).abs() <= 1e-15,
+                (measured.coverage - stored.coverage).abs() <= 1e-12,
                 "{}: measured={} stored={}",
                 measured.input,
                 measured.coverage,
@@ -2018,7 +2050,6 @@ mod tests {
             .with_saved_calibration(toniator_domain::ChannelId(1), saved)
             .unwrap();
     }
-
     /// Measures both raw and Uniform payloads for one eligible authored Even marks recipe.
     ///
     /// # Panics

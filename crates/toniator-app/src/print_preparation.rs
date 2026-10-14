@@ -18,7 +18,7 @@ use toniator_domain::{
 };
 use toniator_engine::{
     EvaluationLimits, MediaTools, OutputRasterTarget, RasterAntialiasing, RasterBackground,
-    RasterSurface, open_source_media,
+    RasterSurface, StreamingRasterTarget, open_source_media,
     print_preflight::{
         PreflightLimits, PreflightRasterOutcome, PreflightRasterReport, PreflightSelection,
         preflight_current_frame_with_raster,
@@ -46,7 +46,7 @@ impl BackgroundChoice {
 /// Runtime PNG intent shared by the real exporter and optional preflight check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct OutputSelection {
-    pub(crate) target: OutputRasterTarget,
+    pub(crate) target: StreamingRasterTarget,
     pub(crate) antialiasing: RasterAntialiasing,
     pub(crate) background: BackgroundChoice,
     /// Explicit PNG-only garment preparation; a collapsed section never changes this value.
@@ -97,15 +97,35 @@ impl OutputSelection {
         self.background.resolve(session.document().channel_model())
     }
 
-    /// Projects applied document print intent and runtime output intent into engine selection.
-    fn preflight(self, capture: &ExportCapture) -> PreflightSelection {
-        PreflightSelection {
+    /// Admits only a complete-raster consumer without changing the retained PNG selection.
+    /// # Errors
+    /// Returns the unchanged full-raster resource diagnostic.
+    pub(crate) fn raster_target(self) -> Result<OutputRasterTarget, String> {
+        OutputRasterTarget::new(self.target.width(), self.target.height())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Checks optional global cleanup independently of preview or report memory budgets.
+    /// # Errors
+    /// Returns actionable correction-specific admission errors; ordinary PNG ignores stored widths.
+    pub(crate) fn admit_export(self) -> Result<(), String> {
+        if self.prepare_for_print {
+            self.cleanup.admit_pixels(self.target.pixel_count())?;
+        }
+        Ok(())
+    }
+
+    /// Projects admitted applied intent into the existing full-raster advisory authority.
+    /// # Errors
+    /// Returns full-raster admission errors without changing final PNG dimensions.
+    fn preflight(self, capture: &ExportCapture) -> Result<PreflightSelection, String> {
+        Ok(PreflightSelection {
             frame: capture.frame,
-            target: self.target,
+            target: self.raster_target()?,
             antialiasing: self.antialiasing,
             selected_background: self.background_for(&capture.session),
             settings: capture.session.document().print_preparation().clone(),
-        }
+        })
     }
 }
 
@@ -173,7 +193,7 @@ impl CheckJob {
     pub(crate) fn run(self) -> CheckCompletion {
         let result = (|| {
             let capture = &self.request.capture;
-            let selection = self.request.selection.preflight(capture);
+            let selection = self.request.selection.preflight(capture)?;
             let mut media = open_source_media(&capture.sources, MediaTools::default(), &|| {
                 self.cancelled.load(Ordering::Acquire)
             })
@@ -316,7 +336,9 @@ impl Controller {
         let pixels = u64::from(selection.target.width())
             .checked_mul(u64::from(selection.target.height()))
             .and_then(|pixels| pixels.checked_mul(4));
-        if pixels.is_none_or(|bytes| bytes > MAX_RETAINED_BYTES) {
+        if pixels.is_none_or(|bytes| bytes > MAX_RETAINED_BYTES)
+            || selection.raster_target().is_err()
+        {
             self.invalidate();
             self.status = Some(CheckStatus::Unavailable);
             self.unavailable_reason =
@@ -616,7 +638,7 @@ mod tests {
     /// Resolves ordinary PNG defaults with no physical intent or viewer backdrop dependency.
     fn selection() -> OutputSelection {
         OutputSelection {
-            target: OutputRasterTarget::new(64, 48).unwrap(),
+            target: StreamingRasterTarget::new(64, 48).unwrap(),
             antialiasing: RasterAntialiasing::On,
             background: BackgroundChoice::Automatic,
             prepare_for_print: false,
@@ -829,7 +851,7 @@ mod tests {
     fn oversized_review_is_unavailable_without_downsampling() {
         let history = history();
         let mut selected = selection();
-        selected.target = OutputRasterTarget::new(5000, 5000).unwrap();
+        selected.target = StreamingRasterTarget::new(5000, 5000).unwrap();
         let mut controller = Controller::default();
         assert!(controller.request(capture(&history, 7), selected).is_none());
         assert_eq!(controller.status(), CheckStatus::Unavailable);
@@ -900,7 +922,7 @@ mod tests {
                 workspace_generation: 7,
             };
             let mut selected = selection();
-            selected.target = OutputRasterTarget::new(64, 24).unwrap();
+            selected.target = StreamingRasterTarget::new(64, 24).unwrap();
             let mut controller = Controller::default();
             let job = controller.request(capture.clone(), selected).unwrap();
             let old_id = job.id;
@@ -949,7 +971,7 @@ mod tests {
                     ..live(&capture)
                 })),
                 "target" => {
-                    selected.target = OutputRasterTarget::new(65, 24).unwrap();
+                    selected.target = StreamingRasterTarget::new(65, 24).unwrap();
                     controller.select(selected);
                 }
                 "aa" => {

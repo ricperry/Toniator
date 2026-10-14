@@ -522,7 +522,7 @@ mod tests {
         assert!(
             document
                 .materialize_frame(0)
-                .unwrap()
+                .unwrap().document()
                 .modeled_channel(toniator_domain::ChannelId(1))
                 .is_some()
         );

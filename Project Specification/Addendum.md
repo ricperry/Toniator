@@ -514,6 +514,15 @@ explicit same-document filter inputs, premultiplied-RGBA arithmetic, and
 viewer blending, ordinary source-over for RGB/CMYK, or an embedded raster
 substitute.
 
+Final SVG serialization joins maximal contiguous runs of fully opaque geometry
+with channel-owned solid paint within each channel as editable NonZero compound
+paths. Each primitive retains its own filled meaning before joining; preserve
+exact circles and certified simple curves, and normalize other fill topology
+per primitive under explicit precision, work-limit, and cancellation checks.
+Per-primitive sampled paint and translucent geometry retain their original
+ordered vector primitives. This final-consumer operation does not change the
+canonical scene, Pattern geometry, calibration, preview, or raster output.
+
 ### 4.6 Preview backdrop and export background
 
 Preview backdrop is viewer-only presentation. Default viewer policy is black
@@ -1728,17 +1737,24 @@ artifact stores a versioned geometry profile, typed ID-free structural binding,
 and monotone raw `C(size)` observations over `0..=2`. Eligible marks also store
 the dimensionless Uniform full-tone radius and survival inverse, regardless of
 the response mode selected when measured. The binding includes effective
-connected-stroke bias, shape rotation, and guide aspect where those affect
-coverage; it excludes scalar Density/Feature size, artwork, source tone and
-paint, whole-Pattern placement/rotation, and Advanced response range, sampling,
-mode, and artistic scale. A channel may reuse an artifact from another channel
-only when its complete typed binding matches.
+connected-stroke bias and guide aspect where those affect coverage. Measured
+shape rotation remains a field in the saved binding as immutable provenance,
+without a format change; all other static binding fields require exact
+compatibility. Compatibility ignores the
+effective individual Shape rotation. Static and animated Shape rotation retain
+the assignment's saved artifact: changed overlap and tone are intentional;
+explicit nonoverlap remains enforced. The binding excludes scalar
+Density/Feature size, artwork, source tone and paint, whole-Pattern
+placement/rotation, and Advanced response range, sampling, mode, and artistic
+scale. Each channel independently owns its artifact, even when measured
+bindings are equal. A compatible donor may fill a missing assignment during
+guarded publication; it never replaces an existing compatible assignment.
 Scatter site, randomized connection, and maze variation seed values are excluded
 from that binding. The saved reference uses fixed seed `43` for each such field;
 the authored seed remains in the Pattern and still changes its generated
 geometry. Seed-bearing bindings use distinct seed-neutral v5 strict or mean
-profiles, while seed-free v4 measurements remain current except for the revised
-Guide Faces producer described below. Cross-seed response is
+profiles, while seed-free v4 measurements remain current except for the typed
+producer revisions described below. Cross-seed response is
 statistical: representative alternate-seed checks are acceptance evidence, not
 a guarantee for every `u32` seed or individual render.
 
@@ -1747,10 +1763,28 @@ Pattern binding, even when no currently modeled channel uses it. Named channel
 edits cannot erase that companion. A later model replacement may rebind it to
 new channels without measuring. A structural change to the ALL binding must
 prepare its missing companion alongside changed active bindings before
-publication. Named Recalibrate forces only its selected binding and fills a
-missing ALL companion; ALL Recalibrate forces all distinct active bindings and
-the ALL companion. Equivalent bindings share one measurement and one atomic
-history result. Project and Document Preset persistence retain this companion.
+publication. Named Recalibrate updates only the selected channel and preserves
+all other channel assignments and an existing ALL companion; it may fill a
+missing ALL companion. ALL Recalibrate updates every active channel and the
+ALL companion. Fresh measurement may deduplicate exact current bindings, but
+publication enumerates the intended recipients explicitly. One atomic history
+result retains every independently assigned numeric artifact in project and
+Document Preset persistence.
+
+Animation contains eligible continuous overrides only, never structural or
+discrete keyframes. Every materialized frame retains Start's exact assigned
+artifacts, including animated guide aspect and connected-stroke bias. This
+exception belongs only to immutable domain frame authority consumed by
+preview and export. A borrowed or cloned ordinary document gains no exception;
+ordinary static aspect/bias edits remain incompatible and require measurement.
+Materialization never fits, donates, or fills missing assignments.
+
+When an effective Shape rotation trajectory is nonconstant, End frame presents
+this dedicated warning near its controls and in its explanatory tooltip:
+“Rotating marks can change overlap and tone. The saved calibration stays fixed.”
+A full 0→360 turn qualifies. Base and named delta trajectories are evaluated
+with their easing; exact cancellation suppresses the warning. This description
+never replaces an error or progress message.
 
 Ordinary preview, PNG, SVG, reopening, and nonstructural edits use the saved
 artifact without entering a fitter. A missing, stale, or unsupported artifact
@@ -1760,7 +1794,7 @@ publishes the structure and all required artifact replacements as one guarded,
 undoable result; cancellation or a stale revision publishes neither. Neutral
 Wizard structural previews remain disposable and do not fit per edit. The
 source-independent fixed reference does not infer a transfer artifact for an
-unmeasured family, shape, or rotation.
+unmeasured family or shape.
 
 Advanced Variable mark, connected-stroke, and region response endpoints now
 express **desired absolute geometric coverage** in `0..=1`, for every supported
@@ -1775,8 +1809,8 @@ Uniform marks keep their separate 99.9% full-tone footprint and survival
 inverse. Source mapping, cutoff, alpha suppression, paint, contextual mode, and
 strict nonoverlap retain their existing authorities. Calibration probes use an
 explicit transient raw-size request; no ordinary document field temporarily
-stores a raw size in a coverage-valued response slot. Raw geometry profiles
-and their fixed reference populations remain unchanged.
+stores a raw size in a coverage-valued response slot. Raw geometry profiles retain their fixed reference populations; the producer
+revisions described below require matching numeric provenance.
 
 The fixed 1024-square reference first fits 32 nominal spacings and checks an
 independent 64-spacing population. Only a population-convergence failure may
@@ -1809,6 +1843,22 @@ artifact. A former
 numeric profile in a recognized source-free Document Preset is discarded during
 conversion so the destination can recalibrate before publication; current
 projects still reject that obsolete profile.
+Corrected convex-linear UniformOffset insets intersect their shifted inward
+edge half-planes: vanished edges disappear and a consumed polygon stays empty.
+Outward RegionRound construction remains unchanged. Authored open guides derive
+one shape-preserving scale from the stable canvas frame, independent of Feature
+size and generation padding. Bounded endpoint rays provide required off-canvas
+coverage, retaining tangent continuity where a finite bounded continuation is
+possible; the original scaled authored interior and repetition pitch remain fixed.
+Affected saved profiles append the applicable typed producer marker. When both
+apply, the canonical order is `+guide-span-v2` followed by `+convex-inset-v3`. Only formerly valid unmarked companions for
+those typed producers are obsolete. Ordinary projects reject them; supported
+source-free Document Presets discard only that numeric companion and recalibrate
+before publication, preserving authored Start/End intent and original bytes.
+Current-format standalone Pattern Presets may likewise omit their recognized
+obsolete optional companion and require recalibration before structural apply.
+Unaffected geometry profiles and numeric artifacts retain their meaning.
+
 Current seed-free strict geometry profiles are v4 at both 32/64 and 64/128
 tiers except Guide Faces; seed-bearing strict and 32+64 mean profiles are
 seed-neutral v5. Guide Faces producer contract v2 canonicalizes provenance-linked

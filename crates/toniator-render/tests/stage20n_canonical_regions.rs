@@ -59,6 +59,9 @@ fn direct_region_scene(width: f64, height: f64) -> RenderScene {
 }
 
 /// Proves raster and SVG consumers fill an already-closed canonical region without topology repair.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn canonical_regions_fill_with_final_canvas_clipping_only() {
     let ring = CurvePath::polyline(
@@ -109,7 +112,8 @@ fn canonical_regions_fill_with_final_canvas_clipping_only() {
     assert_eq!(raster.width(), 4);
     assert_eq!(raster.height(), 4);
     assert!(raster.pixels().chunks_exact(4).all(|pixel| pixel[3] > 0));
-    assert!(write_svg(&scene).contains("fill-rule=\"nonzero\""));
+    assert!(write_svg(&scene).expect("SVG serialization")
+            .contains("fill-rule=\"nonzero\""));
 }
 
 /// Proves ordered output IDs are validated and every region output participates in native raster filling.
@@ -197,6 +201,9 @@ fn ordered_region_outputs_validate_identity_and_raster_in_painter_order() {
 }
 
 /// Generates the deterministic Stage 20N direct-region native and SVG artifacts under `target`.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 #[ignore = "validation artifact generator"]
 fn generate_direct_region_intrinsic_artifacts() {
@@ -215,7 +222,7 @@ fn generate_direct_region_intrinsic_artifacts() {
             encode_png(&raster).expect("PNG"),
         )
         .expect("native region PNG");
-        std::fs::write(output.join(format!("{name}.svg")), write_svg(&scene))
+        std::fs::write(output.join(format!("{name}.svg")), write_svg(&scene).expect("SVG serialization"),)
             .expect("direct region SVG");
     }
 }

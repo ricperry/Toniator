@@ -130,6 +130,9 @@ fn maze_stroke() -> CanonicalStroke {
 }
 
 /// Proves connection renderers consume the canonical outline directly with matching SVG/PNG presence.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn connection_stroke_svg_and_png_share_one_canonical_direct_outline() {
     let scene = RenderScene::new(
@@ -156,7 +159,7 @@ fn connection_stroke_svg_and_png_share_one_canonical_direct_outline() {
         ],
     )
     .expect("connection scene");
-    let svg = write_svg(&scene);
+    let svg = write_svg(&scene).expect("SVG serialization");
     let png = rasterize(&scene, RasterBackground::Transparent).expect("connection PNG");
     assert!(svg.contains("fill-rule=\"nonzero\""));
     assert!(svg.contains("<path "));
@@ -165,6 +168,9 @@ fn connection_stroke_svg_and_png_share_one_canonical_direct_outline() {
 
 /// Proves SVG and PNG consume a typed maze wall's direct canonical outline without introducing a
 /// renderer-side maze interpretation or a separate raster path.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn maze_wall_stroke_svg_and_png_share_one_canonical_direct_outline() {
     let scene = RenderScene::new(
@@ -191,7 +197,7 @@ fn maze_wall_stroke_svg_and_png_share_one_canonical_direct_outline() {
         ],
     )
     .expect("maze wall scene");
-    let svg = write_svg(&scene);
+    let svg = write_svg(&scene).expect("SVG serialization");
     let png = rasterize(&scene, RasterBackground::Transparent).expect("maze wall PNG");
     assert!(svg.contains("fill-rule=\"nonzero\""));
     assert!(svg.contains("<path "));
@@ -232,6 +238,9 @@ fn structural_stroke_scene_fingerprint_remains_exact() {
 }
 
 /// Proves SVG writes direct nonzero outline paths and keeps off-canvas canonical geometry intact.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn stroke_outline_is_directly_painted_and_canonical_geometry_remains_offcanvas() {
     let canonical_stroke = stroke(4.0);
@@ -259,7 +268,7 @@ fn stroke_outline_is_directly_painted_and_canonical_geometry_remains_offcanvas()
         vec![layer],
     )
     .expect("scene");
-    let svg = write_svg(&scene);
+    let svg = write_svg(&scene).expect("SVG serialization");
     assert!(svg.contains("fill-rule=\"nonzero\""));
     assert!(!svg.contains("stroke-0-clip"));
     assert!(!svg.contains("<rect id=\"channel-1-stroke"));
@@ -303,7 +312,7 @@ fn stroke_outline_is_directly_painted_and_canonical_geometry_remains_offcanvas()
         vec![offcanvas, partial],
     )
     .expect("scene");
-    let culled_svg = write_svg(&culled);
+    let culled_svg = write_svg(&culled).expect("SVG serialization");
     assert!(!culled_svg.contains("channel-2-stroke-0"));
     assert!(culled_svg.contains("channel-3-stroke-0"));
 }

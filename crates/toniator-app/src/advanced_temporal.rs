@@ -116,6 +116,7 @@ pub(super) fn display_document(
         temporal_preview::Endpoint::Start => Ok(document.clone()),
         temporal_preview::Endpoint::End => document
             .materialize_frame(endpoint.frame(document))
+            .map(|frame| frame.document().clone())
             .map_err(|error| error.to_string()),
     }
 }
@@ -1225,7 +1226,7 @@ mod tests {
         assert_eq!(
             main.document()
                 .materialize_frame(0)
-                .unwrap()
+                .unwrap().document()
                 .pattern_definition_bundles(),
             document.pattern_definition_bundles()
         );

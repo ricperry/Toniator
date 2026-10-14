@@ -143,6 +143,9 @@ fn submit_and_accept(
 
 /// Confirms scheduled diagnostics match synchronous results for both immutable
 /// source formats without granting test code a second evaluation authority.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn scheduled_raster_and_svg_baselines_match_synchronous_results_exactly() {
     for (path, format, source_hash) in [
@@ -196,8 +199,9 @@ fn scheduled_raster_and_svg_baselines_match_synchronous_results_exactly() {
             synchronous.raster().pixels(),
         );
         assert_eq!(
-            toniator_engine::write_svg(cached.result().unwrap().scene()),
-            toniator_engine::write_svg(synchronous.scene()),
+            toniator_engine::write_svg(cached.result().unwrap().scene())
+                .expect("SVG serialization"),
+            toniator_engine::write_svg(synchronous.scene()).expect("SVG serialization"),
         );
         scheduler.shutdown().unwrap();
     }

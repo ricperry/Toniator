@@ -182,12 +182,16 @@ fn preview_target_rerasterizes_geometry_without_changing_native_raster() {
         "output-space AA must remain a narrow edge band"
     );
 }
+/// Proves PNG antialiasing and dimensions leave canonical scene and SVG authority unchanged.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 
 #[test]
 fn png_antialiasing_and_output_target_are_final_consumer_only() {
     let scene = scene(true, color(1.0, 0.0, 0.0, 1.0), 1.0);
     let identity = scene.identity().clone();
-    let svg = write_svg(&scene);
+    let svg = write_svg(&scene).expect("SVG serialization");
     let accepted = rasterize(&scene, RasterBackground::Transparent).unwrap();
     let explicit_on = rasterize_output(
         &scene,
@@ -236,7 +240,7 @@ fn png_antialiasing_and_output_target_are_final_consumer_only() {
     );
     assert_eq!((resized.width(), resized.height()), (20, 16));
     assert_eq!(scene.identity(), &identity);
-    assert_eq!(write_svg(&scene), svg);
+    assert_eq!(write_svg(&scene).expect("SVG serialization"), svg);
     assert_eq!(
         rasterize(&scene, RasterBackground::Transparent).unwrap(),
         accepted
@@ -373,6 +377,10 @@ fn preview_letterbox_clips_crossing_guard_marks_to_transformed_canvas_for_all_mo
         );
     }
 }
+/// Proves scene validation preserves ordered geometry and fingerprints presentation changes.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 
 #[test]
 fn scene_validates_order_preserves_geometry_and_includes_presentation_in_identity() {
@@ -411,8 +419,8 @@ fn scene_validates_order_preserves_geometry_and_includes_presentation_in_identit
             changed.identity().scene_fingerprint()
         );
     }
-    let first_svg = write_svg(&first);
-    let color_svg = write_svg(&color_only);
+    let first_svg = write_svg(&first).expect("SVG serialization");
+    let color_svg = write_svg(&color_only).expect("SVG serialization");
     assert!(first_svg.contains("family=family;realization=realization;scene="));
     assert!(color_svg.contains("family=family;realization=realization;scene="));
     assert!(!color_svg.contains(first.identity().scene_fingerprint()));
@@ -437,6 +445,10 @@ fn scene_validates_order_preserves_geometry_and_includes_presentation_in_identit
     );
     assert!(unordered.is_err());
 }
+/// Proves raster and SVG consumers preserve channel painter order and visibility.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 
 #[test]
 fn multi_layer_order_visibility_and_source_over_are_preserved() {
@@ -510,7 +522,7 @@ fn multi_layer_order_visibility_and_source_over_are_preserved() {
         pixel[2] > pixel[0],
         "later blue source-over layer is visible"
     );
-    let svg = write_svg(&first);
+    let svg = write_svg(&first).expect("SVG serialization");
     assert!(svg.find("channel-9").unwrap() < svg.find("channel-2").unwrap());
     assert!(!svg.contains("channel-3"));
 }
@@ -654,6 +666,10 @@ fn backgrounds_visibility_effective_alpha_and_color_boundaries_are_explicit() {
         "consumer-only background selection never changes the scene identity"
     );
 }
+/// Proves deterministic SVG serialization applies final canvas clipping and linear-to-sRGB paint.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 
 #[test]
 fn svg_is_deterministic_clipped_and_uses_linear_to_srgb_color() {
@@ -666,7 +682,8 @@ fn svg_is_deterministic_clipped_and_uses_linear_to_srgb_color() {
             alpha: 1.0,
         },
         0.72,
-    ));
+    ))
+    .expect("SVG serialization");
     assert!(svg.contains("width=\"10\" height=\"8\" viewBox=\"0 0 10 8\""));
     assert!(svg.contains("<clipPath id=\"canvas-clip\""));
     assert!(svg.contains("fill=\"#00b7ff\" fill-opacity=\"0.72\""));
@@ -983,6 +1000,9 @@ fn modeled_single_layer_matches_accepted_stage5_transparent_pixels() {
 }
 
 /// Verifies modeled SVG retains one ordered editable canvas and model-specific presentation.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn modeled_svg_is_one_editable_canvas_with_ordered_vector_channel_groups() {
     let rgb = write_svg(&modeled(
@@ -991,7 +1011,8 @@ fn modeled_svg_is_one_editable_canvas_with_ordered_vector_channel_groups() {
             solid(1, color(1.0, 0.0, 0.0, 1.0), 1.0),
             solid(2, color(0.0, 1.0, 0.0, 1.0), 1.0),
         ],
-    ));
+    ))
+    .expect("SVG serialization");
     assert!(rgb.contains("<title>Toniator RGB halftone</title>"));
     assert_eq!(rgb.matches("clip-path=").count(), 1);
     assert!(
@@ -1020,7 +1041,8 @@ fn modeled_svg_is_one_editable_canvas_with_ordered_vector_channel_groups() {
             solid(4, color(0.0, 1.0, 1.0, 1.0), 1.0),
             solid(5, color(1.0, 0.0, 1.0, 1.0), 1.0),
         ],
-    ));
+    ))
+    .expect("SVG serialization");
     assert!(cmyk.contains("<title>Toniator CMYK halftone</title>"));
     assert!(cmyk.contains("<g id=\"cmyk-composition\" filter=\"url(#cmyk-fixed-transmittance)\">"));
     assert!(cmyk.contains("<filter id=\"cmyk-fixed-transmittance\""));
@@ -1043,7 +1065,8 @@ fn modeled_svg_is_one_editable_canvas_with_ordered_vector_channel_groups() {
             )
             .unwrap(),
         ],
-    ));
+    ))
+    .expect("SVG serialization");
     assert!(source_color.contains("<title>Toniator source-colored halftone</title>"));
     assert_eq!(source_color.matches("clip-path=").count(), 1);
     assert!(
@@ -1247,6 +1270,9 @@ fn immutable_project_assets_decode_and_vector_rasterizes_without_claiming_model_
 }
 
 /// Verifies one opaque modeled SVG secondary against native and Inkscape rendering.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 fn assert_opaque_editable_secondary(
     scene: &RenderScene,
     svg_path: &std::path::Path,
@@ -1256,7 +1282,7 @@ fn assert_opaque_editable_secondary(
     tolerance: u8,
     visible_ids: &[&str],
 ) {
-    fs::write(svg_path, write_svg(scene)).unwrap();
+    fs::write(svg_path, write_svg(scene).expect("SVG serialization")).unwrap();
     let native = rasterize(scene, RasterBackground::Transparent).unwrap();
     fs::write(native_path, encode_png(&native).unwrap()).unwrap();
     export_inkscape(svg_path, inkscape_path);
@@ -1278,6 +1304,9 @@ fn assert_opaque_editable_secondary(
 }
 
 /// Verifies an invisible channel retains serialized geometry without contributing pixels.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 fn assert_invisible_channel_is_editable_but_hidden(
     scene: &RenderScene,
     svg_path: &std::path::Path,
@@ -1286,7 +1315,7 @@ fn assert_invisible_channel_is_editable_but_hidden(
     hidden_mark_id: &str,
     expected_center: [u8; 4],
 ) {
-    let svg = write_svg(scene);
+    let svg = write_svg(scene).expect("SVG serialization");
     assert!(svg.contains("<g id=\"canvas\" clip-path=\"url(#canvas-clip)\""));
     assert!(svg.contains(hidden_group));
     assert!(svg.contains(&format!("id=\"{hidden_mark_id}\"")));
@@ -1315,6 +1344,9 @@ fn assert_invisible_channel_is_editable_but_hidden(
 }
 
 /// Verifies fractional CMYK SVG output follows native fixed transmittance within renderer rounding.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 fn assert_fractional_svg_parity(
     scene: &RenderScene,
     svg_path: std::path::PathBuf,
@@ -1323,7 +1355,7 @@ fn assert_fractional_svg_parity(
     expected_native: [u8; 4],
     tolerance: u8,
 ) {
-    fs::write(&svg_path, write_svg(scene)).unwrap();
+    fs::write(&svg_path, write_svg(scene).expect("SVG serialization")).unwrap();
     let native = rasterize(scene, RasterBackground::Transparent).unwrap();
     fs::write(&native_path, encode_png(&native).unwrap()).unwrap();
     export_inkscape(&svg_path, &inkscape_path);
@@ -1351,6 +1383,10 @@ fn assert_pixel_within(actual: [u8; 4], expected: [u8; 4], tolerance: u8, contex
         );
     }
 }
+/// Compares native and Inkscape fractional output against separately specified compositor expectations.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 
 fn assert_fractional_svg_difference(
     scene: &RenderScene,
@@ -1360,7 +1396,7 @@ fn assert_fractional_svg_difference(
     expected_native: [u8; 4],
     expected_inkscape: [u8; 4],
 ) {
-    fs::write(&svg_path, write_svg(scene)).unwrap();
+    fs::write(&svg_path, write_svg(scene).expect("SVG serialization")).unwrap();
     let native = rasterize(scene, RasterBackground::Transparent).unwrap();
     fs::write(&native_path, encode_png(&native).unwrap()).unwrap();
     export_inkscape(&svg_path, &inkscape_path);

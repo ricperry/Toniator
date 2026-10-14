@@ -479,8 +479,10 @@ an entry does not authorize a later stage or change an accepted contract.
 
 ## TON-018 — Calibrate RGB and CMYK advanced settings for source-tone fidelity
 
-- Status: In progress as of 2026-10-11. Included with the accepted TON-013–17
+- Status: In progress as of 2026-10-13. Included with the accepted TON-013–17
   repairs in the published 0.4.1 prerelease at checkpoint `f3605cd`.
+  The verified completion round is included in the 0.4.2 release checkpoint;
+  see [release notes](docs/releases/v0.4.2.md).
   TON-018 itself is not accepted as complete; the remaining work below stays open.
 - Current behavior: Production stores one calibration per finished structural
   Pattern revision, persists it with the Pattern and in applied projects and
@@ -507,19 +509,95 @@ an entry does not authorize a later stage or change an accepted contract.
   was reviewed and the session stopped. Verification passed: `cargo build -p toniator-app -p toniator-cli --offline`.
   Scoped strict Clippy for render/app/CLI, the focused off-canvas circle
   witness, and `git diff --check` also pass. Automated Sway/wlroots evidence
-  does not establish human review or GNOME/Mutter acceptance. PNG
-  tiling is not implemented; the UI reports the 67,108,864-pixel cap.
-- Remaining: Eleven of fifteen personal Document Preset candidates converted
-  in isolation; four fail across three bindings: Confetti and Noisy Stained
-  Glass Uniform Offset (raw 2, seed 23), HexGridDotsAlignedRGB (128-knot cap),
-  and SkinnyCurve (convergence). Originals remain untouched; any later
-  conversion needs exact backups and hash guards. A user-approved opaque SVG
-  join has not begun, so the current SVG seam risk remains. The animation
-  response policy after structural edits is unanswered; do not infer it. Finish
-  broad GTK workflows and Pattern-family spot checks. Add a focused test for
-  multi-contour omission accounting; omission of a contour is a risk to
-  investigate, not a confirmed defect. The whole-primitive tiny-area guard is
-  implemented.
+  does not establish human review or GNOME/Mutter acceptance. This earlier
+  export-cap limitation is superseded by the streaming milestone below.
+- Final SVG milestone (2026-10-13): Opaque eligible runs join within each
+  channel, and final canvas intersection retains original/restricted cubics,
+  analytic circle arcs, winding, and sampled/translucent ordering. Canonical
+  scenes, calibration, native raster output, and animation are unchanged.
+  Guide SVG size falls 11.07% (38,031,722 → 33,822,698 bytes); vector-source SVG
+  falls 26.02% (13,802,174 → 10,211,410 bytes). A straight-rail encoding that
+  introduced three opaque faint-line spikes was removed. Thirteen integration
+  tests, two clipping tests, actual app export/cancellation checks, final app/CLI
+  builds, and renderer strict Clippy pass; parent inspected native/consumer
+  artifacts. See the [final report](target/validation/ton018-svg-canvas-20261013/README.md).
+  Two inherited Inkscape alpha-1→255 pixels remain at `(284,10)` and `(504,556)`;
+  this is not exact consumer parity or full TON-018 acceptance. Prior private
+  AT-SPI export-action evidence does not establish destination completion;
+  the chooser did not appear and the private session is stopped.
+- Calibration and personal Preset milestone, verified 2026-10-13: all three
+  blockers are fixed with unchanged accuracy criteria. Convex insets no longer
+  reappear after collapse; HexGrid fits within the new 144-knot bound; authored
+  open-guide shape stays stable across Feature size with endpoint coverage.
+  All fifteen personal Presets are converted, installed, and reopened, with
+  exact original-byte backups and hash guards. Both-source/default/fine and
+  representative native output checks pass (38 inspected renders across the
+  repair/conversion stages). See the [conversion report](target/validation/ton018-personal-presets-20261013/README.md).
+- Native regression milestone (2026-10-13): the partial-contour omission
+  accounting defect is fixed. All 64 current default/fine family cases render;
+  all 63 available prior outputs remain decoded-RGBA identical. The fine-vector
+  Two-Guide Maze rounding loop is repaired with bounded checked retries and
+  cooperative cancellation, retaining the existing fill-error budget. Focused
+  tests, independent review and a clean app/CLI build pass. See the
+  [native repair report](target/validation/ton018-checked-boolean-20261013/README.md)
+  for resource-policy and synchronous-cancellation limits.
+- SVG-derived PNG remains unselected: tests lose faint coverage and reveal an
+  ordered SourceColorAlpha SVG composition discrepancy against required native
+  linear-light equations. Supersampling does not resolve those differences.
+  This consumer-fidelity finding remains open; see the
+  [comparison report](target/validation/ton018-svg-raster-comparison-20261013/README.md).
+- Built-in Preset milestone (2026-10-13): fourteen complete configurations are
+  embedded with tidy names, existing confirmation and one-Undo application.
+  Both-source tests and private GTK load/Undo/Redo pass; the reported rotated
+  RGB photo renders at Feature .25. A disposable scatter-preview spacing defect
+  is corrected. See the [report](target/validation/ton018-builtin-document-presets-20261013/README.md).
+- The edited Poisson/weighted-Lloyd fit succeeds after 157.78 seconds in the
+  diagnostic run; cumulative fitting work, not a union hang, explains the old
+  120-second test failure. One combined union/intersection yields the same
+  accepted profile and knot positions in an observed 118.03 seconds, with
+  witnessed numerical equivalence and unchanged product accuracy/storage rules.
+  Fresh structural calibration remains slow; internal Boolean cancellation
+  gaps remain. Real GTK publication/history verification is recorded below. See the
+  [calibration-union report](target/validation/ton018-calibration-union-20261013/README.md).
+- Static GTK completion (2026-10-13): real edited Poisson/Lloyd Apply finishes
+  in 116.24 seconds and publishes once. Fixed stale Review admission after
+  companion attachment, recoverable action states, and neutral Wizard visibility
+  across RGB/CMYK channels. Native history, both-source saved-companion reuse,
+  Advanced and seed workflows pass; parent inspected final frames. Build/Clippy
+  pass and private services are stopped. See the
+  [report](target/validation/ton018-gtk-static-completion-20261013/README.md)
+  for actual-fit versus saved-companion replay evidence and remaining limits.
+- Animation response milestone (2026-10-13): static/animated Shape rotation and
+  continuous frames retain exact saved assignments; named Recalibrate updates
+  only its channel and All updates every channel plus its baseline. End displays
+  the rotation warning, including full turns. Actual fitting/history/cancellation,
+  persistence, both-source native output, focused tests and clean builds pass.
+  Parent inspected the output and UI. Physical keyboard delivery remains
+  unverified in the private headless seat. See the
+  [report](target/validation/ton018-animation-response-20261013/README.md).
+- Authored-mark SVG rejection repaired: exact point-collapsed contours now
+  contribute no fill. Both failing projects export; positive subgrid/hole
+  guards remain. Focused tests, builds and parent visual inspection pass;
+  existing SVG-viewer/native color differences are unchanged. See the
+  [report](target/validation/ton018-svg-empty-20261013/README.md).
+- Large PNG headless foundation verified: exact pixel parity, atomic failure
+  handling, and actual 16384×9312 photo export pass. The photo uses about 2 GiB
+  peak process memory; bounded band buffers do not bound global geometry. See
+  the [report](target/validation/ton018-png-streaming-20261013/README.md).
+- Large PNG app/CLI integration verified: ordinary and zero-cleanup prepared
+  still exports stream atomically, retaining exact requested dimensions/DPI.
+  Preview and advisory Review limits no longer prevent valid large export;
+  nonzero global cleanup retains an explicit 32,000,000-pixel limit. Invalid
+  current fields cannot export a stale valid selection. Actual GTK photo and
+  CLI 16384×9312 outputs fully decode, with 300-DPI metadata for prepared output.
+  Both-source parity, cancellation, preview recovery, focused tests, independent
+  review, strict Clippy and final app/CLI build pass. Parent inspected output
+  and UI; private services are inactive. See the
+  [report](target/validation/ton018-png-export-integration-20261013/README.md).
+- Remaining: user review/acceptance of this completion round. Known limits are
+  fresh structural calibration time, dense geometry memory, SVG-consumer color
+  differences, documented cancellation gaps and private-seat keyboard evidence.
+  Video/sequence policy and the nonzero-cleanup limit are unchanged.
 
 ## TON-019 — Preview panning stalls during drag and appears to discard rendered areas
 
@@ -572,3 +650,30 @@ an entry does not authorize a later stage or change an accepted contract.
   before Apply. Record the exact intervening actions if immediate reopening
   does not reproduce the report. Keep this separate from TON-017's built-in
   direct-Apply and gallery-selection fixes.
+
+## TON-021 — Reduce off-canvas geometry construction while preserving complete canvas coverage
+
+- Status: Open; user-requested (2026-10-13); tracking only. No implementation
+  is authorized by this entry.
+- Report: Current SVG inspection exposes substantial geometry beyond the
+  visible canvas. The engine may construct more off-canvas geometry than is
+  necessary, increasing geometry counts, compute work, and memory use. This
+  is a potential optimization, not a confirmed algorithm diagnosis. Historical
+  expansion beyond the canvas ensured complete coverage and must remain
+  sufficient. The user's manual SVG intersection demonstrates output-size
+  savings; it does not establish an engine runtime or memory improvement.
+- Expected behavior when authorized: Generate only the geometry required for
+  complete canvas coverage, including edges and corners. Bounds must account
+  for rotation, stretch, offsets, mark sizes, stroke widths, and the required
+  neighbor/topology halo. Preserve authored spacing and density, seed
+  statistics, calibration, determinism, and complete off-canvas structural
+  neighborhoods wherever visible output depends on them.
+- Verification when authorized: Compare generated geometry counts, elapsed
+  time, and peak RSS against the existing implementation, alongside native
+  output parity. Exercise default and fine Feature sizes with both immutable
+  sample artworks, multiple Pattern families, and rotated, stretched, offset,
+  large-mark/stroke, and edge/corner boundary cases. Reduced work is acceptable
+  only with preserved complete coverage and current geometric semantics.
+- Scope: Keep this future construction optimization separate from TON-003's
+  general preview latency and TON-018's current final-SVG clipping. This entry
+  changes neither engine construction nor canonical geometry.

@@ -146,6 +146,7 @@ fn prepare(document: &Document, channels: &[ChannelId], edit: Edit) -> Result<Ch
             let end = document
                 .materialize_frame(temporal_preview::Endpoint::End.frame(document))
                 .map_err(|error| error.to_string())?;
+            let end = end.document();
             let mut edits = Vec::new();
             for channel in channels {
                 let mode = match &edit {
@@ -633,7 +634,8 @@ mod tests {
         execute(&mut history, &first, Edit::Hue(-720.0));
         execute(&mut history, &all, Edit::EndAlpha(0.314159265359));
         execute(&mut history, &first, Edit::Easing(Easing::SmoothStep));
-        let end = history.document().materialize_frame(2).unwrap();
+        let end_frame = history.document().materialize_frame(2).unwrap();
+        let end = end_frame.document();
         for channel in all {
             assert_eq!(end.solid_paint(channel).unwrap().alpha, 0.314159265359);
         }

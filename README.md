@@ -13,8 +13,8 @@ Built with Rust and GTK4, Toniator includes a visual Pattern Wizard, a personal
 Pattern library, and a headless command-line renderer. It is free software under
 the [GPL-3.0-only license](LICENSE).
 
-**Current prerelease: 0.4.1.**
-[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.4.1) ·
+**Current prerelease: 0.4.2.**
+[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.4.2) ·
 [Windows development build (0.3.2)](https://github.com/ricperry/Toniator/releases/tag/v0.3.2-windows-dev.20260927) ·
 [native Windows build instructions](docs/windows-build.md) ·
 [known issues](ISSUES.md).
@@ -36,7 +36,7 @@ See [example settings and reproduction commands](docs/examples/README.md).
 ## Download and run
 
 Download **one** of the x86_64 Linux packages from the
-[0.4.1 release](https://github.com/ricperry/Toniator/releases/tag/v0.4.1).
+[0.4.2 release](https://github.com/ricperry/Toniator/releases/tag/v0.4.2).
 Both include the graphical app and CLI, with application ID
 `io.github.ricperry.Toniator`.
 
@@ -52,8 +52,8 @@ until you have recovered any settings or personal Patterns you need.
 In the folder containing your download:
 
 ```bash
-chmod +x Toniator-0.4.1-x86_64.AppImage
-./Toniator-0.4.1-x86_64.AppImage
+chmod +x Toniator-0.4.2-x86_64.AppImage
+./Toniator-0.4.2-x86_64.AppImage
 ```
 
 The AppImage's recorded minimum glibc version is in the attached
@@ -62,7 +62,7 @@ broad distribution compatibility is not established. If FUSE mounting is
 unavailable, run it with:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.1-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.2-x86_64.AppImage
 ```
 
 ### Flatpak
@@ -70,7 +70,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.1-x86_64.AppImage
 With Flatpak installed, run:
 
 ```bash
-flatpak install --user ./Toniator-0.4.1-x86_64.flatpak
+flatpak install --user ./Toniator-0.4.2-x86_64.flatpak
 flatpak run io.github.ricperry.Toniator
 ```
 
@@ -87,7 +87,7 @@ Download `SHA256SUMS` alongside the packages to verify their integrity with
 
 The separate [Windows development release](https://github.com/ricperry/Toniator/releases/tag/v0.3.2-windows-dev.20260927)
 contains unsigned portable GUI and CLI binaries built as version 0.3.2. It is
-not a Windows build of this 0.4.1 prerelease; no 0.4.1 Windows package is
+not a Windows build of this 0.4.2 prerelease; no 0.4.2 Windows package is
 provided. To build the current source natively with MSVC and without WSL, follow
 the [Windows build instructions](docs/windows-build.md). The portable package
 has no installer or signing, and video tools require the optional
@@ -179,6 +179,11 @@ clusters. Turning relaxation off retains its settings for later use.
 Use the header information button, **About Toniator** in the menu, or **F1** for
 the version, license, user guide, source code, and issue-reporting links.
 
+**New → Select preset…** offers fourteen built-in document configurations.
+Selection uses the normal confirmation and applies all channel settings in one
+undoable change while preserving your artwork, canvas, and project identity.
+The built-in collection is independent of your personal Preset files.
+
 **New → Save preset** saves the whole design configuration
 as a source-free `.toniator-preset`. **Load preset...** accepts that format or an
 intact `.toniator` project, applies all channel settings, and keeps your current
@@ -193,6 +198,12 @@ PNG exports offer background, antialiasing, and **1x, 2x, 4x, 8x, or Custom**
 output sizes based on the document canvas, independent of preview zoom. SVG
 exports keep a transparent background. RGB PNG defaults to black, CMYK to
 white, and source-color output to transparent.
+
+Ordinary still PNG exports stream in bounded row bands, allowing large images without
+allocating a full output raster. Requested dimensions and print DPI are retained
+even when the full-size preview or advisory Review is unavailable. Dense Pattern
+geometry can still use substantial memory. Cancellation before publication
+preserves an existing destination file.
 
 ### Animate artwork
 
@@ -275,7 +286,7 @@ Use an `.svg` output filename for vector export. Render a saved project using
 its stored settings with `toniator render -i artwork.toniator -o artwork.svg`.
 Run `toniator --help` or `toniator render --help` for the supported commands.
 
-In an AppImage, prepend `./Toniator-0.4.1-x86_64.AppImage --cli` in place of
+In an AppImage, prepend `./Toniator-0.4.2-x86_64.AppImage --cli` in place of
 `toniator`. The Flatpak CLI is available through
 `flatpak run --command=toniator io.github.ricperry.Toniator`; direct CLI file paths must be
 accessible inside its sandbox.
@@ -321,7 +332,11 @@ overlaps and crossings while keeping the source-derived family, topology, and
 source weighting fixed. It is saved with the Pattern and embedded in applied
 projects and Document Presets. Artwork, Feature size, channel rotation, and
 response edits reuse it; finishing a structural edit replaces it, and Advanced
-provides manual Recalibrate. Reopening and ordinary edits do not fit again.
+provides manual Recalibrate. With a named channel selected, Recalibrate updates
+only that channel; All updates every channel and the shared baseline. Individual
+Shape rotation and continuous animation retain the saved response. Rotating
+marks can intentionally change overlap and tone; End frame displays a warning
+when Shape rotation is animated. Reopening and ordinary edits do not fit again.
 Source sampling, alpha/cutoff suppression, and authored response endpoints
 remain in effect.
 
@@ -392,7 +407,10 @@ aspect-preserving pixel size and matching PNG density. Preparation makes pixels
 with alpha at least 128 fully opaque and lower-alpha pixels transparent. It can
 remove isolated marks, thicken narrow features, or treat
 narrow gaps by filling or growing them. Each correction has its own threshold;
-zero disables it. The preview updates automatically and shows the same prepared
+zero disables it. With all three correction widths at zero, prepared PNGs also
+use streaming. Nonzero corrections currently support up to 32,000,000 pixels;
+the dialog explains this limit before export. The preview updates automatically
+when its requested size is supported and shows the same prepared
 pixels as the exported file beside the settings, with a draggable divider,
 zoom, and pan. Background and custom fills have separate swatches; both provide
 **Use garment color**, which copies the viewer swatch once. These settings do
@@ -418,7 +436,7 @@ exhaustive GNOME/Mutter or native file-portal acceptance.
 - [Pattern Wizard regression checks](docs/PATTERN_WIZARD_TESTING.md)
 - [Example artwork and reproduction commands](docs/examples/README.md)
 - [Package installation and build guide](packaging/README.md)
-- [Release notes](docs/releases/v0.4.1.md)
+- [Release notes](docs/releases/v0.4.2.md)
 - [Previous release notes](docs/releases/v0.3.3.md)
 - [Architecture and design specifications](Project%20Specification/ArchitectureSchema.md)
 

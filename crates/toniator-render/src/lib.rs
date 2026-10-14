@@ -6,8 +6,14 @@
 //! pattern settings. Raster compositing happens in linear premultiplied RGBA;
 //! `RasterSurface` exposes only straight sRGBA bytes at the output boundary.
 
-mod vector_occupancy;
 mod area_raster;
+mod streaming_png;
+pub use streaming_png::{
+    PngStreamOptions, PngStreamSummary, StreamingRasterTarget, write_png_streaming,
+};
+mod svg_clip;
+mod svg_join;
+mod vector_occupancy;
 pub use vector_occupancy::{
     VectorOccupancyMeasurement, VectorOccupancyPrecision, measure_geometry_vector_occupancy,
 };
@@ -33,6 +39,7 @@ pub const DEFAULT_MAX_FLATTENED_RASTER_EDGES: usize = 4_194_304;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RasterizationLimits {
     max_flattened_edges: usize,
+    max_boolean_operations: usize,
 }
 
 #[cfg(test)]
@@ -98,6 +105,9 @@ mod stage20r_composite_tests {
     }
 
     /// Proves SVG consumes authored painter order and a swap changes presentation identity only.
+    ///
+    /// # Panics
+    /// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
     #[test]
     fn svg_and_scene_preserve_composite_painter_order() {
         let first = composite_scene([9, 7]);
@@ -110,7 +120,7 @@ mod stage20r_composite_tests {
                 .collect::<Vec<_>>(),
             vec![9, 7]
         );
-        let svg = write_svg(&first);
+        let svg = write_svg(&first).expect("SVG serialization");
         let first_position = svg.find("cx=\"9\"").expect("first output geometry");
         let second_position = svg.find("cx=\"7\"").expect("second output geometry");
         assert!(first_position < second_position);
@@ -239,6 +249,9 @@ mod stage20r_composite_tests {
     }
 
     /// Proves heterogeneous sampled regions and marks preserve painter and paint alignment.
+    ///
+    /// # Panics
+    /// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
     #[test]
     fn heterogeneous_region_and_mark_outputs_composite_in_authored_order() {
         let site_id = FamilySiteId {
@@ -353,7 +366,7 @@ mod stage20r_composite_tests {
                 .expect("mark-first scene rasterizes")
                 .pixels()
         );
-        let svg = write_svg(&region_then_mark);
+        let svg = write_svg(&region_then_mark).expect("SVG serialization");
         assert!(
             svg.find("<path").expect("sampled region path emits")
                 < svg.find("<circle").expect("solid mark emits")
@@ -362,7 +375,8 @@ mod stage20r_composite_tests {
 }
 
 impl RasterizationLimits {
-    /// Builds a nonzero flattened-edge limit without changing canonical scene identity.
+    /// Builds a nonzero flattened-edge admission limit and separate saturated 256-times Boolean allowance.
+    /// The Boolean allowance bounds charged resource work without changing canonical scene identity.
     ///
     /// # Errors
     ///
@@ -376,7 +390,22 @@ impl RasterizationLimits {
         }
         Ok(Self {
             max_flattened_edges,
+            max_boolean_operations: max_flattened_edges.saturating_mul(256),
         })
+    }
+
+    /// Overrides the separate Boolean operation allowance without changing flattened-edge admission.
+    ///
+    /// Zero deterministically rejects Boolean work. The allowance bounds charged work rather than
+    /// proving algorithmic complexity; fixed split-round caps remain active even for usize::MAX.
+    pub const fn with_max_boolean_operations(mut self, max_boolean_operations: usize) -> Self {
+        self.max_boolean_operations = max_boolean_operations;
+        self
+    }
+
+    /// Returns the separate request-wide Boolean work allowance, including discarded attempts.
+    pub const fn max_boolean_operations(self) -> usize {
+        self.max_boolean_operations
     }
 
     /// Returns the exact maximum number of concrete flattened edges accepted per request.
@@ -386,10 +415,11 @@ impl RasterizationLimits {
 }
 
 impl Default for RasterizationLimits {
-    /// Supplies the Stage 20E2 finite adaptive-raster edge contract.
+    /// Supplies finite flattened-edge admission and independent native-AA Boolean work allowances.
     fn default() -> Self {
         Self {
             max_flattened_edges: DEFAULT_MAX_FLATTENED_RASTER_EDGES,
+            max_boolean_operations: DEFAULT_MAX_FLATTENED_RASTER_EDGES.saturating_mul(256),
         }
     }
 }
@@ -1647,6 +1677,7 @@ pub enum RasterAntialiasing {
 /// Request-local generalized-mark work state shared across all layers and marks.
 struct RasterWork<'a> {
     remaining_edges: usize,
+    remaining_boolean_operations: usize,
     antialiasing: RasterAntialiasing,
     is_cancelled: &'a (dyn Fn() -> bool + Sync),
     completed_units: usize,
@@ -1685,6 +1716,7 @@ impl<'a> RasterWork<'a> {
     ) -> Self {
         Self {
             remaining_edges: limits.max_flattened_edges(),
+            remaining_boolean_operations: limits.max_boolean_operations(),
             antialiasing,
             is_cancelled,
             completed_units: 0,
@@ -4027,7 +4059,7 @@ fn record_sparse_coverage(covered: &mut Vec<(u32, u16)>, x: u32) -> Result<(), R
 ///
 /// # Errors
 ///
-/// Returns cancellation, numeric subdivision, or request-wide edge-limit diagnostics.
+/// Returns cancellation, numeric subdivision, request-wide edge limits, or allocation diagnostics.
 fn flattened_path_edges(
     path: &toniator_geometry::CurvePath,
     transform: CanonicalRasterTransform,
@@ -4038,12 +4070,18 @@ fn flattened_path_edges(
         match segment {
             CurveSegment::Line(line) => {
                 if points.is_empty() {
+                    points.try_reserve(1).map_err(|_| {
+                        RenderError::new("raster.allocation", "path origin allocation failed")
+                    })?;
                     points.push(transform.point(line.start()));
                 }
                 push_flattened_point(&mut points, transform.point(line.end()), work)?;
             }
             CurveSegment::CubicBezier(cubic) => {
                 if points.is_empty() {
+                    points.try_reserve(1).map_err(|_| {
+                        RenderError::new("raster.allocation", "path origin allocation failed")
+                    })?;
                     points.push(transform.point(cubic.start()));
                 }
                 flatten_cubic(
@@ -4058,14 +4096,19 @@ fn flattened_path_edges(
             }
         }
     }
-    Ok(points.windows(2).map(|pair| (pair[0], pair[1])).collect())
+    let mut edges = Vec::new();
+    edges
+        .try_reserve_exact(points.len().saturating_sub(1))
+        .map_err(|_| RenderError::new("raster.allocation", "path edge allocation failed"))?;
+    edges.extend(points.windows(2).map(|pair| (pair[0], pair[1])));
+    Ok(edges)
 }
 
 /// Flattens every independent canonical outline contour under the shared raster edge budget.
 ///
 /// # Errors
 ///
-/// Returns cancellation, numeric subdivision, or edge-limit diagnostics without changing
+/// Returns cancellation, numeric subdivision, edge-limit, or allocation diagnostics without changing
 /// canonical outline topology or applying consumer clipping before raster sampling.
 fn flattened_outline_edges(
     outline: &toniator_geometry::CanonicalFilledOutline,
@@ -4080,12 +4123,24 @@ fn flattened_outline_edges(
             match segment {
                 CurveSegment::Line(line) => {
                     if points.is_empty() {
+                        points.try_reserve(1).map_err(|_| {
+                            RenderError::new(
+                                "raster.allocation",
+                                "outline origin allocation failed",
+                            )
+                        })?;
                         points.push(transform.point(line.start()));
                     }
                     push_flattened_point(&mut points, transform.point(line.end()), work)?;
                 }
                 CurveSegment::CubicBezier(cubic) => {
                     if points.is_empty() {
+                        points.try_reserve(1).map_err(|_| {
+                            RenderError::new(
+                                "raster.allocation",
+                                "outline origin allocation failed",
+                            )
+                        })?;
                         points.push(transform.point(cubic.start()));
                     }
                     flatten_cubic(
@@ -4100,6 +4155,9 @@ fn flattened_outline_edges(
                 }
             }
         }
+        edges
+            .try_reserve(points.len().saturating_sub(1))
+            .map_err(|_| RenderError::new("raster.allocation", "outline edge allocation failed"))?;
         edges.extend(points.windows(2).map(|pair| (pair[0], pair[1])));
     }
     Ok(edges)
@@ -4620,15 +4678,77 @@ fn quantize_linear(value: f64) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-pub fn write_svg(scene: &RenderScene) -> String {
-    match scene.model {
-        None => write_stage5_svg(scene),
-        Some(model) => write_modeled_svg(scene, model),
+/// Serializes only the final SVG consumer of an immutable canonical scene.
+///
+/// The normal policy has no arbitrary creative-work ceiling. Geometry errors
+/// and allocation failure are reported before callers publish any bytes.
+///
+/// # Errors
+/// Returns serialization, geometry, or allocation diagnostics.
+pub fn write_svg(scene: &RenderScene) -> Result<String, RenderError> {
+    write_svg_cancellable_with_limits(scene, SvgSerializationLimits::default(), &|| false)
+}
+
+/// Limits the number of canonical or flattened edges admitted to one SVG join.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SvgSerializationLimits {
+    max_edges: usize,
+}
+
+impl SvgSerializationLimits {
+    /// Builds a nonzero explicit SVG work ceiling for a bounded caller.
+    ///
+    /// # Errors
+    /// Rejects a zero edge ceiling.
+    pub fn new(max_edges: usize) -> Result<Self, RenderError> {
+        if max_edges == 0 {
+            return Err(RenderError::new(
+                "svg.limits.edges",
+                "SVG edge limit must be positive",
+            ));
+        }
+        Ok(Self { max_edges })
     }
 }
 
+impl Default for SvgSerializationLimits {
+    /// Leaves normal creative work uncapped while preserving checked arithmetic and allocation errors.
+    fn default() -> Self {
+        Self {
+            max_edges: usize::MAX,
+        }
+    }
+}
+
+/// Builds SVG privately and checks cancellation before returning complete bytes.
+///
+/// Joining is a final SVG consumer operation; it never changes the scene, PNG,
+/// preview, or animation raster request.
+///
+/// # Errors
+/// Returns cancellation, work-limit, geometry, precision, or allocation diagnostics.
+pub fn write_svg_cancellable_with_limits(
+    scene: &RenderScene,
+    limits: SvgSerializationLimits,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<String, RenderError> {
+    let mut join = svg_join::SvgJoin::new(scene.canvas(), limits.max_edges, cancelled)?;
+    let document = match scene.model {
+        None => write_stage5_svg(scene, &mut join),
+        Some(model) => write_modeled_svg(scene, model, &mut join),
+    }?;
+    join.check()?;
+    Ok(document)
+}
+
 /// Serializes one unmodeled canonical scene with one final canvas clip and editable mark geometry.
-fn write_stage5_svg(scene: &RenderScene) -> String {
+///
+/// # Errors
+/// Returns shared SVG cancellation, precision, allocation, or explicit work-limit diagnostics.
+fn write_stage5_svg(
+    scene: &RenderScene,
+    join: &mut svg_join::SvgJoin<'_>,
+) -> Result<String, RenderError> {
     let width = compact_number(scene.canvas.width);
     let height = compact_number(scene.canvas.height);
     let mut document = format!(
@@ -4644,27 +4764,25 @@ fn write_stage5_svg(scene: &RenderScene) -> String {
         let color = color_hex(&layer.color);
         let opacity = compact_number(layer.color.alpha * layer.opacity);
         document.push_str(&format!("<g id=\"channel-{}\" clip-path=\"url(#canvas-clip)\" fill=\"{color}\" fill-opacity=\"{opacity}\">\n", layer.channel_id.0));
-        for output in &layer.outputs {
-            write_svg_geometry(
-                &mut document,
-                output.geometry(),
-                layer.channel_id.0,
-                None,
-                None,
-                &scene.canvas,
-            );
-        }
+        write_svg_outputs(&mut document, layer, false, &scene.canvas, join)?;
         document.push_str("</g>\n");
     }
     document.push_str("</svg>\n");
-    document
+    Ok(document)
 }
 
 /// Serializes one modeled scene as deterministic editable SVG with its fixed model compositor.
 ///
 /// RGB retains its accepted editable screen-blend structure, CMYK emits explicit linear-light
 /// same-document filter inputs, and SourceColorAlpha retains ordinary ordered source-over.
-fn write_modeled_svg(scene: &RenderScene, model: HalftoneChannelModel) -> String {
+///
+/// # Errors
+/// Returns shared SVG cancellation, precision, allocation, or explicit work-limit diagnostics.
+fn write_modeled_svg(
+    scene: &RenderScene,
+    model: HalftoneChannelModel,
+    join: &mut svg_join::SvgJoin<'_>,
+) -> Result<String, RenderError> {
     let width = compact_number(scene.canvas.width);
     let height = compact_number(scene.canvas.height);
     let title = match model {
@@ -4703,14 +4821,15 @@ fn write_modeled_svg(scene: &RenderScene, model: HalftoneChannelModel) -> String
             filter_id.as_deref(),
             model == HalftoneChannelModel::Cmyk,
             &scene.canvas,
-        );
+            join,
+        )?;
     }
     if model == HalftoneChannelModel::Cmyk {
         document.push_str("</g>\n");
     }
     document.push_str("</g>\n");
     document.push_str("</svg>\n");
-    document
+    Ok(document)
 }
 
 /// Appends the same-document CMYK channel atlas and fixed-transmittance filter graph.
@@ -4780,6 +4899,9 @@ fn write_cmyk_svg_filter_definitions(document: &mut String, scene: &RenderScene)
 /// An optional filter moves only the rendered group result into a same-document model-compositor
 /// input while all child geometry retains its canonical canvas coordinates and stable IDs. The
 /// optional inner canvas clip bounds a CMYK layer before the filter moves it into its atlas slot.
+///
+/// # Errors
+/// Returns shared SVG cancellation, precision, allocation, or explicit work-limit diagnostics.
 fn write_svg_channel_group(
     document: &mut String,
     layer: &RenderLayer,
@@ -4787,7 +4909,8 @@ fn write_svg_channel_group(
     filter_id: Option<&str>,
     clip_layer_to_canvas: bool,
     canvas: &CanvasSpec,
-) {
+    join: &mut svg_join::SvgJoin<'_>,
+) -> Result<(), RenderError> {
     let mut styles = Vec::new();
     if let Some(mode) = blend_mode {
         styles.push(format!("mix-blend-mode:{mode}"));
@@ -4807,27 +4930,80 @@ fn write_svg_channel_group(
     if clip_layer_to_canvas {
         document.push_str("<g clip-path=\"url(#canvas-clip)\">\n");
     }
-    for output in &layer.outputs {
-        write_svg_geometry(
-            document,
-            output.geometry(),
-            layer.channel_id.0,
-            Some(layer),
-            Some(output),
-            canvas,
-        );
-    }
+    write_svg_outputs(document, layer, true, canvas, join)?;
     if clip_layer_to_canvas {
         document.push_str("</g>\n");
     }
     document.push_str("</g>\n");
+    Ok(())
+}
+
+/// Appends maximal eligible opaque output runs as one editable filled path.
+///
+/// Paint-bearing or translucent outputs flush the current run before their
+/// original ordered serializer is called.
+///
+/// # Errors
+/// Returns cancellation, work-limit, precision, or geometry diagnostics.
+fn write_svg_outputs(
+    document: &mut String,
+    layer: &RenderLayer,
+    modeled: bool,
+    canvas: &CanvasSpec,
+    join: &mut svg_join::SvgJoin<'_>,
+) -> Result<(), RenderError> {
+    let mut run = Vec::new();
+    let mut run_ordinal = 0_usize;
+    for output in &layer.outputs {
+        join.check()?;
+        let eligible =
+            layer.color.alpha == 1.0 && layer.opacity == 1.0 && output.primitive_paints.is_none();
+        if eligible {
+            run.push(output.geometry());
+            continue;
+        }
+        if !run.is_empty() {
+            join.write_run(
+                document,
+                layer.channel_id.0,
+                run_ordinal,
+                &layer.color,
+                &run,
+            )?;
+            run_ordinal += 1;
+            run.clear();
+        }
+        write_svg_geometry(
+            document,
+            output.geometry(),
+            layer.channel_id.0,
+            modeled.then_some(layer),
+            modeled.then_some(output),
+            canvas,
+            join,
+        )?;
+    }
+    if !run.is_empty() {
+        join.write_run(
+            document,
+            layer.channel_id.0,
+            run_ordinal,
+            &layer.color,
+            &run,
+        )?;
+    }
+    Ok(())
 }
 
 /// Serializes validated canonical geometry without resolving document resources.
 ///
-/// This SVG boundary omits circles whose original radius is exactly zero while preserving each
-/// positive circle's nonzero radius, original enumeration ID, and paint index. All other geometry
-/// and numeric attributes retain their canonical values and existing formatting.
+/// This final consumer intersects closed fills with the canvas, omits empty/zero-radius
+/// geometry, and preserves original enumeration IDs, paint indices, fill rules, and order.
+/// Curve coordinates retain roundtrip precision and canonical cubic controls;
+/// partial circles retain their original radius in local relative arcs.
+///
+/// # Errors
+/// Returns cancellation, work-limit, allocation, closure, or precision diagnostics before publication.
 fn write_svg_geometry(
     document: &mut String,
     geometry: &GeometryOutput,
@@ -4835,11 +5011,13 @@ fn write_svg_geometry(
     layer: Option<&RenderLayer>,
     output: Option<&RenderOutputLayer>,
     canvas: &CanvasSpec,
-) {
+    join: &mut svg_join::SvgJoin<'_>,
+) -> Result<(), RenderError> {
     match geometry {
         GeometryOutput::CircularMarks(marks) => {
             for (index, mark) in marks.iter().enumerate() {
-                if mark.radius == 0.0 {
+                join.check()?;
+                if mark.radius == 0.0 || !join.circle_intersects_canvas(mark.center, mark.radius) {
                     continue;
                 }
                 let paint = layer.map_or_else(String::new, |layer| {
@@ -4862,17 +5040,20 @@ fn write_svg_geometry(
                 let id = layer.map_or_else(String::new, |_| {
                     format!(" id=\"channel-{channel_id}-mark-{index}\"")
                 });
-                document.push_str(&format!(
-                    "<circle{id} cx=\"{}\" cy=\"{}\" r=\"{}\"{paint}{opacity}/>\n",
-                    compact_number(mark.center.x),
-                    compact_number(mark.center.y),
-                    compact_circle_radius(mark.radius)
-                ));
+                write_svg_circle_geometry(
+                    document,
+                    mark.center,
+                    mark.radius,
+                    &format!("{id}{paint}{opacity}"),
+                    join,
+                )?;
             }
         }
         GeometryOutput::CanonicalMarks(marks) => {
             for (index, mark) in marks.iter().enumerate() {
-                if matches!(mark, CanonicalMark::Circle { radius, .. } if *radius == 0.0) {
+                join.check()?;
+                if matches!(mark, CanonicalMark::Circle { center, radius, .. } if *radius == 0.0 || !join.circle_intersects_canvas(*center, *radius))
+                {
                     continue;
                 }
                 let paint = layer.map_or_else(String::new, |layer| {
@@ -4897,52 +5078,32 @@ fn write_svg_geometry(
                         let id = layer.map_or_else(String::new, |_| {
                             format!(" id=\"channel-{channel_id}-mark-{index}\"")
                         });
-                        document.push_str(&format!("<circle{id} cx=\"{}\" cy=\"{}\" r=\"{}\"{paint} fill-rule=\"evenodd\"{opacity}/>\n", compact_number(center.x), compact_number(center.y), compact_circle_radius(*radius)))
+                        write_svg_circle_geometry(
+                            document,
+                            *center,
+                            *radius,
+                            &format!("{id}{paint} fill-rule=\"evenodd\"{opacity}"),
+                            join,
+                        )?;
                     }
                     CanonicalMark::ClosedPath(mark) => {
-                        let mut data = String::new();
-                        for (segment_index, segment) in mark.path.segments().iter().enumerate() {
-                            match segment {
-                                CurveSegment::Line(line) => {
-                                    if segment_index == 0 {
-                                        data.push_str(&format!(
-                                            "M {} {} ",
-                                            compact_number(line.start().x),
-                                            compact_number(line.start().y)
-                                        ));
-                                    }
-                                    data.push_str(&format!(
-                                        "L {} {} ",
-                                        compact_number(line.end().x),
-                                        compact_number(line.end().y)
-                                    ));
-                                }
-                                CurveSegment::CubicBezier(cubic) => {
-                                    if segment_index == 0 {
-                                        data.push_str(&format!(
-                                            "M {} {} ",
-                                            compact_number(cubic.start().x),
-                                            compact_number(cubic.start().y)
-                                        ));
-                                    }
-                                    data.push_str(&format!(
-                                        "C {} {},{} {},{} {} ",
-                                        compact_number(cubic.control_1().x),
-                                        compact_number(cubic.control_1().y),
-                                        compact_number(cubic.control_2().x),
-                                        compact_number(cubic.control_2().y),
-                                        compact_number(cubic.end().x),
-                                        compact_number(cubic.end().y)
-                                    ));
-                                }
-                            }
+                        if !join.contour_intersects_canvas(mark.path.segments()) {
+                            continue;
                         }
-                        data.push('Z');
+                        let mut data = String::new();
+                        join.curve_data(&mut data, mark.path.segments(), false)?;
+                        if data.is_empty() {
+                            continue;
+                        }
                         let id = layer.map_or_else(String::new, |_| {
                             format!(" id=\"channel-{channel_id}-mark-{index}\"")
                         });
                         document.push_str(&format!(
-                            "<path{id} d=\"{data}\"{paint} fill-rule=\"evenodd\"{opacity}/>\n"
+                            "<path{id} d=\"{data}\"{paint} fill-rule=\"{}\"{opacity}/>\n",
+                            match mark.fill_rule {
+                                CanonicalFillRule::EvenOdd => "evenodd",
+                                CanonicalFillRule::NonZero => "nonzero",
+                            }
                         ));
                     }
                 }
@@ -4950,6 +5111,7 @@ fn write_svg_geometry(
         }
         GeometryOutput::CanonicalStrokes(strokes) => {
             for (index, stroke) in strokes.iter().enumerate() {
+                join.check()?;
                 let id = format!("channel-{channel_id}-stroke-{index}");
                 if stroke.outline.contours.is_empty() {
                     continue;
@@ -4957,7 +5119,10 @@ fn write_svg_geometry(
                 if !outline_intersects_canvas(&stroke.outline, canvas) {
                     continue;
                 }
-                let data = svg_outline_path_data(&stroke.outline);
+                let data = svg_outline_path_data(&stroke.outline, join)?;
+                if data.is_empty() {
+                    continue;
+                }
                 let paint = layer.map_or_else(String::new, |value| {
                     format!(
                         " fill=\"{}\" fill-opacity=\"{}\"",
@@ -4972,6 +5137,7 @@ fn write_svg_geometry(
         }
         GeometryOutput::CanonicalRegions(regions) => {
             for (index, region) in regions.regions().iter().enumerate() {
+                join.check()?;
                 if region.bounds.max.x < 0.0
                     || region.bounds.max.y < 0.0
                     || region.bounds.min.x > canvas.width
@@ -4979,7 +5145,10 @@ fn write_svg_geometry(
                 {
                     continue;
                 }
-                let data = svg_curve_path_data(&region.ring);
+                let data = svg_curve_path_data(&region.ring, join)?;
+                if data.is_empty() {
+                    continue;
+                }
                 let paint = layer.map_or_else(String::new, |value| {
                     let paint = output_primitive_paint(value, output, index);
                     format!(
@@ -4992,6 +5161,37 @@ fn write_svg_geometry(
             }
         }
     }
+    Ok(())
+}
+
+/// Emits an ordered painted circle or its exact-radius canvas intersection with unchanged attributes.
+///
+/// Whole circles retain their existing element encoding; empty tangent fills emit nothing.
+/// # Errors
+/// Returns cancellation, work-limit, allocation, or clipping precision diagnostics.
+fn write_svg_circle_geometry(
+    document: &mut String,
+    center: Point2,
+    radius: f64,
+    attributes: &str,
+    join: &mut svg_join::SvgJoin<'_>,
+) -> Result<(), RenderError> {
+    if join.circle_needs_clipping(center, radius) {
+        let mut data = String::new();
+        join.clipped_circle_data(&mut data, center, radius)?;
+        if !data.is_empty() {
+            document.push_str(&format!("<path{attributes} d=\"{data}\"/>\n"));
+        }
+    } else {
+        join.edges(4)?;
+        document.push_str(&format!(
+            "<circle{attributes} cx=\"{}\" cy=\"{}\" r=\"{}\"/>\n",
+            compact_number(center.x),
+            compact_number(center.y),
+            compact_circle_radius(radius)
+        ));
+    }
+    Ok(())
 }
 
 /// Resolves one output-local sampled paint while preserving channel-owned solid-paint fallback.
@@ -5009,47 +5209,17 @@ fn output_primitive_paint<'a>(
         .unwrap_or(&layer.color)
 }
 
-/// Serializes one already-closed canonical curve path without constructing or repairing topology.
-fn svg_curve_path_data(path: &toniator_geometry::CurvePath) -> String {
+/// Serializes one closed canonical path's final canvas intersection without changing its source.
+///
+/// # Errors
+/// Returns cancellation, work-limit, allocation, closure, or clipping precision diagnostics.
+fn svg_curve_path_data(
+    path: &toniator_geometry::CurvePath,
+    join: &mut svg_join::SvgJoin<'_>,
+) -> Result<String, RenderError> {
     let mut data = String::new();
-    for (index, segment) in path.segments().iter().enumerate() {
-        match segment {
-            CurveSegment::Line(line) => {
-                if index == 0 {
-                    data.push_str(&format!(
-                        "M {} {} ",
-                        compact_number(line.start().x),
-                        compact_number(line.start().y)
-                    ));
-                }
-                data.push_str(&format!(
-                    "L {} {} ",
-                    compact_number(line.end().x),
-                    compact_number(line.end().y)
-                ));
-            }
-            CurveSegment::CubicBezier(cubic) => {
-                if index == 0 {
-                    data.push_str(&format!(
-                        "M {} {} ",
-                        compact_number(cubic.start().x),
-                        compact_number(cubic.start().y)
-                    ));
-                }
-                data.push_str(&format!(
-                    "C {} {},{} {},{} {} ",
-                    compact_number(cubic.control_1().x),
-                    compact_number(cubic.control_1().y),
-                    compact_number(cubic.control_2().x),
-                    compact_number(cubic.control_2().y),
-                    compact_number(cubic.end().x),
-                    compact_number(cubic.end().y)
-                ));
-            }
-        }
-    }
-    data.push('Z');
-    data
+    join.curve_data(&mut data, path.segments(), false)?;
+    Ok(data)
 }
 
 /// Reports whether derived outline bounds reach the final SVG canvas without clipping geometry.
@@ -5065,51 +5235,20 @@ fn outline_intersects_canvas(
     })
 }
 
-/// Serializes independent canonical outline contours as one direct SVG path payload.
-fn svg_outline_path_data(outline: &toniator_geometry::CanonicalFilledOutline) -> String {
+/// Serializes independent outline intersections as one directed path, preserving outer/hole winding.
+///
+/// # Errors
+/// Returns cancellation, work-limit, allocation, closure, or clipping precision diagnostics.
+fn svg_outline_path_data(
+    outline: &toniator_geometry::CanonicalFilledOutline,
+    join: &mut svg_join::SvgJoin<'_>,
+) -> Result<String, RenderError> {
     let mut data = String::new();
     for contour in &outline.contours {
-        for (index, segment) in contour.segments.iter().enumerate() {
-            match segment {
-                CurveSegment::Line(line) => {
-                    if index == 0 {
-                        data.push_str(&format!(
-                            "M {} {} ",
-                            compact_number(line.start().x),
-                            compact_number(line.start().y)
-                        ));
-                    }
-                    data.push_str(&format!(
-                        "L {} {} ",
-                        compact_number(line.end().x),
-                        compact_number(line.end().y)
-                    ));
-                }
-                CurveSegment::CubicBezier(cubic) => {
-                    if index == 0 {
-                        data.push_str(&format!(
-                            "M {} {} ",
-                            compact_number(cubic.start().x),
-                            compact_number(cubic.start().y)
-                        ));
-                    }
-                    data.push_str(&format!(
-                        "C {} {},{} {},{} {} ",
-                        compact_number(cubic.control_1().x),
-                        compact_number(cubic.control_1().y),
-                        compact_number(cubic.control_2().x),
-                        compact_number(cubic.control_2().y),
-                        compact_number(cubic.end().x),
-                        compact_number(cubic.end().y)
-                    ));
-                }
-            }
-        }
-        data.push('Z');
+        join.curve_data(&mut data, &contour.segments, false)?;
     }
-    data
+    Ok(data)
 }
-
 fn color_hex(color: &ColorValue) -> String {
     format!(
         "#{:02x}{:02x}{:02x}",
@@ -5225,17 +5364,22 @@ mod ton013_svg_circle_serialization_tests {
     fn svg_for_layer(layer: &RenderLayer) -> String {
         let mut svg = String::new();
         let output = &layer.outputs()[0];
+        let canvas = CanvasSpec {
+            width: 100.0,
+            height: 100.0,
+        };
+        let mut join =
+            svg_join::SvgJoin::new(&canvas, usize::MAX, &|| false).expect("fixture SVG limits");
         write_svg_geometry(
             &mut svg,
             output.geometry(),
             layer.channel_id.0,
             Some(layer),
             Some(output),
-            &CanvasSpec {
-                width: 100.0,
-                height: 100.0,
-            },
-        );
+            &canvas,
+            &mut join,
+        )
+        .expect("fixture SVG serialization");
         svg
     }
 
@@ -5918,6 +6062,9 @@ mod stage20e2_limit_tests {
 
     /// Proves complete cubic construction bits affect scene identity while SVG retains one editable
     /// closed path, explicit even-odd fill, and the existing final-canvas clip authority.
+    ///
+    /// # Panics
+    /// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
     #[test]
     fn canonical_cubic_identity_and_structural_svg_are_complete() {
         let cubic_path = |control_y: f64| {
@@ -5950,7 +6097,7 @@ mod stage20e2_limit_tests {
             second.identity().scene_fingerprint(),
             "one cubic control-point bit change must invalidate canonical scene identity"
         );
-        let svg = write_svg(&first);
+        let svg = write_svg(&first).expect("SVG serialization");
         assert_eq!(svg.matches("<clipPath ").count(), 1);
         assert_eq!(svg.matches("<path ").count(), 1);
         assert!(svg.contains(" C "));

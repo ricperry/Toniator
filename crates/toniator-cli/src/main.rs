@@ -17,16 +17,20 @@ use toniator_domain::{
     DensityMetric2D, Document, DocumentCommand, DocumentId, DocumentPatternSettings,
     DocumentSession, HalftoneChannelModel, MarkGeometryResponse, PatternDefinition,
     PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
-    PatternOutputLayerId, PatternOutputSettings, SourceComponent, SourcePlacement, SourceReference,
-    SourceReferenceId, SavedCalibration, ValidationError,
+    PatternOutputLayerId, PatternOutputSettings, SavedCalibration, SourceComponent,
+    SourcePlacement, SourceReference, SourceReferenceId, ValidationError,
 };
 use toniator_engine::export::video::{VideoCodec, VideoExportOptions};
 use toniator_engine::{
     CanonicalCircleMark, EvaluationLimits, GridError, GridInspectRequest, MarkResponse,
     MarksInspectError, MarksInspectRequest, MediaTools, Point2, RasterAntialiasing,
-    RasterBackground, SiteId, SiteScope, SourceFormat, SourceFormatHint, SvgTextDiagnostic,
-    encode_png, evaluate_cancellable_with_limits, frame_evaluation_request, inspect_circular_marks,
-    inspect_straight_grid, open_source_media, write_svg,
+    RasterBackground, SiteId, SiteScope, SourceFormat, SourceFormatHint, SvgSerializationLimits,
+    SvgTextDiagnostic, evaluate_cancellable_with_limits, frame_evaluation_request,
+    inspect_circular_marks, inspect_straight_grid, open_source_media,
+    write_svg_cancellable_with_limits,
+};
+use toniator_engine::{
+    PngStreamOptions, RasterizationLimits, StreamingRasterTarget, write_png_streaming,
 };
 use toniator_io::{SourceBundle, load as load_document, save as save_document};
 
@@ -879,20 +883,11 @@ fn render_media(
     })
     .map_err(|error| CliError::new(error.path(), error.message()))?;
     let request = match format {
-        OutputFormat::Png => request.for_output(
-            arguments
-                .background
-                .map(RasterBackground::from)
-                .unwrap_or_else(|| {
-                    RasterBackground::default_for_model(session.document().channel_model())
-                }),
-            None,
-            arguments.antialiasing.into(),
-        ),
+        OutputFormat::Png => request.for_scene().map_err(render_error)?,
         OutputFormat::Svg => request.for_output(
             RasterBackground::Transparent,
             Some(toniator_engine::OutputRasterTarget::new(1, 1).map_err(render_error)?),
-            RasterAntialiasing::On,
+            RasterAntialiasing::Off,
         ),
         OutputFormat::Video(_) => unreachable!("video returns through its shared job"),
     };
@@ -906,13 +901,56 @@ fn render_media(
             },
         )?;
     check_cli_cancelled(cancelled)?;
-    write_render_result(&arguments.output, format, &result, cancelled)
+    if matches!(format, OutputFormat::Png) {
+        let target =
+            StreamingRasterTarget::for_canvas(session.document().canvas()).map_err(render_error)?;
+        let background = arguments
+            .background
+            .map(RasterBackground::from)
+            .unwrap_or_else(|| {
+                RasterBackground::default_for_model(session.document().channel_model())
+            });
+        return toniator_io::atomic_output::write_atomic_output(
+            &arguments.output,
+            &|| cancelled.load(Ordering::Acquire),
+            |file| {
+                write_png_streaming(
+                    result.scene(),
+                    target,
+                    PngStreamOptions {
+                        background,
+                        antialiasing: arguments.antialiasing.into(),
+                        ..Default::default()
+                    },
+                    RasterizationLimits::new(limits.max_flattened_raster_edges())
+                        .map_err(std::io::Error::other)?,
+                    file,
+                    &|| cancelled.load(Ordering::Acquire),
+                    &|_, _| {},
+                )
+                .map(|_| ())
+                .map_err(std::io::Error::other)
+            },
+        )
+        .map_err(|error| {
+            CliError::new(
+                "output",
+                if error.published() {
+                    format!("PNG was written, but final folder synchronization failed: {error}")
+                } else {
+                    error.to_string()
+                },
+            )
+        });
+    }
+    write_render_result(&arguments.output, format, &result, limits, cancelled)
 }
 
 /// Writes one already-evaluated canonical result through the selected consumer format.
 ///
-/// PNG consumes the raster already evaluated with its output-only backing and antialiasing.
-/// SVG serializes unchanged canonical geometry. Cancellation is checked again before file I/O.
+/// SVG serializes unchanged canonical geometry with a caller-owned work bound.
+/// PNG uses the earlier captured streaming consumer and cannot enter this vector write path.
+/// Cancellation is checked through serialization and again before file I/O.
 ///
 /// # Errors
 ///
@@ -921,17 +959,24 @@ fn write_render_result(
     output: &PathBuf,
     format: OutputFormat,
     result: &toniator_engine::EvaluationResult,
+    limits: EvaluationLimits,
     cancelled: &AtomicBool,
 ) -> Result<(), CliError> {
     match format {
         OutputFormat::Png => {
-            let png = encode_png(result.raster()).map_err(render_error)?;
-            check_cli_cancelled(cancelled)?;
-            std::fs::write(output, png)
-                .map_err(|_| CliError::new("output", "could not write PNG output"))?;
+            return Err(CliError::new(
+                "render.png",
+                "PNG output requires the captured streaming consumer",
+            ));
         }
         OutputFormat::Svg => {
-            let svg = write_svg(result.scene());
+            let svg = write_svg_cancellable_with_limits(
+                result.scene(),
+                SvgSerializationLimits::new(limits.max_flattened_raster_edges())
+                    .map_err(render_error)?,
+                &|| cancelled.load(Ordering::Acquire),
+            )
+            .map_err(render_error)?;
             check_cli_cancelled(cancelled)?;
             std::fs::write(output, svg)
                 .map_err(|_| CliError::new("output", "could not write SVG output"))?;

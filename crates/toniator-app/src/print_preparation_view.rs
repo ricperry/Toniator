@@ -12,8 +12,10 @@ use std::{
 
 use gtk::prelude::*;
 use toniator_domain::{PhysicalPrintSizeMm, PrintPreparationSettings};
+#[cfg(test)]
+use toniator_engine::OutputRasterTarget;
 use toniator_engine::{
-    OutputRasterTarget, RasterBackground, RasterSurface,
+    RasterBackground, RasterSurface, StreamingRasterTarget,
     print_preflight::{
         CORE_ALPHA, PixelBounds, PixelRun, PreflightIdentity, PreflightRasterReport,
         PreflightReport, ProbeCandidate, SupportComponent,
@@ -37,11 +39,11 @@ pub(crate) const FINDINGS_PER_PAGE: usize = 50;
 const MAX_PREVIEW_AXIS: f64 = 32_768.0;
 
 /// Reports whether an explicit zoom can retain its stated output-pixel scale.
-pub(crate) fn can_show_exact_zoom(target: OutputRasterTarget, scale: f64) -> bool {
+pub(crate) fn can_show_exact_zoom(target: (u32, u32), scale: f64) -> bool {
     scale.is_finite()
         && scale > 0.0
-        && f64::from(target.width()) * scale <= MAX_PREVIEW_AXIS
-        && f64::from(target.height()) * scale <= MAX_PREVIEW_AXIS
+        && f64::from(target.0) * scale <= MAX_PREVIEW_AXIS
+        && f64::from(target.1) * scale <= MAX_PREVIEW_AXIS
 }
 
 /// Owns the singleton modeless PNG options and review widgets for one window epoch.
@@ -154,6 +156,8 @@ pub(crate) struct Controls {
     pub(crate) syncing: Rc<Cell<bool>>,
     /// Runtime PNG target, AA, and backing selected by the real export widgets.
     pub(crate) selection: Cell<print_preparation::OutputSelection>,
+    /// Current resolved validity; retained last-valid intent never authorizes invalid entries.
+    pub(crate) selection_valid: Cell<bool>,
     /// Runtime unit selected by the physical-intent form.
     pub(crate) selected_unit: Cell<EntryUnit>,
     /// Runtime viewer backdrop; it never invalidates preflight identity.
@@ -270,7 +274,8 @@ impl Controls {
             ),
         ]);
 
-        let native = OutputRasterTarget::for_canvas(canvas).map_err(|error| error.to_string())?;
+        let native =
+            StreamingRasterTarget::for_canvas(canvas).map_err(|error| error.to_string())?;
         let background = options.background();
         background.set_model(Some(&gtk::StringList::new(&[
             "Automatic",
@@ -463,6 +468,7 @@ impl Controls {
             close: template.close,
             export: template.export,
             syncing,
+            selection_valid: Cell::new(false),
             selection: Cell::new(print_preparation::OutputSelection {
                 target: native,
                 antialiasing: toniator_engine::RasterAntialiasing::On,
@@ -1275,16 +1281,13 @@ pub(crate) const fn automatic_preview_rgb(
 }
 
 /// Returns the output-target, placement, and exact two-axis PPI projection.
-pub(crate) fn target_summary(
-    target: OutputRasterTarget,
-    settings: &PrintPreparationSettings,
-) -> String {
-    let target_text = format!("{} × {} px", target.width(), target.height());
+pub(crate) fn target_summary(target: (u32, u32), settings: &PrintPreparationSettings) -> String {
+    let target_text = format!("{} × {} px", target.0, target.1);
     let Some(size) = settings.size_mm() else {
         return format!("{target_text} · physical size unknown · PPI unavailable");
     };
     let (width_mm, height_mm) = size.millimetres();
-    match size.ppi_for_pixels(target.width(), target.height()) {
+    match size.ppi_for_pixels(target.0, target.1) {
         Ok(ppi) => {
             let (horizontal, vertical) = ppi.axes();
             format!(
@@ -1363,16 +1366,16 @@ pub(crate) fn export_backing_summary(
 }
 
 /// Counts exact RGBA display pixels with overflow protection.
-pub(crate) fn display_bytes(target: OutputRasterTarget) -> Option<u64> {
-    u64::from(target.width())
-        .checked_mul(u64::from(target.height()))?
+pub(crate) fn display_bytes(target: (u32, u32)) -> Option<u64> {
+    u64::from(target.0)
+        .checked_mul(u64::from(target.1))?
         .checked_mul(4)
 }
 
 /// Scales both preview layers by one factor while respecting GTK's bounded canvas dimensions.
-pub(crate) fn preview_dimensions(target: OutputRasterTarget, requested_scale: f64) -> (i32, i32) {
-    let width = f64::from(target.width());
-    let height = f64::from(target.height());
+pub(crate) fn preview_dimensions(target: (u32, u32), requested_scale: f64) -> (i32, i32) {
+    let width = f64::from(target.0);
+    let height = f64::from(target.1);
     let scale = requested_scale
         .max(f64::MIN_POSITIVE)
         .min(MAX_PREVIEW_AXIS / width)
@@ -1383,12 +1386,12 @@ pub(crate) fn preview_dimensions(target: OutputRasterTarget, requested_scale: f6
 
 /// Fits the complete raster into the current viewport without enlarging its native dimensions.
 pub(crate) fn fitted_preview_dimensions(
-    target: OutputRasterTarget,
+    target: (u32, u32),
     viewport_width: i32,
     viewport_height: i32,
 ) -> (i32, i32) {
-    let scale = (f64::from(viewport_width.max(1)) / f64::from(target.width()))
-        .min(f64::from(viewport_height.max(1)) / f64::from(target.height()))
+    let scale = (f64::from(viewport_width.max(1)) / f64::from(target.0))
+        .min(f64::from(viewport_height.max(1)) / f64::from(target.1))
         .min(1.0);
     preview_dimensions(target, scale)
 }
@@ -1535,7 +1538,7 @@ pub(crate) fn highlight_rgba(
     let report = pair.report();
     let raster = pair.raster();
     let target = report.identity.target();
-    let byte_count = display_bytes(target)
+    let byte_count = display_bytes((target.width(), target.height()))
         .filter(|bytes| *bytes <= MAX_REVIEW_DISPLAY_BYTES)
         .and_then(|bytes| usize::try_from(bytes).ok())
         .ok_or_else(|| "Selected target exceeds the review display budget.".to_owned())?;
@@ -1741,8 +1744,14 @@ mod tests {
     #[test]
     fn preview_zoom_clamps_rectangular_raster_with_a_common_scale() {
         let target = OutputRasterTarget::new(8_000, 1_000).unwrap();
-        assert_eq!(preview_dimensions(target, 6.0), (32_768, 4_096));
-        assert_eq!(fitted_preview_dimensions(target, 1_000, 800), (1_000, 125));
+        assert_eq!(
+            preview_dimensions((target.width(), target.height()), 6.0),
+            (32_768, 4_096)
+        );
+        assert_eq!(
+            fitted_preview_dimensions((target.width(), target.height()), 1_000, 800),
+            (1_000, 125)
+        );
     }
 
     /// Admits a normal 12×16-inch 300-DPI exact preview without using review-pair limits.
@@ -1752,12 +1761,23 @@ mod tests {
     #[test]
     fn common_print_preview_has_separate_checked_budget() {
         let target = OutputRasterTarget::new(3_600, 4_800).unwrap();
-        assert_eq!(display_bytes(target), Some(69_120_000));
-        assert!(display_bytes(target).unwrap() <= MAX_PREPARED_PREVIEW_BYTES);
-        assert!(can_show_exact_zoom(target, 2.0));
+        assert_eq!(
+            display_bytes((target.width(), target.height())),
+            Some(69_120_000)
+        );
+        assert!(
+            display_bytes((target.width(), target.height())).unwrap() <= MAX_PREPARED_PREVIEW_BYTES
+        );
+        assert!(can_show_exact_zoom((target.width(), target.height()), 2.0));
         let too_wide = OutputRasterTarget::new(40_000, 100).unwrap();
-        assert!(!can_show_exact_zoom(too_wide, 1.0));
-        assert!(can_show_exact_zoom(too_wide, 0.5));
+        assert!(!can_show_exact_zoom(
+            (too_wide.width(), too_wide.height()),
+            1.0
+        ));
+        assert!(can_show_exact_zoom(
+            (too_wide.width(), too_wide.height()),
+            0.5
+        ));
     }
 
     /// Converts the standard 12×16-inch print box to and from millimetres without changing its target.
@@ -1960,7 +1980,7 @@ mod tests {
         )
         .unwrap();
         let inspector = inspector_summary(&settings, "Not checked");
-        let target = target_summary(OutputRasterTarget::new(1024, 512).unwrap(), &settings);
+        let target = target_summary((1024, 512), &settings);
         assert!(inspector.contains("0.0000123456789"));
         assert!(inspector.contains("0.00000123456789"));
         assert!(target.contains("1024 × 512 px"));
@@ -1981,7 +2001,10 @@ mod tests {
     #[test]
     fn target_summary_never_hides_known_pixel_dimensions() {
         let target = OutputRasterTarget::new(2048, 1024).unwrap();
-        let text = target_summary(target, &PrintPreparationSettings::default());
+        let text = target_summary(
+            (target.width(), target.height()),
+            &PrintPreparationSettings::default(),
+        );
         assert!(text.starts_with("2048 × 1024 px"));
         assert!(text.contains("PPI unavailable"));
     }

@@ -167,7 +167,7 @@ fn document_presets_render_both_intrinsic_sources_from_both_input_kinds() {
         .unwrap();
         fs::write(
             output.join(format!("{label}-loaded.svg")),
-            write_svg(scene.scene()),
+            write_svg(scene.scene()).expect("SVG serialization"),
         )
         .unwrap();
         let sources = SourceBundle::new([EmbeddedSource::new(

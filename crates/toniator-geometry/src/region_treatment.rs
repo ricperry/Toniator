@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// Versioned private normalized-region-resize contract used by pattern and engine cache identities.
-pub const REGION_TREATMENT_CONTRACT_ID: &str = "toniator.region-resize.v2";
+pub const REGION_TREATMENT_CONTRACT_ID: &str = "toniator.region-resize.v3";
 
 /// Reference point owned by a region producer and excluded from source canonical geometry identity.
 #[derive(Clone, Debug, PartialEq)]
@@ -613,7 +613,8 @@ fn prepare_region_components_serial(
 ///
 /// The solver measures only canonical positive candidate components from this one region. It does
 /// not inspect adjacent regions, canvas complements, walls, or any absolute gap. Convex linear
-/// rings use one exact construction; other current producer rings use a fixed shared-work fallback.
+/// rings validate their analytic candidate against the feasible inset; other current producer
+/// rings and topology-changing convex insets use a fixed shared-work fallback.
 ///
 /// # Errors
 ///
@@ -636,15 +637,19 @@ fn uniform_offset_components_for_fill(
     }
     let analytic_distance = convex_line_ring_offset_distance(region, target_area).ok();
     if let Some(signed_distance) = analytic_distance {
-        return canonical_offset_components(
+        let candidate = canonical_offset_components(
             output_layer_id,
             region,
             signed_distance,
             canonical_work,
             work,
             cancelled,
-        )
-        .map(|candidate| candidate.components);
+        )?;
+        if signed_distance < 0.0
+            || (candidate.area - target_area).abs() <= target_area * 1.0e-6 + 1.0e-9
+        {
+            return Ok(candidate.components);
+        }
     }
     uniform_offset_fallback_components(
         output_layer_id,
@@ -663,6 +668,12 @@ struct CanonicalOffsetCandidate {
 }
 
 /// Builds one positive canonical result from one shared-work offset construction.
+///
+/// Convex linear insets intersect shifted edge half-planes so collapsed edges cannot reverse
+/// into renewed positive geometry. Outward and other producer paths retain RegionRound authority.
+///
+/// # Errors
+/// Returns shared-work, canonicalization, finite-arithmetic, or cancellation diagnostics.
 fn canonical_offset_components(
     output_layer_id: PatternOutputLayerId,
     region: &crate::CanonicalRegion,
@@ -672,7 +683,15 @@ fn canonical_offset_components(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<CanonicalOffsetCandidate, RegionTreatmentError> {
     poll_treatment(cancelled)?;
-    let components = offset_region_path_with_work(&region.ring, signed_distance, work, cancelled)?;
+    let components = if signed_distance > 0.0 {
+        if let Some(vertices) = convex_line_ring_vertices(&region.ring) {
+            convex_line_ring_inset(&vertices, signed_distance, work, cancelled)?
+        } else {
+            offset_region_path_with_work(&region.ring, signed_distance, work, cancelled)?
+        }
+    } else {
+        offset_region_path_with_work(&region.ring, signed_distance, work, cancelled)?
+    };
     if components.is_empty() {
         return Ok(CanonicalOffsetCandidate {
             components,
@@ -704,11 +723,192 @@ fn canonical_offset_components(
     })
 }
 
+/// Recognizes a counter-clockwise convex linear ring without rejecting positive near-collinear turns.
+///
+/// Canonical-region authority supplies a simple counter-clockwise ring. Exact collinear forward
+/// edges are valid redundant half-plane constraints; nonlinear or nonconvex producers remain
+/// under the existing general offset authority.
+fn convex_line_ring_vertices(path: &CurvePath) -> Option<Vec<Point2>> {
+    if path.segments().len() < 3
+        || path
+            .segments()
+            .iter()
+            .any(|segment| !matches!(segment, CurveSegment::Line(_)))
+    {
+        return None;
+    }
+    let vertices = path
+        .segments()
+        .iter()
+        .map(CurveSegment::start)
+        .collect::<Vec<_>>();
+    for index in 0..vertices.len() {
+        let previous = vertices[(index + vertices.len() - 1) % vertices.len()];
+        let current = vertices[index];
+        let next = vertices[(index + 1) % vertices.len()];
+        let incoming = Vector2::new(current.x - previous.x, current.y - previous.y);
+        let outgoing = Vector2::new(next.x - current.x, next.y - current.y);
+        let turn = incoming.x * outgoing.y - incoming.y * outgoing.x;
+        if !turn.is_finite()
+            || turn < 0.0
+            || incoming.x.hypot(incoming.y) == 0.0
+            || outgoing.x.hypot(outgoing.y) == 0.0
+            || (turn == 0.0 && incoming.dot(outgoing) <= 0.0)
+        {
+            return None;
+        }
+    }
+    Some(vertices)
+}
+
+/// Intersects a convex ring's inward shifted edge half-planes in a local coordinate frame.
+///
+/// The feasible polygon loses vanished edges and stays empty beyond collapse. Each clipping
+/// pass consumes shared offset work and polls cancellation; no tolerance changes geometric
+/// half-plane membership and no intermediate candidate escapes this function.
+///
+/// # Errors
+/// Returns shared-work, nonfinite arithmetic, path-construction, or cancellation diagnostics.
+fn convex_line_ring_inset(
+    vertices: &[Point2],
+    distance: f64,
+    work: &mut PathOffsetWork,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<CurvePath>, RegionTreatmentError> {
+    if vertices.len() < 3 {
+        return Err(region_error(
+            "region.resize.geometry.offset",
+            "convex inset requires at least three vertices",
+        ));
+    }
+    if !distance.is_finite() || distance <= 0.0 {
+        return Err(region_error(
+            "region.resize.geometry.offset",
+            "convex inset distance must remain finite and positive",
+        ));
+    }
+    let origin = vertices[0];
+    let source = vertices
+        .iter()
+        .map(|point| Point2::new(point.x - origin.x, point.y - origin.y))
+        .collect::<Vec<_>>();
+    if source.iter().any(|point| !point.is_finite()) {
+        return Err(region_error(
+            "region.resize.geometry.offset",
+            "convex inset local coordinates must remain finite",
+        ));
+    }
+    let mut polygon = source.clone();
+    for index in 0..source.len() {
+        poll_treatment(cancelled)?;
+        if polygon.len() < 3 {
+            return Ok(Vec::new());
+        }
+        work.charge_convex_inset(polygon.len(), 0, polygon.len())
+            .map_err(|error| region_error("region.resize.limits.offset", error.message()))?;
+        let start = source[index];
+        let end = source[(index + 1) % source.len()];
+        let edge = Vector2::new(end.x - start.x, end.y - start.y);
+        let length = edge.x.hypot(edge.y);
+        if !length.is_finite() || length <= 0.0 {
+            return Err(region_error(
+                "region.resize.geometry.offset",
+                "convex inset edge length must remain finite and positive",
+            ));
+        }
+        let normal = Vector2::new(-edge.y / length, edge.x / length);
+        let signed = |point: Point2| -> Result<f64, RegionTreatmentError> {
+            let value = (point.x - start.x) * normal.x + (point.y - start.y) * normal.y - distance;
+            value.is_finite().then_some(value).ok_or(region_error(
+                "region.resize.geometry.offset",
+                "convex inset half-plane distance must remain finite",
+            ))
+        };
+        let mut clipped = Vec::with_capacity(polygon.len() + 1);
+        let mut previous = polygon[polygon.len() - 1];
+        let mut previous_distance = signed(previous)?;
+        for (vertex_index, current) in polygon.iter().copied().enumerate() {
+            if vertex_index & 1023 == 0 {
+                poll_treatment(cancelled)?;
+            }
+            let current_distance = signed(current)?;
+            if (previous_distance >= 0.0) != (current_distance >= 0.0) {
+                let denominator = previous_distance - current_distance;
+                if !denominator.is_finite() || denominator == 0.0 {
+                    return Err(region_error(
+                        "region.resize.geometry.offset",
+                        "convex inset intersection denominator must remain finite and nonzero",
+                    ));
+                }
+                let fraction = previous_distance / denominator;
+                if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+                    return Err(region_error(
+                        "region.resize.geometry.offset",
+                        "convex inset intersection fraction must remain finite and within its edge",
+                    ));
+                }
+                clipped.push(Point2::new(
+                    previous.x + fraction * (current.x - previous.x),
+                    previous.y + fraction * (current.y - previous.y),
+                ));
+            }
+            if current_distance >= 0.0 {
+                clipped.push(current);
+            }
+            previous = current;
+            previous_distance = current_distance;
+        }
+        if clipped.iter().any(|point| !point.is_finite()) {
+            return Err(region_error(
+                "region.resize.geometry.offset",
+                "convex inset intersection coordinates must remain finite",
+            ));
+        }
+        clipped.dedup();
+        if clipped.first() == clipped.last() {
+            clipped.pop();
+        }
+        polygon = clipped;
+    }
+    if polygon.len() < 3 {
+        return Ok(Vec::new());
+    }
+    let area = polygon
+        .iter()
+        .zip(polygon.iter().cycle().skip(1))
+        .map(|(left, right)| left.x * right.y - left.y * right.x)
+        .sum::<f64>()
+        * 0.5;
+    if !area.is_finite() {
+        return Err(region_error(
+            "region.resize.geometry.area",
+            "convex inset area must remain finite",
+        ));
+    }
+    if area <= 0.0 {
+        return Ok(Vec::new());
+    }
+    work.charge_convex_inset(polygon.len(), 1, 0)
+        .map_err(|error| region_error("region.resize.limits.offset", error.message()))?;
+    let points = polygon
+        .into_iter()
+        .map(|point| Point2::new(point.x + origin.x, point.y + origin.y))
+        .collect::<Vec<_>>();
+    CurvePath::polyline(points, PathClosure::Closed)
+        .map(|path| vec![path])
+        .map_err(|error| region_error("region.resize.geometry.offset", error.message()))
+}
+
 /// Solves nonlinear, nonconvex, or topology-changing current producer rings with shared work.
 ///
-/// The fixed thirty-two-step bisection is private, deterministic, and deliberately
-/// non-configurable. Every candidate charges the one request-wide PathOffsetWork. It accepts
+/// The fixed thirty-two-candidate solve is private, deterministic, and deliberately
+/// non-configurable. Convex insets use the last known-area bracket's interpolant after thirty-one
+/// bisections; other rings keep thirty-two bisections. Every candidate charges the one
+/// request-wide PathOffsetWork. It accepts
 /// only canonical numeric tolerance, otherwise failing atomically without a second protocol.
+///
+/// # Errors
+/// Returns offset, canonicalization, cancellation, or unresolved positive-area diagnostics.
 fn uniform_offset_fallback_components(
     output_layer_id: PatternOutputLayerId,
     region: &crate::CanonicalRegion,
@@ -719,12 +919,31 @@ fn uniform_offset_fallback_components(
 ) -> Result<Vec<CurvePath>, RegionTreatmentError> {
     const STEPS: usize = 32;
     let grows = target_area > region.area;
-    let mut low = 0.0;
+    let convex_inset = !grows && convex_line_ring_vertices(&region.ring).is_some();
+    let mut low: f64 = 0.0;
     let mut high = region.area.sqrt();
-    let mut best: Option<(f64, Vec<CurvePath>)> = None;
-    for _ in 0..STEPS {
+    // A convex polygon's inradius is at most sqrt(area / pi), so this upper endpoint is empty.
+    let mut low_area = region.area;
+    let mut high_area: f64 = 0.0;
+    let mut best: Option<(f64, f64, f64, Vec<CurvePath>)> = None;
+    for step in 0..STEPS {
         poll_treatment(cancelled)?;
-        let distance = (low + high) * 0.5;
+        let distance = if convex_inset
+            && step + 1 == STEPS
+            && low.is_finite()
+            && high.is_finite()
+            && low < high
+            && low_area.is_finite()
+            && high_area.is_finite()
+            && low_area >= target_area
+            && target_area >= high_area
+            && low_area > high_area
+        {
+            let fraction = ((low_area - target_area) / (low_area - high_area)).clamp(0.0, 1.0);
+            low + fraction * (high - low)
+        } else {
+            (low + high) * 0.5
+        };
         let candidate = canonical_offset_components(
             output_layer_id,
             region,
@@ -737,26 +956,112 @@ fn uniform_offset_fallback_components(
         let error = (area - target_area).abs();
         if best
             .as_ref()
-            .is_none_or(|(best_error, _)| error < *best_error)
+            .is_none_or(|(best_error, _, _, _)| error < *best_error)
         {
-            best = Some((error, candidate.components));
+            best = Some((error, distance, area, candidate.components));
         }
         if (grows && area < target_area) || (!grows && area > target_area) {
             low = distance;
+            low_area = area;
         } else {
             high = distance;
+            high_area = area;
         }
     }
-    let (error, components) = best.ok_or(region_error(
+    let (error, distance, area, components) = best.ok_or(region_error(
         "region.resize.geometry.offset",
         "UniformOffset fallback produced no positive candidate",
     ))?;
+    if error > target_area * 1.0e-6 + 1.0e-9
+        && std::env::var_os("TONIATOR_CALIBRATION_DIAGNOSTICS").is_some()
+    {
+        diagnose_offset_failure(region, target_area, low, high, distance, area, &components);
+    }
     (error <= target_area * 1.0e-6 + 1.0e-9)
         .then_some(components)
         .ok_or(region_error(
             "region.resize.geometry.offset",
             "UniformOffset fallback did not reach its bounded positive-area tolerance",
         ))
+}
+
+/// Reports the first atomically failed offset without changing its acceptance or shared budget.
+///
+/// Recentered areas reuse canonical-region authority in diagnostic-only independent builds;
+/// no diagnostic geometry can be published as the treatment result.
+#[allow(clippy::too_many_arguments)]
+fn diagnose_offset_failure(
+    region: &crate::CanonicalRegion,
+    target_area: f64,
+    low: f64,
+    high: f64,
+    distance: f64,
+    area: f64,
+    components: &[CurvePath],
+) {
+    let vertices = region
+        .ring
+        .segments()
+        .iter()
+        .map(CurveSegment::start)
+        .collect::<Vec<_>>();
+    let turns_and_lengths = (0..vertices.len())
+        .map(|index| {
+            let previous = vertices[(index + vertices.len() - 1) % vertices.len()];
+            let current = vertices[index];
+            let next = vertices[(index + 1) % vertices.len()];
+            let incoming = Vector2::new(current.x - previous.x, current.y - previous.y);
+            let outgoing = Vector2::new(next.x - current.x, next.y - current.y);
+            (
+                incoming.x * outgoing.y - incoming.y * outgoing.x,
+                incoming.x.hypot(incoming.y),
+                outgoing.x.hypot(outgoing.y),
+            )
+        })
+        .collect::<Vec<_>>();
+    let recentered = |paths: &[CurvePath]| -> Option<f64> {
+        let origin = vertices.first()?;
+        let transform = crate::AffineTransform2D::rotate_about_then_translate(
+            Point2::new(0.0, 0.0),
+            0.0,
+            Vector2::new(-origin.x, -origin.y),
+        )?;
+        let components = paths
+            .iter()
+            .map(|path| path.transformed(transform))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let (canonical, _) = build_canonical_regions_cancellable(
+            CanonicalRegionProposal {
+                output_layer_id: region.id.output_layer_id,
+                source_groups: vec![CanonicalRegionSourceGroup {
+                    source_id: region.id.source_id.clone(),
+                    components,
+                }],
+            },
+            CanonicalRegionLimits::default(),
+            || false,
+        )
+        .ok()?;
+        Some(
+            canonical
+                .regions()
+                .iter()
+                .map(|component| component.area)
+                .sum(),
+        )
+    };
+    eprintln!(
+        "offset failure: id={:?} bounds={:?} base={:.17} target={target_area:.17} bracket=[{low:.17},{high:.17}] best_distance={distance:.17} best_area={area:.17} error={:.17} tolerance={:.17} analytic={:?} recentered_base={:?} recentered_candidate={:?} vertices={vertices:?} turns_incoming_outgoing={turns_and_lengths:?} candidate={components:?}",
+        region.id,
+        region.bounds,
+        region.area,
+        (area - target_area).abs(),
+        target_area * 1.0e-6 + 1.0e-9,
+        convex_line_ring_offset_distance(region, target_area),
+        recentered(std::slice::from_ref(&region.ring)),
+        recentered(components)
+    );
 }
 
 /// Derives one exact signed normal displacement for a convex linear canonical region.
@@ -1112,6 +1417,198 @@ mod tests {
             reference: Some(Point2::new(1.0, 1.0)),
             treatment: Some(RegionTreatment { algorithm, fill }),
         }
+    }
+
+    /// Builds one convex regression polygon through the ordinary canonical-region authority.
+    ///
+    /// # Panics
+    /// Panics if finite, closed regression vertices cannot form one positive canonical region.
+    fn convex_regression_source(vertices: Vec<Point2>) -> CanonicalRegionSet {
+        build_canonical_regions_cancellable(
+            CanonicalRegionProposal {
+                output_layer_id: PatternOutputLayerId(71),
+                source_groups: vec![CanonicalRegionSourceGroup {
+                    source_id: crate::CanonicalRegionSourceId::SiteOwners(vec![
+                        crate::FamilySiteId {
+                            mechanism_id: PatternMechanismId(9),
+                            ordinal: 299,
+                        },
+                    ]),
+                    components: vec![
+                        CurvePath::polyline(vertices, PathClosure::Closed)
+                            .expect("convex regression ring"),
+                    ],
+                }],
+            },
+            CanonicalRegionLimits::default(),
+            || false,
+        )
+        .expect("convex regression canonicalizes")
+        .0
+    }
+
+    /// Keeps the observed fixed-reference triangle's positive fill proportional down to the existing area floor.
+    ///
+    /// # Panics
+    /// Panics if the exact failing cell errors, reverses, or exceeds the unchanged target tolerance.
+    #[test]
+    fn convex_inset_observed_triangle_preserves_low_positive_area() {
+        let source = convex_regression_source(vec![
+            Point2::new(528.6963077376412, 722.0254686576504),
+            Point2::new(549.7963717929123, 689.9643691970791),
+            Point2::new(564.4593852735214, 691.8712382108671),
+        ]);
+        let region = &source.regions()[0];
+        let mut previous = region.area;
+        for fill in [0.5, 0.1, 0.01, 0.001, 0.00000048828125] {
+            let result = treat_region_requests_cancellable(
+                PatternOutputLayerId(71),
+                &source,
+                &[request(region, RegionResizeAlgorithm::UniformOffset, fill)],
+                RegionTreatmentLimits::default(),
+                || false,
+            )
+            .expect("exact triangle inset reaches its bounded area");
+            let area = result
+                .regions
+                .regions()
+                .iter()
+                .map(|region| region.area)
+                .sum::<f64>();
+            let target = region.area * fill * fill;
+            assert!(
+                (area - target).abs() <= target * 1.0e-6 + 1.0e-9,
+                "fill={fill} area={area} target={target}"
+            );
+            assert!(area <= previous);
+            previous = area;
+        }
+        assert!(previous <= 1.0e-9);
+    }
+
+    /// Reaches the observed seven-edge cell's small target within thirty-two candidates.
+    ///
+    /// # Panics
+    /// Panics if final bracket interpolation misses the unchanged absolute and relative tolerance.
+    #[test]
+    fn convex_inset_observed_short_edge_cell_meets_small_target() {
+        let source = convex_regression_source(vec![
+            Point2::new(290.89039811486145, 36.89939300508243),
+            Point2::new(294.0189752807113, 29.55155082343241),
+            Point2::new(319.33158768569973, 29.54919658561438),
+            Point2::new(319.5527179938422, 29.70418536975692),
+            Point2::new(320.899259820551, 73.6891835404679),
+            Point2::new(317.89941553844164, 81.41744027676836),
+            Point2::new(292.95176247183224, 75.94982909749825),
+        ]);
+        let region = &source.regions()[0];
+        let result = treat_region_requests_cancellable(
+            PatternOutputLayerId(71),
+            &source,
+            &[request(region, RegionResizeAlgorithm::UniformOffset, 0.001)],
+            RegionTreatmentLimits::default(),
+            || false,
+        )
+        .expect("short-edge inset reaches its bounded area");
+        let area = result
+            .regions
+            .regions()
+            .iter()
+            .map(|region| region.area)
+            .sum::<f64>();
+        let target = region.area * 0.001 * 0.001;
+        assert!((area - target).abs() <= target * 1.0e-6 + 1.0e-9);
+    }
+
+    /// Removes a short convex bevel and stays empty after the inset consumes the whole polygon.
+    ///
+    /// # Panics
+    /// Panics if an inset grows, retains the vanished bevel, or reappears past its inradius.
+    #[test]
+    fn convex_inset_removes_short_edges_and_never_reappears_after_collapse() {
+        let vertices = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(10.0, 0.0),
+            Point2::new(10.0, 9.8),
+            Point2::new(9.8, 10.0),
+            Point2::new(0.0, 10.0),
+        ];
+        let mut previous = 100.0;
+        for distance in [0.05, 0.2, 1.0, 4.9, 5.0, 6.0, 15.0] {
+            let paths = convex_line_ring_inset(
+                &vertices,
+                distance,
+                &mut PathOffsetWork::new(crate::PathOffsetLimits::default()).unwrap(),
+                &|| false,
+            )
+            .expect("convex inset succeeds");
+            let area = if paths.is_empty() {
+                0.0
+            } else {
+                let canonical = convex_regression_source(
+                    paths[0]
+                        .segments()
+                        .iter()
+                        .map(CurveSegment::start)
+                        .collect(),
+                );
+                canonical.regions()[0].area
+            };
+            assert!(area <= previous);
+            if distance == 1.0 {
+                assert_eq!(paths[0].segments().len(), 4);
+                assert!((area - 64.0).abs() <= 1.0e-12);
+            }
+            if distance >= 5.0 {
+                assert!(paths.is_empty());
+            }
+            previous = area;
+        }
+    }
+
+    /// Fails closed when finite source coordinates overflow local inset arithmetic.
+    ///
+    /// # Panics
+    /// Panics if overflow or an invalid distance masquerades as an empty successful inset.
+    #[test]
+    fn convex_inset_rejects_nonfinite_arithmetic() {
+        let vertices = vec![Point2::new(-1.0e308,0.0),Point2::new(1.0e308,0.0),Point2::new(0.0,1.0)];
+        let mut work=PathOffsetWork::new(crate::PathOffsetLimits::default()).unwrap();
+        assert_eq!(convex_line_ring_inset(&vertices,1.0,&mut work,&||false).unwrap_err().path(),"region.resize.geometry.offset");
+        assert_eq!(convex_line_ring_inset(&vertices,f64::NAN,&mut work,&||false).unwrap_err().path(),"region.resize.geometry.offset");
+    }
+
+    /// Shares convex clipping work across requests and observes cancellation before clipping.
+    ///
+    /// # Panics
+    /// Panics if a second inset bypasses exhausted segment accounting or cancellation.
+    #[test]
+    fn convex_inset_honors_shared_work_and_cancellation() {
+        let vertices = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(2.0, 2.0),
+            Point2::new(0.0, 2.0),
+        ];
+        let limits = crate::PathOffsetLimits {
+            maximum_segments: 20,
+            ..crate::PathOffsetLimits::default()
+        };
+        let mut work = PathOffsetWork::new(limits).unwrap();
+        let paths = convex_line_ring_inset(&vertices, 0.5, &mut work, &|| false).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(
+            convex_line_ring_inset(&vertices, 0.5, &mut work, &|| false)
+                .unwrap_err()
+                .path(),
+            "region.resize.limits.offset"
+        );
+        assert_eq!(
+            convex_line_ring_inset(&vertices, 0.5, &mut work, &|| true)
+                .unwrap_err()
+                .path(),
+            "evaluation.cancelled"
+        );
     }
 
     /// Verifies fill zero omits positive geometry before canonical output construction.

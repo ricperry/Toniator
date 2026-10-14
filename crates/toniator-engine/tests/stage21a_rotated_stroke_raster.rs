@@ -350,7 +350,7 @@ fn generate_rotated_one_guide_intrinsic_artifacts() {
         .expect("native raster PNG writes");
         fs::write(
             output.join(format!("{stem}.svg")),
-            write_svg(result.scene()),
+            write_svg(result.scene()).expect("SVG serialization"),
         )
         .expect("raw canonical SVG writes");
     }

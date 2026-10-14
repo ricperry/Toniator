@@ -38,3 +38,8 @@ rayon = "1.10"
 i_overlay = "=9.0.0"
 kurbo = "=0.13.1"
 libc = "0.2"
+
+# Exact iOverlay 9.0.0 with opt-in checked native-AA splitting; see vendor provenance.
+[patch.crates-io]
+i_overlay = { path = "vendor/i_overlay" }
+i_tree = { path = "vendor/i_tree" }

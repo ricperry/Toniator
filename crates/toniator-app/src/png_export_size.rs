@@ -3,7 +3,7 @@
 use std::fmt;
 
 use toniator_domain::CanvasSpec;
-use toniator_engine::OutputRasterTarget;
+use toniator_engine::{OutputRasterTarget, StreamingRasterTarget};
 
 #[derive(Clone, Copy)]
 enum SizeMenu {
@@ -105,6 +105,19 @@ impl OutputDimensions {
     pub(crate) fn target(self) -> Result<OutputRasterTarget, OutputSizeError> {
         OutputRasterTarget::new(self.width, self.height)
             .map_err(|_| OutputSizeError::RendererLimit(self.render_limit_message()))
+    }
+
+    /// Admits exact PNG dimensions independently of complete-raster preview and video budgets.
+    /// # Errors
+    /// Returns PNG format, row addressability, or minimum-row working-storage diagnostics.
+    pub(crate) fn streaming_target(self) -> Result<StreamingRasterTarget, OutputSizeError> {
+        StreamingRasterTarget::new(self.width, self.height).map_err(|error| {
+            OutputSizeError::RendererLimit(format!(
+                "{} Requested PNG: {}.",
+                error.message(),
+                self.summary()
+            ))
+        })
     }
 
     /// Returns a precise diagnostic when these dimensions exceed the renderer's pixel budget.
@@ -216,10 +229,23 @@ impl PrintFitDimensions {
         (self.physical_width_mm, self.physical_height_mm)
     }
 
-    /// Checks the requested print dimensions through the renderer's final-output authority.
-    ///
+    /// Admits the exact physical-fit PNG without reducing its selected area or DPI.
     /// # Errors
-    /// Returns Toniator's pixel-budget diagnostic without changing the requested print size.
+    /// Returns streaming-format or working-row diagnostics with the requested print resolution.
+    pub(crate) fn streaming_target(self) -> Result<StreamingRasterTarget, OutputSizeError> {
+        self.dimensions.streaming_target().map_err(|error| {
+            OutputSizeError::RendererLimit(format!(
+                "{} Requested print resolution: {} DPI.",
+                error.message(),
+                self.target_dpi
+            ))
+        })
+    }
+
+    /// Checks full-surface test consumers independently of streaming PNG admission.
+    /// # Errors
+    /// Returns the unchanged full-raster resource diagnostic.
+    #[cfg(test)]
     pub(crate) fn target(self) -> Result<OutputRasterTarget, OutputSizeError> {
         match self.dimensions.target() {
             Err(OutputSizeError::RendererLimit(_)) => {
@@ -230,6 +256,7 @@ impl PrintFitDimensions {
     }
 
     /// Describes an over-budget print fit while retaining the selected area and DPI.
+    #[cfg(test)]
     pub(crate) fn render_limit_message(self) -> String {
         format!(
             "Requested print output is {} at {:.1} DPI, above Toniator's current raster rendering limit of {} pixels ({:.1} MP). The requested print area and DPI are unchanged.",

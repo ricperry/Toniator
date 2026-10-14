@@ -19,7 +19,8 @@ pub use calibration::{
     CALIBRATION_PROFILE_MEAN, CALIBRATION_PROFILE_ROUND_INTERIOR,
     CALIBRATION_PROFILE_SEEDED, CALIBRATION_PROFILE_SEEDED_64,
     CALIBRATION_REFERENCE_CANVAS_SIDE, CALIBRATION_REFERENCE_SEED, CalibrationBinding,
-    CalibrationKnot, CalibrationVariation, SavedCalibration, UniformCalibration,
+    CalibrationKnot, CalibrationVariation, MAX_SAVED_CALIBRATION_KNOTS, SavedCalibration,
+    UniformCalibration,
 };
 mod color_authoring;
 mod pattern_batches;
@@ -5995,6 +5996,8 @@ impl Document {
             let artifact = calibration::default_straight_artifact(&document, channel_id)?;
             document = document.with_saved_calibration(channel_id, artifact)?;
         }
+        let baseline = calibration::default_straight_artifact(&document, document.channel_ids()[0])?;
+        document = document.with_saved_baseline_calibration(baseline)?;
         Ok(document)
     }
 
@@ -6208,7 +6211,10 @@ impl Document {
     /// Propagates base recipe reconstruction or ALL aspect validation errors.
     pub fn baseline_saved_calibration(&self) -> Result<Option<&SavedCalibration>, ValidationError> {
         let binding = self.baseline_calibration_binding()?;
-        Ok(self.baseline_saved_calibration.as_ref().filter(|artifact| artifact.binding() == &binding))
+        Ok(self
+            .baseline_saved_calibration
+            .as_ref()
+            .filter(|artifact| artifact.binding().is_compatible_with(&binding)))
     }
 
     /// Requires complete current saved authority before guarded structural publication.
@@ -6232,7 +6238,7 @@ impl Document {
         Ok(())
     }
 
-    /// Reads only a measurement whose typed structure still matches this channel.
+    /// Reads this channel's own compatible assignment without borrowing another channel's data.
     ///
     /// # Errors
     /// Returns reconstruction diagnostics; a stale or absent entry returns `None`.
@@ -6244,134 +6250,98 @@ impl Document {
         Ok(self
             .saved_calibrations
             .iter()
-            .find(|entry| entry.channel_id == channel_id && entry.artifact.binding() == &binding)
-            .or_else(|| {
-                self.saved_calibrations
-                    .iter()
-                    .find(|entry| entry.artifact.binding() == &binding)
+            .find(|entry| {
+                entry.channel_id == channel_id
+                    && entry.artifact.binding().is_compatible_with(&binding)
             })
-            .map(|entry| &entry.artifact)
-            .or_else(|| self.baseline_saved_calibration.as_ref()
-                .filter(|artifact| artifact.binding() == &binding)))
+            .map(|entry| &entry.artifact))
     }
 
-    /// Replaces one structural binding's measurement across every equivalent channel atomically.
+    /// Replaces exactly one channel's assignment, preserving every other channel and ALL.
     ///
     /// # Errors
-    /// Rejects a stale structural binding or an invalid resulting document.
+    /// Rejects a foreign channel, incompatible structural binding, or invalid document.
     pub fn with_saved_calibration(
         &self,
         channel_id: ChannelId,
         artifact: SavedCalibration,
     ) -> Result<Self, ValidationError> {
-        if artifact.binding() != &CalibrationBinding::for_channel(self, channel_id)? {
+        if !artifact
+            .binding()
+            .is_compatible_with(&CalibrationBinding::for_channel(self, channel_id)?)
+        {
             return Err(ValidationError::new(
                 "calibration.binding",
                 "saved calibration does not match current Pattern geometry; Recalibrate",
             ));
         }
         let mut candidate = self.clone();
-        let channels = self
-            .channel_ids()
-            .into_iter()
-            .filter(|id| {
-                CalibrationBinding::for_channel(self, *id).ok().as_ref() == Some(artifact.binding())
-            })
-            .collect::<Vec<_>>();
-        candidate
+        if let Some(entry) = candidate
             .saved_calibrations
-            .retain(|entry| !channels.contains(&entry.channel_id));
-        candidate
-            .saved_calibrations
-            .extend(channels.into_iter().map(|channel_id| AttachedCalibration {
+            .iter_mut()
+            .find(|entry| entry.channel_id == channel_id)
+        {
+            entry.artifact = artifact;
+        } else {
+            candidate.saved_calibrations.push(AttachedCalibration {
                 channel_id,
-                artifact: artifact.clone(),
-            }));
-        if &candidate.baseline_calibration_binding()? == artifact.binding() {
-            candidate.baseline_saved_calibration = Some(artifact);
+                artifact,
+            });
         }
         candidate.validate()?;
         Ok(candidate)
     }
 
-    /// Replaces the hidden ALL measurement and any equal active channel payload atomically.
+    /// Replaces only the hidden last-ALL measurement, preserving independent channel payloads.
     ///
     /// # Errors
-    /// Rejects a stale base binding or invalid complete candidate.
+    /// Rejects an incompatible base binding or invalid complete candidate.
     pub fn with_saved_baseline_calibration(
         &self,
         artifact: SavedCalibration,
     ) -> Result<Self, ValidationError> {
-        if artifact.binding() != &self.baseline_calibration_binding()? {
-            return Err(ValidationError::new("calibration.baseline.binding",
-                "shared Pattern calibration does not match current ALL geometry; Recalibrate"));
+        if !artifact
+            .binding()
+            .is_compatible_with(&self.baseline_calibration_binding()?)
+        {
+            return Err(ValidationError::new(
+                "calibration.baseline.binding",
+                "shared Pattern calibration does not match current ALL geometry; Recalibrate",
+            ));
         }
         let mut candidate = self.clone();
-        for entry in &mut candidate.saved_calibrations {
-            if entry.artifact.binding() == artifact.binding() {
-                entry.artifact = artifact.clone();
-            }
-        }
         candidate.baseline_saved_calibration = Some(artifact);
         candidate.validate()?;
         Ok(candidate)
     }
 
-    /// Restores current-schema project or Preset measurements after complete document construction.
+    /// Restores independent current-schema assignments directly without donor expansion.
     ///
     /// # Errors
-    /// Rejects duplicate channels or any stale binding before returning a candidate.
+    /// Rejects duplicate, foreign, or incompatible channels before exposing a candidate.
     pub fn with_saved_calibrations(
         &self,
         entries: Vec<AttachedCalibration>,
     ) -> Result<Self, ValidationError> {
         let mut candidate = self.clone();
-        candidate.saved_calibrations.clear();
-        let mut seen = std::collections::BTreeSet::new();
-        let mut bindings = Vec::<SavedCalibration>::new();
-        for entry in entries {
-            if !seen.insert(entry.channel_id) {
-                return Err(ValidationError::new(
-                    "calibration.channel_id",
-                    "saved calibration channels must be unique",
-                ));
-            }
-            if bindings.iter().any(|artifact| {
-                artifact.binding() == entry.artifact.binding() && artifact != &entry.artifact
-            }) {
-                return Err(ValidationError::new(
-                    "calibration.binding",
-                    "equal structural bindings cannot carry different saved measurements",
-                ));
-            }
-            bindings.push(entry.artifact.clone());
-            candidate = candidate.with_saved_calibration(entry.channel_id, entry.artifact)?;
-        }
+        candidate.saved_calibrations = entries;
+        candidate.validate()?;
         Ok(candidate)
     }
 
-    /// Restores active and hidden ALL artifacts with exact same-binding payload equality.
+    /// Restores independent active and hidden ALL artifacts without rewriting any payload.
     ///
     /// # Errors
-    /// Rejects duplicate, stale, or conflicting measurements before exposing a document.
+    /// Rejects duplicate, foreign, or incompatible assignments; equal bindings may differ numerically.
     pub fn with_saved_calibration_authority(
         &self,
         entries: Vec<AttachedCalibration>,
         baseline: Option<SavedCalibration>,
     ) -> Result<Self, ValidationError> {
-        let mut empty = self.clone();
-        empty.saved_calibrations.clear();
-        empty.baseline_saved_calibration = None;
-        let mut candidate = empty.with_saved_calibrations(entries)?;
-        if let Some(artifact) = baseline {
-            if candidate.saved_calibrations.iter().any(|entry| {
-                entry.artifact.binding() == artifact.binding() && entry.artifact != artifact
-            }) {
-                return Err(ValidationError::new("calibration.baseline.payload",
-                    "equal shared and channel bindings carry different measurements"));
-            }
-            candidate = candidate.with_saved_baseline_calibration(artifact)?;
-        }
+        let mut candidate = self.clone();
+        candidate.saved_calibrations = entries;
+        candidate.baseline_saved_calibration = baseline;
+        candidate.validate()?;
         Ok(candidate)
     }
 
@@ -7835,6 +7805,13 @@ impl Document {
             model,
             topology: topology.clone(),
         };
+        let command = DocumentCommand::ReplaceChannelTopology {
+            model,
+            topology: topology.clone(),
+        };
+        candidate.reconcile_response_after_structure(self, &command);
+        temporal::reconcile_end_after_start(self, &mut candidate, &command)?;
+        candidate.reconcile_saved_assignments(self)?;
         candidate.validate()?;
         Ok(topology)
     }
@@ -12256,24 +12233,149 @@ impl Document {
     /// Returns stable print-intent, authored-structure, canvas, definition,
     /// channel, or topology diagnostics without mutating the document.
     pub fn validate(&self) -> Result<(), ValidationError> {
+        self.validate_content()?;
+        self.validate_saved_assignments()
+    }
+
+    /// Reconciles saved assignments after authored edits while preserving compatible own payloads.
+    ///
+    /// New identities inherit the compatible last-ALL baseline first, then another saved donor.
+    /// Existing compatible assignments remain exact, including their measured artistic rotation.
+    ///
+    /// # Errors
+    /// Returns typed baseline or active binding reconstruction diagnostics without fitting.
+    fn reconcile_saved_assignments(&mut self, before: &Document) -> Result<(), ValidationError> {
+        let baseline_binding = self.baseline_calibration_binding()?;
+        self.baseline_saved_calibration = before
+            .baseline_saved_calibration
+            .as_ref()
+            .filter(|artifact| artifact.binding().is_compatible_with(&baseline_binding))
+            .cloned()
+            .or_else(|| {
+                before
+                    .saved_calibrations
+                    .iter()
+                    .find(|entry| {
+                        entry
+                            .artifact
+                            .binding()
+                            .is_compatible_with(&baseline_binding)
+                    })
+                    .map(|entry| entry.artifact.clone())
+            });
+        let mut retained = self
+            .saved_calibrations
+            .iter()
+            .filter(|entry| {
+                CalibrationBinding::for_channel(self, entry.channel_id)
+                    .is_ok_and(|binding| entry.artifact.binding().is_compatible_with(&binding))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for channel_id in self.channel_ids() {
+            if retained.iter().any(|entry| entry.channel_id == channel_id) {
+                continue;
+            }
+            let binding = CalibrationBinding::for_channel(self, channel_id)?;
+            if let Some(artifact) = self
+                .baseline_saved_calibration
+                .as_ref()
+                .filter(|artifact| artifact.binding().is_compatible_with(&binding))
+            {
+                retained.push(AttachedCalibration {
+                    channel_id,
+                    artifact: artifact.clone(),
+                });
+            } else if let Some(source) = before
+                .saved_calibrations
+                .iter()
+                .find(|entry| entry.artifact.binding().is_compatible_with(&binding))
+            {
+                retained.push(AttachedCalibration {
+                    channel_id,
+                    artifact: source.artifact.clone(),
+                });
+            }
+        }
+        self.saved_calibrations = retained;
+        Ok(())
+    }
+
+    /// Drops incompatible assignments after an authored static edit without fitting or donating.
+    ///
+    /// Compatible independent payloads retain their exact numbers and measured provenance.
+    fn retain_compatible_saved_assignments(&mut self) {
+        let entries = std::mem::take(&mut self.saved_calibrations);
+        self.saved_calibrations = entries
+            .into_iter()
+            .filter(|entry| {
+                CalibrationBinding::for_channel(self, entry.channel_id)
+                    .is_ok_and(|binding| entry.artifact.binding().is_compatible_with(&binding))
+            })
+            .collect();
+        if self
+            .baseline_saved_calibration
+            .as_ref()
+            .is_some_and(|artifact| {
+                self.baseline_calibration_binding()
+                    .is_ok_and(|binding| !artifact.binding().is_compatible_with(&binding))
+            })
+        {
+            self.baseline_saved_calibration = None;
+        }
+    }
+
+    /// Checks independent static assignments against current structure without requiring presence.
+    ///
+    /// # Errors
+    /// Rejects duplicate, foreign, or stale assignments, including ordinary static aspect/bias edits.
+    fn validate_saved_assignments(&self) -> Result<(), ValidationError> {
+        if let Some(artifact) = &self.baseline_saved_calibration
+            && !artifact
+                .binding()
+                .is_compatible_with(&self.baseline_calibration_binding()?)
+        {
+            return Err(ValidationError::new(
+                "calibration.baseline.binding",
+                "shared Pattern calibration is stale; Recalibrate",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for entry in &self.saved_calibrations {
+            if !seen.insert(entry.channel_id) {
+                return Err(ValidationError::new(
+                    "calibration.channel_id",
+                    "saved calibration channels must be unique",
+                ));
+            }
+            if !entry
+                .artifact
+                .binding()
+                .is_compatible_with(&CalibrationBinding::for_channel(self, entry.channel_id)?)
+            {
+                return Err(ValidationError::new(
+                    "calibration.binding",
+                    "channel Pattern calibration is stale; Recalibrate",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates document content independently of static saved-binding compatibility.
+    ///
+    /// Only immutable materialized frame authority may use this boundary without the static
+    /// assignment check; continuous overrides retain Start's validated numeric companions.
+    ///
+    /// # Errors
+    /// Returns canvas, authored structure, topology, response, or continuous temporal diagnostics.
+    fn validate_content(&self) -> Result<(), ValidationError> {
         validate_positive_finite(self.canvas.width, "canvas.width")?;
         validate_positive_finite(self.canvas.height, "canvas.height")?;
         self.print_preparation.validate()?;
         self.appearance_baseline.validate()?;
         self.response_settings.validate()?;
         validate_authored_structures(&self.authored_structures)?;
-        if let Some(artifact) = &self.baseline_saved_calibration {
-            if artifact.binding() != &self.baseline_calibration_binding()? {
-                return Err(ValidationError::new("calibration.baseline.binding",
-                    "shared Pattern calibration is stale; Recalibrate"));
-            }
-            if self.saved_calibrations.iter().any(|entry| {
-                entry.artifact.binding() == artifact.binding() && &entry.artifact != artifact
-            }) {
-                return Err(ValidationError::new("calibration.baseline.payload",
-                    "equal shared and channel bindings carry different measurements"));
-            }
-        }
 
         let mut definition_ids = HashSet::new();
         let mut mechanism_ids = HashSet::new();
@@ -12466,45 +12568,7 @@ impl Document {
         command.apply_to_valid_document(&mut candidate);
         candidate.reconcile_response_after_structure(self, command);
         temporal::reconcile_end_after_start(self, &mut candidate, command)?;
-        let baseline_binding = candidate.baseline_calibration_binding()?;
-        candidate.baseline_saved_calibration = self.baseline_saved_calibration.as_ref()
-            .filter(|artifact| artifact.binding() == &baseline_binding)
-            .cloned()
-            .or_else(|| self.saved_calibrations.iter()
-                .find(|entry| entry.artifact.binding() == &baseline_binding)
-                .map(|entry| entry.artifact.clone()));
-        let mut retained = candidate
-            .saved_calibrations
-            .iter()
-            .filter(|entry| {
-                CalibrationBinding::for_channel(&candidate, entry.channel_id)
-                    .ok()
-                    .as_ref()
-                    == Some(entry.artifact.binding())
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        for channel_id in candidate.channel_ids() {
-            if retained.iter().any(|entry| entry.channel_id == channel_id) {
-                continue;
-            }
-            let binding = CalibrationBinding::for_channel(&candidate, channel_id)?;
-            if let Some(source) = self
-                .saved_calibrations
-                .iter()
-                .find(|entry| entry.artifact.binding() == &binding)
-            {
-                retained.push(AttachedCalibration {
-                    channel_id,
-                    artifact: source.artifact.clone(),
-                });
-            } else if let Some(artifact) = candidate.baseline_saved_calibration.as_ref()
-                .filter(|artifact| artifact.binding() == &binding)
-            {
-                retained.push(AttachedCalibration { channel_id, artifact: artifact.clone() });
-            }
-        }
-        candidate.saved_calibrations = retained;
+        candidate.reconcile_saved_assignments(self)?;
         candidate.validate()?;
         if candidate == *self {
             return Err(ValidationError::new(
@@ -28192,13 +28256,51 @@ impl DocumentEvaluationToken {
 /// constructor.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DocumentEvaluationSnapshot {
-    document: Document,
+    authority: EvaluationDocumentAuthority,
     token: DocumentEvaluationToken,
 }
 
+/// Keeps static and materialized authority private to domain-created immutable snapshots.
+#[derive(Clone, Debug, PartialEq)]
+enum EvaluationDocumentAuthority {
+    Static(Document),
+    Frame(MaterializedFrame),
+}
+
 impl DocumentEvaluationSnapshot {
+    /// Borrows content without transferring immutable continuous-frame authority to clones.
     pub fn document(&self) -> &Document {
-        &self.document
+        match &self.authority {
+            EvaluationDocumentAuthority::Static(document) => document,
+            EvaluationDocumentAuthority::Frame(frame) => frame.document(),
+        }
+    }
+
+    /// Validates the domain-owned static or immutable continuous-frame authority.
+    ///
+    /// # Errors
+    /// Returns content or static binding diagnostics without fitting or mutating assignments.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        match &self.authority {
+            EvaluationDocumentAuthority::Static(document) => document.validate(),
+            EvaluationDocumentAuthority::Frame(frame) => frame.validate(),
+        }
+    }
+
+    /// Reads the exact channel assignment under this snapshot's immutable authority.
+    ///
+    /// # Errors
+    /// Rejects a foreign channel or invalid static binding reconstruction.
+    pub fn saved_calibration_for(
+        &self,
+        channel: ChannelId,
+    ) -> Result<Option<&SavedCalibration>, ValidationError> {
+        match &self.authority {
+            EvaluationDocumentAuthority::Static(document) => {
+                document.saved_calibration_for(channel)
+            }
+            EvaluationDocumentAuthority::Frame(frame) => frame.saved_calibration_for(channel),
+        }
     }
 
     pub fn token(&self) -> DocumentEvaluationToken {
@@ -28314,7 +28416,7 @@ impl DocumentSession {
     /// snapshot, this supports both legacy and modeled document topologies.
     pub fn document_evaluation_snapshot(&self) -> DocumentEvaluationSnapshot {
         DocumentEvaluationSnapshot {
-            document: self.document.clone(),
+            authority: EvaluationDocumentAuthority::Static(self.document.clone()),
             token: self.document_evaluation_token(),
         }
     }
@@ -28631,14 +28733,31 @@ impl DocumentHistory {
                     )));
                 }
             };
-            let receiver = receivers.into_iter().find(|channel_id| {
-                CalibrationBinding::for_channel(&after, *channel_id).ok().as_ref()
-                    == Some(artifact.binding())
-            }).ok_or_else(|| DocumentSessionError::Validation(ValidationError::new(
-                "calibration.binding",
-                "Pattern Preset has no calibration for the concrete receiving geometry; Recalibrate",
-            )))?;
-            after = after.with_saved_calibration(receiver, artifact.clone())?;
+            let mut attached = false;
+            for receiver in receivers {
+                if artifact
+                    .binding()
+                    .is_compatible_with(&CalibrationBinding::for_channel(&after, receiver)?)
+                {
+                    after = after.with_saved_calibration(receiver, artifact.clone())?;
+                    attached = true;
+                }
+            }
+            if !attached {
+                return Err(DocumentSessionError::Validation(ValidationError::new(
+                    "calibration.binding",
+                    "Pattern Preset has no calibration for the concrete receiving geometry; Recalibrate",
+                )));
+            }
+            if matches!(
+                command,
+                DocumentCommand::ReplaceDocumentPatternDefinitionRecipe { .. }
+            ) && artifact
+                .binding()
+                .is_compatible_with(&after.baseline_calibration_binding()?)
+            {
+                after = after.with_saved_baseline_calibration(artifact.clone())?;
+            }
             let difference = squash_result(&before, &after);
             result.affected_channels = difference.affected_channels;
             result.invalidation = difference.invalidation;
@@ -29304,8 +29423,8 @@ impl DocumentHistory {
 
     /// Publishes one hidden ALL calibration under the same stale-root guard as channel artifacts.
     ///
-    /// Equal active bindings receive the replacement in this undoable history step. A hidden-only
-    /// payload change has no rendering invalidation until a later topology uses that binding.
+    /// Active assignments remain independent. A hidden-only payload change has no rendering
+    /// invalidation until a later topology uses that binding.
     ///
     /// # Errors
     /// Rejects a stale root, mismatched base binding, invalid candidate, or revision limit.

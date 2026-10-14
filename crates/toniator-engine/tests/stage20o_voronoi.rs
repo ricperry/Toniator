@@ -192,6 +192,9 @@ fn parametric_voronoi_document(width: f64, height: f64, source_id: SourceReferen
 }
 
 /// Evaluates one source-backed v5 ordinary-region document through save/load before rendering.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 fn render_v5_artwork(
     input_name: &str,
     width: f64,
@@ -237,7 +240,7 @@ fn render_v5_artwork(
     .expect("native PNG writes");
     fs::write(
         directory.join(format!("{stem}.svg")),
-        write_svg(evaluated.scene()),
+        write_svg(evaluated.scene()).expect("SVG serialization"),
     )
     .expect("raw SVG writes");
 }
@@ -283,6 +286,9 @@ fn direct_family(points: &[(f64, f64)]) -> FamilySiteSet {
 /// The builder receives guard-inclusive sites and emits only finite canonical cells. The renderer
 /// then applies its ordinary final canvas clip while serializing the same immutable scene to PNG
 /// and SVG.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 fn render_direct_region_artwork(stem: &str, points: &[(f64, f64)]) {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -341,7 +347,7 @@ fn render_direct_region_artwork(stem: &str, points: &[(f64, f64)]) {
         .expect("direct Region PNG"),
     )
     .expect("direct Region PNG writes");
-    fs::write(directory.join(format!("{stem}.svg")), write_svg(&scene))
+    fs::write(directory.join(format!("{stem}.svg")), write_svg(&scene).expect("SVG serialization"),)
         .expect("direct Region SVG writes");
 }
 

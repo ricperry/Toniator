@@ -89,12 +89,13 @@ use toniator_patterns::{
     RegionEvaluationEvidence, realize_region_output_with_evidence_cancellable,
 };
 pub use toniator_render::{
-    GeometryOutput, OutputRasterTarget, PreviewRasterTarget, RasterAntialiasing, RasterBackground,
-    RasterSurface, RenderError, RenderLayer, RenderScene, SceneIdentity, encode_png,
-    encode_png_with_density, linear_to_srgb, raster_output_identity, rasterize,
+    GeometryOutput, OutputRasterTarget, PngStreamOptions, PngStreamSummary, PreviewRasterTarget,
+    RasterAntialiasing, RasterBackground, RasterSurface, RasterizationLimits, RenderError,
+    RenderLayer, RenderScene, SceneIdentity, StreamingRasterTarget, SvgSerializationLimits,
+    encode_png, encode_png_with_density, linear_to_srgb, raster_output_identity, rasterize,
     rasterize_cancellable, rasterize_cancellable_with_progress, rasterize_output,
     rasterize_preview, rasterize_preview_cancellable, rasterize_preview_cancellable_with_progress,
-    srgb_to_linear, write_svg,
+    srgb_to_linear, write_png_streaming, write_svg, write_svg_cancellable_with_limits,
 };
 pub use toniator_sampling::{
     DECODER_CONTRACT_ID, ReducedPreviewSource, SourceField, SourceFormat, SourceFormatHint,
@@ -2475,12 +2476,12 @@ fn preset_companion(
     if is_cancelled() {
         return Err(EvaluationError::new("preset.calibration.cancelled", "Preset preparation cancelled"));
     }
-    if let Some(saved) = pool.iter().find(|saved| saved.binding() == binding) {
+    if let Some(saved) = pool.iter().find(|saved| saved.binding().is_compatible_with(binding)) {
         return Ok(saved.clone());
     }
     if let Some(saved) = toniator_patterns::PresetRegistry::bundled().entries().iter()
         .filter_map(|record| record.saved_calibration.as_ref())
-        .find(|saved| saved.binding() == binding)
+        .find(|saved| saved.binding().is_compatible_with(binding))
     {
         pool.push(saved.clone());
         return Ok(saved.clone());
@@ -2552,11 +2553,17 @@ pub fn prepare_pending_raw_preset(
     }
     for channel_id in active_ids.iter().copied() {
         let binding = CalibrationBinding::for_channel(&candidate, channel_id).map_err(EvaluationError::from_domain)?;
-        let saved = preset_companion(&binding, &mut pool, limits, is_cancelled)?;
+        let saved = match candidate.saved_calibration_for(channel_id).map_err(EvaluationError::from_domain)? {
+            Some(saved) => saved.clone(),
+            None => preset_companion(&binding, &mut pool, limits, is_cancelled)?,
+        };
         candidate = candidate.with_saved_calibration(channel_id, saved).map_err(EvaluationError::from_domain)?;
     }
     let baseline_binding = candidate.baseline_calibration_binding().map_err(EvaluationError::from_domain)?;
-    let baseline = preset_companion(&baseline_binding, &mut pool, limits, is_cancelled)?;
+    let baseline = match candidate.baseline_saved_calibration().map_err(EvaluationError::from_domain)? {
+        Some(saved) => saved.clone(),
+        None => preset_companion(&baseline_binding, &mut pool, limits, is_cancelled)?,
+    };
     candidate = candidate.with_saved_baseline_calibration(baseline.clone()).map_err(EvaluationError::from_domain)?;
 
     let baseline_response = &baseline_binding.recipe().output_settings[0].response;
@@ -2773,6 +2780,22 @@ impl EvaluationRequest {
     pub fn for_preview(mut self, target: PreviewRasterTarget) -> Self {
         self.raster_request = RasterRequest::Preview(target);
         self
+    }
+
+    /// Evaluates the captured canonical scene with only a one-pixel derived raster consumer.
+    ///
+    /// Streaming PNG and vector consumers use the unchanged native scene without admitting or
+    /// retaining a full output raster. Source/frame materialization and saved-calibration authority
+    /// remain captured by this request; the tiny raster is not an export preview or quality sample.
+    ///
+    /// # Errors
+    /// Propagates the shared target authority if it cannot admit the fixed one-pixel consumer.
+    pub fn for_scene(self) -> Result<Self, RenderError> {
+        Ok(self.for_output(
+            RasterBackground::Transparent,
+            Some(OutputRasterTarget::new(1, 1)?),
+            RasterAntialiasing::Off,
+        ))
     }
 
     /// Requests the Pattern Wizard's disposable structural illustration.
@@ -4092,7 +4115,7 @@ fn evaluate_cached_document_impl(
     }
     let document = request.snapshot.document();
     let structural_preview = request.structural_preview;
-    document
+    request.snapshot
         .validate()
         .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
     let model = document.channel_model().ok_or(EvaluationError::new(
@@ -4495,7 +4518,7 @@ fn evaluate_cached_document_impl(
             let uniform_marks = !structural_preview && uniform_density
                 .is_some_and(|density| density.mode == toniator_domain::MarkDensityMode::Uniform);
             let uniform_fit = if uniform_marks {
-                let saved = document.saved_calibration_for(channel.id)
+                let saved = request.snapshot.saved_calibration_for(channel.id)
                     .map_err(EvaluationError::from_domain)?
                     .ok_or(EvaluationError::new("calibration.missing", "Pattern geometry needs a saved calibration; Recalibrate"))?;
                 realization_key.uniform_calibration = Some(saved.clone());
@@ -4570,7 +4593,7 @@ fn evaluate_cached_document_impl(
             };
             let mut prepared_coverage = None;
             let calibrated_curve = if calibrate {
-                let saved = document.saved_calibration_for(channel.id)
+                let saved = request.snapshot.saved_calibration_for(channel.id)
                     .map_err(EvaluationError::from_domain)?
                     .ok_or(EvaluationError::new("calibration.missing", "Pattern geometry needs a saved calibration; Recalibrate"))?;
                 let coverage_key = document_coverage_cache_key(&realization_key, &source, saved);
@@ -9312,6 +9335,9 @@ pub(crate) mod test_support {
     }
 
     /// Proves the phase-aligned three-guide authoritative pipeline reaches canonical regions and SVG.
+    ///
+    /// # Panics
+    /// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
     #[test]
     fn guide_face_document_reaches_canonical_regions_and_svg() {
         let session = modeled_guide_face_session();
@@ -9331,7 +9357,8 @@ pub(crate) mod test_support {
             .expect("guide-face realization completes");
         assert!(result.scene().layers().iter().all(|layer| matches!(layer.outputs().first().map(toniator_render::RenderOutputLayer::geometry), Some(GeometryOutput::CanonicalRegions(regions)) if !regions.regions().is_empty())));
         assert_production_equilateral_triangles(result.scene());
-        assert!(write_svg(result.scene()).contains("<path"));
+        assert!(write_svg(result.scene())
+                .expect("SVG serialization").contains("<path"));
         assert!(
             scheduler
                 .accept_completion(&completion, &session)
@@ -9346,6 +9373,9 @@ pub(crate) mod test_support {
     /// artifacts and invokes Inkscape. It never invents guide paths: the persisted document
     /// definition, shared centered grid transform, family evaluation, region builder, and
     /// renderer all participate before serialization.
+    ///
+    /// # Panics
+    /// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
     #[test]
     #[ignore = "validation artifact generator"]
     fn generate_intrinsic_production_three_guide_face_artifact() {
@@ -9405,7 +9435,7 @@ pub(crate) mod test_support {
         )
         .expect("production PNG writes");
         let svg_path = output.join(format!("{name}.svg"));
-        std::fs::write(&svg_path, write_svg(result.scene())).expect("production SVG writes");
+        std::fs::write(&svg_path, write_svg(result.scene()).expect("SVG serialization"),).expect("production SVG writes");
         let status = std::process::Command::new("inkscape")
             .arg(&svg_path)
             .arg("--export-type=png")
@@ -10276,6 +10306,9 @@ pub(crate) mod test_support {
     ///
     /// The returned result and snapshot are the exact normal engine invocation used for the
     /// records and exports. The helper never rebuilds producer, sampling, or treatment state.
+    ///
+    /// # Panics
+    /// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
     #[allow(clippy::too_many_arguments)]
     fn stage20q_write_guide_face_case(
         output: &Path,
@@ -10326,7 +10359,7 @@ pub(crate) mod test_support {
         });
         let evidence = evidence.expect("normal Guide Face invocation records evidence");
         let png = encode_png(evaluated.result.raster()).expect("Guide Face native PNG encodes");
-        let svg = write_svg(evaluated.result.scene());
+        let svg = write_svg(evaluated.result.scene()).expect("SVG serialization");
         let png_path = output.join(format!("{stem}.png"));
         let svg_path = output.join(format!("{stem}.svg"));
         fs::write(&png_path, &png).expect("Guide Face native PNG writes");
@@ -10408,6 +10441,9 @@ pub(crate) mod test_support {
     /// Writes a direct geometry-render split witness after production cubic Guide Faces retain one component per base.
     ///
     /// The witness remains legacy Stage 20Q evidence only and is not part of current normalized resize coverage.
+    ///
+    /// # Panics
+    /// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
     fn stage20q_write_direct_split_witness(output: &Path) {
         let output_layer_id = PatternOutputLayerId(20_709);
         let source = build_canonical_regions_cancellable(
@@ -10527,7 +10563,7 @@ pub(crate) mod test_support {
         let raster = rasterize(&scene, RasterBackground::Transparent)
             .expect("direct split renderer rasterizes");
         let png = encode_png(&raster).expect("direct split PNG encodes");
-        let svg = write_svg(&scene);
+        let svg = write_svg(&scene).expect("SVG serialization");
         let png_path = output.join("crossing-split-direct-geometry-render.png");
         let svg_path = output.join("crossing-split-direct-geometry-render.svg");
         fs::write(&png_path, &png).expect("direct split PNG writes");
@@ -10595,6 +10631,9 @@ pub(crate) mod test_support {
     /// The ignored generator writes only derived validation files. Each record is collected from
     /// the one normal engine evaluation that produced its native PNG and raw SVG; no diagnostic
     /// path reconstructs sites, samples, or treatment geometry.
+    ///
+    /// # Panics
+    /// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
     #[test]
     #[ignore = "writes Stage 20Q typed-parametric Voronoi validation artifacts"]
     fn generate_stage20q_parametric_voronoi_artifacts() {
@@ -10739,7 +10778,7 @@ pub(crate) mod test_support {
                 "a raw ParametricPaths output remains Guide-Faces-ineligible"
             );
             let png = encode_png(evaluated.result.raster()).expect("native PNG encodes");
-            let svg = write_svg(evaluated.result.scene());
+            let svg = write_svg(evaluated.result.scene()).expect("SVG serialization");
             let png_path = output.join(format!("{stem}.png"));
             let svg_path = output.join(format!("{stem}.svg"));
             fs::write(&png_path, &png).expect("native PNG writes");
@@ -11488,6 +11527,9 @@ pub(crate) mod test_support {
     /// SVG is serialized only by a caller from the completed immutable scene; the scheduler owns
     /// no SVG cache. This witness proves that the sole scene from which SVG can be serialized is
     /// the newest Region scene and that the cancelled candidate never reaches that boundary.
+    ///
+    /// # Panics
+    /// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
     #[test]
     fn voronoi_region_scheduler_cancellation_is_atomic_before_cache_publication() {
         let (gate, entered) =
@@ -11540,7 +11582,8 @@ pub(crate) mod test_support {
         assert_eq!(result.raster().width(), 64);
         assert_eq!(result.raster().height(), 48);
         assert!(
-            write_svg(result.scene()).contains("<path"),
+            write_svg(result.scene()).expect("SVG serialization")
+                .contains("<path"),
             "the accepted Region scene remains the only scheduler result a caller can serialize"
         );
         assert!(
@@ -11785,6 +11828,9 @@ pub(crate) mod test_support {
     }
 
     /// Proves the engine carries sampled per-region paint through SourceColorAlpha scene and SVG assembly.
+    ///
+    /// # Panics
+    /// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
     #[test]
     fn sampled_voronoi_regions_build_source_colored_scene_and_svg() {
         let session = modeled_sampled_voronoi_session();
@@ -11804,7 +11850,7 @@ pub(crate) mod test_support {
             .expect("sampled Region output carries per-region paint");
         assert_eq!(paints.len(), regions.regions().len());
         assert!(paints.iter().all(|paint| paint.alpha > 0.0));
-        let svg = write_svg(evaluated.scene());
+        let svg = write_svg(evaluated.scene()).expect("SVG serialization");
         assert!(svg.contains(&format!("channel-{}-region-", layer.channel_id().0)));
         assert!(svg.contains("fill-rule=\"nonzero\""));
         assert!(
@@ -13777,6 +13823,9 @@ pub(crate) mod test_support {
     }
 
     /// Generates native Stage 20R composite documents, PNG/SVG outputs, identities, and raw statistics.
+    ///
+    /// # Panics
+    /// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
     #[test]
     #[ignore = "writes Stage 20R composite validation artifacts"]
     fn generate_stage20r_composite_artifacts() {
@@ -13886,7 +13935,7 @@ pub(crate) mod test_support {
             )
             .expect("Stage 20R composite evaluates");
             let png = encode_png(evaluated.result.raster()).expect("native PNG encodes");
-            let svg = write_svg(evaluated.result.scene());
+            let svg = write_svg(evaluated.result.scene()).expect("SVG serialization");
             let png_path = output.join(format!("{stem}.png"));
             let svg_path = output.join(format!("{stem}.svg"));
             fs::write(&png_path, &png).expect("native PNG writes");

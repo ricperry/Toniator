@@ -1219,7 +1219,8 @@ fn tonal_controls_publish_selected_frame_and_native_outputs() {
             candidate.materialize_frame(0).unwrap(),
             initial.document.materialize_frame(0).unwrap()
         );
-        let rendered_end = candidate.materialize_frame(end).unwrap();
+        let rendered_end_frame = candidate.materialize_frame(end).unwrap();
+        let rendered_end = rendered_end_frame.document();
         for (field, expected) in edits {
             let batch = rendered_end.channel_scalar_batch(field).unwrap();
             assert!(batch.values.len() > 1);
@@ -1276,4 +1277,448 @@ fn tonal_controls_publish_selected_frame_and_native_outputs() {
         }
     }
     println!("Gate 2 native witnesses: {}", directory.display());
+}
+
+/// Exercises static ALL/mixed sizing, private Cancel, atomic Apply/history and model restoration.
+/// Uses current saved weighted-even witnesses read-only; no rotation or animation policy is tested.
+///
+/// # Panics
+/// Panics on changed source authority, nonempty fitting plans, incorrect controls or failed previews.
+#[test]
+#[ignore = "requires the private Wayland static-completion harness"]
+fn gtk_static_advanced_and_saved_seed_reuse() {
+    use crate::wizard_workflow_tests::{
+        button_named, capture, dropdown, render_current, reuse_both_sources, save_exact, select,
+        wait_until,
+    };
+    register_resources();
+    glib::set_application_name("Toniator");
+    gtk::init().unwrap();
+    let app = gtk::Application::builder()
+        .application_id("io.github.ricperry.Toniator.StaticRegression")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    app.register(None::<&gio::Cancellable>).unwrap();
+    let state = build_window(&app);
+    state.borrow().window.present();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for name in ["raster", "vector"] {
+        let path = root.join(format!("target/validation/ton018-config16-final-20261011/weighted-uniform-witnesses/weighted-even-{name}.toniator"));
+        let mut workspace = load_workspace(&path).unwrap();
+        let channels = authoritative_channel_ids(workspace.document());
+        assert!(
+            calibration_preparation::plan_to_prepare(workspace.document(), &channels, false, false)
+                .unwrap()
+                .is_empty()
+        );
+        let channel = channels[0];
+        let output = workspace
+            .document()
+            .effective_channel_pattern(channel)
+            .unwrap()
+            .output_settings[0]
+            .output_layer_id;
+        // A real named override makes ALL mixed before the native modal opens.
+        advanced_batches::apply_all_mark_density_mode(
+            &mut workspace.history,
+            toniator_domain::MarkDensityMode::Uniform,
+        )
+        .unwrap();
+        let command = workspace
+            .document()
+            .set_channel_mark_density_mode_for_effective(
+                channel,
+                output,
+                toniator_domain::MarkDensityMode::Variable,
+            )
+            .unwrap();
+        workspace.history.apply(&command).unwrap();
+        let initial = workspace.snapshot();
+        let revision = workspace.history.revision();
+        install_workspace(&state, workspace);
+        state.borrow_mut().inspector_runtime.target = InspectorTarget::DocumentAll;
+        render_current(&state);
+        open_advanced_settings(&state);
+        wait_until("Advanced ALL controls", 30, || {
+            state
+                .borrow()
+                .advanced_settings
+                .as_ref()
+                .is_some_and(|surface| {
+                    dropdown(surface.fields.upcast_ref(), "Mark sizing").is_some()
+                })
+        });
+        let fields = state
+            .borrow()
+            .advanced_settings
+            .as_ref()
+            .unwrap()
+            .fields
+            .clone();
+        let control = dropdown(fields.upcast_ref(), "Mark sizing").unwrap();
+        assert!(control.is_sensitive());
+        assert_eq!(
+            control
+                .selected_item()
+                .and_downcast::<gtk::StringObject>()
+                .unwrap()
+                .string(),
+            "Mixed"
+        );
+        control.grab_focus();
+        capture(&format!("advanced-{name}-mixed"));
+        select(fields.upcast_ref(), "Mark sizing", "Variable");
+        assert_eq!(
+            state.borrow().workspace.as_ref().unwrap().snapshot(),
+            initial
+        );
+        let window = state
+            .borrow()
+            .advanced_settings
+            .as_ref()
+            .unwrap()
+            .window
+            .clone();
+        button_named(window.upcast_ref(), "Cancel")
+            .unwrap()
+            .emit_clicked();
+        assert!(state.borrow().advanced_settings.is_none());
+        assert_eq!(
+            state.borrow().workspace.as_ref().unwrap().snapshot(),
+            initial
+        );
+        assert_eq!(
+            state
+                .borrow()
+                .workspace
+                .as_ref()
+                .unwrap()
+                .history
+                .revision(),
+            revision
+        );
+        open_advanced_settings(&state);
+        wait_until("Advanced ALL controls reopen", 30, || {
+            state
+                .borrow()
+                .advanced_settings
+                .as_ref()
+                .is_some_and(|surface| {
+                    dropdown(surface.fields.upcast_ref(), "Mark sizing").is_some()
+                })
+        });
+        let fields = state
+            .borrow()
+            .advanced_settings
+            .as_ref()
+            .unwrap()
+            .fields
+            .clone();
+        select(fields.upcast_ref(), "Mark sizing", "Uniform");
+        {
+            let app = state.borrow();
+            let draft = app.advanced_settings.as_ref().unwrap().draft.borrow();
+            for channel in authoritative_channel_ids(draft.document()) {
+                assert!(channel_mark_scale_visible(draft.document(), channel));
+                assert!(!channel_mark_range_visible(draft.document(), channel));
+            }
+            assert!(
+                draft
+                    .document()
+                    .channel_response_overrides()
+                    .iter()
+                    .all(|entry| !matches!(
+                        &entry.response,
+                        toniator_domain::ChannelOutputResponse::Marks {
+                            density_mode: Some(_),
+                            ..
+                        }
+                    ))
+            );
+        }
+        capture(&format!("advanced-{name}-uniform"));
+        select(fields.upcast_ref(), "Mark sizing", "Variable");
+        let applied = state
+            .borrow()
+            .advanced_settings
+            .as_ref()
+            .unwrap()
+            .draft
+            .borrow()
+            .document()
+            .clone();
+        for channel in authoritative_channel_ids(&applied) {
+            assert!(!channel_mark_scale_visible(&applied, channel));
+            assert!(channel_mark_range_visible(&applied, channel));
+        }
+        assert!(
+            calibration_preparation::plan_to_prepare(
+                &applied,
+                &authoritative_channel_ids(&applied),
+                false,
+                false
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(
+            state.borrow().workspace.as_ref().unwrap().snapshot(),
+            initial
+        );
+        let apply = state
+            .borrow()
+            .advanced_settings
+            .as_ref()
+            .unwrap()
+            .apply
+            .clone();
+        assert!(apply.is_sensitive());
+        apply.emit_clicked();
+        assert!(state.borrow().advanced_settings.is_none());
+        assert_eq!(
+            state
+                .borrow()
+                .workspace
+                .as_ref()
+                .unwrap()
+                .history
+                .revision()
+                .0,
+            revision.0 + 1
+        );
+        assert_eq!(
+            state.borrow().workspace.as_ref().unwrap().document(),
+            &applied
+        );
+        assert_eq!(
+            state.borrow().workspace.as_ref().unwrap().sources,
+            initial.sources
+        );
+        render_current(&state);
+        capture(&format!("advanced-{name}-applied"));
+        apply_history_navigation(&state, false);
+        assert_eq!(
+            state.borrow().workspace.as_ref().unwrap().snapshot(),
+            initial
+        );
+        render_current(&state);
+        capture(&format!("advanced-{name}-undo"));
+        apply_history_navigation(&state, true);
+        assert_eq!(
+            state.borrow().workspace.as_ref().unwrap().document(),
+            &applied
+        );
+        render_current(&state);
+        // Native Color model selection uses the production notify/command route.
+        let selector = state.borrow().selector.clone();
+        let next = if applied.channel_topology().unwrap().channels().len() == 3 {
+            PreviewModel::Cmyk
+        } else {
+            PreviewModel::Rgb
+        };
+        selector.set_selected(
+            PreviewModel::ALL
+                .iter()
+                .position(|value| *value == next)
+                .unwrap() as u32,
+        );
+        let switched = state
+            .borrow()
+            .workspace
+            .as_ref()
+            .unwrap()
+            .document()
+            .clone();
+        assert_ne!(switched.channel_topology(), applied.channel_topology());
+        assert_eq!(switched.pattern_settings(), applied.pattern_settings());
+        assert_eq!(switched.source(), applied.source());
+        render_current(&state);
+        capture(&format!("advanced-{name}-model-switched"));
+        apply_history_navigation(&state, false);
+        assert_eq!(
+            state.borrow().workspace.as_ref().unwrap().document(),
+            &applied
+        );
+        render_current(&state);
+        capture(&format!("advanced-{name}-model-restored"));
+        apply_history_navigation(&state, true);
+        assert_eq!(
+            state.borrow().workspace.as_ref().unwrap().document(),
+            &switched
+        );
+        render_current(&state);
+        save_exact(
+            state.borrow().workspace.as_ref().unwrap(),
+            &format!("advanced-{name}-final.toniator"),
+        );
+        eprintln!(
+            "Advanced {name}: mixed/Uniform/Variable, private Cancel, atomic Apply, Undo/Redo and model restoration pass with zero new fits"
+        );
+    }
+    install_workspace(
+        &state,
+        load_workspace(&root.join("assets/vector-sample.svg")).unwrap(),
+    );
+    state.borrow_mut().inspector_runtime.target = InspectorTarget::DocumentAll;
+    sync_ui(&mut state.borrow_mut());
+    open_pattern_wizard(&state, gtk::Button::with_label("Change…"));
+    let epoch = state.borrow().pattern_wizard.as_ref().unwrap().epoch;
+    select_wizard_preset_candidate(
+        &state,
+        epoch,
+        Some("clustered-dispersion-random-links".to_owned()),
+    );
+    wait_until("saved Clustered gallery Apply", 60, || {
+        state
+            .borrow()
+            .pattern_wizard
+            .as_ref()
+            .unwrap()
+            .apply
+            .is_sensitive()
+    });
+    capture("clustered-saved-gallery");
+    let apply = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .unwrap()
+        .apply
+        .clone();
+    apply.emit_clicked();
+    wait_until("saved Clustered gallery closes", 30, || {
+        state.borrow().pattern_wizard.is_none()
+    });
+    let before = state
+        .borrow()
+        .workspace
+        .as_ref()
+        .unwrap()
+        .document()
+        .clone();
+    assert!(
+        calibration_preparation::plan_to_prepare(
+            &before,
+            &authoritative_channel_ids(&before),
+            false,
+            false
+        )
+        .unwrap()
+        .is_empty()
+    );
+    render_current(&state);
+    capture("clustered-saved-applied");
+    open_pattern_wizard(&state, gtk::Button::with_label("Change…"));
+    let edit = state.borrow().pattern_wizard.as_ref().unwrap().edit.clone();
+    edit.emit_clicked();
+    let next = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .unwrap()
+        .review
+        .clone();
+    next.emit_clicked();
+    let seed = state.borrow().pattern_wizard.as_ref().unwrap().text_inputs.iter().find_map(|input| matches!(&input.kind, WizardTextInputKind::DescriptorU32(descriptor) if descriptor.field == PropertyFieldId::RandomSeed).then(|| input.entry.clone())).unwrap();
+    seed.set_text("12345");
+    seed.emit_activate();
+    let varied = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .unwrap()
+        .draft
+        .borrow()
+        .document()
+        .clone();
+    assert_ne!(
+        varied.pattern_definition_bundles(),
+        before.pattern_definition_bundles()
+    );
+    assert_eq!(
+        varied
+            .saved_calibration_for(authoritative_channel_ids(&varied)[0])
+            .unwrap(),
+        before
+            .saved_calibration_for(authoritative_channel_ids(&before)[0])
+            .unwrap()
+    );
+    assert_eq!(
+        varied.baseline_saved_calibration().unwrap(),
+        before.baseline_saved_calibration().unwrap()
+    );
+    assert!(
+        calibration_preparation::plan_to_prepare(
+            &varied,
+            &authoritative_channel_ids(&varied),
+            false,
+            false
+        )
+        .unwrap()
+        .is_empty()
+    );
+    capture("clustered-seed-varied-private");
+    let seed_revision = state
+        .borrow()
+        .workspace
+        .as_ref()
+        .unwrap()
+        .history
+        .revision();
+    for _ in 0..2 {
+        let next = state
+            .borrow()
+            .pattern_wizard
+            .as_ref()
+            .unwrap()
+            .review
+            .clone();
+        assert!(next.is_sensitive());
+        next.emit_clicked();
+    }
+    wait_until("saved seed Review", 60, || {
+        state
+            .borrow()
+            .pattern_wizard
+            .as_ref()
+            .unwrap()
+            .apply
+            .is_sensitive()
+    });
+    let apply = state
+        .borrow()
+        .pattern_wizard
+        .as_ref()
+        .unwrap()
+        .apply
+        .clone();
+    apply.emit_clicked();
+    assert!(
+        state.borrow().pattern_wizard.is_none(),
+        "saved seed Apply needs no calibration worker"
+    );
+    assert_eq!(
+        state
+            .borrow()
+            .workspace
+            .as_ref()
+            .unwrap()
+            .history
+            .revision()
+            .0,
+        seed_revision.0 + 1
+    );
+    assert_eq!(
+        state.borrow().workspace.as_ref().unwrap().document(),
+        &varied
+    );
+    render_current(&state);
+    capture("clustered-seed-applied");
+    save_exact(
+        state.borrow().workspace.as_ref().unwrap(),
+        "clustered-seed-applied.toniator",
+    );
+    reuse_both_sources(&state, &varied, "clustered-seed-reuse");
+    let window = state.borrow().window.clone();
+    window.close();
 }

@@ -5132,7 +5132,7 @@ pub(super) fn calibration_for_recipe(
         )?;
         SavedCalibration::with_mean_profile(binding, raw, uniform, variation)?
     } else {
-        SavedCalibration::with_profile(profile.to_owned(), binding, raw, uniform)?
+        SavedCalibration::with_profile(binding.profile_for_reference(profile), binding, raw, uniform)?
     };
     Ok(Some(calibration))
 }

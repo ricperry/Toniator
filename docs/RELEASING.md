@@ -20,34 +20,34 @@ source used to build the packages. This does not submit the app to Flathub.
    bundles finish. Keep local evidence under `target/validation/`.
 
 The existing Windows development ZIP is a separately versioned 0.3.2 package
-built from its verified debug binaries. Do not attach or relabel it as a 0.4.1
+built from its verified debug binaries. Do not attach or relabel it as a 0.4.2
 Windows build; a current Windows package needs its own native build and checks.
 
 ## Publish
 
 After publication is authorized, push the source and a new annotated tag.
-For version 0.4.1:
+For version 0.4.2:
 
-The prior 0.4.0 release notes remain available at
-[docs/releases/v0.4.0.md](releases/v0.4.0.md).
+The prior 0.4.1 release notes remain available at
+[docs/releases/v0.4.1.md](releases/v0.4.1.md).
 
 ```sh
 git push origin main
-git tag -a v0.4.1 -m 'Toniator 0.4.1'
-git push origin refs/tags/v0.4.1
-gh release create v0.4.1 \
-  dist/Toniator-0.4.1-x86_64.AppImage \
-  dist/Toniator-0.4.1-x86_64.flatpak \
+git tag -a v0.4.2 -m 'Toniator 0.4.2'
+git push origin refs/tags/v0.4.2
+gh release create v0.4.2 \
+  dist/Toniator-0.4.2-x86_64.AppImage \
+  dist/Toniator-0.4.2-x86_64.flatpak \
   dist/SHA256SUMS dist/build-info.json \
   --verify-tag --draft --prerelease \
-  --title 'Toniator 0.4.1 — Calibration and response checkpoint' \
-  --notes-file docs/releases/v0.4.1.md
+  --title 'Toniator 0.4.2 — Patterns, calibration and large PNG export' \
+  --notes-file docs/releases/v0.4.2.md
 ```
 
 Review the draft and attachments, then publish:
 
 ```sh
-gh release edit v0.4.1 --draft=false
+gh release edit v0.4.2 --draft=false
 ```
 
 Download all four published assets into a fresh directory, verify their hashes,

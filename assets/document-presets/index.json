@@ -1,0 +1,126 @@
+{
+  "format_version": 1,
+  "document_preset_format_version": 3,
+  "configuration_schema_version": 16,
+  "provenance": "Verified current conversions from ton018-personal-presets-20261013",
+  "presets": [
+    {
+      "id": "chromatic-aberration-cmyk",
+      "name": "Chromatic Aberration CMYK",
+      "archive": "chromatic-aberration-cmyk.toniator-preset",
+      "sha256": "0890af9ee8188d7de467450aeca6af597d3b4dd65b65e64bee8376e42fb4478a",
+      "source": "presets/ChromaticAberrationCMYK.toniator-preset",
+      "original_sha256": "3a9426a6d07a1c1b302f96ce3e27d1cf79ecacfcc49aa915f787ded24a003882"
+    },
+    {
+      "id": "confetti-stained-glass-cmyk",
+      "name": "Confetti Stained Glass CMYK",
+      "archive": "confetti-stained-glass-cmyk.toniator-preset",
+      "sha256": "08bf6139878184f2b96a6ba8a0fba707eec37f395ccd8b8ecbd8fe0cc27aaa59",
+      "source": "presets/ConfettiStainedGlassCMYK.toniator-preset",
+      "original_sha256": "f64a68005ba1dec490f5a17ac514ccf123d487261959925d0db8a541f34c5599"
+    },
+    {
+      "id": "controlled-splatter-cmyk",
+      "name": "Controlled Splatter CMYK",
+      "archive": "controlled-splatter-cmyk.toniator-preset",
+      "sha256": "04715f540ab67eeb46ce22481e7093d6412ddfab225d3ae89803b5f6e66e3477",
+      "source": "document-presets/ControlledSplatterCMYK.toniator-preset",
+      "original_sha256": "968b185f242553229023b458114fbd986824896ee8356e4a46e4865c21ba8cf3"
+    },
+    {
+      "id": "diamond-diamond-rgb",
+      "name": "Diamond Diamond RGB",
+      "archive": "diamond-diamond-rgb.toniator-preset",
+      "sha256": "d48e42f5bcae43270898f9574f92f54947d8b31f403e3abb02863842772b70a8",
+      "source": "presets/DiamondDiamondRGB.toniator-preset",
+      "original_sha256": "b27f5fb591e0426606d9305e5efeb3130bf4918ee0ece6fb20c3167050a023e6"
+    },
+    {
+      "id": "hex-grid-dots-aligned-rgb",
+      "name": "Hex Grid Dots Aligned RGB",
+      "archive": "hex-grid-dots-aligned-rgb.toniator-preset",
+      "sha256": "621ce79befd37d6cb429de96a45e6ab5ce2a9d4757a49b73a420be2496e34bc2",
+      "source": "document-presets/HexGridDotsAlignedRGB.toniator-preset",
+      "original_sha256": "913bea114f035de4299f933858331e272e4b65fce70f2b7ddb3b8ecd7fdf76d8"
+    },
+    {
+      "id": "magazine-cmyk",
+      "name": "Magazine CMYK",
+      "archive": "magazine-cmyk.toniator-preset",
+      "sha256": "6f24d8a01836f65b1db89bda19ab4030c5859ce10b714c526d5da9f346b32b8b",
+      "source": "document-presets/CMYK_magazine.toniator-preset",
+      "original_sha256": "28404bb5294c9dfa781cff56667638e0fedd1dfe14a21ce94bc1c376b2623243"
+    },
+    {
+      "id": "magazine-cmyk-alternate",
+      "name": "Magazine CMYK — Alternate",
+      "archive": "magazine-cmyk-alternate.toniator-preset",
+      "sha256": "8b5581e2ff5498f45e857ddc2b87fc8bcf360c1eacbbacd084369f93721da740",
+      "source": "presets/MagazineCMYK.toniator-preset",
+      "original_sha256": "91595354a807ead1e680667725cd39b7eda1d5acec1fce96a168f5ec39e6a7ce"
+    },
+    {
+      "id": "magazine-rgb",
+      "name": "Magazine RGB",
+      "archive": "magazine-rgb.toniator-preset",
+      "sha256": "52dea4f8c9afbe833c3d954351e5089fa9f79a805f30116d06060f90484ea4aa",
+      "source": "document-presets/RGB_magazine.toniator-preset",
+      "original_sha256": "cd8d8512453191b60eb4d504ded90b965d5ad399a1d70fdfa966f41c68a8d8a0"
+    },
+    {
+      "id": "magazine-rgb-alternate",
+      "name": "Magazine RGB — Alternate",
+      "archive": "magazine-rgb-alternate.toniator-preset",
+      "sha256": "a93ecd4bda8697b26288c2b0a72c6b1a686e45d74b49cc0a4ae35d64f9056214",
+      "source": "presets/MagazineRGB.toniator-preset",
+      "original_sha256": "8348b9c256ed7ed4aa5d12caad33e21ac645cb802f13eef3f4216b62e87cb227"
+    },
+    {
+      "id": "moire-grayscale",
+      "name": "Moire Grayscale",
+      "archive": "moire-grayscale.toniator-preset",
+      "sha256": "8bde512c4f6a49d0895cf7ef9462a9fdbde1d485c793ef56fe4b71571db44df3",
+      "source": "presets/MoireGrayscale.toniator-preset",
+      "original_sha256": "46351a95154ac171448e17c1b657f9715fb7b63fe00a4aadc5908e87942fbf27"
+    },
+    {
+      "id": "noisy-stained-glass-rgb",
+      "name": "Noisy Stained Glass RGB",
+      "archive": "noisy-stained-glass-rgb.toniator-preset",
+      "sha256": "484fb6345b52b31c9acb5f0661aec0ff7209d717666456603e0cf47d5c20bedc",
+      "source": "presets/NoisyStainedGlassRGB.toniator-preset",
+      "original_sha256": "78c6531c1ecc02ea6fe9c5319c3cd78addeec92465be988435318ee206fb5d85"
+    },
+    {
+      "id": "skinny-curve",
+      "name": "Skinny Curve",
+      "archive": "skinny-curve.toniator-preset",
+      "sha256": "d7011afebb47ac9abba0e92f7728c697c9b50172e7928f9cb610bfd396ebefb7",
+      "source": "document-presets/SkinnyCurve.toniator-preset",
+      "original_sha256": "8e7cc173e2ac526fa137c8b333c18244ba692b9d26b8c11fe484c1c8708a3769"
+    },
+    {
+      "id": "skinny-wave-cmyk",
+      "name": "Skinny Wave CMYK",
+      "archive": "skinny-wave-cmyk.toniator-preset",
+      "sha256": "661ffac952ee9c1061087afd60b8a7b3df2e601d85ff1cd739773cee942bc58d",
+      "source": "document-presets/CMYK_skinnyWave.toniator-preset",
+      "original_sha256": "02167c350e2fb5ca5bfd1288db21fc4c519caa411a155803754842809661aff4"
+    },
+    {
+      "id": "skinny-wave-rgb",
+      "name": "Skinny Wave RGB",
+      "archive": "skinny-wave-rgb.toniator-preset",
+      "sha256": "d4e8e9607ce2ac3f87b40dd905407b6e84b2cbe3326aada54f857f24c0b3c097",
+      "source": "document-presets/RGB_skinnyWave.toniator-preset",
+      "original_sha256": "5bcb5329fe2b978e3c6c92f41c28f7ff37ec60488f5368440a2d23588343ff67"
+    }
+  ],
+  "omitted_duplicates": [
+    {
+      "source": "presets/ControlledSplatterCMYK.toniator-preset",
+      "identical_to": "document-presets/ControlledSplatterCMYK.toniator-preset"
+    }
+  ]
+}

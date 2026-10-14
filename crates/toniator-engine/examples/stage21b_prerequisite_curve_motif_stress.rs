@@ -611,6 +611,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
 ///
 /// Returns an encoder or filesystem error after successful canonical evaluation.  It writes no
 /// source data and does not modify document/history state.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 fn export_artifacts(
     source: SourceSelection,
     mutation: Mutation,
@@ -622,7 +625,8 @@ fn export_artifacts(
         .map_err(|error| format!("PNG export failed: {error}"))?;
     let png_encode_elapsed = png_started.elapsed();
     let svg_started = Instant::now();
-    let svg = write_svg(profile.result.scene()).into_bytes();
+    let svg = write_svg(profile.result.scene()).expect("SVG serialization")
+        .into_bytes();
     let svg_encode_elapsed = svg_started.elapsed();
     let stem = format!("{}-{}", source.artifact_source_stem(), mutation.name());
     let png_path = directory.join(format!("{stem}.png"));

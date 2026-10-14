@@ -61,6 +61,8 @@ mod main_shell {
         #[template_child]
         pub end_frame_button: gtk::TemplateChild<gtk::ToggleButton>,
         #[template_child]
+        pub end_rotation_warning: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
         pub preview_progress: gtk::TemplateChild<gtk::Box>,
         #[template_child]
         pub preview_overall_progress_label: gtk::TemplateChild<gtk::Label>,
@@ -148,6 +150,11 @@ impl ToniatorMainShell {
             self.imp().end_frame_button.get(),
         )
     }
+    /// Returns the passive End warning beside endpoint controls without status ownership.
+    pub fn end_rotation_warning(&self) -> gtk::Label {
+        self.imp().end_rotation_warning.get()
+    }
+
     /// Creates the resource-defined shell and names its native message scrollbar.
     /// Message text remains complete within the bounded viewport; document authority is untouched.
     pub fn new() -> Self {

@@ -49,7 +49,11 @@ use toniator_domain::{
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 /// Source-free document Preset archives and guarded publication.
+mod builtin_document_presets;
 mod document_presets;
+pub use builtin_document_presets::{
+    BuiltinDocumentPreset, builtin_document_preset, builtin_document_presets,
+};
 /// Current-only XDG personal preset and authored-resource library authority.
 pub mod personal_library;
 pub use document_presets::{
@@ -66,6 +70,8 @@ mod temporal;
 use temporal::{EndOverrideDto, ProjectTimingDto};
 /// Retained native filesystem operations; publication and cleanup policy stay with callers.
 mod filesystem;
+/// Caller-owned still-output encoding with atomic adjacent-file publication.
+pub mod atomic_output;
 mod media;
 pub mod sequence;
 pub mod video_output;
@@ -161,6 +167,7 @@ pub fn load_preset(path: &Path) -> Result<PresetRecord, PresetIoError> {
         if value.get("saved_calibration").is_some_and(|companion| {
             obsolete_seeded_v4_companion(companion)
                 || obsolete_guide_faces_v4_companion(companion)
+                || obsolete_geometry_companion(companion)
         }) {
             envelope.saved_calibration = None;
         }
@@ -202,6 +209,19 @@ fn obsolete_guide_faces_v4_companion(value: &serde_json::Value) -> bool {
         .and_then(serde_json::Value::as_str)
         .is_some_and(|profile| FORMER_GUIDE_FACES.contains(&profile))
         && former_companion_binding(value).is_some_and(|binding| binding.uses_guide_faces())
+}
+
+/// Recognizes only known unmarked companions affected by corrected typed geometry producers.
+///
+/// Malformed identities and unknown future or partial markers remain strict artifact errors.
+fn obsolete_geometry_companion(value: &serde_json::Value) -> bool {
+    value
+        .get("profile")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|profile| {
+            former_companion_binding(value)
+                .is_some_and(|binding| binding.is_obsolete_geometry_profile(profile))
+        })
 }
 
 /// Decodes only the complete typed identity needed to classify an obsolete optional cache.
@@ -579,7 +599,7 @@ impl std::error::Error for SaveError {}
 ///
 /// Returns an archive diagnostic for missing, truncated, multidisk, inconsistent, or ZIP64 end
 /// records; the current container writer emits none of those forms.
-fn declared_zip_entry_count(file: &mut File, length: u64) -> Result<usize, LoadError> {
+fn declared_zip_entry_count<R: Read + Seek>(file: &mut R, length: u64) -> Result<usize, LoadError> {
     const END_RECORD_BYTES: u64 = 22;
     const MAX_COMMENT_BYTES: u64 = u16::MAX as u64;
     let tail_start = length.saturating_sub(END_RECORD_BYTES + MAX_COMMENT_BYTES);
@@ -1076,8 +1096,8 @@ fn create_temp(parent: &Path, destination: &Path) -> Result<(PathBuf, File), Sav
 ///
 /// # Errors
 /// Returns archive/read failures or a limit diagnostic before returning any oversized payload.
-fn read_limited(
-    archive: &mut ZipArchive<File>,
+fn read_limited<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
     index: usize,
     limit: u64,
     name: &str,
@@ -1731,13 +1751,16 @@ impl SavedCalibrationDto {
     fn into_domain(self) -> Result<SavedCalibration, ValidationError> {
         let recipe = self.binding_recipe.into_domain().map_err(|_| ValidationError::new("calibration.recipe", "saved calibration recipe is invalid"))?;
         let binding = CalibrationBinding::new(recipe, self.density_aspect, self.shape_rotation_degrees)?;
+        if binding.is_obsolete_geometry_profile(&self.profile) {
+            return Err(ValidationError::new("calibration.profile", "saved calibration geometry producer is obsolete; Recalibrate"));
+        }
         let uniform = self.uniform.map(|uniform| UniformCalibration::new(
             uniform.radius_per_nominal_spacing,
             uniform.inverse.into_iter().map(CalibrationKnotDto::into_domain).collect(),
         )).transpose()?;
         let raw = self.raw.into_iter().map(CalibrationKnotDto::into_domain).collect();
         match self.variation {
-            Some(variation) if self.profile == CALIBRATION_PROFILE_MEAN => {
+            Some(variation) if self.profile == binding.profile_for_reference(CALIBRATION_PROFILE_MEAN) => {
                 let variation = CalibrationVariation::new(
                     variation.raw_absolute, variation.raw_fraction_of_span,
                     variation.normalized_tone_absolute, variation.low_tone_relative,

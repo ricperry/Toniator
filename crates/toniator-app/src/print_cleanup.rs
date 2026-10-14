@@ -49,6 +49,22 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Reports whether any global correction pass is requested; all three zero widths disable it.
+    pub(crate) const fn is_active(self) -> bool {
+        self.remove_below_px != 0 || self.minimum_feature_px != 0 || self.minimum_gap_px != 0
+    }
+
+    /// Checks global cleanup admission before any export work or allocation begins.
+    /// # Errors
+    /// Returns invalid settings or an actionable cleanup-specific raster-budget diagnostic.
+    pub(crate) fn admit_pixels(self, pixels: u64) -> Result<(), String> {
+        self.validate()?;
+        if self.is_active() && pixels > MAX_CORRECTION_PIXELS as u64 {
+            return Err("Print corrections support up to 32,000,000 pixels. Set Remove below, Minimum feature width, and Minimum gap width to 0 to export this size, or choose a smaller print area or DPI.".into());
+        }
+        Ok(())
+    }
+
     /// Validates bounded integer widths and the independent removal cutoff.
     ///
     /// # Errors
@@ -88,10 +104,7 @@ pub(crate) fn apply(
     cancelled: &AtomicBool,
 ) -> Result<RasterSurface, String> {
     settings.validate()?;
-    if settings.remove_below_px == 0
-        && settings.minimum_feature_px == 0
-        && settings.minimum_gap_px == 0
-    {
+    if !settings.is_active() {
         return Ok(surface.clone());
     }
     let width = usize::try_from(surface.width())
@@ -101,9 +114,7 @@ pub(crate) fn apply(
     let count = width
         .checked_mul(height)
         .ok_or("Print pixel count overflows.")?;
-    if count > MAX_CORRECTION_PIXELS {
-        return Err("Selected PNG exceeds the bounded print-correction raster budget.".into());
-    }
+    settings.admit_pixels(count as u64)?;
     let mut mask = allocated(count, false)?;
     for (index, pixel) in surface.pixels().chunks_exact(4).enumerate() {
         check_cancel(index, cancelled)?;

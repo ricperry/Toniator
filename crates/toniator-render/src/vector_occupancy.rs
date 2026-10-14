@@ -36,17 +36,21 @@ impl VectorOccupancyPrecision {
 pub struct VectorOccupancyMeasurement {
     pub fraction: f64,
     pub vertices: usize,
+    /// Time constructing the opaque union intersected with the canvas in one Boolean operation.
     pub union_duration: Duration,
 }
 
 /// Measures a single canonical output's opaque union, independently of paint and channel model.
 ///
-/// Each primitive is normalized under its own fill rule before bulk union; overlap, reversed
+/// Each primitive is normalized under its own fill rule before its positive subject fill is
+/// unioned and intersected with the canvas in one Boolean operation. Overlap, reversed
 /// windings, holes, and off-canvas shapes therefore retain their canonical meaning. Coordinates
 /// and tolerances are normalized by the canvas long axis before i64 Boolean quantization.
-/// Flattening and iOverlay calls have no interior cancellation callback; cancellation is polled
-/// at every primitive and before/after each library call. The existing flattened-edge budget
-/// bounds retained input vertices. This consumer never changes RGBA or SVG output.
+/// Flattening polls cancellation during bounded subdivision and Kurbo callbacks; a callback
+/// observes cancellation but the bounded current span must return before flattening can stop.
+/// Ordinary iOverlay calls retain only pre/post cancellation checks, without interior polling.
+/// The flattened-edge budget bounds retained input vertices. This consumer returns coverage,
+/// rather than drawing RGBA/SVG; newly fitted curves may subsequently affect rendered output.
 ///
 /// # Errors
 /// Rejects invalid geometry/canvas, cancellation, edge budget, unsafe quantization, Boolean
@@ -202,20 +206,24 @@ pub fn measure_geometry_vector_occupancy(
     }
     check_cancel(is_cancelled)?;
     let started = Instant::now();
-    let union = normalized
-        .overlay_with_fixed_scale_as::<i64>(&empty, OverlayRule::Subject, FillRule::NonZero, scale)
-        .map_err(|_| error("vector.overlay.union", "opaque primitive union failed"))?;
-    let union_duration = started.elapsed();
-    check_cancel(is_cancelled)?;
     let rect = vec![
         [0.0, 0.0],
         [normalized_canvas[0], 0.0],
         [normalized_canvas[0], normalized_canvas[1]],
         [0.0, normalized_canvas[1]],
     ];
-    let clipped = union
+    // Primitive normalization makes each subject's winding nonnegative on its filled set.
+    // NonZero subject/clip intersection therefore computes union(subjects) intersect canvas
+    // directly, without materializing and requantizing an intermediate full union.
+    let clipped = normalized
         .overlay_with_fixed_scale_as::<i64>(&rect, OverlayRule::Intersect, FillRule::NonZero, scale)
-        .map_err(|_| error("vector.overlay.clip", "canvas intersection failed"))?;
+        .map_err(|_| {
+            error(
+                "vector.overlay.clip",
+                "opaque union canvas intersection failed",
+            )
+        })?;
+    let union_duration = started.elapsed();
     check_cancel(is_cancelled)?;
     let area = area_of_shapes(&clipped, is_cancelled)?;
     let fraction = area / canvas_area;
@@ -283,7 +291,7 @@ fn circle_shape(
 ///
 /// # Errors
 /// Returns empty, cancelled, invalid, or over-budget contour diagnostics.
-fn flatten_contour(
+pub(super) fn flatten_contour(
     segments: &[CurveSegment],
     axis: f64,
     tolerance: f64,
@@ -768,5 +776,308 @@ mod tests {
                 .path(),
             "vector.limits.flattened_edges",
         );
+    }
+    /// Proves a single clipped union preserves typed positive fill, holes, touching and empty boundaries.
+    ///
+    /// Analytic polygons independently constrain the result; curved circles retain the existing
+    /// flattening envelope. Reversed and self-intersecting outlines normalize before combination.
+    ///
+    /// # Panics
+    /// Panics if valid current geometry fails or its canvas fraction violates analytic fill authority.
+    #[test]
+    fn clipped_union_keeps_typed_holes_self_overlap_and_canvas_boundaries() {
+        let canvas = CanvasSpec {
+            width: 10.0,
+            height: 10.0,
+        };
+        for (name, geometry, expected) in scalar_contract_cases::cases() {
+            for precision in [
+                VectorOccupancyPrecision::Baseline,
+                VectorOccupancyPrecision::Tight,
+            ] {
+                let measured = measure_geometry_vector_occupancy(
+                    &geometry,
+                    &canvas,
+                    precision,
+                    RasterizationLimits::default(),
+                    &|| false,
+                )
+                .unwrap();
+                let repeated = measure_geometry_vector_occupancy(
+                    &geometry,
+                    &canvas,
+                    precision,
+                    RasterizationLimits::default(),
+                    &|| false,
+                )
+                .unwrap();
+                assert_eq!(measured.fraction.to_bits(), repeated.fraction.to_bits());
+                assert_eq!(measured.vertices, repeated.vertices);
+                let tolerance =
+                    if name == "circle-crossing-canvas" || name == "off-grid-curved-hole" {
+                        1e-5
+                    } else {
+                        1e-8
+                    };
+                assert!(
+                    (measured.fraction - expected).abs() < tolerance,
+                    "{name} {precision:?}: {} vs {expected}",
+                    measured.fraction
+                );
+            }
+        }
+    }
+
+    mod scalar_contract_cases {
+        //! Exact analytic current-geometry witnesses for independent scalar-consumer comparisons.
+        use crate::GeometryOutput;
+        use toniator_domain::{
+            GuideDimensionId, PathStrokeStyle, PatternMechanismId, PatternOutputLayerId,
+        };
+        use toniator_geometry::{
+            CanonicalFillRule, CanonicalFilledOutline, CanonicalMark, CanonicalOutlineContour,
+            CanonicalPathMark, CanonicalRegionProposal, CanonicalRegionSourceGroup,
+            CanonicalRegionSourceId, CanonicalStroke, CubicBezierSegment, CurvePath, CurveSegment,
+            FamilySiteId, FamilySiteProvenance, PathClosure, PathLocation, Point2, SiteScope,
+            StrokeProfileSample, StructuralPathInstanceId, build_canonical_regions,
+        };
+
+        /// Builds one valid stable site identity without influencing measurement geometry.
+        fn site(ordinal: usize) -> FamilySiteId {
+            FamilySiteId {
+                mechanism_id: PatternMechanismId(1),
+                ordinal,
+            }
+        }
+        /// Supplies source-independent provenance for typed consumer witnesses.
+        fn provenance() -> FamilySiteProvenance {
+            FamilySiteProvenance::Random {
+                candidate_ordinal: 0,
+                accepted_ordinal: 0,
+                exclusion_neighbor_ordinal: None,
+            }
+        }
+        /// Builds a closed path from explicit document-space vertices.
+        /// # Panics
+        /// Panics if the finite fixture is invalid.
+        fn path(points: &[[f64; 2]]) -> CurvePath {
+            CurvePath::polyline(
+                points.iter().map(|p| Point2::new(p[0], p[1])).collect(),
+                PathClosure::Closed,
+            )
+            .unwrap()
+        }
+        /// Builds a typed outline with holes or self-intersection without reinterpreting its NonZero authority.
+        /// # Panics
+        /// Panics if the finite canonical consumer fixture fails validation.
+        fn stroke(contours: Vec<CurvePath>) -> CanonicalStroke {
+            let bounds = contours[0].bounds().unwrap();
+            let outline = CanonicalFilledOutline {
+                contours: contours
+                    .into_iter()
+                    .map(|p| CanonicalOutlineContour {
+                        segments: p.segments().to_vec(),
+                    })
+                    .collect(),
+                fill_rule: CanonicalFillRule::NonZero,
+                bounds: Some(bounds),
+            };
+            let centerline = CurvePath::line(Point2::new(0., 5.), Point2::new(10., 5.)).unwrap();
+            let profile = vec![StrokeProfileSample {
+                location: PathLocation::new(0, 0.).unwrap(),
+                center: Point2::new(0., 5.),
+                normalized_thickness: 1.,
+                width: 1.,
+            }];
+            CanonicalStroke::new(
+                StructuralPathInstanceId::guide_dimension(GuideDimensionId(1), 0, 0),
+                None,
+                centerline,
+                1.,
+                PathStrokeStyle::default(),
+                profile,
+                outline,
+            )
+            .unwrap()
+        }
+        /// Supplies marks, stroked holes/self-intersections, and regions with analytic clipped areas.
+        /// # Panics
+        /// Panics if any current canonical fixture is rejected.
+        pub fn cases() -> Vec<(&'static str, GeometryOutput, f64)> {
+            let mut cases = Vec::new();
+            cases.push((
+                "circle-crossing-canvas",
+                GeometryOutput::CanonicalMarks(vec![CanonicalMark::Circle {
+                    source_site_id: site(0),
+                    center: Point2::new(0., 5.),
+                    radius: 2.,
+                    scope: SiteScope::Canvas,
+                    provenance: provenance(),
+                    fill_rule: CanonicalFillRule::EvenOdd,
+                }]),
+                std::f64::consts::PI * 2. / 100.,
+            ));
+            let bowtie = path(&[[-2., -2.], [12., 12.], [-2., 12.], [12., -2.]]);
+            cases.push((
+                "self-intersecting-closed-mark",
+                GeometryOutput::CanonicalMarks(vec![CanonicalMark::ClosedPath(
+                    CanonicalPathMark::new(
+                        site(1),
+                        bowtie.clone(),
+                        SiteScope::Canvas,
+                        provenance(),
+                        CanonicalFillRule::EvenOdd,
+                    )
+                    .unwrap(),
+                )]),
+                0.5,
+            ));
+            cases.push((
+                "self-intersecting-stroke",
+                GeometryOutput::CanonicalStrokes(vec![stroke(vec![bowtie])]),
+                0.5,
+            ));
+            let degenerate = path(&[[0., 0.], [5., 0.], [10., 0.]]);
+            cases.push((
+                "zero-area-touching-boundary",
+                GeometryOutput::CanonicalMarks(vec![CanonicalMark::ClosedPath(
+                    CanonicalPathMark::new(
+                        site(3),
+                        degenerate,
+                        SiteScope::Canvas,
+                        provenance(),
+                        CanonicalFillRule::NonZero,
+                    )
+                    .unwrap(),
+                )]),
+                0.,
+            ));
+            let touching: Vec<_> = [
+                path(&[[-2., 0.], [5., 0.], [5., 10.], [-2., 10.]]),
+                path(&[[5., 0.], [12., 0.], [12., 10.], [5., 10.]]),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| {
+                CanonicalMark::ClosedPath(
+                    CanonicalPathMark::new(
+                        site(i + 4),
+                        p,
+                        SiteScope::Canvas,
+                        provenance(),
+                        CanonicalFillRule::NonZero,
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect();
+            cases.push((
+                "touching-marks-cover-canvas",
+                GeometryOutput::CanonicalMarks(touching),
+                1.,
+            ));
+            let outer = path(&[[-2., -2.], [12., -2.], [12., 12.], [-2., 12.]]);
+            let hole_a = path(&[[1., 1.], [1., 6.], [6., 6.], [6., 1.]]);
+            let hole_b = path(&[[4., 4.], [4., 9.], [9., 9.], [9., 4.]]);
+            cases.push((
+                "overlapping-independent-holes",
+                GeometryOutput::CanonicalStrokes(vec![
+                    stroke(vec![outer.clone(), hole_a]),
+                    stroke(vec![outer.clone(), hole_b]),
+                ]),
+                0.96,
+            ));
+            let off_outer = path(&[
+                [-2.13765432109, -1.73123456789],
+                [12.16123456789, -1.73123456789],
+                [12.16123456789, 13.31765432109],
+                [-2.13765432109, 13.31765432109],
+            ]);
+            let cx = 4.12345678913;
+            let cy = 4.76543219876;
+            let dx = 1.23456789123;
+            let dy = 1.87654321987;
+            let diagonal_hole = path(&[[cx - dx, cy], [cx, cy + dy], [cx + dx, cy], [cx, cy - dy]]);
+            cases.push((
+                "off-grid-diagonal-hole",
+                GeometryOutput::CanonicalStrokes(vec![stroke(vec![
+                    off_outer.clone(),
+                    diagonal_hole,
+                ])]),
+                1. - 2. * dx * dy / 100.,
+            ));
+            let a = 2.13765432109;
+            let w = 5.77654321987;
+            let y = 4.25987654321;
+            let h = 1.07123456789;
+            let left = Point2::new(a, y);
+            let right = Point2::new(a + w, y);
+            let lens = CurvePath::new(
+                vec![
+                    CurveSegment::CubicBezier(
+                        CubicBezierSegment::new(
+                            left,
+                            Point2::new(a + w / 3., y + h),
+                            Point2::new(a + 2. * w / 3., y + h),
+                            right,
+                        )
+                        .unwrap(),
+                    ),
+                    CurveSegment::CubicBezier(
+                        CubicBezierSegment::new(
+                            right,
+                            Point2::new(a + 2. * w / 3., y - h),
+                            Point2::new(a + w / 3., y - h),
+                            left,
+                        )
+                        .unwrap(),
+                    ),
+                ],
+                PathClosure::Closed,
+            )
+            .unwrap();
+            cases.push((
+                "off-grid-curved-hole",
+                GeometryOutput::CanonicalStrokes(vec![stroke(vec![off_outer.clone(), lens])]),
+                1. - w * h / 100.,
+            ));
+            let thin = path(&[
+                [-0.12345678913, 4.12345678913],
+                [-0.12345678913, 4.12345680113],
+                [2.87654321087, 4.12345680115],
+                [2.87654321087, 4.12345678915],
+            ]);
+            cases.push((
+                "off-grid-near-collinear-boundary-hole",
+                GeometryOutput::CanonicalStrokes(vec![stroke(vec![off_outer, thin])]),
+                1. - 2.87654321087 * 0.000000012 / 100.,
+            ));
+            let hole = path(&[[2., 2.], [2., 8.], [8., 8.], [8., 2.]]);
+            let holed = stroke(vec![outer.clone(), hole]);
+            cases.push((
+                "duplicate-stroke-with-hole",
+                GeometryOutput::CanonicalStrokes(vec![holed.clone(), holed]),
+                0.64,
+            ));
+            for (name, ring, expected) in [
+                ("region-covering-canvas", outer, 1.),
+                (
+                    "region-outside-canvas",
+                    path(&[[20., 20.], [21., 20.], [21., 21.], [20., 21.]]),
+                    0.,
+                ),
+            ] {
+                let regions = build_canonical_regions(CanonicalRegionProposal {
+                    output_layer_id: PatternOutputLayerId(1),
+                    source_groups: vec![CanonicalRegionSourceGroup {
+                        source_id: CanonicalRegionSourceId::SiteOwners(vec![site(2)]),
+                        components: vec![ring],
+                    }],
+                })
+                .unwrap();
+                cases.push((name, GeometryOutput::CanonicalRegions(regions), expected));
+            }
+            cases
+        }
     }
 }

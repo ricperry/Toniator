@@ -1600,6 +1600,9 @@ fn write_stage20s_manifest_from_existing(output: &Path, registry: &PresetRegistr
 
 /// Writes one validation-only document through normal evaluation, native PNG,
 /// raw SVG, and Inkscape SVG rasterization, returning bounded manifest text.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 fn write_validation_fixture_artifacts(
     id: &str,
     history: &DocumentHistory,
@@ -1617,7 +1620,7 @@ fn write_validation_fixture_artifacts(
     let svg_path = output.join(format!("{id}.svg"));
     let raster_path = output.join(format!("{id}-svg-raster.png"));
     let png = encode_png(result.raster()).expect("curved fixture native PNG encodes");
-    let svg = write_svg(result.scene());
+    let svg = write_svg(result.scene()).expect("SVG serialization");
     fs::write(&png_path, &png).expect("curved fixture native PNG writes");
     fs::write(&svg_path, &svg).expect("curved fixture raw SVG writes");
     let status = Command::new("inkscape")
@@ -1725,6 +1728,9 @@ fn write_selected_validation_fixture_artifacts(
 
 /// Evaluates one complete modeled document through the ordinary canonical
 /// engine boundary and retains PNG/SVG bytes plus public per-channel identity.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 fn canonical_output(history: &DocumentHistory, source: ResolvedSource) -> CanonicalOutput {
     let result = evaluate(EvaluationRequest::new(
         history.session().document_evaluation_snapshot(),
@@ -1733,7 +1739,7 @@ fn canonical_output(history: &DocumentHistory, source: ResolvedSource) -> Canoni
     .unwrap();
     CanonicalOutput {
         png: encode_png(result.raster()).unwrap(),
-        svg: write_svg(result.scene()),
+        svg: write_svg(result.scene()).expect("SVG serialization"),
         channels: result
             .channels()
             .iter()
@@ -1909,6 +1915,9 @@ fn source_weighted_voronoi_uses_independent_rgb_source_mappings() {
 /// Stage 21A validation directory. It uses the normal RGB channel mappings and solid paints, the
 /// ordinary document-base preset command, and the canonical engine evaluator; it never injects
 /// per-channel artwork-weight remapping or rewrites prior validation evidence.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 #[ignore = "writes Stage 21A source-weighted Voronoi validation artifacts"]
 fn stage21a_source_weighted_voronoi_all_base_artifacts() {
@@ -1953,7 +1962,7 @@ fn stage21a_source_weighted_voronoi_all_base_artifacts() {
             encode_png(result.raster()).expect("native PNG encodes"),
         )
         .expect("native PNG writes");
-        fs::write(&svg_path, write_svg(result.scene())).expect("raw SVG writes");
+        fs::write(&svg_path, write_svg(result.scene()).expect("SVG serialization"),).expect("raw SVG writes");
         assert_eq!(
             image::image_dimensions(&png_path).expect("native PNG dimensions read"),
             dimensions,
@@ -2296,6 +2305,9 @@ fn curved_two_stack_intersections_evaluates_repeated_mark_layers() {
 
 /// Renders all six validation-only curved-guide fixtures in memory, proving
 /// deterministic PNG/SVG replay and bounded small-fixture evaluation time.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn curved_guide_fixture_matrix_replays_png_and_svg_within_thirty_seconds() {
     let source_id = SourceReferenceId::new("curved-matrix-rgb").expect("source ID validates");
@@ -2341,7 +2353,7 @@ fn curved_guide_fixture_matrix_replays_png_and_svg_within_thirty_seconds() {
             "{id} elapsed={elapsed:?}"
         );
         let png = encode_png(first.raster()).expect("curved matrix PNG encodes");
-        let svg = write_svg(first.scene());
+        let svg = write_svg(first.scene()).expect("SVG serialization");
         assert!(
             png.starts_with(b"\x89PNG\r\n\x1a\n"),
             "{id} emits native PNG"
@@ -2366,7 +2378,7 @@ fn curved_guide_fixture_matrix_replays_png_and_svg_within_thirty_seconds() {
             png,
             encode_png(replay.raster()).expect("replay PNG encodes")
         );
-        assert_eq!(svg, write_svg(replay.scene()));
+        assert_eq!(svg, write_svg(replay.scene()).expect("SVG serialization"));
     }
 }
 
@@ -2809,6 +2821,9 @@ fn heterogeneous_rgb_history(
 
 /// Proves the validation-only `heterogeneous-rgb-recipes` document evaluates
 /// three independently materialized catalog definitions in visible RGB order.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn heterogeneous_rgb_recipes_replay_canonical_png_and_svg() {
     let source_id =
@@ -2880,7 +2895,7 @@ fn heterogeneous_rgb_recipes_replay_canonical_png_and_svg() {
         GeometryOutput::CanonicalRegions(_)
     ));
     let png = encode_png(first.raster()).expect("heterogeneous PNG encodes");
-    let svg = write_svg(first.scene());
+    let svg = write_svg(first.scene()).expect("SVG serialization");
     let replay = evaluate(EvaluationRequest::new(
         history.session().document_evaluation_snapshot(),
         ResolvedSource::new(source_id, bytes, SourceFormatHint::Png)
@@ -2891,7 +2906,7 @@ fn heterogeneous_rgb_recipes_replay_canonical_png_and_svg() {
         png,
         encode_png(replay.raster()).expect("heterogeneous replay PNG encodes")
     );
-    assert_eq!(svg, write_svg(replay.scene()));
+    assert_eq!(svg, write_svg(replay.scene()).expect("SVG serialization"));
     let identities = first
         .channels()
         .iter()
@@ -3098,6 +3113,9 @@ fn parallel_evaluation_matches_single_worker_reference() {
 }
 
 /// Prints release-mode architectural metrics for one caller-selected ordinary catalog workload.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 #[ignore = "run explicitly in release mode for Stage 20 performance evidence"]
 fn stage20_closeout_release_profile() {
@@ -3122,7 +3140,7 @@ fn stage20_closeout_release_profile() {
     let png = encode_png(profile.result.raster()).expect("profile raster encodes");
     let png_elapsed = png_started.elapsed();
     let svg_started = Instant::now();
-    let svg = write_svg(profile.result.scene());
+    let svg = write_svg(profile.result.scene()).expect("SVG serialization");
     let svg_elapsed = svg_started.elapsed();
     println!(
         "stage20_profile run=cold preset={preset_id} size={size} configured_workers={} observed_workers={} worker_registrations={}",
@@ -3212,6 +3230,9 @@ fn edit_red_seed(history: &mut DocumentHistory, red: ChannelId) {
 /// MANIFEST, or inventory. `STAGE20S_MANIFEST_EXISTING=1` instead audits
 /// retained evidence and writes only a compact MANIFEST without evaluation or
 /// artifact regeneration. The test does not claim visual acceptance.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn bundled_presets_reload_and_preserve_canonical_output_parity() {
     let registry = PresetRegistry::bundled();
@@ -3328,9 +3349,9 @@ fn bundled_presets_reload_and_preserve_canonical_output_parity() {
             .unwrap_or_else(|error| panic!("{preset_id} reloaded evaluation failed: {error:?}"));
         let original_png = encode_png(original.raster()).unwrap();
         let reloaded_png = encode_png(reloaded_output.raster()).unwrap();
-        let original_svg = write_svg(original.scene());
+        let original_svg = write_svg(original.scene()).expect("SVG serialization");
         assert_eq!(original_png, reloaded_png);
-        assert_eq!(original_svg, write_svg(reloaded_output.scene()));
+        assert_eq!(original_svg, write_svg(reloaded_output.scene()).expect("SVG serialization"));
         assert_eq!(
             original
                 .scene()
@@ -3608,6 +3629,9 @@ fn bundled_presets_reload_and_preserve_canonical_output_parity() {
 /// complete-document geometry and per-channel identity; isolated SVG bytes are
 /// intentionally excluded because hidden document-wide identity metadata still
 /// changes when red changes.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn independent_rgb_presets_preserve_unaffected_channel_canonical_outputs() {
     let cases = [
@@ -3646,7 +3670,7 @@ fn independent_rgb_presets_preserve_unaffected_channel_canonical_outputs() {
         let before_result = evaluated_document(&history, source.clone());
         let before = CanonicalOutput {
             png: encode_png(before_result.raster()).unwrap(),
-            svg: write_svg(before_result.scene()),
+            svg: write_svg(before_result.scene()).expect("SVG serialization"),
             channels: before_result
                 .channels()
                 .iter()
@@ -3668,7 +3692,7 @@ fn independent_rgb_presets_preserve_unaffected_channel_canonical_outputs() {
         let after_result = evaluated_document(&history, source.clone());
         let after = CanonicalOutput {
             png: encode_png(after_result.raster()).unwrap(),
-            svg: write_svg(after_result.scene()),
+            svg: write_svg(after_result.scene()).expect("SVG serialization"),
             channels: after_result
                 .channels()
                 .iter()

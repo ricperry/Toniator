@@ -90,6 +90,49 @@ impl PathOffsetWork {
     pub const fn limits(&self) -> PathOffsetLimits {
         self.limits
     }
+
+    /// Charges convex inset clipping to this request's existing segment, component, and pair bounds.
+    ///
+    /// The geometry-owned inset caller polls cancellation before each clipping pass. Accounting
+    /// uses checked arithmetic and publishes no partial charge when any shared bound is exceeded.
+    ///
+    /// # Errors
+    /// Returns the existing segment, component, or cleanup-limit diagnostic on exhausted work.
+    pub(crate) fn charge_convex_inset(
+        &mut self,
+        segments: usize,
+        components: usize,
+        inspections: usize,
+    ) -> Result<(), CurveError> {
+        let emitted_segments = self
+            .emitted_segments
+            .checked_add(segments)
+            .filter(|total| *total <= self.limits.maximum_segments)
+            .ok_or(CurveError::new(
+                "curve.offset.segment_limit",
+                "path offset segment limit exceeded",
+            ))?;
+        let retained_components = self
+            .retained_components
+            .checked_add(components)
+            .filter(|total| *total <= self.limits.maximum_components)
+            .ok_or(CurveError::new(
+                "curve.offset.component_limit",
+                "path offset component limit exceeded",
+            ))?;
+        let cleanup_pairs = self
+            .cleanup_pairs
+            .checked_add(inspections)
+            .filter(|total| *total <= self.limits.maximum_cleanup_pairs)
+            .ok_or(CurveError::new(
+                "curve.offset.cleanup_limit",
+                "path offset cleanup pair limit exceeded",
+            ))?;
+        self.emitted_segments = emitted_segments;
+        self.retained_components = retained_components;
+        self.cleanup_pairs = cleanup_pairs;
+        Ok(())
+    }
 }
 
 impl Default for PathOffsetLimits {

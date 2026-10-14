@@ -94,7 +94,7 @@ fn evaluate_transition(
     .expect("validation PNG writes");
     fs::write(
         output.join(format!("along-guide-orientation-{artifact_stem}.svg")),
-        write_svg(result.scene()),
+        write_svg(result.scene()).expect("SVG serialization"),
     )
     .expect("validation SVG writes");
 }

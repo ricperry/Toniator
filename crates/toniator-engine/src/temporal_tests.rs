@@ -244,7 +244,7 @@ fn native_endpoint_artifacts_use_both_immutable_sources() {
                 &NeverCancelled,
             )
             .unwrap();
-            let svg = write_svg(evaluation.result.scene());
+            let svg = write_svg(evaluation.result.scene()).expect("SVG serialization");
             let raster = toniator_render::rasterize_output(
                 evaluation.result.scene(),
                 RasterBackground::default_for_model(Some(HalftoneChannelModel::Rgb)),

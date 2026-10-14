@@ -327,7 +327,7 @@ fn generate_stage20s_preset_icons() {
     assert_eq!(result.scene().canvas().width, 100.0);
     assert_eq!(result.scene().canvas().height, 100.0);
     assert_eq!(result.scene().model(), Some(HalftoneChannelModel::Rgb));
-    let icon = add_rgb_icon_background(write_svg(result.scene()), "Curve Motif");
+    let icon = add_rgb_icon_background(write_svg(result.scene()).expect("SVG serialization"), "Curve Motif",);
     assert!(icon.contains("width=\"100\" height=\"100\" viewBox=\"0 0 100 100\""));
     assert_eq!(icon.matches("id=\"icon-background\"").count(), 1);
     let curve_path = output.join("curve-motif-rows.svg");

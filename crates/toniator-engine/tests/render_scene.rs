@@ -118,6 +118,9 @@ fn mark_bundle() -> PatternDefinitionBundle {
 
 /// Verifies current document authority yields exact deterministic circle diagnostics for both
 /// immutable source inputs, including source-sensitive realization and scene identities.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn document_derived_evaluation_has_current_deterministic_circle_geometry() {
     for (path, format, decoded, family, realization, scene) in [
@@ -165,7 +168,8 @@ fn document_derived_evaluation_has_current_deterministic_circle_geometry() {
             (result.raster().width(), result.raster().height()),
             (900, 600)
         );
-        assert!(write_svg(result.scene()).contains("<circle "));
+        assert!(write_svg(result.scene()).expect("SVG serialization")
+                .contains("<circle "));
     }
 }
 

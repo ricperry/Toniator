@@ -69,6 +69,12 @@ def payload(prefix):
         install(ROOT / 'assets' / ('appicon' + suffix),
                 prefix / 'share/icons/hicolor' / size / 'apps' / (APP_ID + suffix))
     install(ROOT / 'LICENSE', prefix / 'share/licenses' / APP_ID / 'LICENSE')
+    # Retain exact license texts and local patch provenance for both shared bundles.
+    for crate, notices in [('i_overlay', ['LICENSE-MIT', 'LICENSE-APACHE', 'PROVENANCE.md']),
+                           ('i_tree', ['LICENSE', 'PROVENANCE.md'])]:
+        for name in notices:
+            install(ROOT / 'vendor' / crate / name,
+                    prefix / 'share/licenses' / APP_ID / crate / name)
 
 
 def flatpak_bundle():
@@ -81,7 +87,7 @@ def flatpak_bundle():
     run('flatpak', 'build-finish', '--command=toniator-app', '--socket=wayland',
         '--socket=fallback-x11', '--share=ipc', '--device=dri', build)
     run('flatpak', 'build-export', '--disable-sandbox', WORK / 'repo', build, 'stable')
-    bundle = DIST / 'Toniator-0.4.1-x86_64.flatpak'
+    bundle = DIST / 'Toniator-0.4.2-x86_64.flatpak'
     temporary = DIST / ('.Toniator-' + str(time.time_ns()) + '.flatpak')
     run('flatpak', 'build-bundle', WORK / 'repo', temporary, APP_ID, 'stable',
         '--runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo')
@@ -101,7 +107,7 @@ def main():
     if not args.skip_build:
         sdk_build()
     bundle = flatpak_bundle()
-    record = {'version': '0.4.1', 'app_id': APP_ID,
+    record = {'version': '0.4.2', 'app_id': APP_ID,
               'base_commit': output('git', 'rev-parse', 'HEAD'),
               'packaging_diff': output('git', 'diff', '--', 'crates/toniator-app/src/main.rs',
                                         'crates/toniator-app/src/main_view_state.rs'),

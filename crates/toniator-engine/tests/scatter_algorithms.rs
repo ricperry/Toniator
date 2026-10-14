@@ -92,7 +92,7 @@ fn poisson_feature_size_increases_full_canvas_population() {
             .unwrap();
             std::fs::write(
                 directory.join(format!("poisson-size-{size}.svg")),
-                toniator_render::write_svg(result.scene()),
+                toniator_render::write_svg(result.scene()).expect("SVG serialization"),
             )
             .unwrap();
         }
@@ -248,7 +248,7 @@ fn fresh_scatter_choices_and_relaxation_evaluate_for_both_sources() {
                 .unwrap();
                 std::fs::write(
                     directory.join(format!("{asset}-{index}.svg")),
-                    toniator_render::write_svg(result.scene()),
+                    toniator_render::write_svg(result.scene()).expect("SVG serialization"),
                 )
                 .unwrap();
             }

@@ -17,6 +17,8 @@ use toniator_engine::evaluate_with_limits;
 mod components;
 mod controller;
 mod document_presets;
+#[cfg(test)]
+mod current_test_fixtures;
 mod main_view_state;
 mod paint_editor;
 mod personal_pattern_management;
@@ -104,10 +106,13 @@ use toniator_domain::{
     GenericGuidePrototypeDraft, MarkOrientationDraft, OffsetCleanup, PathStrokeStyle,
     PatternOutputSettingsRecipe, SiteDensityModulation, SiteUseFilterRecipe,
 };
+#[cfg(test)]
+use toniator_engine::write_svg;
 use toniator_engine::{
-    EvaluationLimits, EvaluationRequest, EvaluationScheduler, OutputRasterTarget,
-    RasterAntialiasing, RasterBackground, RasterSurface, ResolvedSource, SourceFormatHint,
-    SourceIdentity, encode_png, encode_png_with_density, write_svg,
+    EvaluationLimits, EvaluationRequest, EvaluationScheduler, OutputRasterTarget, PngStreamOptions,
+    RasterAntialiasing, RasterBackground, RasterSurface, RasterizationLimits, ResolvedSource,
+    SourceFormatHint, SourceIdentity, StreamingRasterTarget, SvgSerializationLimits, encode_png,
+    encode_png_with_density, write_png_streaming, write_svg_cancellable_with_limits,
 };
 #[cfg(test)]
 use toniator_engine::{rasterize_output, reduced_preview_png, resolve_source_identity};
@@ -849,7 +854,7 @@ struct ExportSettings {
     format: ExportFormat,
     background: RasterBackground,
     antialiasing: RasterAntialiasing,
-    output_target: Option<OutputRasterTarget>,
+    output_target: Option<StreamingRasterTarget>,
     prepare_for_print: bool,
     pixels_per_metre: Option<u32>,
     cleanup: print_cleanup::Settings,
@@ -989,6 +994,7 @@ fn wizard_preview_surface_after<T: Copy>(
 
 #[derive(Clone)]
 struct Actions {
+    select_document_preset: gio::SimpleAction,
     load_document_preset: gio::SimpleAction,
     save_document_preset: gio::SimpleAction,
     new: gio::SimpleAction,
@@ -3774,6 +3780,7 @@ struct AppState {
     endpoint_controls: gtk::Box,
     start_frame: gtk::ToggleButton,
     end_frame: gtk::ToggleButton,
+    end_rotation_warning: gtk::Label,
     syncing_endpoint: Rc<Cell<bool>>,
     view_state: MainViewState,
     source_texture: Option<gtk::gdk::Texture>,
@@ -4217,6 +4224,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     new_menu.append(Some("Open artwork or document…"), Some("app.open"));
     new_menu.append(Some("Import image sequence…"), Some("app.import-sequence"));
     let preset_menu = gio::Menu::new();
+    preset_menu.append(Some("Select preset…"), Some("app.select-document-preset"));
     preset_menu.append(Some("Load preset..."), Some("app.load-document-preset"));
     preset_menu.append(Some("Save preset"), Some("app.save-document-preset"));
     new_menu.append_section(None, &preset_menu);
@@ -4302,6 +4310,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     });
 
     let actions = Actions {
+        select_document_preset: gio::SimpleAction::new("select-document-preset", None),
         load_document_preset: gio::SimpleAction::new("load-document-preset", None),
         save_document_preset: gio::SimpleAction::new("save-document-preset", None),
         new: gio::SimpleAction::new("new", None),
@@ -4319,6 +4328,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         help: gio::SimpleAction::new("help", None),
     };
     for action in [
+        &actions.select_document_preset,
         &actions.load_document_preset,
         &actions.save_document_preset,
         &actions.new,
@@ -4393,6 +4403,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         endpoint_controls: shell.endpoint_controls().0,
         start_frame: shell.endpoint_controls().1,
         end_frame: shell.endpoint_controls().2,
+        end_rotation_warning: shell.end_rotation_warning(),
         syncing_endpoint: Rc::new(Cell::new(false)),
         view_state: MainViewState::default(),
         source_texture: None,
@@ -4750,6 +4761,14 @@ fn connect_actions(state: &Rc<RefCell<AppState>>) {
             .actions
             .animation_settings
             .connect_activate(move |_, _| temporal_settings::open(&handle));
+    }
+    {
+        let handle = Rc::clone(state);
+        state
+            .borrow()
+            .actions
+            .select_document_preset
+            .connect_activate(move |_, _| document_presets::choose_builtin(&handle));
     }
     {
         let handle = Rc::clone(state);
@@ -5261,6 +5280,27 @@ fn sync_endpoint_controls(state: &AppState) {
                 .frame_count()
                 > 1
     });
+    let rotating = temporal
+        && state.workspace.as_ref().is_some_and(|workspace| {
+            workspace
+                .document()
+                .has_animated_shape_rotation()
+                .unwrap_or(false)
+        });
+    const ROTATION_WARNING: &str =
+        "Rotating marks can change overlap and tone. The saved calibration stays fixed.";
+    state
+        .end_rotation_warning
+        .set_visible(rotating && state.endpoint == temporal_preview::Endpoint::End);
+    let end_description = if rotating {
+        ROTATION_WARNING
+    } else {
+        "Show the end of the selected animation range"
+    };
+    state.end_frame.set_tooltip_text(Some(end_description));
+    state
+        .end_frame
+        .update_property(&[gtk::accessible::Property::Description(end_description)]);
     state.endpoint_controls.set_visible(temporal);
     state
         .endpoint_controls
@@ -7113,6 +7153,7 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
                     temporal_preview::Endpoint::End => workspace
                         .document()
                         .materialize_frame(state.endpoint.frame(workspace.document()))
+                        .map(|frame| frame.document().clone())
                         .ok(),
                 }) {
             let ids = authoritative_channel_ids(&document);
@@ -15217,10 +15258,30 @@ fn commit_wizard_input(
     }
 }
 
+/// Selects existing white presentation styling for forced-black studies without changing model authority.
+/// Sampled SourceColorAlpha paint keeps its existing gray alpha-viewer backing. Native RGBA stays intact.
+fn wizard_preview_backdrop_class(document: &Document) -> &'static str {
+    if document.channel_model() == Some(HalftoneChannelModel::SourceColorAlpha) {
+        PreviewModel::SourceColorAlpha.css_class()
+    } else {
+        PreviewModel::Cmyk.css_class()
+    }
+}
+
+/// Updates only the Wizard picture's existing backdrop classes; document and raster bytes remain immutable.
+fn update_wizard_preview_backdrop(picture: &gtk::Picture, document: &Document) {
+    picture.add_css_class("toniator-viewer");
+    for model in PreviewModel::ALL {
+        picture.remove_css_class(model.css_class());
+    }
+    picture.add_css_class(wizard_preview_backdrop_class(document));
+}
+
 /// Submits the newest wizard draft through an isolated scheduler using the fixed proxy and target.
 ///
 /// A newer request supersedes an older ticket and invalidates obsolete construction admission.
 /// The neutral picture never certifies full-document construction or blocks main preview state.
+/// Its native RGBA stays transparent; forced-black studies receive white backing only in GTK presentation.
 fn submit_wizard_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
     let editing = state
         .borrow()
@@ -15284,7 +15345,7 @@ fn submit_wizard_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
             WIZARD_PREVIEW_TARGET_PX,
         )
         .expect("fixed Pattern Wizard preview target is valid")
-        .with_background(preview_backdrop::raster_background_for_document(session.document()));
+        .with_background(toniator_engine::RasterBackground::Transparent);
         let snapshot = session.document_evaluation_snapshot();
         let request = EvaluationRequest::with_preview_target(snapshot, source.clone(), target)
             .for_structural_preview();
@@ -15373,8 +15434,8 @@ fn wizard_candidate_document(
 ///
 /// CoverCanvas recipes can materialize different finite geometry for the captured document. The
 /// catalog remains strict for ordinary callers; this disposable app path probes materialization
-/// without a companion, then attaches the catalog measurement only when exact binding equality
-/// proves it applies to a receiver. Incompatible companions stay absent for later preparation.
+/// without a companion, then uses domain structural compatibility to attach the measurement while
+/// preserving its measured-angle provenance. Incompatible companions stay absent for preparation.
 ///
 /// # Errors
 /// Returns catalog lookup, target reconstruction, command, validation, or history errors without
@@ -15432,9 +15493,7 @@ fn apply_catalog_pattern_candidate(
     let compatible_companion = entry.preset.saved_calibration.as_ref().filter(|artifact| {
         receivers.iter().copied().any(|channel_id| {
             CalibrationBinding::for_channel(probe.document(), channel_id)
-                .ok()
-                .as_ref()
-                == Some(artifact.binding())
+                .is_ok_and(|binding| artifact.binding().is_compatible_with(&binding))
         })
     });
     history
@@ -15607,6 +15666,9 @@ fn wizard_preview_canvas_document(
 
 /// Scales absolute family lengths to the disposable preview canvas; dimensionless settings remain authored.
 /// This projection changes neither the source document nor feature-size density authority.
+/// Current domain recipes require nominal spacing for Raw, Clustered and Stratified; Even alone
+/// retains `None` and scales its own minimum distance. The caller supplies a validated positive
+/// canvas ratio and validates the complete disposable document after this in-place projection.
 fn scale_wizard_preview_family_lengths(mechanism: &mut PatternMechanism, scale: f64) {
     use toniator_domain::{RandomSiteCharacter, SiteExclusionPolicy};
     match mechanism {
@@ -15620,12 +15682,23 @@ fn scale_wizard_preview_family_lengths(mechanism: &mut PatternMechanism, scale: 
             }
         }
         PatternMechanism::AlongParametricCurveSites { interval, .. } => *interval *= scale,
-        PatternMechanism::RandomSiteProcess { character, .. } => match character {
-            RandomSiteCharacter::Even {
-                minimum_center_distance,
-            } => *minimum_center_distance *= scale,
-            RandomSiteCharacter::Clustered { cluster_spread, .. } => *cluster_spread *= scale,
-            RandomSiteCharacter::RawUniform | RandomSiteCharacter::Stratified { .. } => {}
+        PatternMechanism::RandomSiteProcess {
+            character,
+            nominal_spacing,
+            ..
+        } => {
+            // Current domain recipes require a nominal length except Even, whose sole length
+            // is its minimum center distance. Preserve that absence without inventing a default.
+            if let Some(spacing) = nominal_spacing {
+                *spacing *= scale;
+            }
+            match character {
+                RandomSiteCharacter::Even {
+                    minimum_center_distance,
+                } => *minimum_center_distance *= scale,
+                RandomSiteCharacter::Clustered { cluster_spread, .. } => *cluster_spread *= scale,
+                RandomSiteCharacter::RawUniform | RandomSiteCharacter::Stratified { .. } => {}
+            }
         },
         PatternMechanism::SiteExclusion { policy, .. } => match policy {
             SiteExclusionPolicy::MinimumCenterDistance { minimum } => *minimum *= scale,
@@ -15727,6 +15800,9 @@ fn scale_wizard_preview_guide_structure(
 /// are 0–1, region sampling is Area average, density mode is Contextual, and uniform size scale is
 /// `1`. Artwork weighting and strict non-overlap remain structural inputs; the source document and
 /// its initialized End values remain untouched.
+/// The disposable visible solid-paint channel reads neutral luminance for fill and independent
+/// weighting; SourceColorAlpha keeps its required sampled-source mapping and paint. Actual channel
+/// roles, artwork mappings and saved authority outside this projection remain unchanged.
 fn wizard_preview_document(
     document: &Document,
     target: InspectorTarget,
@@ -15843,6 +15919,28 @@ fn wizard_preview_document(
                 })
                 .map_err(|error| error.to_string())?;
         }
+    }
+    if projection.document().channel_model() != Some(HalftoneChannelModel::SourceColorAlpha)
+        && projection.document().modeled_channel(visible).is_some()
+    {
+        // A neutral study is one common scalar ramp, not an RGB/CMYK color separation.
+        // These commands affect only the disposable visible channel after identity defaults.
+        projection
+            .apply(&DocumentCommand::SetModeledMappingField {
+                channel_id: visible,
+                edit: toniator_domain::ModeledMappingFieldEdit::Component(
+                    toniator_domain::SourceMappingComponent::Luminance,
+                ),
+            })
+            .map_err(|error| error.to_string())?;
+        projection
+            .apply(&DocumentCommand::SetSourceWeightingField {
+                channel_id: visible,
+                edit: toniator_domain::SourceWeightingFieldEdit::Component(
+                    toniator_domain::SourceMappingComponent::Luminance,
+                ),
+            })
+            .map_err(|error| error.to_string())?;
     }
     let black = ColorValue {
         red: 0.0,
@@ -16035,7 +16133,7 @@ fn handle_wizard_preview_completion(
             .and_then(|result| texture_from_surface(result.raster()).ok())
         {
             Some(texture) => {
-                update_preview_picture_backdrop(&surface.picture,preview_session.document());
+                update_wizard_preview_backdrop(&surface.picture, preview_session.document());
                 surface.picture.set_paintable(Some(&texture));
                 if let Some(result) = completion.result() {
                     let document = preview_session.document();
@@ -16175,6 +16273,25 @@ fn apply_pattern_wizard(state: &Rc<RefCell<AppState>>, epoch: u64) {
             return;
         }
     }
+    publish_admitted_wizard_draft(state, epoch, &draft);
+}
+
+/// Publishes one admitted private Wizard draft as one history command and refreshes the workspace.
+///
+/// Ordinary Apply checks exact construction Review and admission before calling this tail. A
+/// calibration completion first checks its captured root, epoch, draft/revision and cancellation,
+/// then attaches only validated companions. That admitted candidate does not re-enter Review:
+/// companion attachment changes the exact document revision without changing its construction.
+/// Gallery and Pattern Save retain their separate publication paths. Rejection leaves the modal open.
+fn publish_admitted_wizard_draft(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    draft: &Rc<RefCell<DocumentHistory>>,
+) {
+    if let Some(surface) = state.borrow().pattern_wizard.as_ref().filter(|surface| surface.epoch == epoch) {
+        // Recovery must be available even if the fallible history squash rejects publication.
+        set_wizard_calibration_pending(surface, false);
+    }
     let result = {
         let mut app_state = state.borrow_mut();
         let Some(workspace) = app_state.workspace.as_mut() else {
@@ -16210,6 +16327,7 @@ fn apply_pattern_wizard(state: &Rc<RefCell<AppState>>, epoch: u64) {
         }
         Ok(_) => {
             if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+                refresh_wizard_action_controls(surface);
                 surface
                     .status
                     .set_label("Apply is unavailable because no pattern settings changed.");
@@ -16218,6 +16336,7 @@ fn apply_pattern_wizard(state: &Rc<RefCell<AppState>>, epoch: u64) {
         }
         Err(error) => {
             if let Some(surface) = state.borrow().pattern_wizard.as_ref() {
+                refresh_wizard_action_controls(surface);
                 surface
                     .status
                     .set_label(&format!("Couldn’t apply these pattern settings: {error}"));
@@ -17065,8 +17184,10 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
     reset.connect_clicked(move |button| advanced_defaults::reset(&state_for_reset, epoch, button));
 
     let recalibrate = shell.recalibrate();
-    let recalibrate_description =
-        "Measure this Pattern’s current structural binding again in the private draft. Apply keeps the result; Cancel discards it.";
+    let recalibrate_description = match target {
+        InspectorTarget::Channel(_) => "Measure the selected channel’s Pattern again. Other channels and the saved ALL calibration stay fixed. Apply keeps the result; Cancel discards it.",
+        InspectorTarget::DocumentAll => "Measure every active channel’s Pattern and the saved ALL calibration again. Apply keeps the results; Cancel discards them.",
+    };
     recalibrate.set_tooltip_text(Some(recalibrate_description));
     recalibrate.update_property(&[
         gtk::accessible::Property::Label("Recalibrate Pattern"),
@@ -21725,7 +21846,7 @@ fn main_numeric_input_matches_current(
             .document()
             .materialize_frame(state.endpoint.frame(workspace.document()))
         {
-            Ok(document) => document,
+            Ok(frame) => frame.document().clone(),
             Err(_) => return false,
         },
     };
@@ -22395,7 +22516,7 @@ fn set_inspector_status(state: &mut AppState, message: impl Into<String>) {
                 .materialize_frame(state.endpoint.frame(workspace.document()))
                 .ok()
                 .and_then(|document| {
-                    artwork_weighted_transform_notice(&document, state.inspector_runtime.target)
+                    artwork_weighted_transform_notice(document.document(), state.inspector_runtime.target)
                 }),
         });
     let main_message =
@@ -24884,13 +25005,15 @@ fn export_filters() -> gio::ListStore {
 
 /// Projects runtime-only PNG sizing validity and custom applicability into GTK.
 ///
-/// The shared renderer validates the budget; this callback never changes the document, zoom,
-/// review backdrop, or report authority.
+/// Streaming format and working-row admission govern Export independently of preview budgets.
+/// This callback changes only GTK state, never document, zoom, backdrop, or report authority.
+/// # Errors
+/// Returns malformed dimensions or streaming PNG admission diagnostics.
 fn sync_png_export_size(
     options: &components::ToniatorPngExportOptions,
     export: &gtk::Button,
     canvas: &CanvasSpec,
-) -> Result<OutputRasterTarget, png_export_size::OutputSizeError> {
+) -> Result<StreamingRasterTarget, png_export_size::OutputSizeError> {
     options
         .dimensions()
         .set_sensitive(options.scale().selected() == 4);
@@ -24899,7 +25022,7 @@ fn sync_png_export_size(
         options.scale().selected(),
         options.dimensions().text().as_str(),
     ) {
-        Ok(dimensions) => match dimensions.target() {
+        Ok(dimensions) => match dimensions.streaming_target() {
             Ok(target) => {
                 options.size_summary().set_label(&format!(
                     "PNG: {} × {} pixels",
@@ -25526,6 +25649,7 @@ fn print_preparation_controls_handles(
         close: controls.close.clone(),
         syncing: Rc::clone(&controls.syncing),
         selection: Cell::new(controls.selection.get()),
+        selection_valid: Cell::new(controls.selection_valid.get()),
         selected_unit: Cell::new(controls.selected_unit.get()),
         selected_backdrop: Rc::clone(&controls.selected_backdrop),
         garment_rgb: Rc::clone(&controls.garment_rgb),
@@ -25589,8 +25713,8 @@ fn retire_deferred_png_chooser(
     true
 }
 
-/// Projects current applied intent, target, lifecycle state, and backing into inspector and PNG UI.
-/// Projects export-local PNG controls into renderer selection and the visible sizing summary.
+/// Resolves live export-local controls and projects exact PNG intent and independent preview admission.
+/// Validity never comes from the retained last-valid selection, and invalid fields retire previews.
 ///
 /// The document supplies only initial values and canvas dimensions; the print-box draft remains
 /// canonical millimetres in this surface. This updates GTK state without mutating project history.
@@ -25688,14 +25812,15 @@ fn sync_print_preparation_surface(state: &mut AppState) {
                             ))
                         })();
                         match summary {
-                            Ok(summary) => match fit.target() {
+                            Ok(summary) => match fit.streaming_target() {
                                 Ok(target) => {
                                     surface.controls.options.size_summary().set_label(&summary);
                                     surface.controls.options.size_error().set_visible(false);
                                     Ok((target, Some(fit.pixels_per_metre())))
                                 }
                                 Err(_) => {
-                                    let error = fit.render_limit_message();
+                                    let error =
+                                        fit.streaming_target().unwrap_err().message().to_owned();
                                     surface.controls.options.size_summary().set_label(&summary);
                                     surface.controls.options.size_error().set_label(&error);
                                     surface.controls.options.size_error().set_visible(true);
@@ -25741,7 +25866,7 @@ fn sync_print_preparation_surface(state: &mut AppState) {
                 } else {
                     print_cleanup::Settings::default()
                 };
-                Ok(print_preparation::OutputSelection {
+                let selected = print_preparation::OutputSelection {
                     target,
                     prepare_for_print: prepared,
                     pixels_per_metre,
@@ -25752,7 +25877,11 @@ fn sync_print_preparation_surface(state: &mut AppState) {
                         RasterAntialiasing::On
                     },
                     background,
-                })
+                };
+                selected
+                    .admit_export()
+                    .map_err(png_export_size::OutputSizeError::Invalid)?;
+                Ok(selected)
             });
             if let Err(error) = &selected {
                 surface
@@ -25785,18 +25914,26 @@ fn sync_print_preparation_surface(state: &mut AppState) {
             ))
         });
     reconcile_print_png_preview_intent(state, desired_preview);
-    let status = match selection.as_ref().and_then(|selection| selection.as_ref().err()) {
+    let status = match selection
+        .as_ref()
+        .and_then(|selection| selection.as_ref().err())
+    {
+        None if selection
+            .as_ref()
+            .and_then(|value| value.as_ref().ok())
+            .is_some_and(|selection| png_preview_target(*selection).is_none()) =>
+        {
+            "Full-size preview unavailable; export retains the requested dimensions and DPI."
+                .to_owned()
+        }
         Some(error) => error
             .preview_status()
-            .unwrap_or("Enter valid PNG dimensions to show the preview")
+            .unwrap_or("Resolve PNG settings to show the preview")
             .to_owned(),
-        None => state
-            .print_preparation_surface
-            .as_ref()
-            .map_or_else(
-                || "Preview not rendered".to_owned(),
-                |surface| print_png_preview_status_text(surface.preview_status).to_owned(),
-            ),
+        None => state.print_preparation_surface.as_ref().map_or_else(
+            || "Preview not rendered".to_owned(),
+            |surface| print_png_preview_status_text(surface.preview_status).to_owned(),
+        ),
     };
     state
         .shell
@@ -25817,6 +25954,10 @@ fn sync_print_preparation_surface(state: &mut AppState) {
         .as_mut()
         .filter(|surface| surface.workspace_generation == workspace_generation)
     {
+        surface
+            .controls
+            .selection_valid
+            .set(selection.as_ref().is_some_and(Result::is_ok));
         if let Some(Ok(selection)) = selection.as_ref() {
             surface.controls.selection.set(*selection);
             surface
@@ -25834,7 +25975,10 @@ fn sync_print_preparation_surface(state: &mut AppState) {
                     selection.target.height()
                 )
             } else {
-                print_preparation_view::target_summary(selection.target, &document_settings)
+                print_preparation_view::target_summary(
+                    (selection.target.width(), selection.target.height()),
+                    &document_settings,
+                )
             };
             surface.controls.target_summary.set_label(&target_summary);
         } else {
@@ -25927,18 +26071,27 @@ fn sync_print_preparation_surface(state: &mut AppState) {
         surface.controls.status.set_label(&status_text);
         let available = surface.raster_texture.is_some();
         let target = surface.controls.selection.get().target;
-        surface
-            .controls
-            .preview_zoom_out
-            .set_sensitive(available && print_preparation_view::can_show_exact_zoom(target, 0.5));
-        surface
-            .controls
-            .preview_actual_size
-            .set_sensitive(available && print_preparation_view::can_show_exact_zoom(target, 1.0));
-        surface
-            .controls
-            .preview_zoom_in
-            .set_sensitive(available && print_preparation_view::can_show_exact_zoom(target, 2.0));
+        surface.controls.preview_zoom_out.set_sensitive(
+            available
+                && print_preparation_view::can_show_exact_zoom(
+                    (target.width(), target.height()),
+                    0.5,
+                ),
+        );
+        surface.controls.preview_actual_size.set_sensitive(
+            available
+                && print_preparation_view::can_show_exact_zoom(
+                    (target.width(), target.height()),
+                    1.0,
+                ),
+        );
+        surface.controls.preview_zoom_in.set_sensitive(
+            available
+                && print_preparation_view::can_show_exact_zoom(
+                    (target.width(), target.height()),
+                    2.0,
+                ),
+        );
         surface.controls.preview_fit.set_sensitive(available);
     }
 }
@@ -26009,7 +26162,8 @@ fn sync_print_findings_projection(state: &mut AppState) {
     let target = report.identity.target();
     let identity = report.identity.transparent_raster_identity().to_owned();
     let pair_bytes = print_preparation::retained_bytes(pair).unwrap_or(u64::MAX);
-    let image_bytes = print_preparation_view::display_bytes(target).unwrap_or(u64::MAX);
+    let image_bytes = print_preparation_view::display_bytes((target.width(), target.height()))
+        .unwrap_or(u64::MAX);
     let image_allowed = image_bytes <= print_preparation_view::MAX_REVIEW_DISPLAY_BYTES
         && pair_bytes
             .checked_add(image_bytes)
@@ -26233,8 +26387,11 @@ fn project_selected_print_highlight(
             .set_paintable(None::<&gtk::gdk::Paintable>);
         return;
     }
-    let overlay_bytes =
-        print_preparation_view::display_bytes(pair.report().identity.target()).unwrap_or(u64::MAX);
+    let overlay_bytes = print_preparation_view::display_bytes((
+        pair.report().identity.target().width(),
+        pair.report().identity.target().height(),
+    ))
+    .unwrap_or(u64::MAX);
     if overlay_bytes > print_preparation_view::MAX_REVIEW_DISPLAY_BYTES
         || pair_bytes
             .checked_add(image_bytes)
@@ -26465,6 +26622,17 @@ fn queue_ready_print_png_preview(state: &mut AppState) {
     });
 }
 
+/// Admits only the existing full-size preview budget while preserving exact PNG intent.
+fn png_preview_target(selection: print_preparation::OutputSelection) -> Option<OutputRasterTarget> {
+    let bytes = print_preparation_view::display_bytes((
+        selection.target.width(),
+        selection.target.height(),
+    ))?;
+    (bytes <= print_preparation_view::MAX_PREPARED_PREVIEW_BYTES)
+        .then(|| selection.raster_target().ok())
+        .flatten()
+}
+
 /// Starts a fresh final-raster preview without depending on advisory detector completion.
 ///
 /// The captured session, source, frame, output intent, and surface generation
@@ -26501,7 +26669,11 @@ fn request_print_png_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
         };
         (capture, surface.controls.selection.get(), authority)
     };
-    let bytes = print_preparation_view::display_bytes(selection.target).unwrap_or(u64::MAX);
+    let bytes = print_preparation_view::display_bytes((
+        selection.target.width(),
+        selection.target.height(),
+    ))
+    .unwrap_or(u64::MAX);
     let (request_id, cancelled) = {
         let mut app = state.borrow_mut();
         if app.print_png_preview_worker.is_some() {
@@ -26515,9 +26687,10 @@ fn request_print_png_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
             return;
         };
         surface.invalidate_preview();
-        if bytes > print_preparation_view::MAX_PREPARED_PREVIEW_BYTES {
-            surface.preview_status = print_preparation_view::PreviewStatus::Failed;
-            eprintln!("print preparation: selected PNG exceeds the preview memory budget");
+        if bytes > print_preparation_view::MAX_PREPARED_PREVIEW_BYTES
+            || png_preview_target(selection).is_none()
+        {
+            surface.preview_status = print_preparation_view::PreviewStatus::NotRendered;
             sync_ui(&mut app);
             return;
         }
@@ -26614,13 +26787,15 @@ fn complete_print_png_preview(
 /// output-pixel scale and leaves panning to the scrollbars. This only changes GTK presentation.
 fn project_print_png_preview_zoom(surface: &print_preparation_view::Surface) {
     let target = surface.controls.selection.get().target;
-    let factor = surface
-        .preview_zoom
-        .filter(|scale| print_preparation_view::can_show_exact_zoom(target, *scale));
+    let factor = surface.preview_zoom.filter(|scale| {
+        print_preparation_view::can_show_exact_zoom((target.width(), target.height()), *scale)
+    });
     let (width, height) = match factor {
-        Some(scale) => print_preparation_view::preview_dimensions(target, scale),
+        Some(scale) => {
+            print_preparation_view::preview_dimensions((target.width(), target.height()), scale)
+        }
         None => print_preparation_view::fitted_preview_dimensions(
-            target,
+            (target.width(), target.height()),
             surface.controls.canvas_scroll.width(),
             surface.controls.canvas_scroll.height(),
         ),
@@ -26666,7 +26841,10 @@ fn set_print_png_preview_zoom(state: &Rc<RefCell<AppState>>, epoch: u64, zoom: O
     }
     if zoom.is_some_and(|factor| {
         !print_preparation_view::can_show_exact_zoom(
-            surface.controls.selection.get().target,
+            (
+                surface.controls.selection.get().target.width(),
+                surface.controls.selection.get().target.height(),
+            ),
             factor,
         )
     }) {
@@ -27031,8 +27209,10 @@ fn apply_print_intent_draft(state: &Rc<RefCell<AppState>>, epoch: u64) {
     }
 }
 
-/// Captures final PNG session, source, frame, target, backing, and antialiasing at Export activation.
+/// Revalidates current PNG controls before capturing session, source, frame, dimensions and policy.
+/// Invalid current fields cannot reuse retained selection; chooser/workspace epoch guards remain authoritative.
 fn request_png_export_from_surface(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    sync_print_preparation_surface(&mut state.borrow_mut());
     let (capture, selection, path) = {
         let app = state.borrow();
         if app.pending_export || app.pending_file_chooser {
@@ -27052,6 +27232,9 @@ fn request_png_export_from_surface(state: &Rc<RefCell<AppState>>, epoch: u64) {
         else {
             return;
         };
+        if !surface.controls.selection_valid.get() {
+            return;
+        }
         let selection = surface.controls.selection.get();
         let capture = capture_still_export(
             workspace,
@@ -27313,8 +27496,11 @@ fn refresh_selected_print_finding(state: &Rc<RefCell<AppState>>, epoch: u64) {
         return;
     };
     let pair_bytes = print_preparation::retained_bytes(pair).unwrap_or(u64::MAX);
-    let image_bytes =
-        print_preparation_view::display_bytes(pair.report().identity.target()).unwrap_or(u64::MAX);
+    let image_bytes = print_preparation_view::display_bytes((
+        pair.report().identity.target().width(),
+        pair.report().identity.target().height(),
+    ))
+    .unwrap_or(u64::MAX);
     if let Some(surface) = print_preparation_surface
         .as_mut()
         .filter(|surface| surface.epoch == epoch)
@@ -27365,7 +27551,8 @@ fn zoom_to_selected_print_finding(state: &Rc<RefCell<AppState>>, epoch: u64) {
     let factor = (viewport_width / (bounds_width * 2.5))
         .min(viewport_height / (bounds_height * 2.5))
         .clamp(1.0, 6.0);
-    let (scaled_width, scaled_height) = print_preparation_view::preview_dimensions(target, factor);
+    let (scaled_width, scaled_height) =
+        print_preparation_view::preview_dimensions((target.width(), target.height()), factor);
     raster_picture.set_size_request(scaled_width, scaled_height);
     highlight_picture.set_size_request(scaled_width, scaled_height);
     backdrop.set_size_request(scaled_width, scaled_height);
@@ -27411,8 +27598,11 @@ fn fit_print_review_view(state: &Rc<RefCell<AppState>>, epoch: u64) {
         )
     };
     let (scroll, raster_picture, highlight_picture, backdrop, target) = projection;
-    let (width, height) =
-        print_preparation_view::fitted_preview_dimensions(target, scroll.width(), scroll.height());
+    let (width, height) = print_preparation_view::fitted_preview_dimensions(
+        (target.width(), target.height()),
+        scroll.width(),
+        scroll.height(),
+    );
     raster_picture.set_size_request(width, height);
     highlight_picture.set_size_request(width, height);
     backdrop.set_size_request(width, height);
@@ -27427,9 +27617,11 @@ fn fit_print_review_view(state: &Rc<RefCell<AppState>>, epoch: u64) {
 /// # Errors
 /// Returns malformed integer/dimension or shared renderer output-budget diagnostics.
 #[cfg(test)]
-fn parse_output_target(value: &str) -> Result<Option<OutputRasterTarget>, String> {
+fn parse_output_target(value: &str) -> Result<Option<StreamingRasterTarget>, String> {
     parse_output_dimensions(value)?
-        .map(|(width, height)| OutputRasterTarget::new(width, height).map_err(|error| error.to_string()))
+        .map(|(width, height)| {
+            StreamingRasterTarget::new(width, height).map_err(|error| error.to_string())
+        })
         .transpose()
 }
 
@@ -27643,6 +27835,52 @@ fn still_export_progress_window(
     progress
 }
 
+/// Still-output failure retaining whether atomic publication already occurred.
+#[derive(Debug)]
+pub(crate) struct StillExportError {
+    message: String,
+    published: bool,
+}
+
+impl From<String> for StillExportError {
+    /// Captures a prepublication source, rendering, or ordinary filesystem failure.
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            published: false,
+        }
+    }
+}
+impl From<&str> for StillExportError {
+    /// Captures a static prepublication cancellation or validation failure.
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+impl std::fmt::Display for StillExportError {
+    /// Formats the original diagnostic while retaining publication state separately for GTK.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+/// Projects still-export failure status with publication truth preceding late cancellation.
+fn still_export_failure_status(
+    error: &StillExportError,
+    cancelled: bool,
+    prepared: bool,
+) -> Option<&'static str> {
+    if error.published {
+        Some("PNG exported; final folder synchronization failed. See error log.")
+    } else if cancelled {
+        Some("Export cancelled.")
+    } else if prepared {
+        Some("Print PNG export failed; see error log.")
+    } else {
+        None
+    }
+}
+
 /// Exports the document/source/frame captured before the chooser, with immutable output settings.
 ///
 /// Workspace replacement rejects the callback. Later edits in the same workspace
@@ -27711,34 +27949,101 @@ fn export_snapshot_frame_cancellable(
         settings,
         cancelled,
     )
+    .map_err(|error| error.to_string())
 }
 
 /// Evaluates one coherent chooser-time session/source/frame capture for PNG or SVG.
 ///
 /// # Errors
-/// Rejects source, timing, evaluation, rasterization or filesystem failures
-/// without editing history or consulting a later live document.
+/// Rejects source, timing, evaluation, rasterization, cleanup admission or filesystem failures
+/// without editing history or consulting a later live document. PNG publishes only completed staging;
+/// a postpublication folder-sync failure reports that the PNG was written.
 fn export_captured_frame_cancellable(
     capture: print_preparation::ExportCapture,
     path: PathBuf,
     settings: ExportSettings,
     cancelled: &AtomicBool,
-) -> Result<(), String> {
+) -> Result<(), StillExportError> {
     if settings.format == ExportFormat::Png {
-        let surface = render_captured_png_surface(&capture, settings, cancelled)?;
-        if cancelled.load(Ordering::Acquire) {
-            return Err("Export cancelled.".into());
+        let target = settings
+            .output_target
+            .map_or_else(
+                || StreamingRasterTarget::for_canvas(capture.session.document().canvas()),
+                Ok,
+            )
+            .map_err(|error| error.to_string())?;
+        if settings.prepare_for_print {
+            settings.cleanup.admit_pixels(target.pixel_count())?;
         }
-        let output = match settings.pixels_per_metre {
-            Some(ppm) => encode_png_with_density(&surface, ppm),
-            None => encode_png(&surface),
-        }
-        .map_err(|error| error.to_string())?;
-        if cancelled.load(Ordering::Acquire) {
-            return Err("Export cancelled.".into());
-        }
-        return fs::write(&path, output)
-            .map_err(|error| format!("output.write: could not write {}: {error}", path.display()));
+        let stream = !settings.prepare_for_print || !settings.cleanup.is_active();
+        let result = if stream {
+            let mut media = toniator_engine::open_source_media(
+                &capture.sources,
+                toniator_engine::MediaTools::default(),
+                &|| cancelled.load(Ordering::Acquire),
+            )
+            .map_err(|error| error.to_string())?;
+            let request = toniator_engine::frame_evaluation_request(
+                &capture.session,
+                &mut media,
+                capture.frame,
+                &|| cancelled.load(Ordering::Acquire),
+            )
+            .map_err(|error| error.to_string())?
+            .for_scene()
+            .map_err(|error| error.to_string())?;
+            let limits = EvaluationLimits::default();
+            let evaluated =
+                toniator_engine::evaluate_cancellable_with_limits(request, limits, cancelled)
+                    .map_err(|error| match error {
+                        toniator_engine::EvaluationRunError::Cancelled => {
+                            "Export cancelled.".to_owned()
+                        }
+                        toniator_engine::EvaluationRunError::Evaluation(error) => error.to_string(),
+                    })?;
+            toniator_io::atomic_output::write_atomic_output(
+                &path,
+                &|| cancelled.load(Ordering::Acquire),
+                |file| {
+                    write_png_streaming(
+                        evaluated.scene(),
+                        target,
+                        PngStreamOptions {
+                            background: settings.background,
+                            antialiasing: settings.antialiasing,
+                            binary_alpha: settings.prepare_for_print,
+                            pixels_per_metre: settings.pixels_per_metre,
+                            ..Default::default()
+                        },
+                        RasterizationLimits::new(limits.max_flattened_raster_edges())
+                            .map_err(std::io::Error::other)?,
+                        file,
+                        &|| cancelled.load(Ordering::Acquire),
+                        &|_, _| {},
+                    )
+                    .map(|_| ())
+                    .map_err(std::io::Error::other)
+                },
+            )
+        } else {
+            let surface = render_captured_png_surface(&capture, settings, cancelled)?;
+            toniator_io::atomic_output::write_atomic_output(
+                &path,
+                &|| cancelled.load(Ordering::Acquire),
+                |file| {
+                    let bytes = match settings.pixels_per_metre {
+                        Some(ppm) => encode_png_with_density(&surface, ppm),
+                        None => encode_png(&surface),
+                    }
+                    .map_err(std::io::Error::other)?;
+                    std::io::Write::write_all(file, &bytes)
+                },
+            )
+        };
+        return result.map_err(|error| StillExportError {
+            published: error.published(),
+            message: error.to_string(),
+        });
     }
     let mut media = toniator_engine::open_source_media(
         &capture.sources,
@@ -27753,16 +28058,11 @@ fn export_captured_frame_cancellable(
         &|| cancelled.load(Ordering::Acquire),
     )
     .map_err(|error| error.to_string())?;
-    let request = match settings.format {
-        ExportFormat::Png => request.for_output(
-            settings.background,
-            settings.output_target,
-            settings.antialiasing,
-        ),
-        ExportFormat::Svg => request.for_preview(
-            toniator_engine::PreviewRasterTarget::new(1, 1).map_err(|error| error.to_string())?,
-        ),
-    };
+    let request = request.for_output(
+        RasterBackground::Transparent,
+        Some(OutputRasterTarget::new(1, 1).map_err(|error| error.to_string())?),
+        RasterAntialiasing::Off,
+    );
     let result = toniator_engine::evaluate_cancellable_with_limits(
         request,
         EvaluationLimits::default(),
@@ -27775,18 +28075,27 @@ fn export_captured_frame_cancellable(
     if cancelled.load(Ordering::Acquire) {
         return Err("Export cancelled.".into());
     }
-    let output = match settings.format {
-        ExportFormat::Png => encode_png(result.raster()).map_err(|error| error.to_string())?,
-        ExportFormat::Svg => write_svg(result.scene()).into_bytes(),
-    };
+    let output = write_svg_cancellable_with_limits(
+        result.scene(),
+        SvgSerializationLimits::new(EvaluationLimits::default().max_flattened_raster_edges())
+            .map_err(|error| error.to_string())?,
+        &|| cancelled.load(Ordering::Acquire),
+    )
+    .map_err(|error| error.to_string())?
+    .into_bytes();
     if cancelled.load(Ordering::Acquire) {
         return Err("Export cancelled.".into());
     }
-    fs::write(&path, output)
-        .map_err(|error| format!("output.write: could not write {}: {error}", path.display()))
+    fs::write(&path, output).map_err(|error| {
+        StillExportError::from(format!(
+            "output.write: could not write {}: {error}",
+            path.display()
+        ))
+    })
 }
 
-/// Renders one captured final PNG target for both the exact preview and encoded export.
+/// Renders one admitted full-raster preview or global-cleanup PNG from the captured frame.
+/// Streaming ordinary and zero-cleanup export consume the same canonical scene separately.
 ///
 /// Garment preparation always rasterizes the transparent composition first,
 /// thresholds its alpha, then applies the captured PNG backing. Ordinary PNG
@@ -27818,7 +28127,11 @@ fn render_captured_png_surface(
         } else {
             settings.background
         },
-        settings.output_target,
+        settings
+            .output_target
+            .map(|target| OutputRasterTarget::new(target.width(), target.height()))
+            .transpose()
+            .map_err(|error| error.to_string())?,
         settings.antialiasing,
     );
     let result = toniator_engine::evaluate_cancellable_with_limits(
@@ -28041,15 +28354,21 @@ fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
                         ),
                     );
                 }
-                Err(_) if cancelled => set_inspector_status(&mut app_state, "Export cancelled."),
-                Err(error) if prepare_for_print => {
-                    eprintln!("print preparation export: {error}");
-                    set_inspector_status(&mut app_state, "Print PNG export failed; see error log.");
+                Err(error) => {
+                    if let Some(status) =
+                        still_export_failure_status(&error, cancelled, prepare_for_print)
+                    {
+                        if error.published || !cancelled {
+                            eprintln!("still export: {error}");
+                        }
+                        set_inspector_status(&mut app_state, status);
+                    } else {
+                        show_error(
+                            &mut app_state,
+                            format!("Couldn’t export this artwork: {error}"),
+                        );
+                    }
                 }
-                Err(error) => show_error(
-                    &mut app_state,
-                    format!("Couldn’t export this artwork: {error}"),
-                ),
             }
             sync_ui(&mut app_state);
         }
@@ -28687,6 +29006,8 @@ fn resume_wizard_after_calibration(state: &Rc<RefCell<AppState>>, epoch: u64) {
 ///
 /// Draft Apply, Gallery Apply, and Pattern Save retain distinct authorities. Every path first
 /// checks the original workspace generation, document, revision, wizard epoch, and candidate.
+/// Successful Draft Apply attaches companions and publishes the already-admitted construction
+/// directly; attachment changes revision but does not authorize a new structural candidate.
 ///
 /// # Errors
 /// Failed worker results remain in their private surface and never mutate the main history or library.
@@ -28822,8 +29143,15 @@ fn handle_wizard_calibration(
                 });
             }
             if attach.is_ok() {
-                resume_wizard_after_calibration(state, epoch);
-                apply_pattern_wizard(state, epoch);
+                let draft = state
+                    .borrow()
+                    .pattern_wizard
+                    .as_ref()
+                    .filter(|surface| surface.epoch == epoch)
+                    .map(|surface| Rc::clone(&surface.draft));
+                if let Some(draft) = draft {
+                    publish_admitted_wizard_draft(state, epoch, &draft);
+                }
             } else {
                 resume_wizard_after_calibration(state, epoch);
             }
@@ -30249,21 +30577,107 @@ mod tests {
         assert_eq!(draft.document(), &before);
     }
 
-    /// Renders the saved clustered, weighted-Lloyd recipe at progressively finer sizes on both sources.
-    /// Every evaluated preview channel follows the authored size ratio without a density clamp;
-    /// actual generated site counts and pixels change while the draft retains its authored density.
-    /// Writes native PNG/SVG witnesses only when `TONIATOR_WIZARD_RENDER_EVIDENCE` is supplied.
+    /// Checks every current scatter length follows the disposable preview canvas and leaves intent intact.
+    /// Even alone has no nominal spacing; the domain rejects absent nominal length for other processes.
     ///
     /// # Panics
-    /// Panics if the current recipe cannot load, render its bounded preview, or honour cancellation.
+    /// Panics on dimensional drift, invented Even spacing, source mutation or weakened recipe validation.
+    #[test]
+    fn wizard_scatter_preview_scales_nominal_spacing_and_preserves_even_absence() {
+        use toniator_domain::{DEFAULT_RANDOM_NOMINAL_SPACING, RandomSiteCharacter};
+        for character in [
+            RandomSiteCharacter::RawUniform,
+            RandomSiteCharacter::Clustered {
+                cluster_density: 5.0,
+                cluster_spread: 16.0,
+                cluster_strength: 0.85,
+            },
+            RandomSiteCharacter::Stratified { jitter: 0.6 },
+            RandomSiteCharacter::Even {
+                minimum_center_distance: 10.24,
+            },
+        ] {
+            let mut preset = crate::current_test_fixtures::clustered_weighted_lloyd();
+            let even = matches!(character, RandomSiteCharacter::Even { .. });
+            let PatternStructureRecipe::RandomSites {
+                character: original,
+                nominal_spacing,
+                ..
+            } = &mut preset.recipe.structure
+            else {
+                panic!("scatter fixture");
+            };
+            *original = character;
+            *nominal_spacing = (!even).then_some(DEFAULT_RANDOM_NOMINAL_SPACING);
+            let mut workspace = Workspace::from_new().unwrap();
+            PresetRegistry::new(
+                toniator_patterns::BUNDLED_PRESET_REGISTRY_VERSION,
+                vec![preset],
+            )
+            .unwrap()
+            .apply_to_document_base(
+                &mut workspace.history,
+                "user-00000000-0000-4000-88d7-26a841cca68a",
+            )
+            .unwrap();
+            let before = workspace.document().clone();
+            let preview = wizard_preview_canvas_document(&before, 100.0).unwrap();
+            let scale = 100.0 / before.canvas().width.max(before.canvas().height);
+            for mechanism in preview
+                .pattern_definition_bundles()
+                .iter()
+                .flat_map(|bundle| &bundle.definition.mechanisms)
+            {
+                if let PatternMechanism::RandomSiteProcess {
+                    character,
+                    nominal_spacing,
+                    ..
+                } = mechanism
+                {
+                    if even {
+                        assert!(nominal_spacing.is_none());
+                        let RandomSiteCharacter::Even {
+                            minimum_center_distance,
+                        } = character
+                        else {
+                            panic!("Even remains Even");
+                        };
+                        assert!((*minimum_center_distance - 10.24 * scale).abs() < 1e-12);
+                    } else {
+                        assert!(
+                            (nominal_spacing.unwrap() - DEFAULT_RANDOM_NOMINAL_SPACING * scale)
+                                .abs()
+                                < 1e-12
+                        );
+                        if let RandomSiteCharacter::Clustered { cluster_spread, .. } = character {
+                            assert!((*cluster_spread - 16.0 * scale).abs() < 1e-12);
+                        }
+                    }
+                }
+            }
+            assert_eq!(workspace.document(), &before);
+        }
+        let mut invalid = crate::current_test_fixtures::clustered_weighted_lloyd();
+        let PatternStructureRecipe::RandomSites {
+            nominal_spacing, ..
+        } = &mut invalid.recipe.structure
+        else {
+            panic!("scatter fixture");
+        };
+        *nominal_spacing = None;
+        assert!(toniator_domain::validate_preset_record(&invalid).is_err());
+    }
+
+    /// Renders the current clustered/weighted-Lloyd fixture on both source canvases with neutral and artwork fields.
+    /// Checks resolved spacing and the complete guard-inclusive population without a density clamp;
+    /// native PNG/SVG witnesses are optional and never replace the immutable input artwork.
+    ///
+    /// # Panics
+    /// Panics on changed authored intent, spacing/population drift, lost fineness or bounded-preview failure.
     #[test]
     fn saved_clustered_weighted_lloyd_preview() {
         register_resources();
-        let preset = toniator_io::load_preset(
-            &Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/clustered-weighted-lloyd.preset.json"),
-        )
-        .unwrap();
+        let preset = crate::current_test_fixtures::clustered_weighted_lloyd();
         let id = preset.metadata.id.clone();
         let registry = PresetRegistry::new(
             toniator_patterns::BUNDLED_PRESET_REGISTRY_VERSION,
@@ -30280,119 +30694,173 @@ mod tests {
                 input.to_owned(),
             )
             .unwrap();
-            let mut counts = Vec::new();
-            let mut previous_pixels = None;
-            for size in [1.0, 0.2, 0.1] {
-                let mut draft = DocumentHistory::new_draft(&workspace.history);
-                registry.apply_to_document_base(&mut draft, &id).unwrap();
-                let density = draft
-                    .document()
-                    .property_values()
-                    .into_iter()
-                    .find(|value| value.descriptor.field == PropertyFieldId::Density)
-                    .unwrap();
-                if size != 1.0 {
-                    apply_wizard_descriptor_edit(
-                        &mut draft,
-                        InspectorTarget::DocumentAll,
-                        &density.descriptor,
-                        InspectorInput::FiniteF64(
-                            authority_numeric_value(
-                                workspace.document(),
-                                PropertyFieldId::Density,
-                                size,
-                            )
-                            .unwrap(),
-                        ),
-                    )
-                    .unwrap();
-                }
-                let WizardPreviewSource::Ready { source } = prepare_wizard_preview_source(
-                    &workspace.sources,
-                    workspace.source_presentation.as_ref(),
-                ) else {
-                    panic!("neutral source");
-                };
-                let preview =
-                    wizard_preview_session(draft.document(), InspectorTarget::DocumentAll).unwrap();
-                for channel in authoritative_channel_ids(preview.document()) {
-                    assert!(
-                        (preview
-                            .document()
-                            .effective_channel_pattern(channel)
-                            .unwrap()
-                            .density
-                            .density
-                            - WIZARD_PREVIEW_BASE_DENSITY / size)
-                            .abs()
-                            < 1e-9
-                    );
-                }
-                assert_eq!(
-                    artist_numeric_value(
-                        draft.document(),
-                        PropertyFieldId::Density,
-                        draft
-                            .document()
-                            .effective_channel_pattern(ChannelId(1))
-                            .unwrap()
-                            .density
-                            .density
-                    )
-                    .unwrap(),
-                    size
-                );
-                let request = EvaluationRequest::with_preview_target(
-                    preview.document_evaluation_snapshot(),
-                    source,
-                    toniator_engine::PreviewRasterTarget::new(256, 256).unwrap(),
-                );
-                let cancelled = Arc::new(AtomicBool::new(false));
-                let flag = cancelled.clone();
-                let (done, completion) = std::sync::mpsc::channel();
-                let watchdog = thread::spawn(move || {
-                    if completion.recv_timeout(Duration::from_secs(10)).is_err() {
-                        flag.store(true, Ordering::Release);
+            let original = workspace.document().clone();
+            for source_kind in ["neutral", "artwork"] {
+                let mut counts = Vec::new();
+                let mut previous_pixels = None;
+                for size in [1.0, 0.2, 0.1] {
+                    let mut draft = DocumentHistory::new_draft(&workspace.history);
+                    registry.apply_to_document_base(&mut draft, &id).unwrap();
+                    let density = draft
+                        .document()
+                        .property_values()
+                        .into_iter()
+                        .find(|value| value.descriptor.field == PropertyFieldId::Density)
+                        .unwrap();
+                    if size != 1.0 {
+                        apply_wizard_descriptor_edit(
+                            &mut draft,
+                            InspectorTarget::DocumentAll,
+                            &density.descriptor,
+                            InspectorInput::FiniteF64(
+                                authority_numeric_value(
+                                    workspace.document(),
+                                    PropertyFieldId::Density,
+                                    size,
+                                )
+                                .unwrap(),
+                            ),
+                        )
+                        .unwrap();
                     }
-                });
-                let started = Instant::now();
-                let result = toniator_engine::evaluate_cancellable_with_limits(
-                    request,
-                    EvaluationLimits::default(),
-                    &cancelled,
-                );
-                let _ = done.send(());
-                watchdog.join().unwrap();
-                eprintln!(
-                    "{input} size {size} clustered weighted preview: {:?}",
-                    started.elapsed()
-                );
-                assert!(result.is_ok(), "preview failed: {result:?}");
-                let result = result.unwrap();
-                counts.push(result.family_output(ChannelId(1)).unwrap().site_set().len());
-                if let Some(directory) = std::env::var_os("TONIATOR_WIZARD_RENDER_EVIDENCE") {
-                    let directory = PathBuf::from(directory);
-                    fs::create_dir_all(&directory).unwrap();
-                    let name = format!("{input}-clustered-size-{size}");
-                    fs::write(
-                        directory.join(format!("{name}.png")),
-                        encode_png(result.raster()).unwrap(),
+                    let WizardPreviewSource::Ready { source } = prepare_wizard_preview_source(
+                        &workspace.sources,
+                        workspace.source_presentation.as_ref(),
+                    ) else {
+                        panic!("neutral source");
+                    };
+                    let source = if source_kind == "artwork" {
+                        ResolvedSource::new(
+                            workspace.source_presentation.as_ref().unwrap().id.clone(),
+                            fs::read(asset(input)).unwrap(),
+                            format,
+                        )
+                        .unwrap()
+                    } else {
+                        source
+                    };
+                    let preview =
+                        wizard_preview_session(draft.document(), InspectorTarget::DocumentAll)
+                            .unwrap();
+                    for channel in authoritative_channel_ids(preview.document()) {
+                        assert!(
+                            (preview
+                                .document()
+                                .effective_channel_pattern(channel)
+                                .unwrap()
+                                .density
+                                .density
+                                - WIZARD_PREVIEW_BASE_DENSITY / size)
+                                .abs()
+                                < 1e-9
+                        );
+                    }
+                    assert_eq!(
+                        artist_numeric_value(
+                            draft.document(),
+                            PropertyFieldId::Density,
+                            draft
+                                .document()
+                                .effective_channel_pattern(ChannelId(1))
+                                .unwrap()
+                                .density
+                                .density
+                        )
+                        .unwrap(),
+                        size
+                    );
+                    let request = EvaluationRequest::with_preview_target(
+                        preview.document_evaluation_snapshot(),
+                        source,
+                        toniator_engine::PreviewRasterTarget::new(256, 256).unwrap(),
                     )
-                    .unwrap();
-                    fs::write(
-                        directory.join(format!("{name}.svg")),
-                        write_svg(result.scene()),
-                    )
-                    .unwrap();
+                    .for_structural_preview();
+                    let cancelled = Arc::new(AtomicBool::new(false));
+                    let flag = cancelled.clone();
+                    let (done, completion) = std::sync::mpsc::channel();
+                    let watchdog = thread::spawn(move || {
+                        if completion.recv_timeout(Duration::from_secs(10)).is_err() {
+                            flag.store(true, Ordering::Release);
+                        }
+                    });
+                    let started = Instant::now();
+                    let result = toniator_engine::evaluate_cancellable_with_limits(
+                        request,
+                        EvaluationLimits::default(),
+                        &cancelled,
+                    );
+                    let _ = done.send(());
+                    watchdog.join().unwrap();
+                    eprintln!(
+                        "{input} {source_kind} size {size} clustered weighted preview: {:?}",
+                        started.elapsed()
+                    );
+                    let result = result.expect("bounded preview evaluates");
+                    let family = result.family_output(ChannelId(1)).unwrap();
+                    let diagnostics = family.random_diagnostics().unwrap();
+                    let canvas_ratio =
+                        preview.document().canvas().width / draft.document().canvas().width;
+                    let feature_scale =
+                        DensityMetric2D::default_for_canvas(preview.document().canvas())
+                            .unwrap()
+                            .density
+                            / preview
+                                .document()
+                                .effective_channel_pattern(ChannelId(1))
+                                .unwrap()
+                                .density
+                                .density;
+                    let spacing = toniator_domain::DEFAULT_RANDOM_NOMINAL_SPACING
+                        * canvas_ratio
+                        * feature_scale;
+                    let basis = family.site_set().iter().next().unwrap().nominal_cell_basis;
+                    assert!((basis.axis_a.x.hypot(basis.axis_a.y) - spacing).abs() < 1e-10);
+                    // This fixture has no exclusion or rotation. Its envelope includes mark
+                    // support, three cluster standard deviations, two spacing guards and AA.
+                    let guard = family
+                        .planned_support_radius()
+                        .max(spacing)
+                        .max(3.0 * 16.0 * canvas_ratio * feature_scale)
+                        + toniator_patterns::ANTIALIAS_MARGIN
+                        + f64::from(family.guard_steps()) * spacing.max(1.0);
+                    let canvas = preview.document().canvas();
+                    let expected_offered = ((canvas.width + 2.0 * guard)
+                        * (canvas.height + 2.0 * guard)
+                        / spacing
+                        / spacing)
+                        .ceil() as usize;
+                    assert_eq!(diagnostics.offered_candidates, expected_offered);
+                    assert_eq!(diagnostics.rejected_by_density, 0);
+                    assert_eq!(diagnostics.rejected_by_exclusion, 0);
+                    eprintln!(
+                        "{input} {source_kind} size {size} spacing {spacing} guard {guard} diagnostics {diagnostics:?}"
+                    );
+                    counts.push(family.site_set().len());
+                    if let Some(directory) = std::env::var_os("TONIATOR_WIZARD_RENDER_EVIDENCE") {
+                        let directory = PathBuf::from(directory);
+                        fs::create_dir_all(&directory).unwrap();
+                        let name = format!("{input}-{source_kind}-clustered-size-{size}");
+                        fs::write(
+                            directory.join(format!("{name}.png")),
+                            encode_png(result.raster()).unwrap(),
+                        )
+                        .unwrap();
+                        fs::write(
+                            directory.join(format!("{name}.svg")),
+                            write_svg(result.scene()).expect("SVG serialization"),
+                        )
+                        .unwrap();
+                    }
+                    let pixels = result.raster().pixels().to_vec();
+                    if let Some(previous) = previous_pixels.replace(pixels.clone()) {
+                        assert_ne!(previous, pixels, "Feature size must change rendered pixels");
+                    }
                 }
-                let pixels = result.raster().pixels().to_vec();
-                if let Some(previous) = previous_pixels.replace(pixels.clone()) {
-                    assert_ne!(previous, pixels, "Feature size must change rendered pixels");
-                }
+                eprintln!("{input} {source_kind} site counts at 1, 0.2, 0.1: {counts:?}");
+                assert!(counts[1] > counts[0] * 3, "finer geometry must not plateau");
+                assert!(counts[2] > counts[1] * 2, "0.1 must be finer than 0.2");
             }
-            eprintln!("{input} site counts at 1, 0.2, 0.1: {counts:?}");
-            assert!(counts[1] > counts[0] * 3, "finer geometry must not plateau");
-            assert!(counts[2] > counts[1] * 2, "0.1 must be finer than 0.2");
+            assert_eq!(workspace.document(), &original);
         }
     }
 
@@ -30471,6 +30939,77 @@ mod tests {
             );
             assert!(result.is_err());
             assert!(!output.exists());
+        }
+    }
+
+    /// Exports current guide scenes through the actual captured-frame SVG boundary.
+    ///
+    /// Both immutable artworks remain embedded byte-for-byte in the source
+    /// projects. Successful SVG bytes match the CLI's final consumer, workspace
+    /// state stays unchanged, and cancellation preserves an existing output.
+    /// The test does not exercise a desktop destination chooser.
+    ///
+    /// # Panics
+    /// Panics on fixture loading, native export, state mutation, differing SVG
+    /// bytes, or publication after cancellation.
+    /// This opt-in evidence check requires retained TON-018 guide projects and SVG consumer
+    /// validation artifacts; those files are not shipped source fixtures.
+    #[test]
+    #[ignore = "requires retained TON-018 guide projects and SVG consumer validation artifacts"]
+    fn ton018_captured_svg_export_preserves_state_and_cancelled_output() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/validation");
+        let directory = root.join("ton018-svg-canvas-20261013");
+        fs::create_dir_all(&directory).expect("current stage artifact directory");
+        for source in ["raster", "vector"] {
+            let project = root
+                .join("ton018-config16-final-20261011/native-projects")
+                .join(format!("one-guide-lines-{source}-f025.toniator"));
+            let workspace = load_workspace(&project).expect("current guide project opens");
+            let before = probe(&workspace);
+            let frame = workspace.document().project_timing().frame_range().start();
+            let capture = capture_still_export(&workspace, frame, 1, 1);
+            let settings = ExportSettings {
+                format: ExportFormat::Svg,
+                background: RasterBackground::Transparent,
+                antialiasing: RasterAntialiasing::On,
+                output_target: None,
+                prepare_for_print: false,
+                pixels_per_metre: None,
+                cleanup: print_cleanup::Settings::default(),
+            };
+            let output = directory.join(format!("app-one-guide-{source}.svg"));
+            export_captured_frame_cancellable(
+                capture.clone(),
+                output.clone(),
+                settings,
+                &AtomicBool::new(false),
+            )
+            .expect("actual app captured-frame SVG export");
+            assert_eq!(
+                fs::read(&output).expect("app SVG bytes"),
+                fs::read(directory.join(if source == "raster" {
+                    "guide-clipped.svg"
+                } else {
+                    "vector-clipped.svg"
+                }))
+                .expect("current clipped CLI SVG bytes")
+            );
+            assert_eq!(probe(&workspace), before);
+            let cancelled_output = directory.join(format!("app-cancelled-{source}.svg"));
+            let sentinel = b"TON-018 existing output is preserved on cancellation\n";
+            fs::write(&cancelled_output, sentinel).expect("owned cancellation sentinel");
+            let result = export_captured_frame_cancellable(
+                capture,
+                cancelled_output.clone(),
+                settings,
+                &AtomicBool::new(true),
+            );
+            assert!(result.is_err());
+            assert_eq!(
+                fs::read(cancelled_output).expect("preserved sentinel"),
+                sentinel
+            );
+            assert_eq!(probe(&workspace), before);
         }
     }
     use super::*;
@@ -32286,7 +32825,7 @@ mod tests {
         let token = capture.session.document_evaluation_token();
         let target = OutputRasterTarget::new(256, 256).unwrap();
         let choice = print_preparation::OutputSelection {
-            target,
+            target: StreamingRasterTarget::new(target.width(), target.height()).unwrap(),
             antialiasing: RasterAntialiasing::On,
             background: print_preparation::BackgroundChoice::Automatic,
             prepare_for_print: false,
@@ -32344,7 +32883,9 @@ mod tests {
         .unwrap()
         .for_output(
             settings.background,
-            settings.output_target,
+            settings
+                .output_target
+                .map(|target| OutputRasterTarget::new(target.width(), target.height()).unwrap()),
             settings.antialiasing,
         );
         let expected = toniator_engine::evaluate_cancellable_with_limits(
@@ -32388,7 +32929,13 @@ mod tests {
                 &|| false,
             )
             .unwrap()
-            .for_output(background, selected.output_target, selected.antialiasing);
+            .for_output(
+                background,
+                selected.output_target.map(|target| {
+                    OutputRasterTarget::new(target.width(), target.height()).unwrap()
+                }),
+                selected.antialiasing,
+            );
             let rendered = toniator_engine::evaluate_cancellable_with_limits(
                 request,
                 EvaluationLimits::default(),
@@ -32447,7 +32994,9 @@ mod tests {
                     format: ExportFormat::Png,
                     background,
                     antialiasing: RasterAntialiasing::On,
-                    output_target: Some(target),
+                    output_target: Some(
+                        StreamingRasterTarget::new(target.width(), target.height()).unwrap(),
+                    ),
                     prepare_for_print: true,
                     pixels_per_metre: Some(11_811),
                     cleanup: print_cleanup::Settings::default(),
@@ -32533,7 +33082,7 @@ mod tests {
                     background: RasterBackground::Transparent,
                     antialiasing: RasterAntialiasing::On,
                     output_target: Some(
-                        OutputRasterTarget::new(dimensions.0, dimensions.1)
+                        StreamingRasterTarget::new(dimensions.0, dimensions.1)
                             .expect("fixed export target is valid"),
                     ),
                 },
@@ -33177,7 +33726,9 @@ mod tests {
                         cleanup: print_cleanup::Settings::default(),
                         background: RasterBackground::Transparent,
                         antialiasing: RasterAntialiasing::Off,
-                        output_target: Some(target),
+                        output_target: Some(
+                            StreamingRasterTarget::new(target.width(), target.height()).unwrap(),
+                        ),
                     },
                 )
                 .unwrap();
@@ -33198,7 +33749,10 @@ mod tests {
                             cleanup: print_cleanup::Settings::default(),
                             background: RasterBackground::Transparent,
                             antialiasing: RasterAntialiasing::On,
-                            output_target: Some(target),
+                            output_target: Some(
+                                StreamingRasterTarget::new(target.width(), target.height())
+                                    .unwrap(),
+                            ),
                         },
                     )
                     .unwrap();
@@ -39043,7 +39597,9 @@ mod tests {
                     cleanup: print_cleanup::Settings::default(),
                     background: RasterBackground::Transparent,
                     antialiasing: RasterAntialiasing::On,
-                    output_target: Some(target),
+                    output_target: Some(
+                        StreamingRasterTarget::new(target.width(), target.height()).unwrap(),
+                    ),
                 },
             )
             .expect("transparent native intrinsic PNG export succeeds");

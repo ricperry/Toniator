@@ -996,6 +996,9 @@ fn write_artifacts(
 /// so external RSS supervision isolates canonical preview evaluation. The requested model remains
 /// visible in the case and artifact identity. It does not catch process OOM, signals, or external
 /// timeouts; supervisors classify those process-level outcomes.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 fn run(arguments: Arguments) -> Result<(), String> {
     let registry = PresetRegistry::bundled();
     if registry.find(&arguments.preset_id).is_none() {
@@ -1048,7 +1051,8 @@ fn run(arguments: Arguments) -> Result<(), String> {
             .map_err(|error| format!("PNG export failed: {error}"))?;
         let png_elapsed = png_started.elapsed();
         let svg_started = Instant::now();
-        let svg = write_svg(cold.result.scene()).into_bytes();
+        let svg = write_svg(cold.result.scene()).expect("SVG serialization")
+            .into_bytes();
         let svg_elapsed = svg_started.elapsed();
         println!(
             "export png_bytes={} png_sha256={} png_elapsed_us={} svg_bytes={} svg_sha256={} svg_elapsed_us={}",

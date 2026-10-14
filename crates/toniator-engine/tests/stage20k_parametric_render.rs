@@ -160,6 +160,9 @@ fn document(
 }
 
 /// Evaluates one immutable artwork and writes canonical PNG/SVG evidence without mutating inputs.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 fn render_artwork(
     input_name: &str,
     width: f64,
@@ -200,7 +203,7 @@ fn render_artwork(
     .expect("PNG writes");
     fs::write(
         directory.join(format!("{stem}.svg")),
-        write_svg(output.scene()),
+        write_svg(output.scene()).expect("SVG serialization"),
     )
     .expect("SVG writes");
 }

@@ -1,6 +1,6 @@
 //! Typed asynchronous completions delivered onto GTK's main context.
 
-use crate::{ExportFormat, LifecycleAction, SavedContent, Workspace};
+use crate::{ExportFormat, LifecycleAction, SavedContent, StillExportError, Workspace};
 use toniator_engine::{EvaluationCompletion, EvaluationProgress};
 
 /// Carries worker results without granting workers GTK or document authority.
@@ -64,7 +64,7 @@ pub(crate) enum AppEvent {
         workspace_generation: u64,
         format: ExportFormat,
         prepare_for_print: bool,
-        result: Result<(), String>,
+        result: Result<(), StillExportError>,
     },
     /// Delivers the scheduler's newest candidate for main-context acceptance.
     Preview(EvaluationCompletion),

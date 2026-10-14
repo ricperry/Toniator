@@ -192,15 +192,22 @@ fn guide_face_scene(kind: &str, width: f64, height: f64) -> RenderScene {
 }
 
 /// Proves canonical guide faces use the same fixed nonzero PNG and SVG fill path as other regions.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn guide_faces_render_to_png_and_svg() {
     let scene = guide_face_scene("two-guide", 64.0, 64.0);
     let raster = rasterize(&scene, RasterBackground::Transparent).expect("raster");
     assert!(!encode_png(&raster).expect("png").is_empty());
-    assert!(write_svg(&scene).contains("fill-rule=\"nonzero\""));
+    assert!(write_svg(&scene)
+            .expect("SVG serialization").contains("fill-rule=\"nonzero\""));
 }
 
 /// Generates intrinsic native PNG, raw SVG, and SVG-rasterized witnesses for every Stage 20P face arrangement.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 #[ignore = "validation artifact generator"]
 fn generate_intrinsic_guide_face_artifacts() {
@@ -246,7 +253,7 @@ fn generate_intrinsic_guide_face_artifacts() {
         )
         .expect("png write");
         let svg_path = output.join(format!("{name}.svg"));
-        std::fs::write(&svg_path, write_svg(&scene)).expect("svg write");
+        std::fs::write(&svg_path, write_svg(&scene).expect("SVG serialization")).expect("svg write");
         let status = std::process::Command::new("inkscape")
             .arg(&svg_path)
             .arg("--export-type=png")

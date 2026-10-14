@@ -9,9 +9,10 @@ mod tests;
 
 use crate::{
     CancellationProbe, DocumentDerivedCache, EvaluationLimits, EvaluationProgressStage,
-    EvaluationRunError, FrameSource, MediaTools, OutputRasterTarget, PreviewRasterTarget,
-    RasterAntialiasing, RasterBackground, RasterRequest, SourceMediaMetadata, encode_png,
-    evaluate_cached_document, frame_evaluation_request, open_source_media, write_svg,
+    EvaluationRunError, FrameSource, MediaTools, OutputRasterTarget,
+    RasterAntialiasing, RasterBackground, RasterRequest, SourceMediaMetadata, SvgSerializationLimits, encode_png,
+    evaluate_cached_document, frame_evaluation_request, open_source_media,
+    write_svg_cancellable_with_limits,
 };
 use std::{
     path::{Path, PathBuf},
@@ -260,9 +261,13 @@ impl SequenceExportJob {
                     SequenceFormat::Svg => {
                         // The evaluator retains a raster cache slot; a minimal derived preview
                         // avoids full raster work while SVG consumes the unchanged native scene.
-                        request.raster_request = RasterRequest::Preview(
-                            PreviewRasterTarget::new(1, 1).expect("one pixel is valid"),
-                        );
+                        request.raster_request = RasterRequest::Output {
+                            background: RasterBackground::Transparent,
+                            target: Some(
+                                OutputRasterTarget::new(1, 1).map_err(|error| ExportError::new("export.svg", error))?,
+                            ),
+                            antialiasing: RasterAntialiasing::Off,
+                        };
                     }
                 }
                 let probe = ExportFrameProbe {
@@ -282,7 +287,20 @@ impl SequenceExportJob {
                 let bytes = match self.options.format {
                     SequenceFormat::Png => encode_png(evaluated.result.raster())
                         .map_err(|error| ExportError::new("export.png", error))?,
-                    SequenceFormat::Svg => write_svg(evaluated.result.scene()).into_bytes(),
+                    SequenceFormat::Svg => write_svg_cancellable_with_limits(evaluated.result.scene(),
+                        SvgSerializationLimits::new(
+                            self.options.limits.max_flattened_raster_edges(),
+                        )
+                        .map_err(|error| ExportError::new("export.svg", error))?,
+                        &|| cancelled.load(Ordering::Acquire),
+                    )
+                    .map_err(|error| {
+                        if cancelled.load(Ordering::Acquire) || error.path() == "svg.cancelled" {
+                            ExportError::new("export.cancelled", "export was cancelled")
+                        } else {
+                            ExportError::new("export.svg", error)
+                        }
+                    })?.into_bytes(),
                 };
                 check_cancelled(cancelled)?;
                 writer

@@ -16,8 +16,9 @@ use std::{
 use gtk::prelude::*;
 use toniator_domain::{Document, DocumentConfiguration, Revision};
 use toniator_io::{
-    DocumentPresetError, DocumentPresetWriteGuard, StagedDocumentPreset,
-    capture_document_preset_destination, load_document_preset_staged, save_document_preset,
+    DocumentPresetError, DocumentPresetWriteGuard, StagedDocumentPreset, builtin_document_preset,
+    builtin_document_presets, capture_document_preset_destination, load_document_preset_staged,
+    save_document_preset,
 };
 
 use crate::{AppState, InspectorTarget, PreviewModel, Workspace, app_events::AppEvent};
@@ -106,6 +107,7 @@ pub(crate) struct RequestId {
 /// Describes the actual operation phase used for sensitivity and stale-result checks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Phase {
+    SelectChooser,
     LoadChooser,
     LoadRead,
     LoadConfirm,
@@ -188,6 +190,45 @@ impl OperationState {
     }
 }
 
+/// Identifies an immutable built-in or a personal file independently from its display label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LoadIdentity {
+    BuiltIn(&'static str),
+    File(PathBuf),
+}
+
+impl LoadIdentity {
+    /// Returns product metadata for built-ins and the selected filename for personal files.
+    fn display_name(&self) -> String {
+        match self {
+            Self::BuiltIn(id) => builtin_document_preset(id)
+                .map(|preset| preset.name.to_owned())
+                .unwrap_or_else(|| id.to_string()),
+            Self::File(path) => path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+        }
+    }
+
+    /// Uses the strict shared archive decoder without granting embedded presets filesystem identity.
+    ///
+    /// # Errors
+    /// Returns an unknown built-in identity or ordinary strict Preset/project load diagnostic.
+    fn load(&self, destination: &Document) -> Result<StagedDocumentPreset, DocumentPresetError> {
+        match self {
+            Self::BuiltIn(id) => builtin_document_preset(id)
+                .ok_or_else(|| DocumentPresetError::Kind {
+                    context: "unknown built-in Document Preset".into(),
+                })?
+                .load(destination)
+                .map(StagedDocumentPreset::Current),
+            Self::File(path) => load_document_preset_staged(path, destination),
+        }
+    }
+}
+
 /// Captures every authored binding input and revision before opening a load chooser.
 #[derive(Clone)]
 pub(crate) struct LoadCapture {
@@ -206,7 +247,7 @@ pub(crate) struct SaveCapture {
 pub(crate) enum Completion {
     Read {
         id: RequestId,
-        path: PathBuf,
+        identity: LoadIdentity,
         capture: LoadCapture,
         result: Box<Result<DocumentConfiguration, String>>,
     },
@@ -246,6 +287,10 @@ pub(crate) fn sync_controls(state: &mut AppState) {
     let available = !crate::lifecycle_is_busy(state) && !private_editor_open(state);
     state
         .actions
+        .select_document_preset
+        .set_enabled(available && state.workspace.as_ref().is_some_and(Workspace::can_save));
+    state
+        .actions
         .load_document_preset
         .set_enabled(available && state.workspace.as_ref().is_some_and(Workspace::can_save));
     state
@@ -273,10 +318,123 @@ pub(crate) fn sync_controls(state: &mut AppState) {
     state.inspector_catalog.set_sensitive(!busy);
     state.advanced_controls.set_sensitive(!busy);
     state.shell.new_button().set_tooltip_text(Some(if state.workspace.as_ref().is_some_and(Workspace::can_save) {
-        "New and Open projects; load reusable settings from a Preset or project, or save a source-free Preset."
+        "New and Open projects; select a built-in Document Preset, load settings from a file, or save a source-free Preset."
     } else {
-        "Open artwork before loading a Preset. Save preset captures settings without artwork."
+        "Open artwork before selecting or loading a Document Preset. Save preset captures settings without artwork."
     }));
+}
+
+/// Opens a compact native selector whose selection stays private until replacement is confirmed.
+/// The stable catalog ID, captured document/revision, and operation phase guard all later callbacks.
+pub(crate) fn choose_builtin(state: &Rc<RefCell<AppState>>) {
+    let (id, capture, parent) = {
+        let mut app = state.borrow_mut();
+        if crate::lifecycle_is_busy(&app) || private_editor_open(&app) {
+            return;
+        }
+        let Some(workspace) = app
+            .workspace
+            .as_ref()
+            .filter(|workspace| workspace.can_save())
+        else {
+            return;
+        };
+        let capture = LoadCapture {
+            base: workspace.document().clone(),
+            revision: workspace.history.revision(),
+        };
+        let generation = app.workspace_generation;
+        let Some(id) = app.document_presets.begin(generation, Phase::SelectChooser) else {
+            return;
+        };
+        crate::sync_ui(&mut app);
+        (id, capture, app.window.clone())
+    };
+    let window = gtk::Window::builder()
+        .accessible_role(gtk::AccessibleRole::Dialog)
+        .title("Select document preset")
+        .transient_for(&parent)
+        .modal(true)
+        .resizable(false)
+        .default_width(480)
+        .build();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
+    content.set_margin_top(20);
+    content.set_margin_bottom(20);
+    content.set_margin_start(20);
+    content.set_margin_end(20);
+    let label = gtk::Label::new(Some("_Document Preset"));
+    label.set_use_underline(true);
+    label.set_xalign(0.0);
+    let names = builtin_document_presets()
+        .iter()
+        .map(|preset| preset.name)
+        .collect::<Vec<_>>();
+    let selector = gtk::DropDown::new(Some(gtk::StringList::new(&names)), None::<gtk::Expression>);
+    selector.set_hexpand(true);
+    selector.set_tooltip_text(Some(
+        "Choose built-in settings for all channels. Your artwork stays in place.",
+    ));
+    selector.update_relation(&[gtk::accessible::Relation::LabelledBy(&[label.upcast_ref()])]);
+    label.set_mnemonic_widget(Some(&selector));
+    content.append(&label);
+    content.append(&selector);
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    buttons.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_mnemonic("_Cancel");
+    let next = gtk::Button::with_mnemonic("_Continue");
+    next.add_css_class("suggested-action");
+    buttons.append(&cancel);
+    buttons.append(&next);
+    content.append(&buttons);
+    window.set_child(Some(&content));
+    window.set_default_widget(Some(&next));
+    let weak = window.downgrade();
+    cancel.connect_clicked(move |_| {
+        if let Some(window) = weak.upgrade() {
+            window.close();
+        }
+    });
+    let callback_state = Rc::clone(state);
+    window.connect_close_request(move |_| {
+        if accepts(&callback_state, id, Phase::SelectChooser) {
+            finish(&callback_state, id);
+        }
+        glib::Propagation::Proceed
+    });
+    let keys = gtk::EventControllerKey::new();
+    let weak = window.downgrade();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk::gdk::Key::Escape {
+            if let Some(window) = weak.upgrade() {
+                window.close();
+            }
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    window.add_controller(keys);
+    let callback_state = Rc::clone(state);
+    let weak = window.downgrade();
+    next.connect_clicked(move |_| {
+        if !accepts(&callback_state, id, Phase::SelectChooser) {
+            return;
+        }
+        let Some(preset) = builtin_document_presets().get(selector.selected() as usize) else {
+            return;
+        };
+        start_read(
+            &callback_state,
+            id,
+            LoadIdentity::BuiltIn(preset.id),
+            capture.clone(),
+        );
+        if let Some(window) = weak.upgrade() {
+            window.close();
+        }
+    });
+    window.present();
 }
 
 /// Opens the native Preset/project chooser after capturing the current source-backed destination.
@@ -317,7 +475,7 @@ pub(crate) fn choose_load(state: &Rc<RefCell<AppState>>) {
         }
         match result {
             Ok(file) => match file.path() {
-                Some(path) => start_read(&state, id, path, capture),
+                Some(path) => start_read(&state, id, LoadIdentity::File(path), capture),
                 None => fail(
                     &state,
                     id,
@@ -360,35 +518,48 @@ fn load_filters() -> gio::ListStore {
     filters
 }
 
-/// Reads and validates both input formats off-thread while Cancel retains the existing document.
-fn start_read(state: &Rc<RefCell<AppState>>, id: RequestId, path: PathBuf, capture: LoadCapture) {
+/// Reads a captured built-in or personal file and privately prepares calibration off-thread.
+/// Cancel retains the current document; the main context alone accepts the guarded result.
+fn start_read(
+    state: &Rc<RefCell<AppState>>,
+    id: RequestId,
+    identity: LoadIdentity,
+    capture: LoadCapture,
+) {
     let cancelled = Arc::new(AtomicBool::new(false));
     let sender = {
         let mut app = state.borrow_mut();
         app.document_presets.advance(id, Phase::LoadRead);
-        app.document_presets.last_directory = path.parent().map(Path::to_path_buf);
+        if let LoadIdentity::File(path) = &identity {
+            app.document_presets.last_directory = path.parent().map(Path::to_path_buf);
+        }
         app.document_presets
             .set_cancellation(id, Arc::clone(&cancelled));
         app.event_sender.clone()
     };
     show_progress(state, id, "Loading preset…");
     thread::spawn(move || {
-        let result = load_document_preset_staged(&path, &capture.base)
+        let result = identity
+            .load(&capture.base)
             .map_err(file_error_message)
             .and_then(|staged| {
                 let configuration = match staged {
                     StagedDocumentPreset::Current(configuration) => configuration,
-                    StagedDocumentPreset::PendingRaw(pending) =>
+                    StagedDocumentPreset::PendingRaw(pending) => {
                         toniator_engine::prepare_pending_raw_preset(
-                            pending, &capture.base, toniator_engine::EvaluationLimits::default(),
+                            pending,
+                            &capture.base,
+                            toniator_engine::EvaluationLimits::default(),
                             &|| cancelled.load(Ordering::Acquire),
-                        ).map_err(|error| error.to_string())?,
+                        )
+                        .map_err(|error| error.to_string())?
+                    }
                 };
                 prepare_configuration(&capture.base, configuration, &cancelled)
             });
         let _ = sender.send_blocking(AppEvent::DocumentPreset(Completion::Read {
             id,
-            path,
+            identity,
             capture,
             result: Box::new(result),
         }));
@@ -690,7 +861,7 @@ pub(crate) fn complete(state: &Rc<RefCell<AppState>>, completion: Completion) {
     match completion {
         Completion::Read {
             id,
-            path,
+            identity,
             capture,
             result,
         } => {
@@ -699,7 +870,7 @@ pub(crate) fn complete(state: &Rc<RefCell<AppState>>, completion: Completion) {
             }
             close_progress(state);
             match *result {
-                Ok(configuration) => confirm_load(state, id, &path, capture, configuration),
+                Ok(configuration) => confirm_load(state, id, &identity, capture, configuration),
                 Err(error) => fail(state, id, format!("Couldn’t load preset. {error}")),
             }
         }
@@ -785,7 +956,7 @@ pub(crate) fn complete(state: &Rc<RefCell<AppState>>, completion: Completion) {
 fn confirm_load(
     state: &Rc<RefCell<AppState>>,
     id: RequestId,
-    path: &Path,
+    identity: &LoadIdentity,
     capture: LoadCapture,
     configuration: DocumentConfiguration,
 ) {
@@ -798,7 +969,7 @@ fn confirm_load(
         .map(PreviewModel::from_domain)
         .map(PreviewModel::label)
         .unwrap_or("stored channel configuration");
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let name = identity.display_name();
     let detail = format!(
         "Load {name} using {model}? This replaces all channel Patterns and settings. Your current artwork and canvas stay in place. Undo restores your previous design."
     );
@@ -1006,6 +1177,129 @@ fn dismissed(error: &glib::Error) -> bool {
 mod tests {
     use super::*;
     use toniator_domain::DocumentCommand;
+
+    /// Exercises built-in preparation/application on both immutable artwork kinds with exact history.
+    /// All saved numeric companions are already current, so loading must plan zero new fits.
+    ///
+    /// # Panics
+    /// Panics on lost source/canvas/location, mismatched calibration, stale acceptance or history regression.
+    #[test]
+    fn builtin_loads_preserve_sources_and_reuse_calibration_in_one_undo() {
+        for (bytes, hint) in [
+            (
+                include_bytes!("../../../assets/raster-sample.png").as_slice(),
+                crate::SourceFormatHint::Png,
+            ),
+            (
+                include_bytes!("../../../assets/vector-sample.svg").as_slice(),
+                crate::SourceFormatHint::Svg,
+            ),
+        ] {
+            for preset in builtin_document_presets() {
+                let mut workspace =
+                    Workspace::from_direct(bytes.into(), hint, "Destination artwork".into())
+                        .unwrap();
+                workspace.accept_saved_snapshot(
+                    PathBuf::from("destination.toniator"),
+                    workspace.snapshot(),
+                );
+                let before = workspace.snapshot();
+                let capture = LoadCapture {
+                    base: workspace.document().clone(),
+                    revision: workspace.history.revision(),
+                };
+                let identity = LoadIdentity::BuiltIn(preset.id);
+                assert_eq!(identity.display_name(), preset.name);
+                let StagedDocumentPreset::Current(configuration) =
+                    identity.load(&capture.base).unwrap()
+                else {
+                    panic!("current built-in");
+                };
+                let candidate = configuration.bind(&capture.base).unwrap();
+                assert!(
+                    crate::calibration_preparation::plan_to_prepare(
+                        &candidate,
+                        &crate::authoritative_channel_ids(&candidate),
+                        false,
+                        false
+                    )
+                    .unwrap()
+                    .is_empty(),
+                    "{}",
+                    preset.id
+                );
+                assert!(
+                    prepare_configuration(
+                        &capture.base,
+                        configuration.clone(),
+                        &AtomicBool::new(true)
+                    )
+                    .is_err()
+                );
+                assert_eq!(workspace.snapshot(), before);
+                let prepared =
+                    prepare_configuration(&capture.base, configuration, &AtomicBool::new(false))
+                        .unwrap();
+                assert!(apply_configuration(&mut workspace, &capture, &prepared).unwrap());
+                assert_eq!(workspace.sources, before.sources);
+                assert_eq!(workspace.document().id(), before.document.id());
+                assert_eq!(workspace.document().source(), before.document.source());
+                assert_eq!(workspace.document().canvas(), before.document.canvas());
+                assert_eq!(
+                    workspace.location,
+                    Some(PathBuf::from("destination.toniator"))
+                );
+                assert!(workspace.is_dirty());
+                assert!(apply_configuration(&mut workspace, &capture, &prepared).is_err());
+                workspace.history.undo().unwrap();
+                assert!(!workspace.is_dirty());
+                assert_eq!(workspace.document(), &before.document);
+                let equal_capture = LoadCapture {
+                    base: workspace.document().clone(),
+                    revision: workspace.history.revision(),
+                };
+                assert!(
+                    !apply_configuration(
+                        &mut workspace,
+                        &equal_capture,
+                        &DocumentConfiguration::capture(&equal_capture.base)
+                    )
+                    .unwrap()
+                );
+                assert!(workspace.history.can_redo());
+                workspace.history.redo().unwrap();
+                assert_eq!(
+                    DocumentConfiguration::capture(workspace.document()),
+                    prepared
+                );
+            }
+        }
+    }
+
+    /// Keeps selection/cancellation phase identity independent from personal paths and later operations.
+    ///
+    /// # Panics
+    /// Panics if canceled or superseded selector callbacks retain permission to publish.
+    #[test]
+    fn builtin_selection_rejects_cancelled_stale_and_replaced_workspace_callbacks() {
+        let mut state = OperationState {
+            last_directory: Some(PathBuf::from("personal-folder")),
+            ..OperationState::default()
+        };
+        let first = state.begin(4, Phase::SelectChooser).unwrap();
+        assert!(state.blocks_edits());
+        assert!(!state.accepts(first, Phase::SelectChooser, 5));
+        assert!(state.finish(first));
+        assert!(!state.accepts(first, Phase::SelectChooser, 4));
+        let second = state.begin(4, Phase::SelectChooser).unwrap();
+        assert_ne!(first, second);
+        assert!(!state.finish(first));
+        state.advance(second, Phase::LoadRead);
+        assert!(!state.accepts(second, Phase::SelectChooser, 4));
+        state.advance(second, Phase::LoadConfirm);
+        assert!(state.accepts(second, Phase::LoadConfirm, 4));
+        assert_eq!(state.last_directory, Some(PathBuf::from("personal-folder")));
+    }
 
     /// Exercises exclusivity, phase sensitivity and stale callbacks without GTK or file writes.
     #[test]

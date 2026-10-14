@@ -846,7 +846,10 @@ impl Document {
         configuration
             .channel_response_overrides
             .retain(|entry| !entry.response.is_empty());
+        let baseline = configuration.baseline_saved_calibration.take();
         let mut candidate = configuration.bind(self)?;
+        candidate.baseline_saved_calibration = baseline.filter(|artifact|
+            candidate.baseline_calibration_binding().is_ok_and(|binding| artifact.binding().is_compatible_with(&binding)));
         reconcile_end_values(self, &mut candidate, None, false, &[])?;
         candidate.validate()?;
         Ok(DocumentConfiguration::capture(&candidate))
@@ -894,6 +897,7 @@ impl Document {
                 authored + (desired_value - current.value),
             )?;
         }
+        candidate.retain_compatible_saved_assignments();
         candidate.validate()?;
         Ok(DocumentConfiguration::capture(&candidate))
     }
@@ -1182,16 +1186,131 @@ impl Document {
     /// Materializes one immutable static frame through the existing effective resolver inputs.
     ///
     /// The source document, history, definition records, and stored End overrides
-    /// remain unchanged. The returned document has no temporal overrides, so
-    /// existing engine consumers can call `effective_channel_pattern` exactly once.
+    /// remain unchanged. The returned immutable frame borrows content with no temporal overrides;
+    /// engine consumers resolve effective values once under its captured calibration authority.
     ///
     /// # Errors
     ///
     /// Returns range, exact-time, target, finite, bounds, coupled-response, or
     /// complete document validation diagnostics for the requested frame.
-    pub fn materialize_frame(&self, frame: u64) -> Result<Document, ValidationError> {
+    pub fn materialize_frame(&self, frame: u64) -> Result<MaterializedFrame, ValidationError> {
+        self.validate()?;
         let progress = self.project_timing.frame_range.progress(frame)?;
-        materialize_progress(self, progress)
+        Ok(MaterializedFrame {
+            document: materialize_progress(self, progress)?,
+        })
+    }
+
+    /// Reports a nonconstant effective Shape rotation trajectory in any active channel.
+    ///
+    /// Base and named delta tracks retain their own easing. Full turns and Hold qualify;
+    /// equal-easing exact cancellation does not. No angle wrapping, sampling, or epsilon is used.
+    ///
+    /// # Errors
+    /// Returns invalid target or finite scalar diagnostics from the domain's existing authority.
+    pub fn has_animated_shape_rotation(&self) -> Result<bool, ValidationError> {
+        for channel in self.channel_ids() {
+            if !self
+                .pattern_capabilities(PatternCapabilityScope::Channel(channel))?
+                .active_controls
+                .iter()
+                .any(|descriptor| descriptor.field == PropertyFieldId::ShapeRotationDegrees)
+            {
+                continue;
+            }
+            let mut moving = Vec::with_capacity(2);
+            for target in [PropertyTarget::Document, PropertyTarget::Channel(channel)] {
+                if let Some(value) =
+                    self.temporal_end_overrides
+                        .iter()
+                        .find_map(|entry| match entry {
+                            TemporalEndOverride::Scalar(value)
+                                if value.target == target
+                                    && value.field == PropertyFieldId::ShapeRotationDegrees =>
+                            {
+                                Some(value)
+                            }
+                            _ => None,
+                        })
+                {
+                    let start = scalar_start(self, target, value.field)?;
+                    if start != value.end {
+                        moving.push((start, value.end, value.easing));
+                    }
+                }
+            }
+            match moving.as_slice() {
+                [] => {}
+                [_] => return Ok(true),
+                [a, b] if a.2 == b.2 && exact_endpoint_sums_equal(a.0, b.0, a.1, b.1) => {}
+                _ => return Ok(true),
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// Immutable continuous-frame authority created only from a validated Start document.
+///
+/// Its content may carry animated aspect/bias while every saved assignment remains unchanged.
+/// Borrowing or cloning `document()` yields an ordinary document with ordinary static validation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterializedFrame {
+    document: Document,
+}
+
+impl MaterializedFrame {
+    /// Borrows evaluated content without transferring continuous-frame authority.
+    pub fn document(&self) -> &Document {
+        &self.document
+    }
+
+    /// Validates continuous content under the immutable Start assignments captured at construction.
+    ///
+    /// # Errors
+    /// Returns content diagnostics; no fit, donor, or missing-assignment fill occurs.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.document.validate_content()
+    }
+
+    /// Reads exactly the Start assignment for one active channel, including absence.
+    ///
+    /// # Errors
+    /// Rejects a foreign channel without reconstructing a changed continuous binding.
+    pub fn saved_calibration_for(
+        &self,
+        channel: ChannelId,
+    ) -> Result<Option<&SavedCalibration>, ValidationError> {
+        if !self.document.channel_ids().contains(&channel) {
+            return Err(ValidationError::new(
+                "calibration.channel_id",
+                "frame channel is absent",
+            ));
+        }
+        Ok(self
+            .document
+            .saved_calibrations
+            .iter()
+            .find(|entry| entry.channel_id == channel)
+            .map(|entry| &entry.artifact))
+    }
+}
+
+/// Compares two finite endpoint sums exactly with error-free TwoSum expansions.
+///
+/// A shared half scale prevents overflow only when a sum overflows; both same-sign operands
+/// then have large magnitude, so scaling is exact. Ordinary tiny residuals stay unscaled.
+fn exact_endpoint_sums_equal(a: f64, b: f64, c: f64, d: f64) -> bool {
+    /// Retains the rounded sum and its exact finite rounding residual without reassociation.
+    fn two_sum(a: f64, b: f64) -> (f64, f64) {
+        let sum = a + b;
+        let virtual_b = sum - a;
+        (sum, (a - (sum - virtual_b)) + (b - virtual_b))
+    }
+    if (a + b).is_finite() && (c + d).is_finite() {
+        two_sum(a, b) == two_sum(c, d)
+    } else {
+        two_sum(a * 0.5, b * 0.5) == two_sum(c * 0.5, d * 0.5)
     }
 }
 
@@ -1233,7 +1352,7 @@ impl DocumentSession {
         frame: u64,
     ) -> Result<DocumentEvaluationSnapshot, ValidationError> {
         Ok(DocumentEvaluationSnapshot {
-            document: self.document.materialize_frame(frame)?,
+            authority: EvaluationDocumentAuthority::Frame(self.document.materialize_frame(frame)?),
             token: self.document_evaluation_token(),
         })
     }
@@ -2250,12 +2369,15 @@ fn reconcile_end_values(
     Ok(())
 }
 
-/// Materializes every override at one normalized progress value and validates the static result.
+/// Materializes eligible continuous overrides while retaining Start's exact saved assignments.
+///
+/// # Errors
+/// Returns finite, bounds, target, or content diagnostics without granting static document privilege.
 fn materialize_progress(document: &Document, progress: f64) -> Result<Document, ValidationError> {
     let mut candidate = document.clone();
     candidate.temporal_end_overrides.clear();
     if progress == 0.0 {
-        candidate.validate()?;
+        candidate.validate_content()?;
         return Ok(candidate);
     }
     for entry in &document.temporal_end_overrides {
@@ -2282,7 +2404,7 @@ fn materialize_progress(document: &Document, progress: f64) -> Result<Document, 
             apply_color_override(document, &mut candidate, value, progress)?;
         }
     }
-    candidate.validate()?;
+    candidate.validate_content()?;
     Ok(candidate)
 }
 

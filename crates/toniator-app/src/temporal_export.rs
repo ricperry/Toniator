@@ -1784,7 +1784,7 @@ mod tests {
         assert_eq!(
             trimmed
                 .materialize_frame(2)
-                .unwrap()
+                .unwrap().document()
                 .pattern_settings()
                 .pattern_rotation_degrees,
             0.0
@@ -1792,7 +1792,7 @@ mod tests {
         assert_eq!(
             trimmed
                 .materialize_frame(4)
-                .unwrap()
+                .unwrap().document()
                 .pattern_settings()
                 .pattern_rotation_degrees,
             90.0
@@ -1801,7 +1801,7 @@ mod tests {
             interval(&source, 3, 3)
                 .unwrap()
                 .materialize_frame(3)
-                .unwrap()
+                .unwrap().document()
                 .pattern_settings()
                 .pattern_rotation_degrees,
             0.0

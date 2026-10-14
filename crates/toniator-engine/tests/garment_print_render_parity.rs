@@ -18,6 +18,9 @@ const SCHEMA10_BYTES: &[u8] =
     include_bytes!("../../toniator-io/tests/fixtures/garment-schema10-clean-fade.toniator");
 
 /// Shows nonzero print intent preserves the actual PNG/SVG while warm derived caches survive.
+///
+/// # Panics
+/// Panics if fixture construction, serialization, artifact I/O, or the asserted consumer behavior fails.
 #[test]
 fn print_intent_edit_reuses_render_cache_and_preserves_native_exports() {
     let nonce = SystemTime::now()
@@ -48,7 +51,7 @@ fn print_intent_edit_reuses_render_cache_and_preserves_native_exports() {
     let baseline =
         evaluate_profiled_cached_with_limits(request, limits.clone(), &mut cache).unwrap();
     let original_png = encode_png(baseline.result.raster()).unwrap();
-    let original_svg = write_svg(baseline.result.scene());
+    let original_svg = write_svg(baseline.result.scene()).expect("SVG serialization");
     let settings = PrintPreparationSettings::new(
         Some(PhysicalPrintSizeMm::new(101.6, 38.1).unwrap()),
         0.8,
@@ -77,7 +80,7 @@ fn print_intent_edit_reuses_render_cache_and_preserves_native_exports() {
     assert_eq!(diagnostics.scene, CacheDisposition::Hit);
     assert_eq!(diagnostics.raster, CacheDisposition::Hit);
     assert_eq!(encode_png(edited.result.raster()).unwrap(), original_png);
-    assert_eq!(write_svg(edited.result.scene()), original_svg);
+    assert_eq!(write_svg(edited.result.scene()).expect("SVG serialization"), original_svg);
     let saved_path = dir.join("schema11.toniator");
     save(&saved_path, history.document(), loaded.sources()).unwrap();
     let reopened = load(&saved_path).unwrap();
@@ -99,6 +102,6 @@ fn print_intent_edit_reuses_render_cache_and_preserves_native_exports() {
     )
     .unwrap();
     assert_eq!(encode_png(replay.result.raster()).unwrap(), original_png);
-    assert_eq!(write_svg(replay.result.scene()), original_svg);
+    assert_eq!(write_svg(replay.result.scene()).expect("SVG serialization"), original_svg);
     fs::remove_dir_all(dir).unwrap();
 }

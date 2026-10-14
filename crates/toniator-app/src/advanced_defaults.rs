@@ -782,7 +782,8 @@ mod tests {
             history.document().solid_paint(ChannelId(1)).unwrap(),
             before.solid_paint(ChannelId(1)).unwrap()
         );
-        let end = history.document().materialize_frame(2).unwrap();
+        let end_frame = history.document().materialize_frame(2).unwrap();
+        let end = end_frame.document();
         assert_eq!(
             end.solid_paint(ChannelId(1))
                 .unwrap()
@@ -794,7 +795,7 @@ mod tests {
             end.modeled_channel(ChannelId(2)),
             before
                 .materialize_frame(2)
-                .unwrap()
+                .unwrap().document()
                 .modeled_channel(ChannelId(2))
         );
         assert_eq!(
