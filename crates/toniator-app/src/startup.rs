@@ -40,6 +40,7 @@ impl StartupScreen {
         } else {
             gtk::Orientation::Horizontal
         });
+        self.columns.set_homogeneous(size.0 >= 800);
         let window = gtk::Window::builder()
             .application(
                 &parent
@@ -60,8 +61,8 @@ impl StartupScreen {
         window
     }
 
-    /// Builds a responsive native projection of SplashMockup.png, with an unchanged banner source.
-    /// The banner clips only the artwork region; all text and controls are real theme-aware widgets.
+    /// Builds a flat, responsive welcome view with the unchanged splash banner source.
+    /// The banner clips only artwork; native controls retain theme and controller authority.
     /// Recent history scrolls within 280 logical pixels rather than increasing the window height.
     ///
     /// # Panics
@@ -118,6 +119,7 @@ impl StartupScreen {
         let about = card();
         let title = gtk::Label::new(Some("About Toniator"));
         title.add_css_class("title-2");
+        title.set_xalign(0.0);
         about.append(&title);
         let description = gtk::Label::new(Some(
             "Toniator is a halftone and pattern design tool for creating stylized CMYK and RGB artwork from source images.",
@@ -126,6 +128,9 @@ impl StartupScreen {
         description.set_xalign(0.0);
         description.set_max_width_chars(46);
         description.add_css_class("toniator-startup-description");
+        description.set_tooltip_text(Some(
+            "Use CMYK mode for print workflows and RGB for digital displays.",
+        ));
         about.append(&description);
         let start = gtk::Button::with_label("Start New Project");
         start.set_action_name(Some("app.open"));
@@ -135,13 +140,6 @@ impl StartupScreen {
             "Choose a source image or open an existing .toniator project.",
         ));
         about.append(&start);
-        let hint = gtk::Label::new(Some(
-            "Choose a source image to begin, or use this button to open an existing project file.",
-        ));
-        hint.set_wrap(true);
-        hint.set_max_width_chars(46);
-        hint.add_css_class("dim-label");
-        about.append(&hint);
         columns.append(&about);
 
         let recent_card = card();
@@ -179,12 +177,6 @@ impl StartupScreen {
         status.set_visible(false);
         status.update_property(&[gtk::accessible::Property::Label("Startup status")]);
         body.append(&status);
-        let tip = gtk::Label::new(Some(
-            "Tip: Use CMYK mode for print workflows and RGB for digital displays.",
-        ));
-        tip.set_wrap(true);
-        tip.add_css_class("dim-label");
-        body.append(&tip);
         content.append(&body);
         root.set_child(Some(&content));
         Self {
@@ -306,7 +298,7 @@ mod tests {
     }
 }
 
-/// Creates one theme-derived startup card with native spacing and no fixed dark-mode colors.
+/// Groups a welcome section with spacing, without a decorative enclosing panel or state authority.
 fn card() -> gtk::Box {
     let card = gtk::Box::new(gtk::Orientation::Vertical, 18);
     card.set_hexpand(true);

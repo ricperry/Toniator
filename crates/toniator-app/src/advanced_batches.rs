@@ -240,6 +240,7 @@ impl FillMaskDisclosure {
 }
 
 /// Adds a progressive Fill tone response group with live mode-specific help on its heading.
+/// Domain response mode owns expansion defaults; collapsed children cannot receive native focus.
 pub(super) fn append_fill_mask_disclosure(
     document: &Document,
     channels: Option<Vec<ChannelId>>,
@@ -252,6 +253,10 @@ pub(super) fn append_fill_mask_disclosure(
     content.set_margin_start(8);
     content.set_margin_end(8);
     expander.set_child(Some(&content));
+    expander
+        .bind_property("expanded", &content, "visible")
+        .sync_create()
+        .build();
     let was_inactive = fill_mask_inactive(document, channels.as_deref());
     expander.set_expanded(!was_inactive);
     FillMaskDisclosure {
@@ -464,13 +469,15 @@ pub(super) fn append(
     parent: &gtk::Box,
     guard: &Rc<Cell<bool>>,
 ) -> AdvancedBatchControls {
-    let group = gtk::Frame::new(Some("All channels"));
+    let group = gtk::Box::new(gtk::Orientation::Vertical, 8);
     group.update_property(&[gtk::accessible::Property::Label("All channels")]);
+    let heading = gtk::Label::new(Some("All channels"));
+    heading.set_xalign(0.0);
+    heading.set_wrap(true);
+    heading.add_css_class("heading");
+    group.append(&heading);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    content.set_margin_top(8);
-    content.set_margin_bottom(8);
-    content.set_margin_start(8);
-    content.set_margin_end(8);
+    group.append(&content);
 
     let mut batches = ANIMATABLE_SCALAR_FIELD_IDS
         .iter()
@@ -591,6 +598,7 @@ pub(super) fn append(
         labels.set_hexpand(true);
         let label = gtk::Label::new(Some(&inspector_field_label(field)));
         label.set_xalign(0.0);
+        label.set_wrap(true);
         labels.append(&label);
         let detail = gtk::Label::new(None);
         detail.set_xalign(0.0);
@@ -764,7 +772,6 @@ pub(super) fn append(
     }
 
     if !controls.is_empty() || sampling_control.is_some() {
-        group.set_child(Some(&content));
         parent.append(&group);
     }
     (
@@ -1059,6 +1066,7 @@ pub(super) fn apply_all_mark_density_mode(
 }
 
 /// Creates one accessible Advanced section without adding a persistent help paragraph.
+/// Collapsed native disclosures hide their children from GTK keyboard traversal.
 fn all_section(
     parent: &gtk::Box,
     name: &str,
@@ -1066,21 +1074,28 @@ fn all_section(
     collapsed: bool,
 ) -> (gtk::Widget, gtk::Box) {
     let section = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    section.set_margin_top(8);
-    section.set_margin_bottom(8);
-    section.set_margin_start(8);
-    section.set_margin_end(8);
     let (group, label) = if collapsed {
         let expander = gtk::Expander::new(Some(name));
         expander.set_expanded(false);
         expander.set_child(Some(&section));
+        expander
+            .bind_property("expanded", &section, "visible")
+            .sync_create()
+            .build();
         let label = expander.label_widget().and_downcast::<gtk::Label>();
+        if let Some(label) = &label {
+            label.set_wrap(true);
+        }
         (expander.upcast::<gtk::Widget>(), label)
     } else {
-        let frame = gtk::Frame::new(Some(name));
-        frame.set_child(Some(&section));
-        let label = frame.label_widget().and_downcast::<gtk::Label>();
-        (frame.upcast::<gtk::Widget>(), label)
+        let group = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let label = gtk::Label::new(Some(name));
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        label.add_css_class("heading");
+        group.append(&label);
+        group.append(&section);
+        (group.upcast::<gtk::Widget>(), Some(label))
     };
     group.update_property(&[
         gtk::accessible::Property::Label(name),
@@ -1096,6 +1111,7 @@ fn all_section(
 }
 
 /// Prepares a detached gain/bias disclosure and opens it for nondefault projected values.
+/// Domain defaults determine initial expansion; child visibility excludes collapsed controls from focus.
 fn fine_adjustments<'a>(
     fields: Vec<PropertyFieldId>,
     channel: Option<ChannelId>,
@@ -1116,6 +1132,10 @@ fn fine_adjustments<'a>(
     }
     let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
     expander.set_child(Some(&content));
+    expander
+        .bind_property("expanded", &content, "visible")
+        .sync_create()
+        .build();
     let expanded = batches.into_iter().any(|batch| {
         fields.contains(&batch.field)
             && batch.values.iter().any(|value| {
@@ -1342,19 +1362,20 @@ impl Controls {
         Ok(Some((self.field, value)))
     }
 
-    /// Displays common/mixed values without authoring display rounding; reset replaces pending text.
+    /// Projects shared values without redundant captions and retains visible Mixed ranges.
+    /// Display rounding never authors values; explicit reset replaces pending text.
     fn project(&self, batch: &ChannelScalarBatch, discard_pending: bool) {
         self.input.set_sensitive(true);
-        self.detail.set_label(&if batch.minimum == batch.maximum {
-            format!("{} matching values", batch.values.len())
-        } else {
-            format!(
+        let mixed = batch.minimum != batch.maximum;
+        self.detail.set_visible(mixed);
+        if mixed {
+            self.detail.set_label(&format!(
                 "Mixed · {} values · Range {}–{}",
                 batch.values.len(),
                 batch.minimum,
                 batch.maximum
-            )
-        });
+            ));
+        }
         if discard_pending || (!self.input.has_focus() && !self.input.has_css_class("error")) {
             let text = if batch.minimum == batch.maximum {
                 batch.minimum.to_string()

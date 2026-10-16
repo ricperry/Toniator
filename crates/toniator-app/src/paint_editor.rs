@@ -336,6 +336,7 @@ fn labeled(parent: &gtk::Box, name: &str, widget: &impl IsA<gtk::Widget>, help: 
     let label = gtk::Label::new(Some(name));
     label.set_xalign(0.0);
     label.set_hexpand(true);
+    label.set_wrap(true);
     label.set_mnemonic_widget(Some(widget));
     labeled_help(&label, widget.as_ref(), name, help);
     row.append(&label);
@@ -391,6 +392,7 @@ impl Controls {
     ///
     /// Field help distinguishes solid paint, sampled source Alpha, and channel Opacity. The
     /// surrounding endpoint toggle selects the edit destination; controls never duplicate it.
+    /// Native disclosure visibility keeps collapsed interpolation controls outside keyboard traversal.
     pub(super) fn new(
         context: AdvancedCommitContext,
         parent: &gtk::Box,
@@ -416,15 +418,14 @@ impl Controls {
         );
         alpha.widget.set_input_purpose(gtk::InputPurpose::Number);
         alpha.widget.set_tooltip_text(Some(ALPHA_HELP));
-        let frame = gtk::Frame::new(Some("Color"));
-        frame.update_property(&[gtk::accessible::Property::Label("Color")]);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        content.set_margin_top(8);
-        content.set_margin_bottom(8);
-        content.set_margin_start(8);
-        content.set_margin_end(8);
-        frame.set_child(Some(&content));
-        parent.append(&frame);
+        content.update_property(&[gtk::accessible::Property::Label("Color")]);
+        let heading = gtk::Label::new(Some("Color"));
+        heading.set_xalign(0.0);
+        heading.set_wrap(true);
+        heading.add_css_class("heading");
+        content.append(&heading);
+        parent.append(&content);
         let dialog = gtk::ColorDialog::builder()
             .title("Choose color")
             .with_alpha(true)
@@ -471,6 +472,10 @@ impl Controls {
         );
         labeled(&options, "Interpolation", &easing, INTERPOLATION_HELP);
         interpolation.set_child(Some(&options));
+        interpolation
+            .bind_property("expanded", &options, "visible")
+            .sync_create()
+            .build();
         interpolation.set_visible(!at_start);
         content.append(&interpolation);
         let callback = context.clone();

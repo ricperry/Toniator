@@ -17,10 +17,10 @@
 }
 
 .toniator-inspector-group {
-  padding: 10px;
-  border: 1px solid @borders;
-  border-radius: 8px;
-  background: alpha(@theme_fg_color, 0.035);
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
 }
 
 .toniator-channel-segments button {
@@ -49,10 +49,6 @@
   min-width: 1px;
 }
 
-.toniator-draft-controls {
-  min-height: 180px;
-}
-
 .toniator-wizard-preview {
   min-width: 1px;
   min-height: 1px;
@@ -61,27 +57,30 @@
 
 .toniator-wizard-card {
   padding: 10px;
-  border-radius: 8px;
-  background: alpha(currentColor, 0.04);
+  border-radius: 0;
+  background: none;
 }
 
+.toniator-gallery-choice { border: 1px solid transparent; border-radius: 0; }
+
 .toniator-wizard-card-current {
-  border: 1px solid alpha(#3584e4, 0.75);
-  background: alpha(#3584e4, 0.12);
+  border-color: @theme_selected_bg_color;
 }
 
 .toniator-wizard-card-badge {
-  color: #3584e4;
   font-weight: 700;
 }
 
 .toniator-startup { background: @theme_bg_color; }
 .toniator-startup-card {
-  padding: 22px;
-  border: 1px solid @borders;
-  border-radius: 12px;
-  background: alpha(@theme_fg_color, 0.035);
+  padding: 0;
 }
 .toniator-startup-description { font-size: 1.08em; }
 .toniator-startup-primary { padding: 16px 12px; font-size: 1.15em; }
-.toniator-recent-file { padding: 12px 10px; border-radius: 6px; }
+.toniator-recent-file { padding: 10px; border-radius: 0; }
+
+/* Native controls retain their theme affordances; only toolbar flow wrappers are quiet. */
+.toniator-viewport-toolbar > flowboxchild { padding: 0; margin: 0; }
+.toniator-inspector-group { margin-top: 4px; }
+
+.toniator-output-group { border: none; border-radius: 0; }

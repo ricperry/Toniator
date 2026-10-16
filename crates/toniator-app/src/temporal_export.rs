@@ -140,18 +140,31 @@ pub(super) struct Surface {
     quit_when_done: bool,
 }
 
-/// Appends a native labeled field with its real label relationship and keyboard path.
+/// Stacks a native field under its wrapping label without changing its authority or keyboard path.
 fn row(parent: &gtk::Box, title: &str, widget: &impl IsA<gtk::Widget>) {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
     let label = gtk::Label::new(Some(title));
     label.set_use_underline(title.contains('_'));
     label.set_xalign(0.0);
+    label.set_wrap(true);
     label.set_hexpand(true);
     label.set_mnemonic_widget(Some(widget));
     relate_descriptor_label(widget.upcast_ref(), &label);
     row.append(&label);
     row.append(widget);
     parent.append(&row);
+}
+
+/// Wraps existing native actions at their natural widths without introducing selection or focus stops.
+fn action_flow() -> gtk::FlowBox {
+    let actions = gtk::FlowBox::new();
+    actions.set_selection_mode(gtk::SelectionMode::None);
+    actions.set_homogeneous(false);
+    actions.set_row_spacing(8);
+    actions.set_column_spacing(8);
+    actions.set_min_children_per_line(1);
+    actions.set_max_children_per_line(4);
+    actions
 }
 
 /// Creates one ordinary text field without interpreting document or filesystem authority.
@@ -313,7 +326,8 @@ fn defaults_path() -> PathBuf {
     glib::user_config_dir().join("Toniator/export-defaults.json")
 }
 
-/// Presents one reviewable export sheet and asynchronously measures source/audio metadata.
+/// Presents a scrollable export draft with wrapping native actions and asynchronous metadata.
+/// Resizing and disclosures retain field identity; shared job validation and worker ownership stay authoritative.
 pub(super) fn open(state: &Rc<RefCell<AppState>>) {
     if let Some(surface) = state.borrow().temporal_export.as_ref() {
         surface.window.present();
@@ -366,6 +380,7 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
     root.set_margin_end(16);
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_vexpand(true);
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     let fields = gtk::Box::new(gtk::Orientation::Vertical, 10);
     scroll.set_child(Some(&fields));
     root.append(&scroll);
@@ -376,6 +391,26 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
         "PNG sequence",
         "Sharing video — AV1 / WebM (lossy)",
     ]);
+    let selected_factory = gtk::SignalListItemFactory::new();
+    selected_factory.connect_setup(|_, object| {
+        if let Some(item) = object.downcast_ref::<gtk::ListItem>() {
+            let label = gtk::Label::new(None);
+            label.set_xalign(0.0);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            label.set_max_width_chars(24);
+            item.set_child(Some(&label));
+        }
+    });
+    selected_factory.connect_bind(|_, object| {
+        if let Some(item) = object.downcast_ref::<gtk::ListItem>()
+            && let Some(value) = item.item().and_downcast::<gtk::StringObject>()
+            && let Some(label) = item.child().and_downcast::<gtk::Label>()
+        {
+            label.set_label(&value.string());
+            label.set_tooltip_text(Some(&value.string()));
+        }
+    });
+    format.set_factory(Some(&selected_factory));
     row(&configuration, "Format", &format);
     let timing = snapshot.document.project_timing();
     let [rate_text, duration_text, frame_count_text] = match timing_values(timing) {
@@ -522,36 +557,76 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
     personal_fields.append(&save_defaults);
     let clear_defaults = gtk::Button::with_label("Prompt for folders next time");
     personal_fields.append(&clear_defaults);
+    personal_fields.set_visible(false);
+    personal
+        .bind_property("expanded", &personal_fields, "visible")
+        .sync_create()
+        .build();
     personal.set_child(Some(&personal_fields));
     configuration.append(&personal);
     let status = gtk::Label::new(Some(&notice));
     status.set_xalign(0.0);
     status.set_wrap(true);
+    status.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     root.append(&status);
     let progress = gtk::ProgressBar::new();
     progress.update_property(&[gtk::accessible::Property::Label("Export progress")]);
     progress.set_show_text(true);
     progress.set_text(Some("Preparing"));
     root.append(&progress);
-    let recovery_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let recovery_row = action_flow();
     let retry = gtk::Button::with_label("Retry encoding");
     let save_png = gtk::Button::with_label("Save PNG sequence");
     let discard = gtk::Button::with_label("Discard rendered PNGs");
     for button in [&retry, &save_png, &discard] {
-        recovery_row.append(button);
+        recovery_row.insert(button, -1);
         button.set_visible(false);
+        if let Some(parent) = button.parent() {
+            button
+                .bind_property("visible", &parent, "visible")
+                .sync_create()
+                .build();
+        }
     }
     root.append(&recovery_row);
-    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let buttons = action_flow();
     let still = gtk::Button::with_label("Export current frame…");
-    buttons.append(&still);
+    buttons.insert(&still, -1);
     let close = gtk::Button::with_label("Close export");
-    buttons.append(&close);
+    buttons.insert(&close, -1);
     let cancel = gtk::Button::with_label("Cancel export");
-    buttons.append(&cancel);
+    buttons.insert(&cancel, -1);
+    if let Some(parent) = cancel.parent() {
+        cancel
+            .bind_property("visible", &parent, "visible")
+            .sync_create()
+            .build();
+    }
     let export = gtk::Button::with_label("Export video");
     export.add_css_class("suggested-action");
-    buttons.append(&export);
+    buttons.insert(&export, -1);
+    let mut child = buttons.first_child();
+    while let Some(wrapper) = child {
+        child = wrapper.next_sibling();
+        wrapper.set_focusable(false);
+        if let Some(button) = wrapper.first_child() {
+            button
+                .bind_property("sensitive", &wrapper, "sensitive")
+                .sync_create()
+                .build();
+        }
+    }
+    let mut child = recovery_row.first_child();
+    while let Some(wrapper) = child {
+        child = wrapper.next_sibling();
+        wrapper.set_focusable(false);
+        if let Some(button) = wrapper.first_child() {
+            button
+                .bind_property("sensitive", &wrapper, "sensitive")
+                .sync_create()
+                .build();
+        }
+    }
     root.append(&buttons);
     window.set_child(Some(&root));
     let epoch = {

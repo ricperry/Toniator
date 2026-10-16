@@ -344,6 +344,7 @@ pub(super) fn apply_pending_inputs(
 ///
 /// All exposes shared/mixed values and progressively disclosed named-channel details.
 /// Each effective output setting appears once. Apply remains one draft publication.
+/// Collapsed channel groups hide unparented children from GTK keyboard traversal.
 pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
     let (draft, target, endpoint, fields, guard) = {
         let mut app = state.borrow_mut();
@@ -415,19 +416,24 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
         let target = InspectorTarget::Channel(channel);
         let group_name = format!("{} settings", channel_display_name(&document, channel));
         let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
-        content.set_margin_top(8);
-        content.set_margin_bottom(8);
-        content.set_margin_start(8);
-        content.set_margin_end(8);
         if !batch_editors.is_empty() {
             let group = gtk::Expander::new(Some(&group_name));
             group.update_property(&[gtk::accessible::Property::Label(&group_name)]);
             group.set_child(Some(&content));
+            group
+                .bind_property("expanded", &content, "visible")
+                .sync_create()
+                .build();
             fields.append(&group);
         } else {
-            let group = gtk::Frame::new(Some(&group_name));
+            let group = gtk::Box::new(gtk::Orientation::Vertical, 8);
             group.update_property(&[gtk::accessible::Property::Label(&group_name)]);
-            group.set_child(Some(&content));
+            let heading = gtk::Label::new(Some(&group_name));
+            heading.set_xalign(0.0);
+            heading.set_wrap(true);
+            heading.add_css_class("heading");
+            group.append(&heading);
+            group.append(&content);
             fields.append(&group);
         }
         let appearance_content = source_group(
@@ -609,12 +615,7 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
                 }
                 let output_content = if multiple_outputs {
                     let output_name = format!("Output {}", output.painter_index + 1);
-                    let output_group = gtk::Frame::new(Some(&output_name));
-                    output_group.update_property(&[gtk::accessible::Property::Label(&output_name)]);
-                    let output_content = gtk::Box::new(gtk::Orientation::Vertical, 8);
-                    output_group.set_child(Some(&output_content));
-                    content.append(&output_group);
-                    output_content
+                    source_group(&content, &output_name, None)
                 } else {
                     content.clone()
                 };
@@ -669,25 +670,33 @@ pub(super) fn rebuild_fields(state: &Rc<RefCell<AppState>>, epoch: u64) {
 ///
 /// The domain descriptors and edit routes remain authoritative. When weighting is inactive the
 /// heading tooltip and Description explain that stored settings remain editable; no help row is added.
+/// Expansion controls child visibility so collapsed content cannot receive native focus.
 fn source_group(parent: &gtk::Box, name: &str, explanation: Option<&str>) -> gtk::Box {
     let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    content.set_margin_top(8);
-    content.set_margin_bottom(8);
-    content.set_margin_start(8);
-    content.set_margin_end(8);
     let (group, label) = if let Some(text) = explanation {
         let expander = gtk::Expander::new(Some(name));
         expander.set_expanded(false);
         expander.set_child(Some(&content));
+        expander
+            .bind_property("expanded", &content, "visible")
+            .sync_create()
+            .build();
         expander.set_tooltip_text(Some(text));
         expander.update_property(&[gtk::accessible::Property::Description(text)]);
         let label = expander.label_widget().and_downcast::<gtk::Label>();
+        if let Some(label) = &label {
+            label.set_wrap(true);
+        }
         (expander.upcast::<gtk::Widget>(), label)
     } else {
-        let frame = gtk::Frame::new(Some(name));
-        frame.set_child(Some(&content));
-        let label = frame.label_widget().and_downcast::<gtk::Label>();
-        (frame.upcast::<gtk::Widget>(), label)
+        let group = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let label = gtk::Label::new(Some(name));
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        label.add_css_class("heading");
+        group.append(&label);
+        group.append(&content);
+        (group.upcast::<gtk::Widget>(), Some(label))
     };
     group.update_property(&[gtk::accessible::Property::Label(name)]);
     if let Some(text) = explanation {
@@ -704,6 +713,7 @@ fn source_group(parent: &gtk::Box, name: &str, explanation: Option<&str>) -> gtk
 
 /// Appends one typed row and its optional End reset/easing disclosure.
 /// The row factory owns descriptor-derived reset names; endpoint binding controls visibility.
+/// End animation children follow expansion so collapsed controls stay outside native focus.
 #[allow(clippy::too_many_arguments)] // Captured modal/descriptor context is explicit at this binding boundary.
 fn append_binding(
     state: &Rc<RefCell<AppState>>,
@@ -787,6 +797,10 @@ fn append_binding(
         reset.connect_clicked(move |_| context_for_reset.reset(locator));
         content.append(&reset);
         disclosure.set_child(Some(&content));
+        disclosure
+            .bind_property("expanded", &content, "visible")
+            .sync_create()
+            .build();
         parent.append(&disclosure);
         Some((reset, easing, hint))
     } else {

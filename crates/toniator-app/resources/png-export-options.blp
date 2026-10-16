@@ -4,7 +4,14 @@ template $ToniatorPngExportOptions : Gtk.Box {
   orientation: vertical;
   spacing: 0;
 
-  Gtk.Paned print_options_paned {
+  Gtk.ScrolledWindow {
+    hexpand: true;
+    vexpand: true;
+    hscrollbar-policy: never;
+    vscrollbar-policy: automatic;
+    Gtk.Box png_options_layout {
+      orientation: vertical;
+      Gtk.Paned print_options_paned {
     orientation: horizontal;
     position: 520;
     hexpand: true;
@@ -21,7 +28,7 @@ template $ToniatorPngExportOptions : Gtk.Box {
 
     [start]
     Gtk.ScrolledWindow print_options_scroll {
-      min-content-width: 470;
+      min-content-width: 0;
       hexpand: true;
       vexpand: true;
       hscrollbar-policy: never;
@@ -34,7 +41,7 @@ template $ToniatorPngExportOptions : Gtk.Box {
         margin-start: 18;
         margin-end: 18;
 
-        Gtk.Grid {
+        Gtk.Grid png_output_settings {
           row-spacing: 10;
           column-spacing: 10;
 
@@ -42,11 +49,13 @@ template $ToniatorPngExportOptions : Gtk.Box {
             label: "_Background";
             use-underline: true;
             halign: start;
+            wrap: true;
+            xalign: 0;
             mnemonic-widget: png_background;
             layout { column: 0; row: 0; }
           }
           Gtk.DropDown png_background {
-            tooltip-text: "PNG-only final-consumer backing";
+            tooltip-text: "Background applied to the exported PNG; separate from the viewer-only preview backdrop";
             hexpand: true;
             layout { column: 1; row: 0; }
           }
@@ -54,6 +63,8 @@ template $ToniatorPngExportOptions : Gtk.Box {
             label: "_Antialiasing";
             use-underline: true;
             halign: start;
+            wrap: true;
+            xalign: 0;
             mnemonic-widget: png_antialiasing;
             layout { column: 0; row: 1; }
           }
@@ -66,6 +77,8 @@ template $ToniatorPngExportOptions : Gtk.Box {
             label: "Output _size";
             use-underline: true;
             halign: start;
+            wrap: true;
+            xalign: 0;
             mnemonic-widget: png_scale;
             layout { column: 0; row: 2; }
           }
@@ -78,10 +91,14 @@ template $ToniatorPngExportOptions : Gtk.Box {
             label: "Custom _dimensions";
             use-underline: true;
             halign: start;
+            wrap: true;
+            xalign: 0;
             mnemonic-widget: png_dimensions;
             layout { column: 0; row: 3; }
           }
           Gtk.Entry png_dimensions {
+            width-chars: 12;
+            max-width-chars: 14;
             placeholder-text: "WIDTHxHEIGHT";
             tooltip-text: "Manual PNG width and height in pixels";
             hexpand: true;
@@ -146,6 +163,8 @@ template $ToniatorPngExportOptions : Gtk.Box {
                 use-underline: true;
                 mnemonic-widget: print_box_unit;
                 halign: start;
+                wrap: true;
+                xalign: 0;
                 layout { column: 0; row: 0; }
               }
               Gtk.DropDown print_box_unit {
@@ -159,10 +178,14 @@ template $ToniatorPngExportOptions : Gtk.Box {
                 use-underline: true;
                 mnemonic-widget: print_box_width;
                 halign: start;
+                wrap: true;
+                xalign: 0;
                 layout { column: 0; row: 1; }
               }
               Gtk.Entry print_box_width {
                 input-purpose: number;
+                width-chars: 10;
+                max-width-chars: 12;
                 placeholder-text: "Maximum width";
                 accessibility { label: "Maximum print box width in millimetres"; }
                 hexpand: true;
@@ -173,10 +196,14 @@ template $ToniatorPngExportOptions : Gtk.Box {
                 use-underline: true;
                 mnemonic-widget: print_box_height;
                 halign: start;
+                wrap: true;
+                xalign: 0;
                 layout { column: 0; row: 2; }
               }
               Gtk.Entry print_box_height {
                 input-purpose: number;
+                width-chars: 10;
+                max-width-chars: 12;
                 placeholder-text: "Maximum height";
                 accessibility { label: "Maximum print box height in millimetres"; }
                 hexpand: true;
@@ -187,10 +214,14 @@ template $ToniatorPngExportOptions : Gtk.Box {
                 use-underline: true;
                 mnemonic-widget: print_target_dpi;
                 halign: start;
+                wrap: true;
+                xalign: 0;
                 layout { column: 0; row: 3; }
               }
               Gtk.Entry print_target_dpi {
                 input-purpose: number;
+                width-chars: 10;
+                max-width-chars: 12;
                 text: "300";
                 accessibility { label: "Print resolution in DPI"; }
                 hexpand: true;
@@ -210,13 +241,13 @@ template $ToniatorPngExportOptions : Gtk.Box {
               row-spacing: 6;
               column-spacing: 10;
               visible: false;
-              Gtk.Label { label: "Minimum _feature width (px)"; use-underline: true; mnemonic-widget: print_min_feature; halign: start; layout { column: 0; row: 0; } }
-              Gtk.Entry print_min_feature { text: "0"; input-purpose: digits; accessibility { label: "Minimum feature width in pixels"; } tooltip-text: "Thicken local thin features; zero disables thickening"; layout { column: 1; row: 0; } }
-              Gtk.Label { label: "_Remove isolated below (px)"; use-underline: true; mnemonic-widget: print_remove_below; halign: start; layout { column: 0; row: 1; } }
-              Gtk.Entry print_remove_below { text: "0"; input-purpose: digits; accessibility { label: "Remove isolated features below pixels"; } tooltip-text: "Remove whole isolated features narrower than this value; attached spurs remain part of their larger feature"; layout { column: 1; row: 1; } }
-              Gtk.Label { label: "Minimum _gap width (px)"; use-underline: true; mnemonic-widget: print_min_gap; halign: start; layout { column: 0; row: 2; } }
-              Gtk.Entry print_min_gap { text: "0"; input-purpose: digits; accessibility { label: "Minimum gap width in pixels"; } tooltip-text: "Treat locally narrow gaps bounded by artwork; zero disables gap correction"; layout { column: 1; row: 2; } }
-              Gtk.Label { label: "Gap _strategy"; use-underline: true; mnemonic-widget: print_gap_strategy; halign: start; layout { column: 0; row: 3; } }
+              Gtk.Label { label: "Minimum _feature width (px)"; use-underline: true; mnemonic-widget: print_min_feature; halign: start; wrap: true; xalign: 0; layout { column: 0; row: 0; } }
+              Gtk.Entry print_min_feature { text: "0"; input-purpose: digits; width-chars: 10; max-width-chars: 12; accessibility { label: "Minimum feature width in pixels"; } tooltip-text: "Thicken local thin features; zero disables thickening"; layout { column: 1; row: 0; } }
+              Gtk.Label { label: "_Remove isolated below (px)"; use-underline: true; mnemonic-widget: print_remove_below; halign: start; wrap: true; xalign: 0; layout { column: 0; row: 1; } }
+              Gtk.Entry print_remove_below { text: "0"; input-purpose: digits; width-chars: 10; max-width-chars: 12; accessibility { label: "Remove isolated features below pixels"; } tooltip-text: "Remove whole isolated features narrower than this value; attached spurs remain part of their larger feature"; layout { column: 1; row: 1; } }
+              Gtk.Label { label: "Minimum _gap width (px)"; use-underline: true; mnemonic-widget: print_min_gap; halign: start; wrap: true; xalign: 0; layout { column: 0; row: 2; } }
+              Gtk.Entry print_min_gap { text: "0"; input-purpose: digits; width-chars: 10; max-width-chars: 12; accessibility { label: "Minimum gap width in pixels"; } tooltip-text: "Treat locally narrow gaps bounded by artwork; zero disables gap correction"; layout { column: 1; row: 2; } }
+              Gtk.Label { label: "Gap _strategy"; use-underline: true; mnemonic-widget: print_gap_strategy; halign: start; wrap: true; xalign: 0; layout { column: 0; row: 3; } }
               Gtk.DropDown print_gap_strategy { accessibility { label: "Gap strategy"; } hexpand: true; layout { column: 1; row: 3; } }
             }
 
@@ -446,7 +477,7 @@ template $ToniatorPngExportOptions : Gtk.Box {
       Gtk.Box {
         spacing: 8;
         Gtk.Label print_check_status {
-          label: "Preview not rendered";
+          label: "PNG preview not rendered";
           xalign: 0;
           hexpand: true;
           wrap: true;
@@ -461,8 +492,13 @@ template $ToniatorPngExportOptions : Gtk.Box {
         visible: false;
       }
 
-      Gtk.Box {
-        spacing: 8;
+      Gtk.FlowBox {
+        selection-mode: none;
+        row-spacing: 6;
+        column-spacing: 6;
+        min-children-per-line: 1;
+        max-children-per-line: 4;
+        homogeneous: true;
         Gtk.Button print_preview_zoom_out { label: "Zoom out"; }
         Gtk.Button print_preview_actual_size { label: "100%"; tooltip-text: "Show one output pixel per preview pixel"; }
         Gtk.Button print_preview_zoom_in { label: "Zoom in"; }
@@ -512,8 +548,8 @@ template $ToniatorPngExportOptions : Gtk.Box {
       }
 
       Gtk.ScrolledWindow print_canvas_scroll {
-        min-content-width: 320;
-        min-content-height: 280;
+        min-content-width: 0;
+        min-content-height: 180;
         hexpand: true;
         vexpand: true;
         hscrollbar-policy: automatic;
@@ -549,9 +585,17 @@ template $ToniatorPngExportOptions : Gtk.Box {
     }
   }
 
-  Gtk.Box {
+    }
+  }
+
+  Gtk.FlowBox {
+    selection-mode: none;
+    min-children-per-line: 1;
+    max-children-per-line: 2;
+    homogeneous: true;
     halign: end;
-    spacing: 8;
+    row-spacing: 6;
+    column-spacing: 6;
     margin-top: 8;
     margin-bottom: 16;
     margin-start: 18;

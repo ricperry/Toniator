@@ -42,6 +42,11 @@ impl SourceNotice {
         (!parts.is_empty()).then(|| parts.join(" "))
     }
 
+    /// Reports session-only dismissal without changing immutable source facts or document history.
+    pub(crate) const fn is_dismissed(&self) -> bool {
+        self.dismissed
+    }
+
     /// Dismisses only a currently presented source notice, preserving unseen notices behind errors.
     pub(crate) fn dismiss(&mut self) {
         if self.presented {
@@ -54,6 +59,20 @@ impl SourceNotice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Keeps SVG-only dismissal session-local while an unseen notice survives an operation error.
+    /// # Panics
+    /// Panics if dismissal consumes an unseen notice or a fresh source inherits prior dismissal.
+    #[test]
+    fn svg_only_notice_dismissal_preserves_unseen_and_replacement_state() {
+        let mut notice = SourceNotice::default();
+        notice.dismiss();
+        assert!(!notice.is_dismissed());
+        notice.presented = true;
+        notice.dismiss();
+        assert!(notice.is_dismissed() && !notice.presented);
+        assert!(!SourceNotice::default().is_dismissed());
+    }
 
     /// Checks exact timing projection, combined notices and session-only dismissal through errors.
     ///

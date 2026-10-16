@@ -84,7 +84,8 @@ fn command(
     Ok(base.replace_temporal_authority_command(timing, base.temporal_end_overrides().to_vec()))
 }
 
-/// Presents a single project timing sheet and probes media off the GTK thread.
+/// Presents a scrollable private timing draft and probes media off the GTK thread.
+/// Resizing preserves native fields and visible validation; only Apply publishes shared timing.
 pub(super) fn open(state: &Rc<RefCell<AppState>>) {
     if let Some(surface) = state.borrow().temporal_settings.as_ref() {
         surface.window.present();
@@ -112,12 +113,18 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
         .transient_for(&parent)
         .modal(true)
         .default_width(540)
-        .resizable(false)
+        .default_height(460)
         .build();
     let header = gtk::HeaderBar::new();
     header.set_title_widget(Some(&gtk::Label::new(Some("Animation settings"))));
     window.set_titlebar(Some(&header));
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_vexpand(true);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    scroll.set_child(Some(&content));
+    root.append(&scroll);
     content.set_margin_top(16);
     content.set_margin_bottom(16);
     content.set_margin_start(16);
@@ -134,9 +141,10 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
             "Source start (seconds)",
             "Source end (excluded, seconds)",
         ][index];
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
         let label = gtk::Label::new(Some(title));
         label.set_hexpand(true);
+        label.set_wrap(true);
         label.set_xalign(0.0);
         let entry = gtk::Entry::new();
         entry.set_width_chars(16);
@@ -157,8 +165,11 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
         "Animation settings status",
     )]);
     status.set_wrap(true);
+    status.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     status.set_xalign(0.0);
-    content.append(&status);
+    status.set_margin_start(16);
+    status.set_margin_end(16);
+    root.append(&status);
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     buttons.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
@@ -167,8 +178,11 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
     apply.set_sensitive(false);
     buttons.append(&cancel);
     buttons.append(&apply);
-    content.append(&buttons);
-    window.set_child(Some(&content));
+    buttons.set_margin_start(16);
+    buttons.set_margin_end(16);
+    buttons.set_margin_bottom(16);
+    root.append(&buttons);
+    window.set_child(Some(&root));
     let cancelled = Arc::new(AtomicBool::new(false));
     let flag = cancelled.clone();
     let (sender, receiver) = async_channel::bounded(1);

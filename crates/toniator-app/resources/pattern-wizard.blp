@@ -9,159 +9,178 @@ template $ToniatorPatternWizardShell : Gtk.Box {
   margin-start: 12;
   margin-end: 12;
 
-  Gtk.Label wizard_breadcrumb {
-    xalign: 0;
-    wrap: true;
-    styles [ "heading" ]
-  }
-
-  Gtk.Label wizard_status {
-    label: "Choose a pattern. Nothing changes until Apply.";
-    xalign: 0;
-    wrap: true;
-    styles [ "dim-label" ]
-  }
-
-  Gtk.Box wizard_layout {
-    orientation: horizontal;
-    spacing: 16;
+  Gtk.ScrolledWindow wizard_content_scroll {
+    hscrollbar-policy: never;
+    vscrollbar-policy: automatic;
     hexpand: true;
     vexpand: true;
-
+    min-content-height: 120;
     Gtk.Box {
-        orientation: vertical;
-        spacing: 10;
-        width-request: 320;
-        hexpand: false;
-        vexpand: true;
-        Gtk.Label {
-          label: "Pattern study";
-          xalign: 0;
-          styles [ "heading" ]
-        }
-        Gtk.Label wizard_preview_description {
-          label: "A neutral light-to-dark sample shows how your pattern responds to tone. Apply it to see the result on your artwork.";
-          xalign: 0;
-          wrap: true;
-          max-width-chars: 34;
-          styles [ "dim-label" ]
-        }
-        Gtk.Label wizard_preview_status {
-          xalign: 0;
-          wrap: true;
-          max-width-chars: 34;
-          styles [ "dim-label" ]
-        }
-        Gtk.ScrolledWindow wizard_preview_viewport {
-        height-request: 320;
-        min-content-height: 320;
-        max-content-height: 320;
-        hscrollbar-policy: never;
-        vscrollbar-policy: never;
-        propagate-natural-height: false;
-        hexpand: true;
-        vexpand: false;
-
-        Gtk.Overlay wizard_preview_frame {
-          hexpand: true;
-          vexpand: false;
-
-          Gtk.Picture wizard_preview {
-            content-fit: contain;
-            can-shrink: true;
-            hexpand: true;
-            vexpand: false;
-            styles [ "toniator-wizard-preview" ]
-          }
-
-          [overlay]
-          Gtk.DrawingArea wizard_guide_overlay {
-            can-target: false;
-            focusable: false;
-          }
-
-          [overlay]
-          Gtk.Spinner wizard_spinner {
-            visible: false;
-            halign: center;
-            valign: center;
-            tooltip-text: "Preview updating";
-          }
-        }
-      }
-      Gtk.Label wizard_guide_legend {
-        label: "Blue: guide shape · preview only";
-        visible: false;
+      orientation: vertical;
+      spacing: 12;
+      Gtk.Label wizard_breadcrumb {
         xalign: 0;
         wrap: true;
+        styles [ "heading" ]
       }
+
+      Gtk.Label wizard_status {
+        label: "Choose a pattern. Nothing changes until Apply.";
+        xalign: 0;
+        wrap: true;
+        styles [ "dim-label" ]
       }
 
-    Gtk.ScrolledWindow wizard_gallery_panel {
-      hscrollbar-policy: never;
-      vscrollbar-policy: automatic;
-      hexpand: true;
-      vexpand: true;
-      min-content-width: 300;
-      min-content-height: 300;
-
-      Gtk.Box wizard_gallery {
-        orientation: vertical;
-        spacing: 10;
-        valign: start;
-
-        Gtk.Label wizard_gallery_heading {
-          label: "Pattern Gallery";
-          xalign: 0;
-          styles [ "heading" ]
-        }
-
-        Gtk.Label wizard_gallery_instruction {
-          label: "Select a built-in Pattern to preview it, then Apply Pattern to apply it directly. Customize walks through its layout and drawing settings; Create new starts a fresh layout. Saved personal Patterns keep the Review step.";
-          xalign: 0;
-          wrap: true;
-          styles [ "dim-label" ]
-        }
-
-        Gtk.FlowBox wizard_cards {
-          selection-mode: none;
-          row-spacing: 10;
-          column-spacing: 10;
-          max-children-per-line: 2;
-          min-children-per-line: 1;
-          hexpand: true;
-          valign: start;
-        }
-      }
-    }
-
-    Gtk.Box wizard_page_panel {
-      orientation: horizontal;
-      spacing: 20;
-      hexpand: true;
-      vexpand: true;
-      width-request: 300;
-
-      Gtk.ScrolledWindow wizard_controls_scroll {
-        hscrollbar-policy: never;
-        vscrollbar-policy: automatic;
+      Gtk.Box wizard_layout {
+        orientation: horizontal;
+        spacing: 16;
         hexpand: true;
         vexpand: true;
-        min-content-height: 220;
-        min-content-width: 440;
 
-        Gtk.Box wizard_controls {
+        Gtk.Box {
           orientation: vertical;
           spacing: 10;
-          valign: start;
+          width-request: 320;
+          hexpand: false;
+          vexpand: true;
+          Gtk.Label {
+            label: "Pattern study";
+            xalign: 0;
+            styles [ "heading" ]
+          }
+          Gtk.Expander wizard_preview_help {
+            label: "About this preview";
+            Gtk.Label wizard_preview_description {
+              label: "A neutral light-to-dark sample shows how your pattern responds to tone. Apply it to see the result on your artwork.";
+              xalign: 0;
+              wrap: true;
+              max-width-chars: 34;
+              styles [ "dim-label" ]
+            }
+          }
+          Gtk.Label wizard_preview_status {
+            xalign: 0;
+            wrap: true;
+            max-width-chars: 34;
+            styles [ "dim-label" ]
+          }
+          Gtk.ScrolledWindow wizard_preview_viewport {
+            height-request: 320;
+            min-content-height: 320;
+            max-content-height: 320;
+            hscrollbar-policy: never;
+            vscrollbar-policy: never;
+            propagate-natural-height: false;
+            hexpand: true;
+            vexpand: false;
+
+            Gtk.Overlay wizard_preview_frame {
+              hexpand: true;
+              vexpand: false;
+
+              Gtk.Picture wizard_preview {
+                content-fit: contain;
+                can-shrink: true;
+                hexpand: true;
+                vexpand: false;
+                styles [ "toniator-wizard-preview" ]
+              }
+
+              [overlay]
+              Gtk.DrawingArea wizard_guide_overlay {
+                can-target: false;
+                focusable: false;
+              }
+
+              [overlay]
+              Gtk.Spinner wizard_spinner {
+                visible: false;
+                halign: center;
+                valign: center;
+                tooltip-text: "Preview updating";
+              }
+            }
+          }
+          Gtk.Label wizard_guide_legend {
+            label: "Blue: guide shape · preview only";
+            visible: false;
+            xalign: 0;
+            wrap: true;
+          }
+        }
+
+        Gtk.ScrolledWindow wizard_gallery_panel {
+          hscrollbar-policy: never;
+          vscrollbar-policy: automatic;
+          hexpand: true;
+          vexpand: true;
+          min-content-width: 300;
+          min-content-height: 300;
+
+          Gtk.Box wizard_gallery {
+            orientation: vertical;
+            spacing: 10;
+            valign: start;
+
+            Gtk.Label wizard_gallery_heading {
+              label: "Pattern Gallery";
+              xalign: 0;
+              styles [ "heading" ]
+            }
+
+            Gtk.Label wizard_gallery_instruction {
+              label: "Select a Pattern, then Apply Pattern or Customize. Personal Patterns use Review.";
+              xalign: 0;
+              wrap: true;
+              styles [ "dim-label" ]
+            }
+
+            Gtk.FlowBox wizard_cards {
+              selection-mode: none;
+              row-spacing: 10;
+              column-spacing: 10;
+              max-children-per-line: 2;
+              min-children-per-line: 1;
+              hexpand: true;
+              valign: start;
+            }
+          }
+        }
+
+        Gtk.Box wizard_page_panel {
+          orientation: horizontal;
+          spacing: 20;
+          hexpand: true;
+          vexpand: true;
+          width-request: 300;
+
+          Gtk.ScrolledWindow wizard_controls_scroll {
+            hscrollbar-policy: never;
+            vscrollbar-policy: automatic;
+            hexpand: true;
+            vexpand: true;
+            min-content-height: 220;
+            min-content-width: 440;
+
+            Gtk.Box wizard_controls {
+              orientation: vertical;
+              spacing: 10;
+              valign: start;
+            }
+          }
         }
       }
+
     }
   }
 
-  Gtk.Box wizard_actions {
-    orientation: horizontal;
-    spacing: 8;
-    halign: end;
+  Gtk.FlowBox wizard_actions {
+    selection-mode: none;
+    row-spacing: 6;
+    column-spacing: 6;
+    min-children-per-line: 1;
+    max-children-per-line: 8;
+    homogeneous: true;
+    hexpand: true;
   }
 }

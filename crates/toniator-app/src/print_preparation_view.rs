@@ -322,6 +322,26 @@ impl Controls {
                 "Grow gap to minimum",
             ])));
         template.gap_strategy.set_selected(0);
+        let gap_factory = gtk::SignalListItemFactory::new();
+        gap_factory.connect_setup(|_, item| {
+            if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
+                let label = gtk::Label::new(None);
+                label.set_xalign(0.0);
+                label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                label.set_max_width_chars(22);
+                item.set_child(Some(&label));
+            }
+        });
+        gap_factory.connect_bind(|_, item| {
+            if let Some(item) = item.downcast_ref::<gtk::ListItem>()
+                && let Some(value) = item.item().and_downcast::<gtk::StringObject>()
+                && let Some(label) = item.child().and_downcast::<gtk::Label>()
+            {
+                label.set_label(&value.string());
+                label.set_tooltip_text(Some(&value.string()));
+            }
+        });
+        template.gap_strategy.set_factory(Some(&gap_factory));
         if let Some(size) = settings.size_mm() {
             let (width, height) = size.millimetres();
             template.box_width.set_text(&format_decimal(width));
@@ -377,8 +397,59 @@ impl Controls {
         template
             .highlight_picture
             .set_paintable(None::<&gtk::gdk::Paintable>);
-        template.canvas_scroll.set_min_content_width(320);
-        template.canvas_scroll.set_min_content_height(280);
+        template.canvas_scroll.set_min_content_width(0);
+        template.canvas_scroll.set_min_content_height(180);
+        let preview_rows = [
+            template
+                .preview_backdrop
+                .parent()
+                .and_downcast::<gtk::Box>(),
+            template.garment_color.parent().and_downcast::<gtk::Box>(),
+            template.background_fill.parent().and_downcast::<gtk::Box>(),
+            template.custom_fill.parent().and_downcast::<gtk::Box>(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        if let Some(label) = template.prepare_toggle.child().and_downcast::<gtk::Label>() {
+            label.set_wrap(true);
+            label.set_xalign(0.0);
+        }
+        install_png_options_layout(
+            &window,
+            &template.options_paned,
+            &template.options_scroll,
+            &preview_rows,
+            &[
+                template.output_settings.clone(),
+                template.box_settings.clone(),
+                template.correction_settings.clone(),
+            ],
+        );
+        for button in [
+            &template.preview_zoom_out,
+            &template.preview_actual_size,
+            &template.preview_zoom_in,
+            &template.preview_fit,
+            &template.close,
+            &template.export,
+        ] {
+            if let Some(wrapper) = button.parent() {
+                wrapper.set_focusable(false);
+                button
+                    .bind_property("sensitive", &wrapper, "sensitive")
+                    .sync_create()
+                    .build();
+            }
+        }
+        if let Some(content) = template.review_expander.child() {
+            content.set_visible(template.review_expander.is_expanded());
+            template
+                .review_expander
+                .connect_expanded_notify(move |expander| {
+                    content.set_visible(expander.is_expanded());
+                });
+        }
 
         let syncing = Rc::new(Cell::new(false));
         let garment_rgb = Rc::new(Cell::new([112, 64, 160]));
@@ -492,6 +563,129 @@ impl Controls {
         project();
         self.syncing.set(false);
     }
+}
+
+/// Reflows native PNG fields and the resizable preview split from the actual window allocation.
+///
+/// Narrow or large-text windows expose one vertically scrolling stack above the pinned actions.
+/// Wide windows retain the user's horizontal divider position. Only GTK allocation changes;
+/// output selection, preview pixels, document state, and export authority remain untouched.
+/// The bounded local tick stops when its owning window is hidden.
+fn install_png_options_layout(
+    window: &gtk::Window,
+    paned: &gtk::Paned,
+    settings_scroll: &gtk::ScrolledWindow,
+    preview_rows: &[gtk::Box],
+    grids: &[gtk::Grid],
+) {
+    let mut fields = Vec::new();
+    for grid in grids {
+        let mut child = grid.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            let (column, row, width, height) = grid.query_child(&widget);
+            fields.push((grid.clone(), widget, column, row, width, height));
+        }
+    }
+    let Some(layout) = paned.parent().and_downcast::<gtk::Box>() else {
+        return;
+    };
+    let Some(preview) = paned.end_child() else {
+        return;
+    };
+    let window = window.clone();
+    let paned = paned.clone();
+    let settings_scroll = settings_scroll.clone();
+    let preview_rows = preview_rows.to_vec();
+    let mut previous = None;
+    let mut wide_position = 520;
+    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+        if !window.is_visible() {
+            return glib::ControlFlow::Break;
+        }
+        let font_height = window.pango_context().metrics(None, None).height() / gtk::pango::SCALE;
+        let narrow = window.width() < (font_height * 62).max(900);
+        if narrow && previous == Some(false) {
+            wide_position = paned.position();
+        }
+        if narrow {
+            if let Some(content) = settings_scroll.child() {
+                let (_, height, _, _) =
+                    content.measure(gtk::Orientation::Vertical, window.width().max(1));
+                if settings_scroll.min_content_height() != height {
+                    settings_scroll.set_min_content_height(height);
+                }
+            }
+        } else {
+            settings_scroll.set_min_content_height(-1);
+        }
+        if previous != Some(narrow) {
+            let focused = gtk::prelude::GtkWindowExt::focus(&window);
+            if narrow {
+                paned.set_start_child(None::<&gtk::Widget>);
+                paned.set_end_child(None::<&gtk::Widget>);
+                paned.set_visible(false);
+                layout.append(&settings_scroll);
+                layout.append(&preview);
+            } else {
+                if previous == Some(true) {
+                    layout.remove(&settings_scroll);
+                    layout.remove(&preview);
+                    paned.set_start_child(Some(&settings_scroll));
+                    paned.set_end_child(Some(&preview));
+                }
+                paned.set_visible(true);
+                paned.set_position(wide_position);
+            }
+            settings_scroll.set_propagate_natural_height(narrow);
+            settings_scroll.set_vexpand(!narrow);
+            for row in &preview_rows {
+                row.set_orientation(if narrow {
+                    gtk::Orientation::Vertical
+                } else {
+                    gtk::Orientation::Horizontal
+                });
+                let mut child = row.first_child();
+                while let Some(widget) = child {
+                    child = widget.next_sibling();
+                    if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                        label.set_xalign(0.0);
+                        label.set_wrap(true);
+                    } else if widget.is::<gtk::DrawingArea>() {
+                        widget.set_halign(gtk::Align::Start);
+                    }
+                }
+            }
+            for (grid, widget, column, row, width, height) in &fields {
+                let Some(child) = grid.layout_manager().and_then(|layout| {
+                    layout
+                        .layout_child(widget)
+                        .downcast::<gtk::GridLayoutChild>()
+                        .ok()
+                }) else {
+                    continue;
+                };
+                child.set_column(if narrow { 0 } else { *column });
+                child.set_row(if narrow { row * 2 + column } else { *row });
+                child.set_column_span(if narrow { 1 } else { *width });
+                child.set_row_span(*height);
+            }
+            if let Some(focused) = focused {
+                let restored = if let Some(text) = focused.downcast_ref::<gtk::Text>() {
+                    text.grab_focus_without_selecting()
+                } else if let Some(entry) = focused.downcast_ref::<gtk::Entry>() {
+                    entry.grab_focus_without_selecting()
+                } else {
+                    focused.grab_focus()
+                };
+                if !restored && narrow {
+                    settings_scroll.child_focus(gtk::DirectionType::TabForward);
+                }
+            }
+            previous = Some(narrow);
+        }
+        glib::ControlFlow::Continue
+    });
 }
 
 impl Surface {

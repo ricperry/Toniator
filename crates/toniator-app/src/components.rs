@@ -7,6 +7,34 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 
+/// Describes allocation and visibility only; no document, viewport or edit state is stored here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct InspectorLayout {
+    pub narrow: bool,
+    pub canvas_visible: bool,
+    pub settings_visible: bool,
+    pub preferred_width: i32,
+}
+
+/// Derives the fixed text-scaled inspector allocation without changing the requested Settings state.
+/// The canvas receives at least twenty-eight text ems beside the approximately twenty-four-em inspector.
+/// Narrow allocations show the same Settings widget full-width until the user returns explicitly.
+pub(crate) fn inspector_layout(
+    width: i32,
+    preferred_width: i32,
+    requested: bool,
+) -> InspectorLayout {
+    let preferred_width = preferred_width.max(1);
+    let canvas_minimum = (i64::from(preferred_width) * 28 / 24).max(376);
+    let narrow = i64::from(width) < i64::from(preferred_width) + canvas_minimum;
+    InspectorLayout {
+        narrow,
+        canvas_visible: !narrow || !requested,
+        settings_visible: requested,
+        preferred_width,
+    }
+}
+
 mod main_shell {
     use super::*;
 
@@ -25,7 +53,7 @@ mod main_shell {
         #[template_child]
         pub main_banner_dismiss: gtk::TemplateChild<gtk::Button>,
         #[template_child]
-        pub workspace_split: gtk::TemplateChild<gtk::Paned>,
+        pub workspace_split: gtk::TemplateChild<gtk::Box>,
         #[template_child]
         pub file_button: gtk::TemplateChild<gtk::MenuButton>,
         #[template_child]
@@ -77,11 +105,37 @@ mod main_shell {
         #[template_child]
         pub inspector_scroll: gtk::TemplateChild<gtk::ScrolledWindow>,
         #[template_child]
+        pub inspector_column: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
         pub inspector_status: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub inspector_status_row: gtk::TemplateChild<gtk::Box>,
         #[template_child]
         pub cancel_pattern_calibration: gtk::TemplateChild<gtk::Button>,
         #[template_child]
-        pub process_memory_status: gtk::TemplateChild<gtk::Label>,
+        pub canvas_column: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub back_to_canvas: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub toolbar_trailing: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub viewport_toolbar: gtk::TemplateChild<gtk::FlowBox>,
+        #[template_child]
+        pub view_switcher: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub appearance_group: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub variation_group: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub options_group: gtk::TemplateChild<gtk::Expander>,
+        #[template_child]
+        pub frequent_output_group: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub frequent_output_controls: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub print_attention: gtk::TemplateChild<gtk::Label>,
+        pub(super) layout: std::cell::Cell<Option<super::InspectorLayout>>,
+        pub(super) restore_focus: std::cell::RefCell<Option<glib::WeakRef<gtk::Widget>>>,
         #[template_child]
         pub model_selector: gtk::TemplateChild<gtk::DropDown>,
         #[template_child]
@@ -164,27 +218,200 @@ impl ToniatorMainShell {
             .main_banner_scroll
             .vscrollbar()
             .update_property(&[gtk::accessible::Property::Label("Message details")]);
+        shell.set_banner(None);
+        let weak = shell.downgrade();
+        shell.add_tick_callback(move |_, _| {
+            if let Some(shell) = weak.upgrade() {
+                shell.sync_layout();
+            }
+            glib::ControlFlow::Continue
+        });
+        let weak = shell.downgrade();
+        shell.drawer().connect_toggled(move |_| {
+            if let Some(shell) = weak.upgrade() {
+                shell.sync_layout();
+            }
+        });
+        let drawer = shell.drawer();
+        shell
+            .imp()
+            .back_to_canvas
+            .connect_clicked(move |_| drawer.set_active(false));
+        let keys = gtk::EventControllerKey::new();
+        let weak = shell.downgrade();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape
+                && let Some(shell) = weak.upgrade()
+                && shell
+                    .imp()
+                    .layout
+                    .get()
+                    .is_some_and(|layout| layout.narrow && layout.settings_visible)
+            {
+                shell.drawer().set_active(false);
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        shell.add_controller(keys);
         shell
     }
 
-    /// Applies one visible banner message without affecting application authority.
+    /// Reconciles only allocation, visibility and focus while retaining the existing inspector,
+    /// scroller, viewport and document/edit owners. A hidden Settings control never receives focus.
+    /// Current font digit metrics keep the approximately 320px inspector proportional to large text.
+    /// The pinned Back action receives entry focus outside the retained scroller, preserving its offset.
+    pub fn sync_layout(&self) {
+        self.imp().inspector_status_row.set_visible(
+            self.imp().inspector_status.get_visible()
+                && !self.imp().inspector_status.text().is_empty()
+                || self.imp().cancel_pattern_calibration.get_visible(),
+        );
+        if self.width() <= 0 {
+            return;
+        }
+        let preferred_width = self
+            .create_pango_layout(Some(&"0".repeat(39)))
+            .pixel_size()
+            .0;
+        let layout = inspector_layout(self.width(), preferred_width, self.drawer().is_active());
+        let canvas_width = self.width()
+            - if layout.settings_visible && !layout.narrow {
+                layout.preferred_width
+            } else {
+                0
+            };
+        let trailing_minimum = self
+            .imp()
+            .endpoint_controls
+            .measure(gtk::Orientation::Horizontal, -1)
+            .0
+            + self
+                .imp()
+                .view_switcher
+                .measure(gtk::Orientation::Horizontal, -1)
+                .0
+            + 6;
+        self.imp()
+            .toolbar_trailing
+            .set_orientation(if trailing_minimum > canvas_width - 16 {
+                gtk::Orientation::Vertical
+            } else {
+                gtk::Orientation::Horizontal
+            });
+        let previous = self.imp().layout.replace(Some(layout));
+        if previous == Some(layout) {
+            return;
+        }
+        let entering =
+            !layout.canvas_visible && previous.is_none_or(|previous| previous.canvas_visible);
+        let current_focus = self
+            .root()
+            .and_downcast::<gtk::Window>()
+            .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window));
+        let retains_inspector_focus = current_focus
+            .as_ref()
+            .is_some_and(|focus| focus.is_ancestor(&self.imp().inspector_column.get()));
+        if entering
+            && !retains_inspector_focus
+            && let Some(window) = self.root().and_downcast::<gtk::Window>()
+        {
+            *self.imp().restore_focus.borrow_mut() =
+                gtk::prelude::GtkWindowExt::focus(&window).map(|widget| widget.downgrade());
+        }
+        self.imp().canvas_column.set_visible(layout.canvas_visible);
+        let inspector = self.imp().inspector_column.get();
+        inspector.set_hexpand(layout.narrow);
+        inspector.set_width_request(if layout.narrow {
+            -1
+        } else {
+            layout.preferred_width
+        });
+        inspector.set_visible(layout.settings_visible);
+        self.imp()
+            .back_to_canvas
+            .set_visible(layout.narrow && layout.settings_visible);
+        if entering && !retains_inspector_focus {
+            self.imp().back_to_canvas.grab_focus();
+        } else if !layout.settings_visible
+            && previous.is_some_and(|previous| previous.settings_visible)
+        {
+            let restored = self
+                .imp()
+                .restore_focus
+                .borrow_mut()
+                .take()
+                .and_then(|focus| focus.upgrade())
+                .filter(|widget| widget.is_mapped() && widget.is_sensitive())
+                .is_some_and(|widget| widget.grab_focus());
+            if !restored {
+                self.drawer().grab_focus();
+            }
+        }
+    }
+
+    /// Hides empty descriptor sections without changing their rows, callbacks or expansion state.
+    pub fn sync_inspector_sections(&self) {
+        let populated = |container: &gtk::Box| {
+            let mut child = container.first_child();
+            while let Some(widget) = child {
+                if widget.get_visible() {
+                    return true;
+                }
+                child = widget.next_sibling();
+            }
+            false
+        };
+        self.imp()
+            .appearance_group
+            .set_visible(populated(&self.appearance_controls()));
+        self.imp()
+            .variation_group
+            .set_visible(populated(&self.variation_controls()));
+        self.imp()
+            .options_group
+            .set_visible(populated(&self.options_controls()));
+        self.imp()
+            .frequent_output_group
+            .set_visible(populated(&self.frequent_output_controls()));
+    }
+
+    /// Exposes active print attention outside the collapsed review without changing print authority.
+    pub fn set_print_attention(&self, message: Option<&str>) {
+        self.imp()
+            .print_attention
+            .set_label(message.unwrap_or_default());
+        self.imp().print_attention.set_visible(message.is_some());
+    }
+
+    /// Presents a message or removes its complete allocation and focus subtree immediately.
+    /// Text and dismissal remain presentation-only and never affect document authority.
     pub fn set_banner(&self, message: Option<&str>) {
         self.imp()
             .main_banner
             .set_label(message.unwrap_or_default());
         self.imp()
+            .viewport_toolbar
+            .set_max_children_per_line(if message.is_some() { 3 } else { 2 });
+        self.imp()
             .main_banner_revealer
             .set_reveal_child(message.is_some());
+        self.imp()
+            .main_banner_revealer
+            .set_visible(message.is_some());
+        if let Some(wrapper) = self
+            .imp()
+            .main_banner_revealer
+            .parent()
+            .and_downcast::<gtk::FlowBoxChild>()
+        {
+            wrapper.set_visible(message.is_some());
+        }
     }
 
     /// Returns the explicit control that hides the currently presented banner message.
     pub fn banner_dismiss(&self) -> gtk::Button {
         self.imp().main_banner_dismiss.get()
-    }
-
-    /// Returns the template-owned conventional GTK split container.
-    pub fn split(&self) -> gtk::Paned {
-        self.imp().workspace_split.get()
     }
 
     /// Returns the static File menu button whose menu model is runtime-owned.
@@ -310,11 +537,6 @@ impl ToniatorMainShell {
         self.imp().cancel_pattern_calibration.get()
     }
 
-    /// Returns the compact process-memory status label.
-    pub fn process_memory_status(&self) -> gtk::Label {
-        self.imp().process_memory_status.get()
-    }
-
     /// Returns the template-owned model selector.
     pub fn model_selector(&self) -> gtk::DropDown {
         self.imp().model_selector.get()
@@ -358,6 +580,11 @@ impl ToniatorMainShell {
     /// Returns the contextual options control group.
     pub fn options_controls(&self) -> gtk::Box {
         self.imp().options_controls.get()
+    }
+
+    /// Returns visible opacity and visibility controls, retaining per-output grouping where needed.
+    pub fn frequent_output_controls(&self) -> gtk::Box {
+        self.imp().frequent_output_controls.get()
     }
 
     /// Returns the applied size, threshold, and review-state summary.
@@ -471,7 +698,7 @@ mod pattern_editor_shell {
         #[template_child]
         pub draft_scroll: gtk::TemplateChild<gtk::ScrolledWindow>,
         #[template_child]
-        pub draft_actions: gtk::TemplateChild<gtk::Box>,
+        pub draft_actions: gtk::TemplateChild<gtk::FlowBox>,
         #[template_child]
         pub draft_introduction: gtk::TemplateChild<gtk::Label>,
         #[template_child]
@@ -498,6 +725,8 @@ mod pattern_editor_shell {
         pub selected_point_label: gtk::TemplateChild<gtk::Label>,
         #[template_child]
         pub primary_rows: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub advanced: gtk::TemplateChild<gtk::Expander>,
         #[template_child]
         pub advanced_rows: gtk::TemplateChild<gtk::Box>,
         #[template_child]
@@ -547,9 +776,19 @@ glib::wrapper! {
 }
 
 impl ToniatorPatternEditorShell {
-    /// Creates a private editor shell before dynamic draft rows attach.
+    /// Creates a scrolling private editor with pinned actions before draft rows attach.
+    ///
+    /// Advanced child visibility follows native expansion immediately so collapsed
+    /// controls leave keyboard traversal; no document or history state changes.
     pub fn new() -> Self {
-        glib::Object::builder().build()
+        let shell: Self = glib::Object::builder().build();
+        shell
+            .imp()
+            .advanced
+            .bind_property("expanded", &shell.imp().advanced_rows.get(), "visible")
+            .sync_create()
+            .build();
+        shell
     }
     /// Returns the template-owned draft status label.
     pub fn status(&self) -> gtk::Label {
@@ -563,9 +802,21 @@ impl ToniatorPatternEditorShell {
     pub fn spinner(&self) -> gtk::Spinner {
         self.imp().draft_preview_spinner.get()
     }
-    /// Appends a stable footer action to the template-owned action row.
+    /// Appends one native wrapping footer action in stable order without draft authority.
+    /// Its wrapper follows native visibility and sensitivity, skipping disabled actions in keyboard traversal.
     pub fn append_action(&self, action: &impl IsA<gtk::Widget>) {
-        self.imp().draft_actions.append(action);
+        self.imp().draft_actions.insert(action, -1);
+        if let Some(wrapper) = action.as_ref().parent() {
+            wrapper.set_focusable(false);
+            action
+                .bind_property("visible", &wrapper, "visible")
+                .sync_create()
+                .build();
+            action
+                .bind_property("sensitive", &wrapper, "sensitive")
+                .sync_create()
+                .build();
+        }
     }
     /// Returns the static draft disclosure label.
     pub fn introduction(&self) -> gtk::Label {
@@ -842,6 +1093,8 @@ mod pattern_wizard_shell {
         #[template_child]
         pub wizard_layout: gtk::TemplateChild<gtk::Box>,
         #[template_child]
+        pub wizard_content_scroll: gtk::TemplateChild<gtk::ScrolledWindow>,
+        #[template_child]
         pub wizard_gallery_panel: gtk::TemplateChild<gtk::ScrolledWindow>,
         #[template_child]
         pub wizard_cards: gtk::TemplateChild<gtk::FlowBox>,
@@ -856,6 +1109,8 @@ mod pattern_wizard_shell {
         #[template_child]
         pub wizard_preview_description: gtk::TemplateChild<gtk::Label>,
         #[template_child]
+        pub wizard_preview_help: gtk::TemplateChild<gtk::Expander>,
+        #[template_child]
         pub wizard_guide_overlay: gtk::TemplateChild<gtk::DrawingArea>,
         #[template_child]
         pub wizard_guide_legend: gtk::TemplateChild<gtk::Label>,
@@ -866,7 +1121,7 @@ mod pattern_wizard_shell {
         #[template_child]
         pub wizard_spinner: gtk::TemplateChild<gtk::Spinner>,
         #[template_child]
-        pub wizard_actions: gtk::TemplateChild<gtk::Box>,
+        pub wizard_actions: gtk::TemplateChild<gtk::FlowBox>,
     }
 
     #[glib::object_subclass]
@@ -899,9 +1154,34 @@ glib::wrapper! {
 }
 
 impl ToniatorPatternWizardShell {
-    /// Creates one resource-owned wizard shell before catalog cards and actions attach.
+    /// Creates the private shell with scrollable content and wrapping native actions.
+    ///
+    /// Preview help follows its native expansion state immediately, keeping collapsed
+    /// children out of keyboard traversal without changing preview or draft authority.
+    /// Empty idle status collapses while pending and failure labels retain their allocation.
     pub fn new() -> Self {
-        glib::Object::builder().build()
+        let shell: Self = glib::Object::builder().build();
+        shell
+            .imp()
+            .wizard_preview_help
+            .update_property(&[gtk::accessible::Property::Label("About this preview")]);
+        shell
+            .imp()
+            .wizard_preview_help
+            .bind_property(
+                "expanded",
+                &shell.imp().wizard_preview_description.get(),
+                "visible",
+            )
+            .sync_create()
+            .build();
+        let preview_status = shell.imp().wizard_preview_status.get();
+        preview_status
+            .bind_property("label", &preview_status, "visible")
+            .transform_to(|_, label: String| Some(!label.is_empty()))
+            .sync_create()
+            .build();
+        shell
     }
 
     /// Returns the target and family breadcrumb presentation label.
@@ -917,6 +1197,11 @@ impl ToniatorPatternWizardShell {
     /// Returns the responsive group container for gallery/page and preview.
     pub fn layout(&self) -> gtk::Box {
         self.imp().wizard_layout.get()
+    }
+
+    /// Returns the content viewport that keeps the footer outside short-window scrolling.
+    pub fn content_scroll(&self) -> gtk::ScrolledWindow {
+        self.imp().wizard_content_scroll.get()
     }
 
     /// Returns the full-width Presets container shown only on the first fixed wizard card.
@@ -982,9 +1267,17 @@ impl ToniatorPatternWizardShell {
         self.imp().wizard_spinner.get()
     }
 
-    /// Appends one explicit wizard action without transferring document authority.
+    /// Appends one native wrapping action in stable order without transferring document authority.
+    /// Its layout wrapper follows the button's visibility immediately and adds no focus stop.
     pub fn append_action(&self, action: &impl IsA<gtk::Widget>) {
-        self.imp().wizard_actions.append(action);
+        self.imp().wizard_actions.insert(action, -1);
+        if let Some(wrapper) = action.as_ref().parent() {
+            wrapper.set_focusable(false);
+            action
+                .bind_property("visible", &wrapper, "visible")
+                .sync_create()
+                .build();
+        }
     }
 }
 
@@ -1175,6 +1468,10 @@ mod png_export_options {
     #[derive(Default, gtk::CompositeTemplate)]
     #[template(resource = "/com/silentbutdigital/Toniator/png-export-options.ui")]
     pub struct ToniatorPngExportOptions {
+        #[template_child]
+        pub print_options_scroll: gtk::TemplateChild<gtk::ScrolledWindow>,
+        #[template_child]
+        pub png_output_settings: gtk::TemplateChild<gtk::Grid>,
         #[template_child]
         pub print_options_paned: gtk::TemplateChild<gtk::Paned>,
         #[template_child]
@@ -1377,6 +1674,8 @@ impl ToniatorPngExportOptions {
         let imp = self.imp();
         PrintPreparationControls {
             options_paned: imp.print_options_paned.get(),
+            options_scroll: imp.print_options_scroll.get(),
+            output_settings: imp.png_output_settings.get(),
             backing_summary: imp.png_backing_summary.get(),
             review_button: imp.print_review_button.get(),
             review_expander: imp.print_review_expander.get(),
@@ -1444,6 +1743,10 @@ impl ToniatorPngExportOptions {
 pub(crate) struct PrintPreparationControls {
     /// Resizable settings/preview split whose native handle supports keyboard adjustment.
     pub(crate) options_paned: gtk::Paned,
+    /// Settings scroller whose natural height is exposed in the narrow stacked layout.
+    pub(crate) options_scroll: gtk::ScrolledWindow,
+    /// Ordinary PNG fields retain their native labels while reflowing at narrow widths.
+    pub(crate) output_settings: gtk::Grid,
     pub(crate) backing_summary: gtk::Label,
     pub(crate) review_button: gtk::Button,
     pub(crate) review_expander: gtk::Expander,

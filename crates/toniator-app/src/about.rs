@@ -6,6 +6,7 @@ use gtk::prelude::*;
 ///
 /// Links open only on activation through GTK's URI handler. Closing this modal window leaves
 /// the parent document untouched. A missing icon decode simply omits the decorative image.
+/// Collapsed license content stays invisible and outside native keyboard traversal.
 pub fn present(parent: &gtk::Window) {
     let window = gtk::Window::builder()
         .title("About Toniator")
@@ -79,6 +80,10 @@ pub fn present(parent: &gtk::Window) {
         .child(&license_text)
         .build();
     license.set_child(Some(&license_scroll));
+    license
+        .bind_property("expanded", &license_scroll, "visible")
+        .sync_create()
+        .build();
     content.append(&license);
     let notices = gtk::LinkButton::with_label(
         "https://github.com/ricperry/Toniator/blob/main/packaging/MEDIA-NOTICES.md",

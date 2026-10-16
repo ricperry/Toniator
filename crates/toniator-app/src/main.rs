@@ -16,9 +16,9 @@ mod calibration_preparation;
 use toniator_engine::evaluate_with_limits;
 mod components;
 mod controller;
-mod document_presets;
 #[cfg(test)]
 mod current_test_fixtures;
+mod document_presets;
 mod main_view_state;
 mod paint_editor;
 mod personal_pattern_management;
@@ -180,23 +180,19 @@ const WIZARD_IMAGE_RESOURCE_PATHS: [&str; 18] = [
     "/com/silentbutdigital/Toniator/preset-icons/two-guide-cells-uniform-offset.svg",
     "/com/silentbutdigital/Toniator/preset-icons/two-guide-maze.svg",
 ];
-const LIFECYCLE_BUTTONS: [(&str, &str, &str); 8] = [
-    ("_New", "app.new", "New document (Ctrl+N)"),
-    ("_Open", "app.open", "Open a document or artwork (Ctrl+O)"),
-    ("_Save", "app.save", "Save document (Ctrl+S)"),
-    ("Save _As", "app.save-as", "Save document as (Ctrl+Shift+S)"),
-    (
-        "Export _image...",
-        "app.export-image",
-        "Export the current frame as PNG or SVG (Ctrl+E)",
-    ),
-    (
-        "Export _video",
-        "app.export-video",
-        "Export video or a PNG sequence",
-    ),
-    ("_Close", "app.close", "Close document (Ctrl+W)"),
-    ("E_xit", "app.exit", "Exit Toniator (Ctrl+Q)"),
+/// Defines the actual grouped secondary menu; New/Open remain in the persistent split action.
+const MAIN_MENU_SECTIONS: &[&[(&str, &str)]] = &[
+    &[("Save", "app.save"), ("Save As…", "app.save-as")],
+    &[
+        ("Export image…", "app.export-image"),
+        ("Export video…", "app.export-video"),
+    ],
+    &[("Animation settings…", "app.animation-settings")],
+    &[("Close", "app.close"), ("Exit", "app.exit")],
+    &[
+        ("Help and feedback…", "app.help"),
+        ("About Toniator", "app.help"),
+    ],
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -873,6 +869,8 @@ fn save_route(workspace: Option<&Workspace>) -> SaveRoute {
     }
 }
 
+/// Projects lifecycle action applicability without changing document authority.
+/// Source-less documents retain model editing; Save and Export still require their existing source boundary.
 fn ui_policy(
     workspace: Option<&Workspace>,
     loading: bool,
@@ -888,9 +886,7 @@ fn ui_policy(
         save_enabled: can_save,
         save_as_enabled: can_save,
         export_enabled: can_save,
-        selector_enabled: !loading
-            && !exporting
-            && workspace.is_some_and(|workspace| workspace.source_presentation.is_some()),
+        selector_enabled: !loading && !exporting && workspace.is_some(),
         undo_enabled: !busy && workspace.is_some_and(|workspace| workspace.history.can_undo()),
         redo_enabled: !busy && workspace.is_some_and(|workspace| workspace.history.can_redo()),
         title: workspace.map_or_else(|| "Toniator".to_owned(), Workspace::title),
@@ -903,6 +899,7 @@ enum BannerPolicy {
     Message(String),
 }
 
+/// Chooses non-authoritative main-banner text with operation errors before source information.
 fn banner_policy(
     migration_notice: bool,
     live_text: Option<&toniator_engine::SvgTextDiagnostic>,
@@ -975,6 +972,22 @@ fn accepts_private_preview_terminal(
     completion_ticket: u64,
 ) -> bool {
     current_epoch == completion_epoch && pending_ticket == Some(completion_ticket)
+}
+
+/// Validates a private evaluator result against its editable origin before projection acceptance.
+///
+/// The projected session owns only evaluator tokens. Workspace generation, editor epoch,
+/// authored revision and endpoint remain authoritative in the retained source request key.
+fn accepts_pattern_editor_preview_origin(
+    origin: Option<temporal_preview::RequestKey>,
+    epoch: u64,
+    workspace: u64,
+    session: &DocumentSession,
+    endpoint: temporal_preview::Endpoint,
+) -> bool {
+    origin.is_some_and(|key| {
+        key.epoch == epoch && key.is_current(origin, workspace, session, endpoint)
+    })
 }
 
 /// Models private-preview surface retention after one terminal completion without any GTK mutation.
@@ -1451,8 +1464,6 @@ const NARROW_EDITOR_MAX_WIDTH_PX: i32 = 700;
 /// Defines the readable wide-layout sidebar request without fixing its vertical allocation.
 const CONSTRUCTION_SIDEBAR_WIDTH_PX: i32 = 320;
 
-/// Defines the smallest usable channel-settings sidebar allocation.
-const MAIN_SIDEBAR_MIN_WIDTH_PX: i32 = 300;
 /// Records the fixed intrinsic dimensions of the bundled neutral Wizard source.
 const WIZARD_NEUTRAL_SOURCE_EDGE_PX: u32 = 100;
 /// Keeps graph-backed previews on the same small neutral canvas, preserving workspace aspect.
@@ -1476,63 +1487,28 @@ const WIZARD_NARROW_MAX_WIDTH_PX: i32 = 820;
 /// Fixes a readable non-expanding Presets card width for the responsive FlowBox grid.
 const WIZARD_PRESET_CARD_WIDTH_PX: i32 = 220;
 
-/// Defines the largest channel-settings sidebar allocation at wide window sizes.
-const MAIN_SIDEBAR_MAX_WIDTH_PX: i32 = 420;
-
 /// Reports whether a current editor allocation must use the reachable narrow layout.
 const fn uses_narrow_editor_layout(width: i32) -> bool {
     width <= NARROW_EDITOR_MAX_WIDTH_PX
-}
-
-/// Computes the readable channel-settings width without letting it consume a wide preview.
-const fn main_sidebar_width_for_window(width: i32) -> i32 {
-    let requested = width / 3;
-    if requested < MAIN_SIDEBAR_MIN_WIDTH_PX {
-        MAIN_SIDEBAR_MIN_WIDTH_PX
-    } else if requested > MAIN_SIDEBAR_MAX_WIDTH_PX {
-        MAIN_SIDEBAR_MAX_WIDTH_PX
-    } else {
-        requested
-    }
-}
-
-/// Computes the GtkPaned start position that leaves the active sidebar at its target width.
-const fn main_split_position_for_window(width: i32) -> i32 {
-    let position = width - main_sidebar_width_for_window(width);
-    if position < 0 { 0 } else { position }
-}
-
-/// Initializes the settings split without replacing a user-selected divider position.
-///
-/// A hidden or already positioned sidebar stays untouched. GTK owns subsequent drag and window
-/// resize allocation; this initial width does not change document or preview state.
-fn apply_main_sidebar_width_policy(
-    width: i32,
-    drawer: &gtk::ToggleButton,
-    inspector: &gtk::ScrolledWindow,
-    split: &gtk::Paned,
-) {
-    if width > 0
-        && drawer.is_active()
-        && inspector.is_visible()
-        && !split.property::<bool>("position-set")
-    {
-        split.set_position(main_split_position_for_window(width));
-    }
 }
 
 /// Applies the current GTK-only construction reflow without touching draft or document state.
 ///
 /// The sidebar and canvas stay in the static Blueprint hierarchy. This function changes only
 /// their presentation allocation policy, preserving natural compact-control heights while the
-/// vertically scrollable editor keeps every control reachable at narrow modal widths.
+/// vertically scrollable editor keeps every control reachable at narrow modal widths. Current
+/// digit metrics move the reflow boundary earlier for larger text without reducing its font.
 fn apply_pattern_editor_width_policy(
     width: i32,
     layout: &gtk::Box,
     sidebar: &gtk::Box,
     canvas: &gtk::DrawingArea,
 ) {
-    if uses_narrow_editor_layout(width) {
+    let font_scaled_threshold = layout
+        .create_pango_layout(Some(&"0".repeat(88)))
+        .pixel_size()
+        .0;
+    if uses_narrow_editor_layout(width) || width <= font_scaled_threshold {
         layout.set_orientation(gtk::Orientation::Vertical);
         sidebar.set_size_request(-1, -1);
         sidebar.set_hexpand(true);
@@ -1572,6 +1548,10 @@ struct PatternEditorDraft {
     sources: SourceBundle,
     scheduler: Arc<EvaluationScheduler>,
     preview_submission: Option<u64>,
+    /// Retains the exact evaluation projection; its revision may differ from editable history.
+    preview_session: Option<DocumentSession>,
+    /// Keeps authoritative origin freshness separate from the evaluation projection token.
+    preview_origin: Option<temporal_preview::RequestKey>,
     /// Rejects source completions after an edit, endpoint switch, or newer request.
     media_preview_key: Option<temporal_preview::RequestKey>,
     epoch: u64,
@@ -1691,6 +1671,7 @@ struct PatternWizardSurface {
     gallery_panel: gtk::ScrolledWindow,
     page_panel: gtk::Box,
     page_scroll: gtk::ScrolledWindow,
+    content_scroll: gtk::ScrolledWindow,
     preview_source: WizardPreviewSource,
     picture: gtk::Picture,
     preview_description: gtk::Label,
@@ -3753,6 +3734,17 @@ impl<K> Default for PrintPreviewIntent<K> {
     }
 }
 
+/// Retains only native output composition; domain IDs and descriptors remain authoritative.
+struct MainOutputGroup {
+    frame: gtk::Frame,
+    frequent: gtk::Box,
+    technical: gtk::Box,
+    details: gtk::Expander,
+}
+
+/// Indexes retained native output composition by the domain-owned output identity.
+type MainOutputGroups = BTreeMap<PatternOutputLayerId, MainOutputGroup>;
+
 struct AppState {
     still_export_cancel: Option<Arc<AtomicBool>>,
     still_export_progress: Option<gtk::Window>,
@@ -3795,6 +3787,8 @@ struct AppState {
     preview_progress_bar: gtk::ProgressBar,
     preview_stage_progress_bar: gtk::ProgressBar,
     error: gtk::Label,
+    main_error_identity: Option<Rc<()>>,
+    save_error_at_start: Option<Rc<()>>,
     shell: components::ToniatorMainShell,
     selector: gtk::DropDown,
     channel_segments: gtk::Box,
@@ -3806,6 +3800,7 @@ struct AppState {
     appearance_controls: gtk::Box,
     variation_controls: gtk::Box,
     options_controls: gtk::Box,
+    frequent_output_controls: gtk::Box,
     advanced_controls: gtk::Box,
     inspector_status: gtk::Label,
     cancel_pattern_calibration: gtk::Button,
@@ -3813,7 +3808,7 @@ struct AppState {
     next_calibration_task: u64,
     pending_inspector_calibration: Option<PendingInspectorCalibration>,
     descriptor_components: BTreeMap<String, DescriptorComponent>,
-    main_output_groups: BTreeMap<PatternOutputLayerId, (gtk::Frame, gtk::Box)>,
+    main_output_groups: MainOutputGroups,
     inspector_runtime: InspectorRuntime,
     syncing_inspector: bool,
     syncing_draft_editor: bool,
@@ -4195,6 +4190,8 @@ fn parse_args(arguments: Vec<std::ffi::OsString>) -> Result<Option<PathBuf>, Str
 /// authoritative headless workspace/history boundary. This function owns
 /// widget lifetime and notification wiring, but never directly mutates a
 /// document outside the existing command paths.
+/// # Panics
+/// Panics when required worker infrastructure cannot start or compiled GTK resources are invalid.
 fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     let theme_bridge = main_view_state::inherit_system_color_scheme();
     install_css();
@@ -4206,16 +4203,13 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         .build();
     window.set_size_request(480, 360);
     let file_menu = gio::Menu::new();
-    for (label, action, tooltip) in LIFECYCLE_BUTTONS {
-        if action == "app.close" {
-            file_menu.append(Some("Animation settings…"), Some("app.animation-settings"));
+    for entries in MAIN_MENU_SECTIONS {
+        let section = gio::Menu::new();
+        for &(label, action) in *entries {
+            section.append(Some(label), Some(action));
         }
-        file_menu.append(Some(&label.replace('_', "")), Some(action));
-        let _ = tooltip;
+        file_menu.append_section(None, &section);
     }
-    let information_menu = gio::Menu::new();
-    information_menu.append(Some("About Toniator"), Some("app.help"));
-    file_menu.append_section(None, &information_menu);
     let shell = components::ToniatorMainShell::new();
     let titlebar = shell.detach_titlebar();
     window.set_titlebar(Some(&titlebar));
@@ -4223,7 +4217,6 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     file_button.set_menu_model(Some(&file_menu));
     document_presets::label_menu(&file_button);
     let new_menu = gio::Menu::new();
-    new_menu.append(Some("New document"), Some("app.new"));
     new_menu.append(Some("Open artwork or document…"), Some("app.open"));
     new_menu.append(Some("Import image sequence…"), Some("app.import-sequence"));
     let preset_menu = gio::Menu::new();
@@ -4266,7 +4259,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     selector.update_property(&[gtk::accessible::Property::Label("Color model")]);
     let inspector_status = shell.inspector_status();
     let cancel_pattern_calibration = shell.cancel_pattern_calibration();
-    let process_memory_status = shell.process_memory_status();
+    let process_memory_status = gtk::Label::new(None);
     process_memory_status.update_property(&[
         gtk::accessible::Property::Label("Memory usage"),
         gtk::accessible::Property::Description(
@@ -4280,37 +4273,10 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     let appearance_controls = shell.appearance_controls();
     let variation_controls = shell.variation_controls();
     let options_controls = shell.options_controls();
+    let frequent_output_controls = shell.frequent_output_controls();
     let advanced_controls = shell.advanced_controls();
-    let inspector_scroll = shell.inspector_scroll();
-    let split = shell.split();
-    let drawer = shell.drawer();
-    let inspector_scroll_for_drawer = inspector_scroll.clone();
-    let split_for_drawer = split.clone();
-    drawer.connect_toggled(move |button| {
-        inspector_scroll_for_drawer.set_visible(button.is_active());
-        apply_main_sidebar_width_policy(
-            split_for_drawer.width(),
-            button,
-            &inspector_scroll_for_drawer,
-            &split_for_drawer,
-        );
-    });
     let startup = startup::StartupScreen::new();
     window.set_child(Some(&shell));
-    let sidebar_drawer = drawer.clone();
-    let sidebar_inspector = inspector_scroll.clone();
-    split.add_tick_callback(move |sidebar_split, _| {
-        if sidebar_split.width() <= 0 {
-            return glib::ControlFlow::Continue;
-        }
-        apply_main_sidebar_width_policy(
-            sidebar_split.width(),
-            &sidebar_drawer,
-            &sidebar_inspector,
-            sidebar_split,
-        );
-        glib::ControlFlow::Break
-    });
 
     let actions = Actions {
         select_document_preset: gio::SimpleAction::new("select-document-preset", None),
@@ -4418,6 +4384,8 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         preview_progress_bar,
         preview_stage_progress_bar,
         error,
+        main_error_identity: None,
+        save_error_at_start: None,
         shell,
         selector,
         channel_segments,
@@ -4429,6 +4397,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         appearance_controls,
         variation_controls,
         options_controls,
+        frequent_output_controls,
         advanced_controls,
         inspector_status,
         cancel_pattern_calibration,
@@ -5305,6 +5274,13 @@ fn sync_endpoint_controls(state: &AppState) {
         .end_frame
         .update_property(&[gtk::accessible::Property::Description(end_description)]);
     state.endpoint_controls.set_visible(temporal);
+    if let Some(wrapper) = state
+        .endpoint_controls
+        .parent()
+        .and_downcast::<gtk::FlowBoxChild>()
+    {
+        wrapper.set_visible(temporal);
+    }
     state
         .endpoint_controls
         .set_sensitive(!state.pending_load && !state.pending_save);
@@ -5636,11 +5612,11 @@ fn rebuild_channel_segments(
     container.set_sensitive(true);
     let all = gtk::ToggleButton::with_label("All");
     all.set_active(selected == InspectorTarget::DocumentAll);
-    all.set_tooltip_text(Some("Set each edited value on all compatible channels"));
+    all.set_tooltip_text(Some("All assigns each changed setting to every compatible channel, including overrides. Selecting a channel does not isolate the preview."));
     all.update_property(&[
         gtk::accessible::Property::Label("All channels"),
         gtk::accessible::Property::Description(
-            "Set each edited value on all compatible channels. Other settings stay independent.",
+            "All assigns each changed setting to every compatible channel, including overrides. At Start, shared Appearance assignments record the document baseline. Named edits affect only that channel; Reset restores inheritance. Selecting a channel does not isolate the preview.",
         ),
     ]);
     connect_channel_segment(state, &all, InspectorTarget::DocumentAll);
@@ -6272,6 +6248,7 @@ fn resolve_descriptor_focus(
 enum MainInspectorSection {
     Appearance,
     Variation,
+    FrequentOutput,
     Options,
 }
 
@@ -6282,10 +6259,14 @@ fn main_inspector_section(field: PropertyFieldId) -> MainInspectorSection {
         | PropertyFieldId::DensityAspect
         | PropertyFieldId::RotationDegrees
         | PropertyFieldId::TranslationX
-        | PropertyFieldId::TranslationY => MainInspectorSection::Appearance,
+        | PropertyFieldId::TranslationY
+        | PropertyFieldId::ShapeRotationDegrees => MainInspectorSection::Appearance,
         PropertyFieldId::RandomSeed
         | PropertyFieldId::ConnectionSeed
         | PropertyFieldId::MazeSeed => MainInspectorSection::Variation,
+        PropertyFieldId::Opacity | PropertyFieldId::Visibility => {
+            MainInspectorSection::FrequentOutput
+        }
         _ => MainInspectorSection::Options,
     }
 }
@@ -6296,6 +6277,7 @@ fn main_inspector_container(state: &AppState, section: MainInspectorSection) -> 
         MainInspectorSection::Appearance => state.appearance_controls.clone(),
         MainInspectorSection::Variation => state.variation_controls.clone(),
         MainInspectorSection::Options => state.options_controls.clone(),
+        MainInspectorSection::FrequentOutput => state.frequent_output_controls.clone(),
     }
 }
 
@@ -7088,6 +7070,8 @@ fn focus_after_command_attempt(
     if accepted { requested } else { current }
 }
 
+/// Restores a descriptor focus only while its actual GTK control remains mapped and sensitive.
+/// Idle reconciliation never reopens hidden Settings or changes inspector/document selection.
 fn schedule_inspector_focus(
     state: &Rc<RefCell<AppState>>,
     identity: InspectorFocusIdentity,
@@ -7099,7 +7083,10 @@ fn schedule_inspector_focus(
     let widget: gtk::Widget = control.clone().upcast();
     let state = Rc::clone(state);
     glib::idle_add_local_once(move || {
-        if focus_matches(&state.borrow().inspector_runtime.focus, &identity) {
+        if focus_matches(&state.borrow().inspector_runtime.focus, &identity)
+            && widget.is_mapped()
+            && widget.is_sensitive()
+        {
             widget.grab_focus();
         }
     });
@@ -7211,7 +7198,8 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
     state.borrow_mut().syncing_inspector = false;
 
     let Some(document) = document else {
-        status.set_label("Open artwork to adjust its pattern.");
+        status.set_label("");
+        status.set_visible(false);
         catalog.set_visible(false);
         project_main_recipe_summary(state, None);
         reconcile_descriptor_components(state, Vec::new());
@@ -7224,20 +7212,22 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
         InspectorTarget::Channel(_) => "Current pattern",
     };
     active_pattern.set_label(&format!("{pattern_label}: {active_pattern_text}"));
+    active_pattern.set_xalign(0.0);
+    active_pattern.set_wrap(true);
+    active_pattern.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    active_pattern.set_hexpand(true);
+    active_pattern.set_tooltip_text(Some(&active_pattern_text));
     let mut status_text = status_message
         .as_deref()
-        .unwrap_or(match target {
-            InspectorTarget::DocumentAll => {
-                "ALL assigns changed settings to every compatible channel, including overrides."
-            }
-            InspectorTarget::Channel(_) => "Adjust this channel or reset it to inherit.",
-        })
+        .filter(|message| *message != "Preview updated.")
+        .unwrap_or_default()
         .to_owned();
     if let Some(notice) = artwork_weighted_transform_notice(&document, target) {
         status_text.push('\n');
         status_text.push_str(notice);
     }
     status.set_label(&status_text);
+    status.set_visible(!status_text.is_empty());
     if catalog.first_child().is_none() {
         catalog.append(&active_pattern);
         append_pattern_gallery_launch(state, &catalog, &advanced);
@@ -7293,6 +7283,8 @@ fn artwork_weighted_transform_notice(
 /// programmatic notifications; topology/reference changes replace only their
 /// affected row and stale identities are removed. This function never mutates
 /// the document, history, or preview authority.
+/// # Panics
+/// Panics if its own insertion/reconciliation invariant leaves an active descriptor without a row.
 fn reconcile_descriptor_components(
     state: &Rc<RefCell<AppState>>,
     values: Vec<(PropertyCurrentValue, InspectorFocusIdentity)>,
@@ -7335,7 +7327,15 @@ fn reconcile_descriptor_components(
         };
         let container = output_group.map_or_else(
             || main_inspector_container(&state.borrow(), section),
-            |output| state.borrow().main_output_groups[&output].1.clone(),
+            |output| {
+                let app = state.borrow();
+                let group = &app.main_output_groups[&output];
+                if section == MainInspectorSection::FrequentOutput {
+                    group.frequent.clone()
+                } else {
+                    group.technical.clone()
+                }
+            },
         );
         let presented_f64 = presented_inspector_f64(state, &value);
         let mut retained = {
@@ -7411,11 +7411,16 @@ fn reconcile_descriptor_components(
                     entry.set_text("");
                 }
             } else {
-                component.detail.set_label("All compatible channels");
+                component.detail.set_label("");
             }
         }
+        component
+            .detail
+            .set_visible(!component.detail.text().is_empty());
         temporal_edit::sync(&app, component);
     }
+    sync_main_output_group_visibility(&app.main_output_groups);
+    app.shell.sync_inspector_sections();
 }
 
 /// Retains labeled normal-inspector groups only when a named channel has multiple outputs.
@@ -7441,23 +7446,36 @@ fn reconcile_main_output_groups(state: &Rc<RefCell<AppState>>) {
         }
     };
     let mut app = state.borrow_mut();
-    let stale = app
-        .main_output_groups
+    let container = app.frequent_output_controls.clone();
+    reconcile_main_output_group_widgets(&container, &mut app.main_output_groups, &outputs);
+}
+
+/// Reconciles native GTK parent/order from the caller's authoritative output sequence.
+/// The helper owns presentation widgets only; it never validates or creates document output capability.
+/// Collapsed disclosure children stay invisible so GTK cannot focus an unrooted child.
+fn reconcile_main_output_group_widgets(
+    container: &gtk::Box,
+    groups: &mut MainOutputGroups,
+    outputs: &[PatternOutputLayerId],
+) {
+    let stale = groups
         .keys()
         .filter(|id| !outputs.contains(id))
         .copied()
         .collect::<Vec<_>>();
     for id in stale {
-        if let Some((frame, _)) = app.main_output_groups.remove(&id) {
-            app.options_controls.remove(&frame);
+        if let Some(group) = groups.remove(&id) {
+            container.remove(&group.frame);
         }
     }
     let mut previous = None;
-    for (index, id) in outputs.into_iter().enumerate() {
+    for (index, id) in outputs.iter().copied().enumerate() {
         let label = format!("Output {}", index + 1);
-        if let Some((frame, _)) = app.main_output_groups.get(&id) {
-            frame.set_label(Some(&label));
-            frame.update_property(&[gtk::accessible::Property::Label(&label)]);
+        if let Some(group) = groups.get(&id) {
+            group.frame.set_label(Some(&label));
+            group
+                .frame
+                .update_property(&[gtk::accessible::Property::Label(&label)]);
         } else {
             let frame = gtk::Frame::new(Some(&label));
             frame.update_property(&[gtk::accessible::Property::Label(&label)]);
@@ -7466,14 +7484,48 @@ fn reconcile_main_output_groups(state: &Rc<RefCell<AppState>>) {
             content.set_margin_bottom(8);
             content.set_margin_start(8);
             content.set_margin_end(8);
-            frame.set_child(Some(&content));
-            app.options_controls.append(&frame);
-            app.main_output_groups.insert(id, (frame, content));
+            let group = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            let details = gtk::Expander::builder()
+                .label("Output details")
+                .expanded(false)
+                .build();
+            details.update_property(&[gtk::accessible::Property::Label("Output details")]);
+            let technical = gtk::Box::new(gtk::Orientation::Vertical, 7);
+            details.set_child(Some(&technical));
+            details
+                .bind_property("expanded", &technical, "visible")
+                .sync_create()
+                .build();
+            group.append(&content);
+            group.append(&details);
+            frame.set_child(Some(&group));
+            frame.add_css_class("toniator-output-group");
+            container.append(&frame);
+            groups.insert(
+                id,
+                MainOutputGroup {
+                    frame,
+                    frequent: content,
+                    technical,
+                    details,
+                },
+            );
         }
-        let frame = app.main_output_groups[&id].0.clone();
-        app.options_controls
-            .reorder_child_after(&frame, previous.as_ref());
+        let frame = groups[&id].frame.clone();
+        container.reorder_child_after(&frame, previous.as_ref());
         previous = Some(frame);
+    }
+}
+
+/// Hides empty output frames and technical disclosures using their own native visibility flags.
+/// Hidden ancestors never prevent a later applicable row from revealing the retained widgets again.
+fn sync_main_output_group_visibility(groups: &MainOutputGroups) {
+    for group in groups.values() {
+        let common_present = group.frequent.first_child().is_some();
+        let technical_present = group.technical.first_child().is_some();
+        group.frequent.set_visible(common_present);
+        group.details.set_visible(technical_present);
+        group.frame.set_visible(common_present || technical_present);
     }
 }
 
@@ -7730,6 +7782,7 @@ fn append_pattern_gallery_launch(
     gallery.connect_clicked(move |_| {
         open_pattern_wizard(&state_for_gallery, gallery_for_restore.clone())
     });
+    gallery.set_valign(gtk::Align::Center);
     inspector.append(&gallery);
 
     let advanced = gtk::Button::with_mnemonic("_Advanced Settings…");
@@ -7945,6 +7998,7 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
         gallery_panel,
         page_panel,
         page_scroll,
+        content_scroll: shell.content_scroll(),
         preview_source,
         picture,
         preview_description,
@@ -7983,6 +8037,8 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
         calibration_task: None,
     });
     let current_pattern_card = gtk::ToggleButton::with_label("Current Pattern");
+    current_pattern_card.add_css_class("flat");
+    current_pattern_card.add_css_class("toniator-gallery-choice");
     current_pattern_card.set_active(true);
     current_pattern_card.set_tooltip_text(Some(
         "Select the pattern currently used by this artwork without changing it.",
@@ -8226,6 +8282,8 @@ fn append_wizard_gallery(
             gtk::accessible::Property::Description(&card_description),
         ]);
         let select = gtk::ToggleButton::new();
+        select.add_css_class("flat");
+        select.add_css_class("toniator-gallery-choice");
         select.set_size_request(WIZARD_PRESET_CARD_WIDTH_PX, -1);
         select.set_hexpand(false);
         select.set_group(Some(current_pattern));
@@ -8269,7 +8327,14 @@ fn append_wizard_library_group(state: &Rc<RefCell<AppState>>, epoch: u64, galler
     description.set_xalign(0.0);
     description.set_wrap(true);
     description.add_css_class("dim-label");
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let actions = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .min_children_per_line(1)
+        .max_children_per_line(2)
+        .column_spacing(6)
+        .row_spacing(6)
+        .halign(gtk::Align::Start)
+        .build();
     let manage = gtk::Button::with_mnemonic("_Manage Pattern Library…");
     let manage_description =
         "Open personal Pattern management for refresh, rename, copy, delete, and root switching.";
@@ -8297,8 +8362,8 @@ fn append_wizard_library_group(state: &Rc<RefCell<AppState>>, epoch: u64, galler
                 .set_label(&format!("Couldn’t refresh Pattern Library: {error}"));
         }
     });
-    actions.append(&manage);
-    actions.append(&refresh);
+    actions.insert(&manage, -1);
+    actions.insert(&refresh, -1);
     group.append(&heading);
     group.append(&description);
     group.append(&actions);
@@ -8500,13 +8565,18 @@ fn synthetic_catalog_thumbnail_request(
     catalog.apply_to_document_base(&mut history, id).ok()?;
     let projection =
         wizard_preview_session(history.document(), InspectorTarget::DocumentAll).ok()?;
-    Some(EvaluationRequest::with_preview_target(
-        projection.document_evaluation_snapshot(),
-        source,
-        toniator_engine::PreviewRasterTarget::new(100, 100)
-            .ok()?
-            .with_background(preview_backdrop::raster_background_for_document(projection.document())),
-    ).for_structural_preview())
+    Some(
+        EvaluationRequest::with_preview_target(
+            projection.document_evaluation_snapshot(),
+            source,
+            toniator_engine::PreviewRasterTarget::new(100, 100)
+                .ok()?
+                .with_background(preview_backdrop::raster_background_for_document(
+                    projection.document(),
+                )),
+        )
+        .for_structural_preview(),
+    )
 }
 
 /// Returns whether a personal Pattern name is free in the current combined
@@ -8749,14 +8819,16 @@ fn set_pattern_library_status(state: &Rc<RefCell<AppState>>, message: impl Into<
     }
 }
 
-/// Appends one personal Pattern row with explicit Rename, Save a Copy, and
-/// Delete actions derived from its personal catalog origin.
+/// Appends one personal Pattern row with wrapping native Rename, Save a Copy, and Delete actions.
+///
+/// Catalog origin and stable record IDs own applicability; row reflow changes no library bytes,
+/// private draft, document, history, or callback authority.
 fn append_pattern_library_row(
     state: &Rc<RefCell<AppState>>,
     entries: &gtk::Box,
     entry: &toniator_patterns::LayeredPresetEntry,
 ) {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
     row.set_hexpand(true);
     row.set_margin_top(3);
     row.set_margin_bottom(3);
@@ -8764,6 +8836,7 @@ fn append_pattern_library_row(
     details.set_hexpand(true);
     let name = gtk::Label::new(Some(&entry.preset.metadata.name));
     name.set_xalign(0.0);
+    name.set_wrap(true);
     name.add_css_class("heading");
     let category = gtk::Label::new(Some(&format!(
         "Personal · {}",
@@ -8820,9 +8893,18 @@ fn append_pattern_library_row(
     ]);
     let state_for_delete = Rc::clone(state);
     delete.connect_clicked(move |_| confirm_delete_personal_pattern(&state_for_delete, &id));
-    row.append(&rename);
-    row.append(&copy);
-    row.append(&delete);
+    let actions = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .min_children_per_line(1)
+        .max_children_per_line(3)
+        .column_spacing(6)
+        .row_spacing(6)
+        .halign(gtk::Align::Start)
+        .build();
+    actions.insert(&rename, -1);
+    actions.insert(&copy, -1);
+    actions.insert(&delete, -1);
+    row.append(&actions);
     row.update_property(&[
         gtk::accessible::Property::Label(&entry.preset.metadata.name),
         gtk::accessible::Property::Description(&format!(
@@ -8892,6 +8974,7 @@ fn rebuild_pattern_library_surface(state: &Rc<RefCell<AppState>>) {
 
 /// Opens the transient Pattern Library manager with an entry-based root switch
 /// control, avoiding desktop portals and preserving one app-owned catalog.
+/// Content scrolls above the retained Close/Undo actions without changing library operations.
 fn open_pattern_library_manager(state: &Rc<RefCell<AppState>>, _wizard_epoch: Option<u64>) {
     if let Some(window) = state
         .borrow()
@@ -8945,11 +9028,20 @@ fn open_pattern_library_manager(state: &Rc<RefCell<AppState>>, _wizard_epoch: Op
         gtk::accessible::Property::Label("Refresh Pattern Library"),
         gtk::accessible::Property::Description("Rescan the active personal Pattern Library."),
     ]);
-    let root_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let root_row = gtk::Box::new(gtk::Orientation::Vertical, 6);
     root_row.append(&root_label);
     root_row.append(&root_entry);
-    root_row.append(&apply_root);
-    root_row.append(&refresh);
+    let root_actions = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .min_children_per_line(1)
+        .max_children_per_line(2)
+        .column_spacing(6)
+        .row_spacing(6)
+        .halign(gtk::Align::Start)
+        .build();
+    root_actions.insert(&apply_root, -1);
+    root_actions.insert(&refresh, -1);
+    root_row.append(&root_actions);
     let status = gtk::Label::new(Some(
         "Changes are separate from applying a Pattern to the document.",
     ));
@@ -8972,6 +9064,7 @@ fn open_pattern_library_manager(state: &Rc<RefCell<AppState>>, _wizard_epoch: Op
     let entries_scroll = gtk::ScrolledWindow::new();
     entries_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     entries_scroll.set_vexpand(true);
+    entries_scroll.set_min_content_height(180);
     entries_scroll.set_child(Some(&entries));
     let heading = gtk::Label::new(Some("Personal Patterns"));
     heading.set_xalign(0.0);
@@ -9005,7 +9098,7 @@ fn open_pattern_library_manager(state: &Rc<RefCell<AppState>>, _wizard_epoch: Op
     title.set_xalign(0.0);
     title.add_css_class("title-3");
     let intro = gtk::Label::new(Some(
-        "Personal Patterns are reusable recipes. Rename and delete affect the library only; use a Pattern Wizard Apply action to change the current document.",
+        "Manage reusable Patterns. Apply them from the Pattern Wizard.",
     ));
     intro.set_xalign(0.0);
     intro.set_wrap(true);
@@ -9016,8 +9109,20 @@ fn open_pattern_library_manager(state: &Rc<RefCell<AppState>>, _wizard_epoch: Op
     content.append(&warnings);
     content.append(&heading);
     content.append(&entries_scroll);
-    content.append(&actions);
-    window.set_child(Some(&content));
+    let content_scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .min_content_height(120)
+        .vexpand(true)
+        .child(&content)
+        .build();
+    let layout = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    actions.set_margin_start(16);
+    actions.set_margin_end(16);
+    actions.set_margin_bottom(16);
+    layout.append(&content_scroll);
+    layout.append(&actions);
+    window.set_child(Some(&layout));
     let surface = PatternLibrarySurface {
         window: window.clone(),
         root_entry: root_entry.clone(),
@@ -9272,8 +9377,10 @@ fn save_existing_pattern_copy(state: &Rc<RefCell<AppState>>, id: &str) {
     }
 }
 
-/// Confirms a recoverable delete before moving the personal Pattern and its
-/// qualified thumbnail into the library's private trash directory.
+/// Presents a bounded, wrapped confirmation before moving one personal Pattern to recoverable trash.
+///
+/// Cancel retains the stable record, document and private draft. Only the explicit Delete action
+/// invokes the existing fingerprint-checked library move and its Undo token publication.
 fn confirm_delete_personal_pattern(state: &Rc<RefCell<AppState>>, id: &str) {
     let name = state
         .borrow()
@@ -9289,6 +9396,7 @@ fn confirm_delete_personal_pattern(state: &Rc<RefCell<AppState>>, id: &str) {
         .unwrap_or_else(|| state.borrow().window.clone().upcast());
     let dialog = gtk::Window::builder()
         .title("Delete Pattern?")
+        .default_width(520)
         .transient_for(&parent)
         .modal(true)
         .build();
@@ -9419,8 +9527,13 @@ fn capture_pattern_save_draft(
         InspectorTarget::Channel(channel) => Some(channel),
         InspectorTarget::DocumentAll => authoritative_channel_ids(&document).into_iter().next(),
     };
-    let saved_calibration = calibration_channel
-        .and_then(|channel| document.saved_calibration_for(channel).ok().flatten().cloned());
+    let saved_calibration = calibration_channel.and_then(|channel| {
+        document
+            .saved_calibration_for(channel)
+            .ok()
+            .flatten()
+            .cloned()
+    });
     let origin = surface
         .candidate
         .as_deref()
@@ -9890,7 +10003,9 @@ fn save_wizard_pattern(
                 };
                 if !installed {
                     cancelled.store(true, Ordering::Release);
-                    status.set_label("The Pattern or artwork changed; reopen Save Pattern and try again.");
+                    status.set_label(
+                        "The Pattern or artwork changed; reopen Save Pattern and try again.",
+                    );
                     return;
                 }
                 set_pattern_save_actions_pending(actions, true);
@@ -10221,6 +10336,7 @@ fn use_wizard_preset(state: &Rc<RefCell<AppState>>, epoch: u64, id: &str, edit: 
 ///
 /// The reset changes no document and leaves catalog selection as presentation-only state. It also
 /// clears incomplete frontend proposals because they cannot survive a different private base.
+/// New workflow entry restores both content viewports; ordinary same-card rebuilds retain scroll.
 fn reset_wizard_private_draft(state: &Rc<RefCell<AppState>>, epoch: u64) -> Result<(), String> {
     let draft = {
         let app_state = state.borrow();
@@ -10244,6 +10360,8 @@ fn reset_wizard_private_draft(state: &Rc<RefCell<AppState>>, epoch: u64) -> Resu
     surface.transition = None;
     surface.site_use_filter = None;
     surface.ordered_output_focus = None;
+    surface.content_scroll.vadjustment().set_value(0.0);
+    surface.page_scroll.vadjustment().set_value(0.0);
     Ok(())
 }
 
@@ -10910,14 +11028,6 @@ fn refresh_wizard_action_controls(surface: &PatternWizardSurface) {
         gtk::accessible::Property::Description(description),
     ]);
     surface.apply.add_css_class("suggested-action");
-    if let Some(actions) = surface.apply.parent().and_downcast::<gtk::Box>() {
-        actions.reorder_child_after(&surface.back, None::<&gtk::Widget>);
-        actions.reorder_child_after(&surface.undo, Some(&surface.back));
-        actions.reorder_child_after(&surface.redo, Some(&surface.undo));
-        actions.reorder_child_after(&surface.cancel, Some(&surface.redo));
-        actions.reorder_child_after(&surface.review, Some(&surface.cancel));
-        actions.reorder_child_after(&surface.apply, Some(&surface.review));
-    }
     let new_family_required = wizard_new_family_is_unselected(
         surface.starting_new,
         surface.draft.borrow().document(),
@@ -11052,7 +11162,6 @@ fn show_wizard_gallery_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
         undo,
         redo,
         apply,
-        cancel,
         starting_new,
         candidate_admission,
     ) = {
@@ -11081,7 +11190,6 @@ fn show_wizard_gallery_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
             surface.undo.clone(),
             surface.redo.clone(),
             surface.apply.clone(),
-            surface.cancel.clone(),
             surface.starting_new,
             wizard_gallery_candidate_apply_admission(&app_state.catalog, surface),
         )
@@ -11112,12 +11220,6 @@ fn show_wizard_gallery_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
         gtk::accessible::Property::Description(description),
     ]);
     apply.set_sensitive(candidate_admission.is_ok());
-    if let Some(actions) = apply.parent().and_downcast::<gtk::Box>() {
-        actions.reorder_child_after(&cancel, None::<&gtk::Widget>);
-        actions.reorder_child_after(&edit, Some(&cancel));
-        actions.reorder_child_after(&new, Some(&edit));
-        actions.reorder_child_after(&apply, Some(&new));
-    }
     match wizard_gallery_card_selection(starting_new, candidate.as_deref()) {
         WizardGalleryCardSelection::NewPattern => {
             current_pattern.set_active(false);
@@ -11217,10 +11319,10 @@ fn show_wizard_current_route_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
     }
 }
 
-/// Scrolls a newly entered wizard card to its preview-adjacent first setting.
+/// Restores a newly entered wizard card's context and first setting at both scroll boundaries.
 ///
 /// Same-card descriptor rebuilds deliberately do not call this helper, so changing a setting deep
-/// in a card retains the artist's reading position while Previous, Next, and Review start at top.
+/// in a card retains the artist's reading position while Back, Next, and Review start at top.
 fn reset_wizard_page_scroll(state: &Rc<RefCell<AppState>>, epoch: u64) {
     if let Some(surface) = state
         .borrow()
@@ -11228,6 +11330,7 @@ fn reset_wizard_page_scroll(state: &Rc<RefCell<AppState>>, epoch: u64) {
         .as_ref()
         .filter(|surface| surface.epoch == epoch)
     {
+        surface.content_scroll.vadjustment().set_value(0.0);
         surface.page_scroll.vadjustment().set_value(0.0);
     }
 }
@@ -11259,6 +11362,7 @@ fn wizard_go_back(state: &Rc<RefCell<AppState>>, epoch: u64) {
         show_wizard_current_route_page(state, epoch);
         submit_wizard_preview(state, epoch);
     } else {
+        reset_wizard_page_scroll(state, epoch);
         show_wizard_gallery_page(state, epoch);
         submit_wizard_preview(state, epoch);
     }
@@ -11562,6 +11666,7 @@ fn wizard_review_site_text(recipe: &PatternDefinitionRecipe) -> String {
 }
 
 /// Appends the workflow chain and every active setting in the same semantic card order used to edit it.
+/// Detailed settings follow expansion visibility so collapsed content stays outside native focus.
 fn append_wizard_review_summary(
     page: &gtk::Box,
     document: &Document,
@@ -11622,6 +11727,10 @@ fn append_wizard_review_summary(
     disclosure.update_property(&[gtk::accessible::Property::Label(
         "Detailed pattern settings",
     )]);
+    disclosure
+        .bind_property("expanded", &details, "visible")
+        .sync_create()
+        .build();
     page.append(&disclosure);
 
     let mut values = wizard_active_values(document, target, projection);
@@ -15702,7 +15811,7 @@ fn scale_wizard_preview_family_lengths(mechanism: &mut PatternMechanism, scale: 
                 RandomSiteCharacter::Clustered { cluster_spread, .. } => *cluster_spread *= scale,
                 RandomSiteCharacter::RawUniform | RandomSiteCharacter::Stratified { .. } => {}
             }
-        },
+        }
         PatternMechanism::SiteExclusion { policy, .. } => match policy {
             SiteExclusionPolicy::MinimumCenterDistance { minimum } => *minimum *= scale,
             SiteExclusionPolicy::VisibleMarkMargin { margin } => *margin *= scale,
@@ -16103,6 +16212,7 @@ fn handle_wizard_preview_progress(
 }
 
 /// Installs only the newest wizard texture and retains the prior success on failure or staleness.
+/// Successful completion clears idle status; pending and failure diagnostics remain visible.
 fn handle_wizard_preview_completion(
     state: &Rc<RefCell<AppState>>,
     epoch: u64,
@@ -16152,7 +16262,7 @@ fn handle_wizard_preview_completion(
                             .install(result, channel, document.canvas().clone());
                     }
                 }
-                surface.preview_status.set_label("Pattern preview updated.");
+                surface.preview_status.set_label("");
             }
             None => {
                 let reason = completion
@@ -17122,6 +17232,8 @@ fn configure_private_dialog_keyboard(window: &gtk::Window, default: &gtk::Button
 }
 
 /// Opens the Blueprint-owned private Advanced Settings history and canonical preview.
+/// Draft edits remain isolated until Apply; Cancel closes without publishing them.
+/// Passive diagnostics follow native expansion visibility to exclude collapsed children from focus.
 fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
     if state.borrow().document_presets.busy() {
         return;
@@ -17188,8 +17300,12 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
 
     let recalibrate = shell.recalibrate();
     let recalibrate_description = match target {
-        InspectorTarget::Channel(_) => "Measure the selected channel’s Pattern again. Other channels and the saved ALL calibration stay fixed. Apply keeps the result; Cancel discards it.",
-        InspectorTarget::DocumentAll => "Measure every active channel’s Pattern and the saved ALL calibration again. Apply keeps the results; Cancel discards them.",
+        InspectorTarget::Channel(_) => {
+            "Measure the selected channel’s Pattern again. Other channels and the saved ALL calibration stay fixed. Apply keeps the result; Cancel discards it."
+        }
+        InspectorTarget::DocumentAll => {
+            "Measure every active channel’s Pattern and the saved ALL calibration again. Apply keeps the results; Cancel discards them."
+        }
     };
     recalibrate.set_tooltip_text(Some(recalibrate_description));
     recalibrate.update_property(&[
@@ -17226,6 +17342,28 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
 
     let fields = gtk::Box::new(gtk::Orientation::Vertical, 12);
     controls.append(&fields);
+    let diagnostics = gtk::Expander::builder()
+        .label("Diagnostics")
+        .expanded(false)
+        .build();
+    diagnostics.update_property(&[gtk::accessible::Property::Label("Diagnostics")]);
+    let memory = gtk::Label::new(None);
+    memory.set_xalign(0.0);
+    memory.set_wrap(true);
+    memory.update_property(&[gtk::accessible::Property::Label("Memory usage")]);
+    memory.set_tooltip_text(Some("Whole-process resident memory and session peak, including caches and undo history. Excludes child processes and GPU allocations."));
+    state
+        .borrow()
+        .process_memory_status
+        .bind_property("label", &memory, "label")
+        .sync_create()
+        .build();
+    diagnostics.set_child(Some(&memory));
+    diagnostics
+        .bind_property("expanded", &memory, "visible")
+        .sync_create()
+        .build();
+    controls.append(&diagnostics);
 
     let cancel = gtk::Button::with_mnemonic("_Cancel");
     let apply = gtk::Button::with_mnemonic("_Apply");
@@ -17352,10 +17490,11 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
 /// Each interactive field receives descriptor-derived hover and accessible help on its control and
 /// visible label. No persistent explanatory row is added; descriptor applicability, bounds, and
 /// commands remain authoritative.
-/// Reset buttons use the same visible field vocabulary for their accessible names.
+/// Compact reset buttons use the visible field vocabulary for their names and inheritance help.
+/// Numeric fields retain exact text with native scrolling within a bounded entry width.
 ///
 /// # Panics
-/// Panics if the private surface is absent or GTK omits a text button's label child.
+/// Panics if the private surface is absent.
 fn advanced_descriptor_row(
     draft: Rc<RefCell<DocumentHistory>>,
     state: Rc<RefCell<AppState>>,
@@ -17414,7 +17553,8 @@ fn advanced_descriptor_row(
     let control = match current.value.clone() {
         PropertyCurrentValueKind::FiniteF64(value) => {
             let entry = gtk::Entry::new();
-            entry.set_width_chars(12);
+            entry.set_width_chars(8);
+            entry.set_max_width_chars(8);
             entry.set_input_purpose(gtk::InputPurpose::Number);
             entry.set_text(&value.to_string());
             label.set_mnemonic_widget(Some(&entry));
@@ -17438,7 +17578,8 @@ fn advanced_descriptor_row(
         }
         PropertyCurrentValueKind::U32(value) => {
             let entry = gtk::Entry::new();
-            entry.set_width_chars(10);
+            entry.set_width_chars(8);
+            entry.set_max_width_chars(8);
             entry.set_input_purpose(gtk::InputPurpose::Digits);
             entry.set_text(&value.to_string());
             label.set_mnemonic_widget(Some(&entry));
@@ -17509,16 +17650,18 @@ fn advanced_descriptor_row(
         set_advanced_control_help(&control, &label, current.descriptor.field, &help);
     }
     if current.descriptor.reset_capable {
-        let reset = gtk::Button::with_label("Reset to inherit");
-        reset.update_relation(&[gtk::accessible::Relation::LabelledBy(&[
-            label.upcast_ref(),
-            reset
-                .child()
-                .expect("text button has its visible label")
-                .upcast_ref(),
-        ])]);
+        let reset = gtk::Button::from_icon_name("edit-undo-symbolic");
+        let name = format!(
+            "Reset {} to inherit",
+            inspector_field_label(current.descriptor.field)
+        );
+        let description = "Remove this channel override and use the ALL value.";
+        reset.update_property(&[
+            gtk::accessible::Property::Label(&name),
+            gtk::accessible::Property::Description(description),
+        ]);
         reset.set_sensitive(current.inheritance == PropertyInheritance::Explicit);
-        reset.set_tooltip_text(Some("Remove this channel override and use the ALL value."));
+        reset.set_tooltip_text(Some(&format!("{name}. {description}")));
         let reset_context = commit_context.clone();
         reset.connect_clicked(move |_| reset_context.reset(locator));
         row.append(&reset);
@@ -17728,8 +17871,22 @@ fn start_advanced_recalibration(state: &Rc<RefCell<AppState>>, epoch: u64) {
             matches!(surface.target, InspectorTarget::DocumentAll),
         )
     };
-    let (candidate_document, candidate_revision, base_document, base_revision, generation, channels, force_baseline) = capture;
-    let (id, cancelled) = match start_calibration_preparation(state, &candidate_document, &channels, true, force_baseline) {
+    let (
+        candidate_document,
+        candidate_revision,
+        base_document,
+        base_revision,
+        generation,
+        channels,
+        force_baseline,
+    ) = capture;
+    let (id, cancelled) = match start_calibration_preparation(
+        state,
+        &candidate_document,
+        &channels,
+        true,
+        force_baseline,
+    ) {
         Ok(task) => task,
         Err(error) => {
             if let Some(surface) = state.borrow().advanced_settings.as_ref() {
@@ -17805,7 +17962,9 @@ fn submit_advanced_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
         return;
     };
     let target = match toniator_engine::PreviewRasterTarget::new(420, 240) {
-        Ok(target) => target.with_background(preview_backdrop::raster_background_for_document(surface.draft.borrow().document())),
+        Ok(target) => target.with_background(preview_backdrop::raster_background_for_document(
+            surface.draft.borrow().document(),
+        )),
         Err(error) => {
             surface.status.set_label(&error.to_string());
             return;
@@ -18338,7 +18497,10 @@ fn open_wizard_new_guide_editor(
 /// history directly from the current wizard draft and uses a disposable neutral response projection;
 /// the Workspace launch retains actual response intent. Both previews bypass saved-calibration use,
 /// and neither path writes a personal library record. Both use the captured real source frame and
-/// preserve the Picture's model backdrop.
+/// use white behind neutral Wizard studies or the document model backdrop for Workspace previews.
+///
+/// # Panics
+/// Panics if the private evaluator cannot start or fixed preview invariants are invalid.
 fn open_pattern_editor_with_launch(
     state: &Rc<RefCell<AppState>>,
     purpose: PatternEditorPurpose,
@@ -18466,6 +18628,8 @@ fn open_pattern_editor_with_launch(
                     EvaluationScheduler::new().expect("private draft scheduler starts"),
                 ),
                 preview_submission: None,
+                preview_session: None,
+                preview_origin: None,
                 media_preview_key: None,
                 epoch,
                 geometry_editor,
@@ -18528,7 +18692,11 @@ fn open_pattern_editor_with_launch(
         }
     }));
     let picture = shell.picture();
-    update_preview_picture_backdrop(&picture, draft.borrow().history.document());
+    update_pattern_editor_preview_backdrop(
+        &picture,
+        draft.borrow().history.document(),
+        &launch.parent,
+    );
     let preview_spinner = shell.spinner();
     preview_spinner.update_property(&[gtk::accessible::Property::Label("Preview updating")]);
     picture.set_can_shrink(true);
@@ -19857,6 +20025,8 @@ fn close_pattern_editor_after_terminal(
         state.pattern_editor.take().inspect(|surface| {
             let mut draft = surface.draft.borrow_mut();
             draft.preview_submission = None;
+            draft.preview_session = None;
+            draft.preview_origin = None;
             draft.media_preview_key = None;
             surface.preview_spinner.stop();
             surface.preview_spinner.set_visible(false);
@@ -19895,7 +20065,8 @@ fn close_pattern_editor_after_terminal(
 ///
 /// GTK sees immutable draft value models and sends typed inputs back to that
 /// private history. Main workspace state is intentionally not read or mutated
-/// after the editor opens, which makes Cancel and titlebar close true discard.
+/// after the editor opens, which makes Cancel and titlebar close true discard. Shape framing
+/// follows resource identity once; ordinary same-resource edits and history rebuilds retain it.
 fn rebuild_pattern_editor(state: &Rc<RefCell<AppState>>) {
     let Some((window, status, draft, purpose)) = (|| {
         let state = state.borrow();
@@ -19994,6 +20165,7 @@ fn rebuild_pattern_editor(state: &Rc<RefCell<AppState>>) {
                     toniator_geometry::CurvePath::from_authored_structure(structure).ok()
                 });
             if let Some(path) = path.as_ref() {
+                draft.geometry_editor.fit_selected_shape(path);
                 draft.geometry_editor.inspect_motif_terminal_direction(path);
             }
             let coordinate = path.as_ref().and_then(|path| {
@@ -20200,6 +20372,7 @@ fn rebuild_authored_resource_list(
         PatternEditorPurpose::Motif => "Drawn paths — choose a motif",
     }));
     heading.set_xalign(0.0);
+    heading.set_wrap(true);
     heading.add_css_class("heading");
     list.append(&heading);
     for (ordinal, structure) in document
@@ -20258,6 +20431,10 @@ fn rebuild_authored_resource_list(
         row.set_halign(gtk::Align::Fill);
         row.set_hexpand(true);
         row.set_has_frame(true);
+        if let Some(label) = row.child().and_downcast::<gtk::Label>() {
+            label.set_wrap(true);
+            label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        }
         let selected = selected_structure == Some(structure.id());
         if selected {
             row.add_css_class("suggested-action");
@@ -20286,11 +20463,16 @@ fn rebuild_authored_resource_list(
     if let Some(personal) = personal.filter(|entries| !entries.is_empty()) {
         let heading = gtk::Label::new(Some("Personal library — insert a document copy"));
         heading.set_xalign(0.0);
+        heading.set_wrap(true);
         heading.set_margin_top(12);
         heading.add_css_class("heading");
         list.append(&heading);
         for entry in personal {
             let button = gtk::Button::with_label(&format!("Insert {}", entry.name));
+            if let Some(label) = button.child().and_downcast::<gtk::Label>() {
+                label.set_wrap(true);
+                label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            }
             button.update_property(&[
                 gtk::accessible::Property::Label(&format!("Insert {}", entry.name)),
                 gtk::accessible::Property::Description(
@@ -21606,29 +21788,46 @@ fn submit_draft_preview(state: &Rc<RefCell<AppState>>) {
                 surface.endpoint.frame(&document),
                 draft.sources.clone(),
                 session,
-                document,
+                document.clone(),
+                pattern_editor_preview_background(
+                    matches!(parent, PatternEditorParent::Wizard { .. }),
+                    &document,
+                ),
             )),
             Err(error) => Err(error),
         }
     };
-    let (workspace_generation, revision, epoch, frame, sources, preview_session, document) =
-        match captured {
-            Ok(capture) => capture,
-            Err(error) => {
-                let status = state
-                    .borrow()
-                    .pattern_editor
-                    .as_ref()
-                    .map(|surface| surface.status.clone());
-                if let Some(status) = status {
-                    status.set_label(&format!("Pattern preview unavailable: {error}"));
-                }
-                return;
+    let (
+        workspace_generation,
+        revision,
+        epoch,
+        frame,
+        sources,
+        preview_session,
+        document,
+        background,
+    ) = match captured {
+        Ok(capture) => capture,
+        Err(error) => {
+            if let Some(surface) = state.borrow().pattern_editor.as_ref() {
+                let mut draft = surface.draft.borrow_mut();
+                draft.scheduler.cancel_pending();
+                draft.preview_submission = None;
+                draft.preview_session = None;
+                draft.preview_origin = None;
+                draft.media_preview_key = None;
+                surface.preview_spinner.stop();
+                surface.preview_spinner.set_visible(false);
+                surface
+                    .status
+                    .set_label(&format!("Pattern preview unavailable: {error}"));
             }
-        };
+            return;
+        }
+    };
     let target = toniator_engine::PreviewRasterTarget::new(512, 512)
         .expect("fixed preview target is valid")
-        .with_background(preview_backdrop::raster_background_for_document(&document));
+        .with_background(background);
     let (status, spinner) = {
         let mut app_state = state.borrow_mut();
         let Some(surface) = app_state.pattern_editor.as_mut() else {
@@ -21652,6 +21851,8 @@ fn submit_draft_preview(state: &Rc<RefCell<AppState>>) {
         };
         draft.scheduler.cancel_pending();
         draft.preview_submission = None;
+        draft.preview_session = Some(preview_session.clone());
+        draft.preview_origin = Some(key);
         draft.media_preview_key = Some(key);
         source_worker.submit(key, preview_session, sources, target);
         (surface.status.clone(), surface.preview_spinner.clone())
@@ -22381,6 +22582,14 @@ fn append_descriptor_control(
             control.upcast()
         }
     };
+    if let Some(entry) = control.downcast_ref::<gtk::Entry>() {
+        entry.set_width_chars(8);
+        entry.set_max_width_chars(8);
+    }
+    if let Some(spin) = control.downcast_ref::<gtk::SpinButton>() {
+        spin.set_width_chars(8);
+        spin.set_max_width_chars(8);
+    }
     let presented = match &current.value {
         PropertyCurrentValueKind::FiniteF64(value) => presented_f64.unwrap_or(*value),
         PropertyCurrentValueKind::U32(value) => *value as f64,
@@ -22425,7 +22634,7 @@ fn append_descriptor_control(
         row.append(&dice);
     }
     let reset = if current.descriptor.reset_capable && !all_scalar {
-        let reset = gtk::Button::with_label("Reset");
+        let reset = gtk::Button::from_icon_name("edit-undo-symbolic");
         reset.set_valign(gtk::Align::Center);
         reset.set_sensitive(current.inheritance == PropertyInheritance::Explicit);
         let description = if matches!(
@@ -22519,12 +22728,18 @@ fn set_inspector_status(state: &mut AppState, message: impl Into<String>) {
                 .materialize_frame(state.endpoint.frame(workspace.document()))
                 .ok()
                 .and_then(|document| {
-                    artwork_weighted_transform_notice(document.document(), state.inspector_runtime.target)
+                    artwork_weighted_transform_notice(
+                        document.document(),
+                        state.inspector_runtime.target,
+                    )
                 }),
         });
     let main_message =
         notice.map_or_else(|| message.clone(), |notice| format!("{message}\n{notice}"));
     state.inspector_status.set_label(&main_message);
+    state
+        .inspector_status
+        .set_visible(message != "Preview updated." || notice.is_some());
     if let Some(surface) = state.pattern_editor.as_ref() {
         surface.status.set_label(&message);
     }
@@ -22637,6 +22852,7 @@ fn remember_inspector_draft(
 }
 
 /// Invalidates the accepted preview target and records queued work before idle submission.
+/// Source-less documents retain the empty artwork action and never queue an impossible preview.
 fn set_preview_pending(state: &mut AppState) {
     state.media_epoch = state.media_epoch.saturating_add(1);
     state.media_preview_key = None;
@@ -22645,6 +22861,16 @@ fn set_preview_pending(state: &mut AppState) {
     }
     state.scheduler.cancel_pending();
     state.preview_target = None;
+    if !state
+        .workspace
+        .as_ref()
+        .is_some_and(workspace_requires_initial_preview)
+    {
+        state.preview_coordinator.clear_submission();
+        sync_main_preview_pending(state);
+        set_page(state, Page::Empty);
+        return;
+    }
     state.preview_coordinator.queue_refresh();
     state.preview_progress_bar.set_fraction(0.0);
     state.preview_progress_bar.set_text(Some("Overall 0%"));
@@ -22869,12 +23095,7 @@ fn apply_inspector_command(
                     return false;
                 }
             };
-        match calibration_preparation::plan_to_prepare(
-            draft.document(),
-            &channels,
-            false,
-            false,
-        ) {
+        match calibration_preparation::plan_to_prepare(draft.document(), &channels, false, false) {
             Ok(plan) if !plan.is_empty() => Some((
                 base_document,
                 base_revision,
@@ -23055,12 +23276,7 @@ fn apply_all_pattern_seed(
                     return false;
                 }
             };
-        match calibration_preparation::plan_to_prepare(
-            draft.document(),
-            &channels,
-            false,
-            false,
-        ) {
+        match calibration_preparation::plan_to_prepare(draft.document(), &channels, false, false) {
             Ok(plan) if !plan.is_empty() => Some((
                 base_document,
                 base_revision,
@@ -23241,7 +23457,16 @@ fn commit_inspector_input_with_focus(
                     .remove(&inspector_key(&descriptor));
                 app.inspector_runtime.focus = Some(focus);
                 set_preview_pending(&mut app);
-                set_inspector_status(&mut app, "Rendering selected frame…");
+                let message = if app
+                    .workspace
+                    .as_ref()
+                    .is_some_and(workspace_requires_initial_preview)
+                {
+                    "Rendering selected frame…"
+                } else {
+                    "Settings updated."
+                };
+                set_inspector_status(&mut app, message);
                 sync_ui(&mut app);
                 drop(app);
                 schedule_inspector_rebuild(state);
@@ -25052,7 +25277,7 @@ fn sync_png_export_size(
                 export.set_sensitive(false);
                 Err(error)
             }
-        }
+        },
         Err(error) => {
             options
                 .size_summary()
@@ -25466,7 +25691,7 @@ fn connect_print_preparation_surface(state: &Rc<RefCell<AppState>>, epoch: u64) 
             resize_print_preview_if_fitting(&state, epoch);
         }
     });
-    install_print_preview_fit_tracking(&surface.options_paned, Rc::downgrade(state), epoch);
+    install_print_preview_fit_tracking(&surface.options, Rc::downgrade(state), epoch);
     for selector in [
         surface.options.background(),
         surface.options.antialiasing(),
@@ -25728,6 +25953,28 @@ fn retire_deferred_png_chooser(
 /// The document supplies only initial values and canvas dimensions; the print-box draft remains
 /// canonical millimetres in this surface. This updates GTK state without mutating project history.
 fn sync_print_preparation_surface(state: &mut AppState) {
+    let attention = match state.print_preparation.status() {
+        print_preparation::CheckStatus::Running => Some("Print review is running…".to_owned()),
+        print_preparation::CheckStatus::OutOfDate => {
+            Some("Print review is out of date. Review the current output.".to_owned())
+        }
+        print_preparation::CheckStatus::Cancelled => Some("Print review was cancelled.".to_owned()),
+        print_preparation::CheckStatus::Unavailable => {
+            Some("Print review is unavailable. Open Review for details.".to_owned())
+        }
+        print_preparation::CheckStatus::CurrentAdvisory => state
+            .print_preparation
+            .accepted()
+            .filter(|pair| {
+                pair.report().positive_status
+                    != toniator_engine::print_preflight::WidthCheckStatus::Disabled
+                    || pair.report().negative_status
+                        != toniator_engine::print_preflight::WidthCheckStatus::Disabled
+            })
+            .map(|pair| print_preparation_view::width_status_summary(pair.report())),
+        print_preparation::CheckStatus::NotChecked => None,
+    };
+    state.shell.set_print_attention(attention.as_deref());
     let settings = state
         .workspace
         .as_ref()
@@ -25739,7 +25986,7 @@ fn sync_print_preparation_surface(state: &mut AppState) {
             && !state.document_presets.busy(),
     );
     let Some(workspace) = state.workspace.as_ref() else {
-        let status = "Preview not rendered";
+        let status = "PNG preview not rendered";
         state.shell.print_preparation_summary().set_label(
             &print_preparation_view::inspector_summary(&settings, status),
         );
@@ -25835,7 +26082,7 @@ fn sync_print_preparation_surface(state: &mut AppState) {
                                     surface.controls.options.size_error().set_visible(true);
                                     Err(png_export_size::OutputSizeError::RendererLimit(error))
                                 }
-                            }
+                            },
                             Err(error) => {
                                 surface
                                     .controls
@@ -25940,7 +26187,7 @@ fn sync_print_preparation_surface(state: &mut AppState) {
             .unwrap_or("Resolve PNG settings to show the preview")
             .to_owned(),
         None => state.print_preparation_surface.as_ref().map_or_else(
-            || "Preview not rendered".to_owned(),
+            || "PNG preview not rendered".to_owned(),
             |surface| print_png_preview_status_text(surface.preview_status).to_owned(),
         ),
     };
@@ -25996,7 +26243,10 @@ fn sync_print_preparation_surface(state: &mut AppState) {
                 .and_then(|selection| selection.as_ref().err())
                 .filter(|error| error.is_render_limit())
                 .map_or_else(
-                    || "Final output target is unavailable until PNG dimensions are valid.".to_owned(),
+                    || {
+                        "Final output target is unavailable until PNG dimensions are valid."
+                            .to_owned()
+                    },
                     |error| error.message().to_owned(),
                 );
             surface.controls.target_summary.set_label(&target_status);
@@ -26108,11 +26358,11 @@ fn sync_print_preparation_surface(state: &mut AppState) {
 /// Names the exact PNG preview lifecycle without treating old detector output as advice.
 fn print_png_preview_status_text(status: print_preparation_view::PreviewStatus) -> &'static str {
     match status {
-        print_preparation_view::PreviewStatus::NotRendered => "Preview not rendered",
-        print_preparation_view::PreviewStatus::Rendering => "Rendering preview…",
+        print_preparation_view::PreviewStatus::NotRendered => "PNG preview not rendered",
+        print_preparation_view::PreviewStatus::Rendering => "Rendering PNG preview…",
         print_preparation_view::PreviewStatus::Current => "Current PNG preview",
         print_preparation_view::PreviewStatus::OutOfDate => "Updating PNG preview…",
-        print_preparation_view::PreviewStatus::Failed => "Preview unavailable · see error log",
+        print_preparation_view::PreviewStatus::Failed => "PNG preview unavailable · see error log",
     }
 }
 
@@ -27101,11 +27351,11 @@ fn resize_print_preview_if_fitting(state: &Rc<RefCell<AppState>>, epoch: u64) {
 /// The callback performs only a bounded size comparison each frame and reprojects the existing
 /// raster only when its viewport changes. It never starts rendering or changes document/output state.
 fn install_print_preview_fit_tracking(
-    paned: &gtk::Paned,
+    root: &impl IsA<gtk::Widget>,
     state: std::rc::Weak<RefCell<AppState>>,
     epoch: u64,
 ) {
-    paned.add_tick_callback(move |_, _| {
+    root.add_tick_callback(move |_, _| {
         let Some(state) = state.upgrade() else {
             return glib::ControlFlow::Break;
         };
@@ -27779,6 +28029,8 @@ fn start_save(state: &Rc<RefCell<AppState>>, after: Option<LifecycleAction>) {
     }
 }
 
+/// Starts an immutable document save and captures the operation error eligible for retry recovery.
+/// Save completion may clear only that same UI identity; newer errors and document authority survive.
 fn start_save_to(state: &Rc<RefCell<AppState>>, path: PathBuf, after: Option<LifecycleAction>) {
     {
         let mut state = state.borrow_mut();
@@ -27804,6 +28056,7 @@ fn start_save_to(state: &Rc<RefCell<AppState>>, path: PathBuf, after: Option<Lif
                 result,
             });
         });
+        state.save_error_at_start = state.main_error_identity.clone();
         state.pending_save = true;
         sync_ui(&mut state);
     }
@@ -28247,7 +28500,8 @@ fn export_snapshot(
 /// generation and scheduler token gates before any view or savepoint changes.
 /// Accepts generation-matching worker results on GTK's main context.
 /// Successful loads/saves update recent metadata; errors preserve the document and release any
-/// pending quit request. Stale results never replace the workspace or populate Recent Files.
+/// pending quit request. Save recovery clears only its captured presentation-error identity.
+/// Stale results never replace the workspace or populate Recent Files.
 fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
     match event {
         AppEvent::PrintPngPreview {
@@ -28305,10 +28559,19 @@ fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
             state.borrow_mut().pending_save = false;
             let mut app_state = state.borrow_mut();
             let saved = result.is_ok();
+            let error_at_start = app_state.save_error_at_start.take();
             match result {
                 Ok(()) => {
                     if let Some(workspace) = app_state.workspace.as_mut() {
                         workspace.accept_saved_snapshot(path.clone(), snapshot);
+                    }
+                    if saved_error_matches_current(
+                        app_state.main_error_identity.as_ref(),
+                        error_at_start.as_ref(),
+                    ) {
+                        app_state.error.set_label("");
+                        app_state.main_error_identity = None;
+                        show_source_diagnostic(&mut app_state);
                     }
                     emit_automation_state(&mut app_state, "save_completed", None);
                 }
@@ -28781,16 +29044,21 @@ fn handle_advanced_calibration(
         } else if !workspace_current {
             Err("The artwork changed before Recalibrate finished. No result was kept.".to_owned())
         } else {
-            let Some(surface) = app.advanced_settings.as_mut().filter(|surface| {
-                surface.epoch == task.epoch
-            }) else {
+            let Some(surface) = app
+                .advanced_settings
+                .as_mut()
+                .filter(|surface| surface.epoch == task.epoch)
+            else {
                 return;
             };
             let mut draft = surface.draft.borrow_mut();
             if draft.document() != &task.candidate_document
                 || draft.revision() != task.candidate_revision
             {
-                Err("Advanced Settings changed before Recalibrate finished. No result was kept.".to_owned())
+                Err(
+                    "Advanced Settings changed before Recalibrate finished. No result was kept."
+                        .to_owned(),
+                )
             } else {
                 result.and_then(|artifacts| {
                     attach_calibrations_to_history(&mut draft, artifacts)?;
@@ -28862,11 +29130,9 @@ fn start_wizard_calibration_if_needed(
             return Err("The artwork changed while the Pattern Wizard was open.".to_owned());
         }
         let base_revision = surface.initial_workspace_revision;
-        let channel_ids = calibration_preparation::changed_channels(
-            &base_document,
-            &candidate_document,
-        )
-        .map_err(|error| error.to_string())?;
+        let channel_ids =
+            calibration_preparation::changed_channels(&base_document, &candidate_document)
+                .map_err(|error| error.to_string())?;
         let plan = calibration_preparation::plan_to_prepare(
             &candidate_document,
             &channel_ids,
@@ -29177,7 +29443,10 @@ fn handle_wizard_calibration(
             {
                 attach_calibrations_to_history(&mut draft, artifacts)
             } else {
-                Err("The selected Pattern candidate changed before calibration finished.".to_owned())
+                Err(
+                    "The selected Pattern candidate changed before calibration finished."
+                        .to_owned(),
+                )
             };
             let publication = attach.and_then(|()| {
                 let mut app = state.borrow_mut();
@@ -29205,7 +29474,10 @@ fn handle_wizard_calibration(
                         app.scatter_memory = scatter_memory;
                     }
                     set_preview_pending(&mut app);
-                    set_inspector_status(&mut app, "Pattern applied directly as one undoable change.");
+                    set_inspector_status(
+                        &mut app,
+                        "Pattern applied directly as one undoable change.",
+                    );
                     sync_ui(&mut app);
                     drop(app);
                     let _ = candidate_id;
@@ -29231,14 +29503,21 @@ fn handle_wizard_calibration(
             actions,
         } => {
             let channel_id = draft.calibration_channel;
-            let artifact = channel_id
-                .and_then(|channel| {
-                    artifacts
-                        .active.into_iter()
-                        .find(|entry| entry.channel_id == channel)
-                        .map(|entry| entry.artifact)
-                        .or_else(|| draft.calibration_document.saved_calibration_for(channel).ok().flatten().cloned())
-                });
+            let artifact = channel_id.and_then(|channel| {
+                artifacts
+                    .active
+                    .into_iter()
+                    .find(|entry| entry.channel_id == channel)
+                    .map(|entry| entry.artifact)
+                    .or_else(|| {
+                        draft
+                            .calibration_document
+                            .saved_calibration_for(channel)
+                            .ok()
+                            .flatten()
+                            .cloned()
+                    })
+            });
             let Some(artifact) = artifact else {
                 status.set_label("Pattern calibration did not produce a reusable measurement.");
                 actions.set_sensitive(true);
@@ -29361,7 +29640,7 @@ fn handle_preview_completion(
                         .preview_coordinator
                         .fail(workspace_generation, ticket);
                     sync_main_preview_pending(&app_state);
-                    show_error(&mut app_state, error);
+                    show_preview_error(&mut app_state, error);
                 }
             },
             None => {
@@ -29370,7 +29649,7 @@ fn handle_preview_completion(
                     .preview_coordinator
                     .fail(workspace_generation, ticket);
                 sync_main_preview_pending(&app_state);
-                show_error(&mut app_state, message);
+                show_preview_error(&mut app_state, message);
             }
         },
         Ok(false) => {
@@ -29384,7 +29663,7 @@ fn handle_preview_completion(
                 .preview_coordinator
                 .fail(workspace_generation, ticket);
             sync_main_preview_pending(&app_state);
-            show_error(&mut app_state, error.to_string());
+            show_preview_error(&mut app_state, error.to_string());
         }
     }
 }
@@ -29410,12 +29689,15 @@ fn handle_draft_media_preview_completion(
     };
     let endpoint = surface.endpoint;
     let mut draft = surface.draft.borrow_mut();
-    if !completion.key.is_current(
-        draft.media_preview_key,
-        workspace_generation,
-        draft.history.session(),
-        endpoint,
-    ) {
+    if draft.preview_origin != Some(completion.key)
+        || draft.preview_session.is_none()
+        || !completion.key.is_current(
+            draft.media_preview_key,
+            workspace_generation,
+            draft.history.session(),
+            endpoint,
+        )
+    {
         return;
     }
     draft.media_preview_key = None;
@@ -29429,6 +29711,8 @@ fn handle_draft_media_preview_completion(
             }
             Err(error) => {
                 draft.preview_submission = None;
+                draft.preview_session = None;
+                draft.preview_origin = None;
                 surface.preview_spinner.stop();
                 surface.preview_spinner.set_visible(false);
                 surface.status.set_label(&format!(
@@ -29438,6 +29722,8 @@ fn handle_draft_media_preview_completion(
         },
         Err(error) => {
             draft.preview_submission = None;
+            draft.preview_session = None;
+            draft.preview_origin = None;
             surface.preview_spinner.stop();
             surface.preview_spinner.set_visible(false);
             surface.status.set_label(&format!(
@@ -29449,6 +29735,9 @@ fn handle_draft_media_preview_completion(
 
 /// Installs a private draft result only after its private ticket and token pass, then presents the
 /// canonical raster against the draft document's model-specific viewer backdrop.
+///
+/// Authoritative origin freshness gates the retained exact evaluation session; a neutral Wizard
+/// projection never replaces editable-history authority or weakens scheduler token validation.
 fn handle_draft_preview_completion(
     state: &Rc<RefCell<AppState>>,
     epoch: u64,
@@ -29464,20 +29753,34 @@ fn handle_draft_preview_completion(
         draft.preview_submission,
         epoch,
         completion.ticket().value(),
+    ) || !accepts_pattern_editor_preview_origin(
+        draft.preview_origin,
+        draft.epoch,
+        app_state.workspace_generation,
+        draft.history.session(),
+        surface.endpoint,
     ) {
         return;
     }
+    let Some(preview_session) = draft.preview_session.take() else {
+        return;
+    };
     draft.preview_submission = None;
+    draft.preview_origin = None;
     surface.preview_spinner.stop();
     surface.preview_spinner.set_visible(false);
     match draft
         .scheduler
-        .accept_completion(&completion, draft.history.session())
+        .accept_completion(&completion, &preview_session)
     {
         Ok(true) => match completion.result() {
             Some(result) => match texture_from_surface(result.raster()) {
                 Ok(texture) => {
-                    update_preview_picture_backdrop(&surface.picture, draft.history.document());
+                    update_pattern_editor_preview_backdrop(
+                        &surface.picture,
+                        draft.history.document(),
+                        &surface.parent,
+                    );
                     surface.picture.set_paintable(Some(&texture));
                     surface.status.set_label(
                         "Structure preview updated · calibrated response and Uniform thinning update on Apply.",
@@ -29510,6 +29813,37 @@ fn handle_draft_preview_completion(
                 .status
                 .set_label("Couldn’t render this pattern. Your last preview is still shown.");
         }
+    }
+}
+
+/// Chooses only editor preview presentation, preserving the real Workspace model background.
+/// Neutral Wizard studies contain black structures and retain the Wizard's transparent raster.
+fn pattern_editor_preview_background(
+    wizard_owned: bool,
+    document: &Document,
+) -> toniator_engine::RasterBackground {
+    if wizard_owned {
+        toniator_engine::RasterBackground::Transparent
+    } else {
+        preview_backdrop::raster_background_for_document(document)
+    }
+}
+
+/// Presents black neutral Wizard structures on white while retaining native RGBA unchanged.
+/// Workspace previews keep the document model backdrop through the existing presentation helper.
+fn update_pattern_editor_preview_backdrop(
+    picture: &gtk::Picture,
+    document: &Document,
+    parent: &PatternEditorParent,
+) {
+    if matches!(parent, PatternEditorParent::Wizard { .. }) {
+        for model in PreviewModel::ALL {
+            picture.remove_css_class(model.css_class());
+        }
+        picture.add_css_class("toniator-wizard-preview");
+    } else {
+        picture.remove_css_class("toniator-wizard-preview");
+        update_preview_picture_backdrop(picture, document);
     }
 }
 
@@ -29642,6 +29976,9 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
         print_preparation_window,
     ) = {
         let mut state = state.borrow_mut();
+        state.error.set_label("");
+        state.main_error_identity = None;
+        state.save_error_at_start = None;
         state.scatter_memory = scatter_memory::Memory::default();
         state.print_preparation.close();
         let print_preparation_window = state
@@ -29755,9 +30092,14 @@ fn sync_model_selector(state: &Rc<RefCell<AppState>>, model: PreviewModel) {
 /// Releases the closed document and its preview generation before showing startup.
 /// Cancellation prevents late main-preview publication; detached GTK editors close after the
 /// AppState borrow ends so their callbacks cannot reenter a mutable borrow.
+/// Clears workspace-owned presentation and operation errors before showing Startup.
+/// Detached modal callbacks run only after the AppState borrow ends; user files remain untouched.
 fn clear_workspace(state: &Rc<RefCell<AppState>>) {
     let (pattern_editor_window, pattern_wizard_window, advanced_window, print_preparation_window) = {
         let mut state = state.borrow_mut();
+        state.error.set_label("");
+        state.main_error_identity = None;
+        state.save_error_at_start = None;
         state.scatter_memory = scatter_memory::Memory::default();
         state.print_preparation.close();
         let print_preparation_window = state
@@ -29834,9 +30176,9 @@ fn clear_workspace(state: &Rc<RefCell<AppState>>) {
 
 /// Replaces the main channel model through its typed history command and refreshes preview.
 ///
-/// This function rejects synchronization/loading/source-less calls before any
-/// mutation. A successful change updates only the main workspace history and
-/// schedules its canonical preview after GTK notifications unwind.
+/// This function rejects synchronization/loading/missing-workspace calls before mutation.
+/// Source-less documents can edit topology while retaining their empty artwork action.
+/// A successful change updates main history and previews only assigned source artwork.
 fn change_model(state: &Rc<RefCell<AppState>>, model: PreviewModel) {
     let mut app_state = state.borrow_mut();
     if main_document_edits_blocked(&app_state) {
@@ -29847,10 +30189,7 @@ fn change_model(state: &Rc<RefCell<AppState>>, model: PreviewModel) {
         app_state.model,
         model,
         app_state.pending_load,
-        app_state
-            .workspace
-            .as_ref()
-            .is_some_and(|workspace| workspace.source_presentation.is_some()),
+        app_state.workspace.is_some(),
     ) {
         return;
     }
@@ -29865,21 +30204,31 @@ fn change_model(state: &Rc<RefCell<AppState>>, model: PreviewModel) {
     app_state.model = model;
     update_backdrop(&mut app_state);
     set_preview_pending(&mut app_state);
-    set_inspector_status(&mut app_state, "Rendering preview…");
+    let message = if app_state
+        .workspace
+        .as_ref()
+        .is_some_and(workspace_requires_initial_preview)
+    {
+        "Rendering preview…"
+    } else {
+        "Settings updated."
+    };
+    set_inspector_status(&mut app_state, message);
     sync_ui(&mut app_state);
     drop(app_state);
     rebuild_inspector(state);
     schedule_main_preview_submission(state);
 }
 
+/// Accepts an explicit model change for one editable workspace without requiring source pixels.
 fn should_apply_model_change(
     syncing_model: bool,
     current_model: PreviewModel,
     selected_model: PreviewModel,
     loading: bool,
-    has_source_presentation: bool,
+    has_workspace: bool,
 ) -> bool {
-    !syncing_model && current_model != selected_model && !loading && has_source_presentation
+    !syncing_model && current_model != selected_model && !loading && has_workspace
 }
 
 /// Replaces color roles as one history command, inheriting the document Pattern and last-ALL Appearance baseline.
@@ -29924,7 +30273,7 @@ fn submit_if_viewport_ready(state: &mut AppState) {
     if let Err(error) = submit_current_source(state, target) {
         state.preview_coordinator.clear_submission();
         sync_main_preview_pending(state);
-        show_error(state, error);
+        show_preview_error(state, error);
     }
 }
 
@@ -30017,7 +30366,7 @@ fn handle_media_preview_completion(
     });
     if let Err(error) = result {
         state.preview_coordinator.clear_submission();
-        show_error(&mut state, error);
+        show_preview_error(&mut state, error);
     }
     sync_main_preview_pending(&state);
 }
@@ -30135,7 +30484,10 @@ fn main_viewport_target(state: &AppState) -> Option<toniator_engine::PreviewRast
         (f64::from(origin.x()), f64::from(origin.y())),
         scroll.scale_factor(),
         state.view_state.is_fit(),
-    ).map(|target|target.with_background(preview_backdrop::raster_background_for_document(document)))
+    )
+    .map(|target| {
+        target.with_background(preview_backdrop::raster_background_for_document(document))
+    })
 }
 
 /// Keys last-full fallback pixels by workspace, document revision, and exact temporal frame.
@@ -30242,8 +30594,18 @@ fn update_backdrop(state: &mut AppState) {
 }
 
 /// Projects existing source diagnostics and undismissed media facts using current document timing.
-/// Media notices are session-only; SVG information and migration diagnostics remain visible.
+/// Source notice dismissal is session-only and covers SVG information plus media facts.
+/// Undismissed operation errors take priority through viewport refresh without presenting unseen
+/// source notices. Migration diagnostics remain independent; source replacement clears old errors.
 fn show_source_diagnostic(state: &mut AppState) {
+    let operation_error = state.error.text();
+    if state.main_error_identity.is_some() && !operation_error.is_empty() {
+        apply_banner_policy(
+            &state.shell,
+            banner_policy(false, None, Some(&operation_error)),
+        );
+        return;
+    }
     let migration_notice = state
         .workspace
         .as_ref()
@@ -30252,13 +30614,15 @@ fn show_source_diagnostic(state: &mut AppState) {
         .workspace
         .as_ref()
         .and_then(|workspace| workspace.source_presentation.as_ref())
+        .filter(|source| !source.notice.is_dismissed())
         .and_then(|source| source.identity.svg_text.as_ref());
+    let source_diagnostic_present = diagnostic.is_some();
     let mut policy = banner_policy(migration_notice, diagnostic, None);
     if let Some(workspace) = state.workspace.as_mut() {
         let timing = workspace.document().project_timing().clone();
         if let Some(source) = workspace.source_presentation.as_mut() {
             let message = source.notice.message(&timing);
-            source.notice.presented = message.is_some();
+            source.notice.presented = message.is_some() || source_diagnostic_present;
             if let Some(message) = message {
                 policy = BannerPolicy::Message(match policy {
                     BannerPolicy::Hidden => message,
@@ -30274,8 +30638,10 @@ fn set_page(state: &mut AppState, page: Page) {
     state.stack.set_visible_child_name(page.name());
 }
 
-/// Presents an operation error on the current workspace or startup screen without discarding work.
+/// Presents an operation error without discarding work and retains it through viewport refresh.
+/// Dismissal, workspace replacement, or an identity-matched successful save retry clears it.
 fn show_error(state: &mut AppState, message: String) {
+    state.main_error_identity = Some(Rc::new(()));
     if let Some(source) = state
         .workspace
         .as_mut()
@@ -30290,6 +30656,26 @@ fn show_error(state: &mut AppState, message: String) {
     apply_banner_policy(&state.shell, banner_policy(false, None, Some(&message)));
     // A failed lifecycle operation must not destroy an accepted preview.
     set_page(state, page_after_preview_error(state.preview.is_some()));
+}
+
+/// Reports a preview failure whose next refresh may replace the transient render diagnostic.
+/// Retained operation errors keep priority. A new preview message updates only notice-presentation
+/// bookkeeping and GTK text; document, history, source bytes, and diagnostic facts stay unchanged.
+fn show_preview_error(state: &mut AppState, message: String) {
+    if state.main_error_identity.is_some() {
+        return;
+    }
+    show_error(state, message);
+    state.main_error_identity = None;
+}
+
+/// Allows a successful save retry to clear only the captured current operation-error identity.
+/// Shared Rc ownership prevents a newer identical message from reusing the captured identity.
+/// A later unrelated error or transient preview failure never matches this recovery authority.
+fn saved_error_matches_current(current: Option<&Rc<()>>, captured: Option<&Rc<()>>) -> bool {
+    current
+        .zip(captured)
+        .is_some_and(|(current, captured)| Rc::ptr_eq(current, captured))
 }
 
 /// Dismisses the current main-window message and leaves document authority untouched.
@@ -30308,6 +30694,7 @@ fn dismiss_main_message(state: &Rc<RefCell<AppState>>) {
     }
     app_state.shell.set_banner(None);
     app_state.error.set_label("");
+    app_state.main_error_identity = None;
     if app_state.stack.visible_child_name().as_deref() == Some(Page::Error.name()) {
         let page = if app_state.workspace.is_some() {
             Page::Success
@@ -30363,7 +30750,7 @@ fn sync_ui(state: &mut AppState) {
             artist_pattern_name(&selected_property_values(workspace.document(), channel))
         })
     });
-    let (document_vm, channel_vm, preview_vm) =
+    let (document_vm, _channel_vm, preview_vm) =
         project_document(state, selected_name, active_pattern);
     state.actions.new.set_enabled(policy.new_enabled);
     state.actions.open.set_enabled(policy.open_enabled);
@@ -30417,7 +30804,11 @@ fn sync_ui(state: &mut AppState) {
         .workspace
         .as_ref()
         .map_or("Welcome", |workspace| workspace.display_name.as_str());
-    state.window_title.set_label(identity);
+    state.window_title.set_label(&format!(
+        "{identity}{}",
+        if lifecycle_vm.dirty { "*" } else { "" }
+    ));
+    state.window_title.set_tooltip_text(Some(identity));
     state
         .window
         .set_tooltip_text(Some(if lifecycle_vm.has_workspace && lifecycle_vm.dirty {
@@ -30425,12 +30816,6 @@ fn sync_ui(state: &mut AppState) {
         } else {
             &document_vm.title
         }));
-    state.channel_segments.set_tooltip_text(
-        channel_vm
-            .active_pattern
-            .as_deref()
-            .or(channel_vm.name.as_deref()),
-    );
     state.picture.set_tooltip_text(Some(preview_tooltip(
         preview_vm.pending,
         preview_vm.accepted_ticket.is_some(),
@@ -31160,8 +31545,13 @@ mod tests {
             recipe: PatternDefinitionRecipe::starter_for_family(PatternRecipeFamilyKind::Guides),
             calibration_document: before.clone(),
             calibration_channel,
-            saved_calibration: calibration_channel
-                .and_then(|channel| before.saved_calibration_for(channel).ok().flatten().cloned()),
+            saved_calibration: calibration_channel.and_then(|channel| {
+                before
+                    .saved_calibration_for(channel)
+                    .ok()
+                    .flatten()
+                    .cloned()
+            }),
             workspace_generation: 0,
             base_document: before.clone(),
             base_revision: workspace.history.revision(),
@@ -31233,6 +31623,8 @@ mod tests {
     /// This check exercises the normal GResource boundary without creating a display, document,
     /// history, scheduler, or file side effect. A missing resource or an accidental Adwaita type
     /// makes the application fail before any window can be presented.
+    /// # Panics
+    /// Panics if a required resource or native GTK hierarchy invariant is missing.
     #[test]
     fn gtk_blueprint_resources_register_and_remain_adwaita_free() {
         register_resources();
@@ -31266,9 +31658,9 @@ mod tests {
                 assert!(
                     template.contains("GtkStackPage")
                         && template.contains("name=\"child\"")
-                        && template.contains("type=\"start\"")
-                        && template.contains("type=\"end\""),
-                    "window must retain named stack-page widgets and valid paned child roles"
+                        && template.contains("id=\"back_to_canvas\"")
+                        && !template.contains("GtkPaned"),
+                    "window retains named pages and reachable fixed/adaptive Settings"
                 );
                 assert!(
                     template.contains("id=\"main_banner_dismiss\"")
@@ -31332,21 +31724,141 @@ mod tests {
         );
     }
 
-    /// Proves active channel settings retain a usable bounded width across supported windows.
-    ///
-    /// This allocation policy is pure: it neither creates GTK widgets nor changes document,
-    /// history, scheduler, preview, or persisted state.
+    /// Verifies fixed text-scaled sizing and reachable Settings across resize/show/hide transitions.
+    /// Layout projection preserves the requested visibility even when the same inspector becomes full-width.
+    /// # Panics
+    /// Panics if a narrow allocation loses its selected view or a hidden inspector reserves canvas space.
     #[test]
-    fn main_sidebar_policy_preserves_usable_width_without_oversizing() {
-        assert_eq!(main_sidebar_width_for_window(480), 300);
-        assert_eq!(main_sidebar_width_for_window(620), 300);
-        assert_eq!(main_sidebar_width_for_window(960), 320);
-        assert_eq!(main_sidebar_width_for_window(1440), 420);
-        for width in [480, 620, 960, 1440] {
-            let sidebar = main_sidebar_width_for_window(width);
-            assert!((MAIN_SIDEBAR_MIN_WIDTH_PX..=MAIN_SIDEBAR_MAX_WIDTH_PX).contains(&sidebar));
-            assert_eq!(main_split_position_for_window(width) + sidebar, width);
+    fn main_sidebar_policy_preserves_requested_view_across_text_and_width_changes() {
+        for width in [960, 1024, 1440] {
+            let layout = components::inspector_layout(width, 320, true);
+            assert!(!layout.narrow);
+            assert!(layout.canvas_visible && layout.settings_visible);
+            assert_eq!(layout.preferred_width, 320);
         }
+        for preferred in [320, 400, 640] {
+            let narrow = components::inspector_layout(480, preferred, true);
+            assert!(narrow.narrow && narrow.settings_visible && !narrow.canvas_visible);
+            let hidden = components::inspector_layout(480, preferred, false);
+            assert!(hidden.canvas_visible && !hidden.settings_visible);
+            let reopened = components::inspector_layout(1440, preferred, true);
+            assert_eq!(reopened.preferred_width, preferred);
+            assert!(reopened.settings_visible);
+        }
+        assert!(
+            components::inspector_layout(660, 300, true).narrow,
+            "pending preview minimum cannot trap the initial narrow transition"
+        );
+        assert!(components::inspector_layout(1024, 640, true).narrow);
+        assert!(!components::inspector_layout(1440, 640, true).narrow);
+        assert!(
+            ui_policy(
+                Some(&Workspace::from_new().expect("source-less New")),
+                false,
+                false,
+                false
+            )
+            .selector_enabled
+        );
+        assert_eq!(
+            main_inspector_section(PropertyFieldId::ShapeRotationDegrees),
+            MainInspectorSection::Appearance
+        );
+    }
+
+    /// Exercises the actual GTK parent/order and empty-detail helpers without inventing domain capability.
+    /// Current domain projects one drawing layer; supplied IDs test only the retained native composition.
+    /// Disclosure visibility follows expansion so collapsed children cannot enter GTK focus traversal.
+    /// A synthetic print status tests attention placement outside every disclosure; it does not run analysis.
+    /// The same Back action remains outside the same inspector scroller so entry focus cannot reset scroll.
+    /// # Panics
+    /// Panics outside the private harness or if widget parent/order/visibility invariants fail.
+    #[test]
+    #[ignore = "requires the private gtk-wayland-debug runtime"]
+    fn main_shell_native_output_groups_follow_order_and_hide_empty_details() {
+        assert!(
+            std::env::var("XDG_RUNTIME_DIR").is_ok_and(|path| path.contains("/toniator-debug."))
+        );
+        gtk::init().expect("private GTK initializes");
+        register_resources();
+        let shell = components::ToniatorMainShell::new();
+        let inspector = shell.inspector_scroll();
+        let column = inspector.parent().expect("same retained inspector column");
+        let back = column.first_child().expect("pinned Back action");
+        assert_eq!(
+            back.clone()
+                .downcast::<gtk::Button>()
+                .unwrap()
+                .label()
+                .as_deref(),
+            Some("_Back to canvas")
+        );
+        assert!(!back.is_ancestor(&inspector));
+        assert_eq!(back.next_sibling().as_ref(), Some(inspector.upcast_ref()));
+        let container = shell.frequent_output_controls();
+        let mut groups = MainOutputGroups::new();
+        let first = PatternOutputLayerId(1);
+        let second = PatternOutputLayerId(2);
+        for outputs in [[first, second], [second, first]] {
+            reconcile_main_output_group_widgets(&container, &mut groups, &outputs);
+            let first_frame = &groups[&outputs[0]].frame;
+            let second_frame = &groups[&outputs[1]].frame;
+            assert_eq!(first_frame.parent().as_ref(), Some(container.upcast_ref()));
+            assert_eq!(
+                container.first_child().as_ref(),
+                Some(first_frame.upcast_ref())
+            );
+            assert_eq!(
+                first_frame.next_sibling().as_ref(),
+                Some(second_frame.upcast_ref())
+            );
+            assert_eq!(first_frame.label().as_deref(), Some("Output 1"));
+            assert_eq!(second_frame.label().as_deref(), Some("Output 2"));
+        }
+        sync_main_output_group_visibility(&groups);
+        shell.sync_inspector_sections();
+        assert!(
+            groups
+                .values()
+                .all(|group| !group.frame.get_visible() && !group.details.get_visible())
+        );
+        assert!(!container.parent().unwrap().get_visible());
+        groups[&first]
+            .technical
+            .append(&gtk::Label::new(Some("Technical field")));
+        sync_main_output_group_visibility(&groups);
+        shell.sync_inspector_sections();
+        assert!(groups[&first].frame.get_visible());
+        assert!(groups[&first].details.get_visible());
+        let group = &groups[&first];
+        assert!(!group.technical.get_visible());
+        group.details.set_expanded(true);
+        assert!(group.technical.get_visible());
+        group.details.set_expanded(false);
+        assert!(!group.technical.get_visible());
+        assert!(!groups[&second].frame.get_visible());
+        assert!(container.parent().unwrap().get_visible());
+        shell.set_print_attention(Some("Print review is running…"));
+        let mut widgets = vec![shell.clone().upcast::<gtk::Widget>()];
+        let mut attention = None;
+        while let Some(widget) = widgets.pop() {
+            if let Some(label) = widget.downcast_ref::<gtk::Label>()
+                && label.text() == "Print review is running…"
+            {
+                attention = Some(label.clone());
+                break;
+            }
+            let mut child = widget.first_child();
+            while let Some(widget) = child {
+                child = widget.next_sibling();
+                widgets.push(widget);
+            }
+        }
+        let attention = attention.expect("synthetic attention has a native label");
+        assert!(attention.get_visible());
+        assert!(attention.ancestor(gtk::Expander::static_type()).is_none());
+        shell.set_print_attention(None);
+        assert!(!attention.get_visible());
     }
 
     /// Proves the PNG dialog selects modeled defaults and rejects unknown GTK positions safely.
@@ -31794,6 +32306,133 @@ mod tests {
             .expect("private test scheduler shuts down");
     }
 
+    /// Reproduces neutral-projection token divergence and accepts only its still-current origin.
+    ///
+    /// A real bounded evaluator completion uses revision zero while an authored private draft
+    /// has advanced. The exact submitted session accepts it; edited, newer, closed, wrong-epoch,
+    /// endpoint and workspace origins reject it without changing the main document or history.
+    ///
+    /// # Panics
+    /// Panics if the immutable PNG, current catalog, scheduler or acceptance boundaries fail.
+    #[test]
+    fn pattern_editor_projected_preview_retains_exact_session_and_origin() {
+        let workspace = direct_png_workspace();
+        let main_before = workspace.history.document().clone();
+        let main_revision = workspace.history.revision();
+        let mut history = DocumentHistory::new_draft(&workspace.history);
+        PresetRegistry::bundled()
+            .apply_to_document_base(&mut history, "curve-motif-rows")
+            .expect("current motif materializes privately");
+        let projected = wizard_preview_session(history.document(), InspectorTarget::DocumentAll)
+            .expect("neutral projection is valid");
+        assert_ne!(history.revision(), projected.revision());
+        assert_eq!(
+            pattern_editor_preview_background(false, history.document()),
+            preview_backdrop::raster_background_for_document(history.document()),
+        );
+        assert_eq!(
+            pattern_editor_preview_background(true, history.document()),
+            toniator_engine::RasterBackground::Transparent,
+        );
+        let presentation = workspace.source_presentation.as_ref().expect("PNG source");
+        let source = workspace
+            .sources
+            .get(&presentation.id)
+            .expect("source bytes");
+        let resolved = ResolvedSource::new(
+            presentation.id.clone(),
+            Arc::<[u8]>::from(source.bytes()),
+            presentation.format,
+        )
+        .expect("source resolves");
+        let scheduler = EvaluationScheduler::new().expect("private scheduler starts");
+        let ticket = scheduler
+            .submit(
+                EvaluationRequest::with_preview_target(
+                    projected.document_evaluation_snapshot(),
+                    resolved,
+                    toniator_engine::PreviewRasterTarget::new(96, 96).expect("bounded target"),
+                )
+                .for_structural_preview(),
+            )
+            .expect("neutral snapshot submits");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let completion = loop {
+            match scheduler.try_receive_latest().expect("completion channel") {
+                Some(completion) => break completion,
+                None if Instant::now() < deadline => thread::yield_now(),
+                None => panic!("neutral preview exceeded bounded guard"),
+            }
+        };
+        assert!(completion.result().is_some());
+        assert!(
+            !scheduler
+                .accept_completion(&completion, history.session())
+                .expect("old route")
+        );
+        let origin = temporal_preview::RequestKey {
+            workspace: 7,
+            revision: history.revision().0,
+            epoch: 11,
+            frame: temporal_preview::Endpoint::Start.frame(history.document()),
+        };
+        assert!(accepts_pattern_editor_preview_origin(
+            Some(origin),
+            11,
+            7,
+            history.session(),
+            temporal_preview::Endpoint::Start,
+        ));
+        assert!(accepts_private_preview_terminal(
+            11,
+            Some(ticket.value()),
+            11,
+            ticket.value()
+        ));
+        assert!(!accepts_private_preview_terminal(
+            11,
+            Some(ticket.value() + 1),
+            11,
+            ticket.value()
+        ));
+        for stale in [
+            None,
+            Some(temporal_preview::RequestKey {
+                workspace: 8,
+                ..origin
+            }),
+            Some(temporal_preview::RequestKey {
+                revision: origin.revision + 1,
+                ..origin
+            }),
+            Some(temporal_preview::RequestKey {
+                epoch: 12,
+                ..origin
+            }),
+            Some(temporal_preview::RequestKey {
+                frame: origin.frame + 1,
+                ..origin
+            }),
+        ] {
+            assert!(!accepts_pattern_editor_preview_origin(
+                stale,
+                11,
+                7,
+                history.session(),
+                temporal_preview::Endpoint::Start,
+            ));
+        }
+        assert!(
+            scheduler
+                .accept_completion(&completion, &projected)
+                .expect("exact projection")
+        );
+        scheduler.shutdown().expect("private scheduler stops");
+        assert_eq!(workspace.history.document(), &main_before);
+        assert_eq!(workspace.history.revision(), main_revision);
+        assert!(!workspace.history.can_undo());
+    }
+
     /// Applies Grid, Random, then Grid through one isolated draft history.
     ///
     /// The test proves family switches advance only the cloned history and
@@ -31932,10 +32571,13 @@ mod tests {
             &task,
             8,
             12,
-            Ok(calibration_preparation::PreparedCalibrations { active: vec![toniator_domain::AttachedCalibration {
-                channel_id,
-                artifact,
-            }], baseline: None }),
+            Ok(calibration_preparation::PreparedCalibrations {
+                active: vec![toniator_domain::AttachedCalibration {
+                    channel_id,
+                    artifact,
+                }],
+                baseline: None,
+            }),
         )
         .expect("matching worker result publishes one private candidate");
         assert!(!summary.unchanged);
@@ -32016,9 +32658,15 @@ mod tests {
             focus: None,
             cancelled,
         };
-        let result =
-            publish_inspector_calibration_result(&mut main, &mut pending, 8,
-                Ok(calibration_preparation::PreparedCalibrations { active: Vec::new(), baseline: None }));
+        let result = publish_inspector_calibration_result(
+            &mut main,
+            &mut pending,
+            8,
+            Ok(calibration_preparation::PreparedCalibrations {
+                active: Vec::new(),
+                baseline: None,
+            }),
+        );
 
         assert_eq!(result, Err("Pattern calibration was cancelled.".to_owned()));
         assert_eq!(main.document(), &base_document);
@@ -32687,6 +33335,40 @@ mod tests {
             assert_eq!(format_hint_for_path(Path::new(path)).unwrap(), expected);
         }
         assert!(format_hint_for_path(Path::new("x.gif")).is_err());
+    }
+
+    /// Exercises source-less model edits through current history while preserving artwork/save gating.
+    /// # Panics
+    /// Panics if editable New loses topology/history authority or invents source-backed preview/save state.
+    #[test]
+    fn source_less_model_edits_preserve_empty_artwork_and_history() {
+        let mut workspace = Workspace::from_new().unwrap();
+        assert!(should_apply_model_change(
+            false,
+            PreviewModel::Rgb,
+            PreviewModel::Cmyk,
+            false,
+            true
+        ));
+        replace_model_topology(&mut workspace.history, PreviewModel::Cmyk).unwrap();
+        assert_eq!(
+            workspace.document().channel_model(),
+            Some(HalftoneChannelModel::Cmyk)
+        );
+        assert!(workspace.is_dirty() && workspace.history.can_undo());
+        assert!(!workspace.can_save() && !workspace_requires_initial_preview(&workspace));
+        workspace.history.undo().unwrap();
+        assert_eq!(
+            workspace.document().channel_model(),
+            Some(HalftoneChannelModel::Rgb)
+        );
+        assert!(!should_apply_model_change(
+            false,
+            PreviewModel::Rgb,
+            PreviewModel::Cmyk,
+            false,
+            false
+        ));
     }
 
     /// Verifies new workspaces stay empty while direct artwork requests initial visible progress.
@@ -33486,16 +34168,20 @@ mod tests {
         assert_eq!(SAVE_FILTER_LABEL, "Toniator documents (.toniator)");
         assert_eq!(EXPORT_FILTER_LABELS, ["PNG image", "SVG vector image"]);
         assert_eq!(
-            LIFECYCLE_BUTTONS.map(|(label, _, _)| label),
+            MAIN_MENU_SECTIONS
+                .iter()
+                .flat_map(|section| section.iter().map(|(_, action)| *action))
+                .collect::<Vec<_>>(),
             [
-                "_New",
-                "_Open",
-                "_Save",
-                "Save _As",
-                "Export _image...",
-                "Export _video",
-                "_Close",
-                "E_xit"
+                "app.save",
+                "app.save-as",
+                "app.export-image",
+                "app.export-video",
+                "app.animation-settings",
+                "app.close",
+                "app.exit",
+                "app.help",
+                "app.help"
             ]
         );
         let surface = RasterSurface::new(2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
@@ -33585,6 +34271,31 @@ mod tests {
         assert_eq!(container.title(), format!("{saved_name}* — Toniator"));
     }
 
+    /// Keeps save recovery scoped to the captured operation failure and preserves newer diagnostics.
+    /// This presentation-only policy never changes savepoints, history, sources, or worker results.
+    /// # Panics
+    /// Panics if successful Save can dismiss an unrelated error or retain its own captured failure.
+    #[test]
+    fn save_error_recovery_preserves_newer_and_preview_messages() {
+        let captured = Rc::new(());
+        let same_error = Rc::clone(&captured);
+        let newer_identical_message = Rc::new(());
+        assert!(saved_error_matches_current(
+            Some(&same_error),
+            Some(&captured)
+        ));
+        assert!(!saved_error_matches_current(
+            Some(&newer_identical_message),
+            Some(&captured)
+        ));
+        assert!(!saved_error_matches_current(None, Some(&captured)));
+        assert!(!saved_error_matches_current(Some(&same_error), None));
+        assert!(!saved_error_matches_current(None, None));
+    }
+
+    /// Verifies operation errors precede source information without changing its authority.
+    /// # Panics
+    /// Panics when an error is replaced by migration or SVG information.
     #[test]
     fn banner_policy_prioritizes_errors_then_migration_then_svg_live_text() {
         let live = toniator_engine::SvgTextDiagnostic {
@@ -38180,6 +38891,9 @@ mod tests {
     ///
     /// This headless resource assertion checks semantic structure only. It does not claim human
     /// visual acceptance, compositor behavior, or runtime focus traversal evidence.
+    /// # Panics
+    /// Panics if preview/page content escapes its scroll boundary, actions cannot wrap,
+    /// or the native catalog selection hierarchy loses its required semantic slots.
     #[test]
     fn stage21b_wizard_template_preserves_static_preview_and_accessible_card_semantics() {
         register_resources();
@@ -38214,10 +38928,16 @@ mod tests {
                 && spinner < controls_scroll
                 && controls_scroll < controls
         );
+        let content_scroll = wizard
+            .find("id=\"wizard_content_scroll\"")
+            .expect("short windows scroll preview and setup content above the actions");
+        let actions = wizard
+            .find("id=\"wizard_actions\"")
+            .expect("wizard actions remain outside the scrolling content");
+        assert!(content_scroll < preview_viewport && controls < actions);
         assert!(
-            wizard[preview_viewport..preview_frame]
-                .contains("<property name=\"height-request\">200"),
-            "the preview frame retains its fixed 200px allocation ahead of settings"
+            wizard[actions.saturating_sub(30)..actions].contains("GtkFlowBox"),
+            "native action layout wraps at narrow allocations instead of clipping actions"
         );
         let gallery_heading = wizard
             .find("id=\"wizard_gallery_heading\"")
@@ -38233,9 +38953,8 @@ mod tests {
             "narrow scroll content presents gallery context before card list"
         );
         assert!(
-            wizard[cards..].contains("max-children-per-line\">3")
-                && !wizard[cards..].contains("homogeneous"),
-            "wide Presets FlowBox leaves child sizing bounded instead of stretching one full-width column"
+            !wizard[cards..actions].contains("homogeneous"),
+            "catalog choices retain their bounded natural widths"
         );
 
         let card = gio::resources_lookup_data(

@@ -101,8 +101,12 @@ The fixed welcome window appears over the editor. Click the editor behind it,
 press Escape, or close welcome to begin with an empty document. Recent Files
 scrolls within its own bounded area.
 
-1. Click **Start New Project** and select an image. The same button opens an
-   existing `.toniator` project; **Recent Files** provides quick access later.
+1. Click **Start New Project** and select an image or existing `.toniator`
+   project; **Recent Files** provides quick access later. In the editor, primary
+   **New** creates an editable document without source artwork. Use **Open artwork…**
+   on the empty canvas, or the **New options** dropdown for Open, image-sequence
+   import, and document Presets. Saving a project and exporting artwork require
+   source artwork.
 2. Choose a color mode and edit **All** channels together or select one channel.
 3. Use **Change…** to choose a Pattern. Use it as supplied or edit its layout,
    placement, and styling in the Pattern Wizard.
@@ -135,7 +139,17 @@ It renders in the background on a bounded sample canvas, including connection
 Patterns. Moving between wizard pages does not wait for a render. The Wizard is
 structure-only: its disposable preview uses neutral response bounds (minimum 0,
 maximum 1), and response ranges and region sampling are not editable there.
-In the main sidebar, **Feature size** controls pattern fineness across families:
+
+The main **Settings** inspector has a fixed preferred width that scales with
+text size. Show or hide it with **Settings**; narrow windows show Settings at full
+width, with **Back to canvas** pinned above the scrolling controls and Escape to
+return. Toggling Settings preserves the edit target, zoom, pan, and inspector
+scroll position. Recipe details, Output options, and Print preparation start
+collapsed where applicable; passive memory readouts are under **Diagnostics**
+in Advanced Settings. Shared dialogs keep long content scrollable above their
+actions, including visible validation reasons when an operation cannot proceed.
+
+In the main inspector, **Feature size** controls pattern fineness across families:
 smaller values tighten spacing and produce more detail; larger values make the
 pattern coarser. Scatter separation and cluster spread, spiral pitch, and
 along-curve point spacing scale together. Spirals adjust their turn count to
@@ -176,15 +190,18 @@ the channel's source weighting; otherwise it aims for even spacing. **Relaxation
 steps** controls how far the arrangement settles. More relaxation can soften
 clusters. Turning relaxation off retains its settings for later use.
 
-Use the header information button, **About Toniator** in the menu, or **F1** for
-the version, license, user guide, source code, and issue-reporting links.
+Use **Main Menu → Help and feedback…**, **About Toniator**, or **F1** for the
+version, license, user guide, source code, and issue-reporting links. Operation
+errors remain visible through preview changes. Dismiss or document replacement
+clears the message; a successful Save retry clears its error while newer errors
+remain.
 
-**New → Select preset…** offers fourteen built-in document configurations.
+**New options → Select preset…** offers fourteen built-in document configurations.
 Selection uses the normal confirmation and applies all channel settings in one
 undoable change while preserving your artwork, canvas, and project identity.
 The built-in collection is independent of your personal Preset files.
 
-**New → Save preset** saves the whole design configuration
+**New options → Save preset** saves the whole design configuration
 as a source-free `.toniator-preset`. **Load preset...** accepts that format or an
 intact `.toniator` project, applies all channel settings, and keeps your current
 artwork and canvas. Loading is one undoable change; saving a Preset does not save
@@ -422,8 +439,12 @@ zero disables it. With all three correction widths at zero, prepared PNGs also
 use streaming. Nonzero corrections currently support up to 32,000,000 pixels;
 the dialog explains this limit before export. The preview updates automatically
 when its requested size is supported and shows the same prepared
-pixels as the exported file beside the settings, with a draggable divider,
-zoom, and pan. Background and custom fills have separate swatches; both provide
+pixels as the exported file. Wide PNG windows place settings beside the preview
+with a draggable divider, zoom, and pan. Narrow windows or large text stack the
+same controls and preview in scrolling content above pinned actions; resizing
+retains field edits, preview view, and the wide divider position. This divider
+belongs to PNG options; the main Settings inspector has a fixed width.
+Background and custom fills have separate swatches; both provide
 **Use garment color**, which copies the viewer swatch once. These settings do
 not change the project or ordinary PNG exports. The result is not a print-safety
 certification. See the

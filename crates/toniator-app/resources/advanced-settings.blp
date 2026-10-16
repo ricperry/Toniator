@@ -9,44 +9,49 @@ template $ToniatorAdvancedSettingsShell : Gtk.Box {
   margin-start: 12;
   margin-end: 12;
 
-  Gtk.Button advanced_reset {
-    label: "_Reset to defaults";
-    use-underline: true;
-    halign: start;
-  }
-
-  Gtk.Button advanced_recalibrate {
-    label: "Reca_librate Pattern";
-    use-underline: true;
-    halign: start;
-    tooltip-text: "Measure this Pattern's current structural binding again in the private draft. Apply keeps the result; Cancel discards it.";
-  }
-
-  Gtk.Label advanced_status {
-    label: "Changes do not affect your artwork until Apply.";
-    xalign: 0;
-    wrap: true;
-    styles [ "dim-label" ]
-  }
-
-  Gtk.Picture advanced_preview {
-    content-fit: contain;
-    can-shrink: true;
-    hexpand: true;
-    height-request: 180;
-    styles [ "toniator-draft-preview" ]
-  }
-
   Gtk.ScrolledWindow {
     hscrollbar-policy: never;
     vscrollbar-policy: automatic;
     vexpand: true;
-    min-content-height: 220;
+    propagate-natural-height: false;
 
-    Gtk.Box advanced_controls {
+    Gtk.Box {
       orientation: vertical;
-      spacing: 10;
-      valign: start;
+      spacing: 12;
+
+      Gtk.Button advanced_reset {
+        label: "_Reset to defaults";
+        use-underline: true;
+        halign: start;
+      }
+
+      Gtk.Button advanced_recalibrate {
+        label: "Reca_librate Pattern";
+        use-underline: true;
+        halign: start;
+        tooltip-text: "Measure this Pattern's current structural binding again in the private draft. Apply keeps the result; Cancel discards it.";
+      }
+
+      Gtk.Label advanced_status {
+        label: "Changes do not affect your artwork until Apply.";
+        xalign: 0;
+        wrap: true;
+        styles [ "dim-label" ]
+      }
+
+      Gtk.Picture advanced_preview {
+        content-fit: contain;
+        can-shrink: true;
+        hexpand: true;
+        height-request: 180;
+        styles [ "toniator-draft-preview" ]
+      }
+
+      Gtk.Box advanced_controls {
+        orientation: vertical;
+        spacing: 10;
+        valign: start;
+      }
     }
   }
 

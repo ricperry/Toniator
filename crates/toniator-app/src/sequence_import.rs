@@ -100,7 +100,8 @@ fn refresh(surface: &Surface) {
     }
 }
 
-/// Opens the sequence sheet after the existing unsaved-document decision has been resolved.
+/// Opens a scrollable sequence draft after the existing unsaved-document decision.
+/// Native list/order/rate controls retain their state while status and actions remain visible.
 pub(super) fn open(state: &Rc<RefCell<AppState>>) {
     if let Some(surface) = state.borrow().sequence_import.as_ref() {
         surface.window.present();
@@ -119,7 +120,13 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
     let header = gtk::HeaderBar::new();
     header.set_title_widget(Some(&gtk::Label::new(Some("Import image sequence"))));
     window.set_titlebar(Some(&header));
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    let content_scroll = gtk::ScrolledWindow::new();
+    content_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    content_scroll.set_vexpand(true);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content_scroll.set_child(Some(&content));
+    root.append(&content_scroll);
     content.set_margin_top(16);
     content.set_margin_bottom(16);
     content.set_margin_start(16);
@@ -162,22 +169,35 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
     let list = gtk::ListView::new(Some(selection.clone()), Some(factory));
     list.update_property(&[gtk::accessible::Property::Label("Image sequence")]);
     let scroll = gtk::ScrolledWindow::new();
-    scroll.set_vexpand(true);
-    scroll.set_min_content_height(180);
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_min_content_height(120);
     scroll.set_child(Some(&list));
     content.append(&scroll);
-    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let controls = gtk::FlowBox::new();
+    controls.set_selection_mode(gtk::SelectionMode::None);
+    controls.set_min_children_per_line(1);
+    controls.set_max_children_per_line(4);
+    controls.set_row_spacing(8);
+    controls.set_column_spacing(8);
     let add = gtk::Button::with_label("Add images…");
     let remove = gtk::Button::with_label("Remove");
     let earlier = gtk::Button::with_label("Move earlier");
     let later = gtk::Button::with_label("Move later");
     for button in [&add, &remove, &earlier, &later] {
-        controls.append(button);
+        controls.insert(button, -1);
+        if let Some(wrapper) = button.parent() {
+            wrapper.set_focusable(false);
+            button
+                .bind_property("sensitive", &wrapper, "sensitive")
+                .sync_create()
+                .build();
+        }
     }
     content.append(&controls);
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
     let label = gtk::Label::new(Some("Source frame rate (fps)"));
     label.set_xalign(0.0);
+    label.set_wrap(true);
     label.set_hexpand(true);
     let rate = gtk::Entry::new();
     rate.set_text("30");
@@ -193,8 +213,11 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
     content.append(&row);
     let status = gtk::Label::new(None);
     status.set_wrap(true);
+    status.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     status.set_xalign(0.0);
-    content.append(&status);
+    status.set_margin_start(16);
+    status.set_margin_end(16);
+    root.append(&status);
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     buttons.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
@@ -202,8 +225,11 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
     import.add_css_class("suggested-action");
     buttons.append(&cancel);
     buttons.append(&import);
-    content.append(&buttons);
-    window.set_child(Some(&content));
+    buttons.set_margin_start(16);
+    buttons.set_margin_end(16);
+    buttons.set_margin_bottom(16);
+    root.append(&buttons);
+    window.set_child(Some(&root));
     let refreshing = Rc::new(Cell::new(false));
     state.borrow_mut().sequence_import = Some(Surface {
         window: window.clone(),

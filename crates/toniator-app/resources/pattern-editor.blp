@@ -9,260 +9,276 @@ template $ToniatorPatternEditorShell : Gtk.Box {
   margin-start: 12;
   margin-end: 12;
 
-  Gtk.Label draft_status {
-    xalign: 0;
-    wrap: true;
-    styles [ "dim-label" ]
-  }
-
-  Gtk.ScrolledWindow {
-    hscrollbar-policy: never;
-    vscrollbar-policy: never;
-    vexpand: false;
-    valign: start;
-    min-content-height: 160;
-    max-content-height: 160;
-    propagate-natural-height: false;
-
-    Gtk.Picture draft_preview {
-      content-fit: contain;
-      hexpand: true;
-      vexpand: false;
-      valign: start;
-      can-shrink: true;
-      width-request: 280;
-      height-request: 160;
-      styles [ "toniator-draft-preview" ]
-    }
-  }
-
-  Gtk.Spinner draft_preview_spinner {
-    visible: false;
-    halign: center;
-    tooltip-text: "Preview updating";
-  }
-
   Gtk.ScrolledWindow draft_scroll {
     vexpand: true;
     hscrollbar-policy: never;
-    min-content-height: 180;
     propagate-natural-height: false;
-    styles [ "toniator-draft-controls" ]
 
-    Gtk.Box draft_editor {
+    Gtk.Box {
       orientation: vertical;
       spacing: 12;
 
-      Gtk.Label draft_introduction {
-        label: "Try curve changes here. Cancel returns to the Pattern Wizard without keeping them.";
+      Gtk.Label draft_status {
         xalign: 0;
         wrap: true;
         styles [ "dim-label" ]
       }
 
-      Gtk.Label draft_history {
-        xalign: 0;
-        styles [ "dim-label" ]
-      }
+      Gtk.ScrolledWindow {
+        hscrollbar-policy: never;
+        vscrollbar-policy: never;
+        vexpand: false;
+        valign: start;
+        min-content-height: 160;
+        max-content-height: 160;
+        propagate-natural-height: false;
 
-      Gtk.Label draft_current_pattern {
-        xalign: 0;
-        styles [ "heading" ]
-      }
-
-      Gtk.Box construction_layout {
-        orientation: horizontal;
-        spacing: 12;
-        hexpand: true;
-
-        Gtk.Box construction_sidebar {
-          orientation: vertical;
-          spacing: 8;
-          width-request: 320;
-          valign: start;
-
-          Gtk.Box resource_list {
-            orientation: vertical;
-            spacing: 6;
-            valign: start;
-          }
-
-          Gtk.Box construction_actions {
-            orientation: horizontal;
-            spacing: 6;
-
-            Gtk.Button new_structure {
-              label: "New structure";
-            }
-          }
-        }
-
-        Gtk.Box construction_surface {
-          orientation: vertical;
-          spacing: 8;
+        Gtk.Picture draft_preview {
+          content-fit: contain;
           hexpand: true;
-
-          Gtk.Label construction_canvas_heading {
-            label: "Curve preview";
-            xalign: 0;
-            styles [ "heading" ]
-          }
-
-          Gtk.DrawingArea construction_canvas {
-            content-width: 220;
-            content-height: 220;
-            hexpand: true;
-            tooltip-text: "Click to select or add points after choosing New. Scroll to zoom; middle-button drag pans. Enter completes; Escape cancels.";
-            styles [ "toniator-draft-preview" ]
-          }
-
-          Gtk.Box coordinate_row {
-            orientation: horizontal;
-            spacing: 6;
-
-            Gtk.Label {
-              label: "X";
-              mnemonic-widget: coordinate_x;
-            }
-
-            Gtk.Entry coordinate_x {
-              sensitive: false;
-              width-chars: 10;
-              input-purpose: number;
-              tooltip-text: "Selected anchor X coordinate";
-            }
-
-            Gtk.Label {
-              label: "Y";
-              mnemonic-widget: coordinate_y;
-            }
-
-            Gtk.Entry coordinate_y {
-              sensitive: false;
-              width-chars: 10;
-              input-purpose: number;
-              tooltip-text: "Selected anchor Y coordinate";
-            }
-          }
-
-          Gtk.Label selected_point_label {
-            label: "Selected point: none";
-            xalign: 0;
-            wrap: true;
-            styles [ "dim-label" ]
-          }
-
-          Gtk.Box motif_terminal_handle_row {
-            orientation: horizontal;
-            spacing: 6;
-            visible: false;
-
-            Gtk.Button edit_left_terminal_handle {
-              label: "Left end handle";
-              sensitive: false;
-              tooltip-text: "Select the left end handle. If the end is a straight line, add a curve handle first.";
-            }
-
-            Gtk.Button edit_right_terminal_handle {
-              label: "Right end handle";
-              sensitive: false;
-              tooltip-text: "Select the right end handle. If the end is a straight line, add a curve handle first.";
-            }
-          }
-
-          Gtk.Grid segment_actions {
-            column-spacing: 6;
-            row-spacing: 6;
-
-            Gtk.Button make_curve {
-              label: "Make curve";
-              sensitive: false;
-              tooltip-text: "Convert the selected line segment to a cubic curve.";
-              layout {
-                column: 0;
-                row: 0;
-              }
-            }
-
-            Gtk.Button make_line {
-              label: "Make line";
-              sensitive: false;
-              tooltip-text: "Convert the selected cubic segment to a straight line.";
-              layout {
-                column: 1;
-                row: 0;
-              }
-            }
-
-            Gtk.Button insert_node {
-              label: "Insert node";
-              sensitive: false;
-              tooltip-text: "Split the selected segment at its selected hit position.";
-              layout {
-                column: 0;
-                row: 1;
-              }
-            }
-
-            Gtk.Button delete_node {
-              label: "Delete node";
-              sensitive: false;
-              tooltip-text: "Delete the selected node when the path retains two nodes.";
-              layout {
-                column: 1;
-                row: 1;
-              }
-            }
-          }
-
-          Gtk.Box motif_direction_row {
-            orientation: horizontal;
-            spacing: 6;
-            visible: false;
-
-            Gtk.Label {
-              label: "End-handle direction";
-              xalign: 0;
-            }
-
-            Gtk.ToggleButton smooth_direction {
-              label: "Smooth direction";
-              sensitive: false;
-              tooltip-text: "Link terminal handle directions for subsequent Curve Motif handle edits.";
-            }
-
-            Gtk.ToggleButton corner_direction {
-              label: "Corner";
-              group: smooth_direction;
-              sensitive: false;
-              tooltip-text: "Keep terminal handle directions independent for subsequent Curve Motif handle edits.";
-            }
-          }
+          vexpand: false;
+          valign: start;
+          can-shrink: true;
+          width-request: 280;
+          height-request: 160;
+          styles [ "toniator-draft-preview" ]
         }
       }
 
-      Gtk.Box primary_rows {
+      Gtk.Spinner draft_preview_spinner {
+        visible: false;
+        halign: center;
+        tooltip-text: "Preview updating";
+      }
+
+      Gtk.Box draft_editor {
         orientation: vertical;
         spacing: 12;
-        valign: start;
-      }
 
-      Gtk.Expander advanced {
-        label: "Advanced";
-        tooltip-text: "Optional source response, spacing, edge coverage, and performance controls for this curve.";
+        Gtk.Label draft_introduction {
+          label: "Try curve changes here. Cancel returns to the Pattern Wizard without keeping them.";
+          xalign: 0;
+          wrap: true;
+          styles [ "dim-label" ]
+        }
 
-        Gtk.Box advanced_rows {
+        Gtk.Label draft_history {
+          visible: false;
+          xalign: 0;
+          wrap: true;
+          styles [ "dim-label" ]
+        }
+
+        Gtk.Label draft_current_pattern {
+          xalign: 0;
+          wrap: true;
+          styles [ "heading" ]
+        }
+
+        Gtk.Box construction_layout {
+          orientation: horizontal;
+          spacing: 12;
+          hexpand: true;
+
+          Gtk.Box construction_sidebar {
+            orientation: vertical;
+            spacing: 8;
+            width-request: 320;
+            valign: start;
+
+            Gtk.Box resource_list {
+              orientation: vertical;
+              spacing: 6;
+              valign: start;
+            }
+
+            Gtk.Box construction_actions {
+              orientation: horizontal;
+              spacing: 6;
+
+              Gtk.Button new_structure {
+                label: "New structure";
+              }
+            }
+          }
+
+          Gtk.Box construction_surface {
+            orientation: vertical;
+            spacing: 8;
+            hexpand: true;
+
+            Gtk.Label construction_canvas_heading {
+              label: "Curve preview";
+              xalign: 0;
+              styles [ "heading" ]
+            }
+
+            Gtk.DrawingArea construction_canvas {
+              content-width: 220;
+              content-height: 220;
+              hexpand: true;
+              tooltip-text: "Click to select or add points after choosing New. Scroll to zoom; middle-button drag pans. Enter completes; Escape cancels.";
+              styles [ "toniator-draft-preview" ]
+            }
+
+            Gtk.Grid coordinate_row {
+              halign: start;
+              column-spacing: 6;
+              row-spacing: 6;
+
+              Gtk.Label {
+                label: "X";
+                mnemonic-widget: coordinate_x;
+                layout { column: 0; row: 0; }
+              }
+
+              Gtk.Entry coordinate_x {
+                layout { column: 1; row: 0; }
+                sensitive: false;
+                width-chars: 8;
+                max-width-chars: 8;
+                input-purpose: number;
+                tooltip-text: "Selected anchor X coordinate";
+              }
+
+              Gtk.Label {
+                label: "Y";
+                mnemonic-widget: coordinate_y;
+                layout { column: 0; row: 1; }
+              }
+
+              Gtk.Entry coordinate_y {
+                layout { column: 1; row: 1; }
+                sensitive: false;
+                width-chars: 8;
+                max-width-chars: 8;
+                input-purpose: number;
+                tooltip-text: "Selected anchor Y coordinate";
+              }
+            }
+
+            Gtk.Label selected_point_label {
+              label: "Selected point: none";
+              xalign: 0;
+              wrap: true;
+              styles [ "dim-label" ]
+            }
+
+            Gtk.Box motif_terminal_handle_row {
+              orientation: vertical;
+              spacing: 6;
+              visible: false;
+
+              Gtk.Button edit_left_terminal_handle {
+                label: "Left end handle";
+                sensitive: false;
+                tooltip-text: "Select the left end handle. If the end is a straight line, add a curve handle first.";
+              }
+
+              Gtk.Button edit_right_terminal_handle {
+                label: "Right end handle";
+                sensitive: false;
+                tooltip-text: "Select the right end handle. If the end is a straight line, add a curve handle first.";
+              }
+            }
+
+            Gtk.Grid segment_actions {
+              column-spacing: 6;
+              row-spacing: 6;
+
+              Gtk.Button make_curve {
+                label: "Make curve";
+                sensitive: false;
+                tooltip-text: "Convert the selected line segment to a cubic curve.";
+                layout {
+                  column: 0;
+                  row: 0;
+                }
+              }
+
+              Gtk.Button make_line {
+                label: "Make line";
+                sensitive: false;
+                tooltip-text: "Convert the selected cubic segment to a straight line.";
+                layout {
+                  column: 1;
+                  row: 0;
+                }
+              }
+
+              Gtk.Button insert_node {
+                label: "Insert node";
+                sensitive: false;
+                tooltip-text: "Split the selected segment at its selected hit position.";
+                layout {
+                  column: 0;
+                  row: 1;
+                }
+              }
+
+              Gtk.Button delete_node {
+                label: "Delete node";
+                sensitive: false;
+                tooltip-text: "Delete the selected node when the path retains two nodes.";
+                layout {
+                  column: 1;
+                  row: 1;
+                }
+              }
+            }
+
+            Gtk.Box motif_direction_row {
+              orientation: vertical;
+              spacing: 6;
+              visible: false;
+
+              Gtk.Label {
+                label: "End-handle direction";
+                xalign: 0;
+              }
+
+              Gtk.ToggleButton smooth_direction {
+                label: "Smooth direction";
+                sensitive: false;
+                tooltip-text: "Link terminal handle directions for subsequent Curve Motif handle edits.";
+              }
+
+              Gtk.ToggleButton corner_direction {
+                label: "Corner";
+                group: smooth_direction;
+                sensitive: false;
+                tooltip-text: "Keep terminal handle directions independent for subsequent Curve Motif handle edits.";
+              }
+            }
+          }
+        }
+
+        Gtk.Box primary_rows {
           orientation: vertical;
           spacing: 12;
           valign: start;
+        }
+
+        Gtk.Expander advanced {
+          label: "Advanced";
+          tooltip-text: "Optional source response, spacing, edge coverage, and performance controls for this curve.";
+
+          Gtk.Box advanced_rows {
+            orientation: vertical;
+            spacing: 12;
+            valign: start;
+          }
         }
       }
     }
   }
 
-  Gtk.Box draft_actions {
-    orientation: horizontal;
-    spacing: 12;
-    halign: end;
+  Gtk.FlowBox draft_actions {
+    selection-mode: none;
+    homogeneous: true;
+    row-spacing: 6;
+    column-spacing: 6;
+    min-children-per-line: 1;
+    max-children-per-line: 4;
   }
 }

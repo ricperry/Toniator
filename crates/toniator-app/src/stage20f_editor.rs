@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use toniator_domain::{AuthoredStructureDraft, AuthoredStructureId, AuthoredStructureKind};
-use toniator_geometry::{CurveError, CurvePath, CurveSegment, PathClosure, PathLocation, Point2};
+use toniator_geometry::{
+    Bounds, CurveError, CurvePath, CurveSegment, PathClosure, PathLocation, Point2,
+};
 
 /// Selects the geometry policy projected by one reusable authored-path editor.
 ///
@@ -119,6 +121,11 @@ pub(crate) enum MotifTerminalHandle {
 pub(crate) struct Stage20fEditorState {
     mode: Option<AuthoredPathEditorMode>,
     guide_frame: Option<GuideAuthoringFrame>,
+    /// Retains a Shape-only presentation fit independently from user pan and zoom.
+    shape_frame: Option<GuideAuthoringFrame>,
+    shape_origin: Point2,
+    /// Fits once per selected resource identity, never per edited geometry revision.
+    shape_frame_structure: Option<AuthoredStructureId>,
     motif_terminal_direction: Option<MotifTerminalDirection>,
     pub(crate) selected_structure: Option<AuthoredStructureId>,
     pub(crate) selected_node: Option<usize>,
@@ -142,6 +149,9 @@ impl Default for Stage20fEditorState {
         Self {
             mode: None,
             guide_frame: None,
+            shape_frame: None,
+            shape_origin: Point2::new(-1.0, -1.0),
+            shape_frame_structure: None,
             motif_terminal_direction: None,
             selected_structure: None,
             selected_node: None,
@@ -241,7 +251,8 @@ impl Stage20fEditorState {
     /// Configures the editor-local policy and workspace frame for one modal open.
     ///
     /// The workspace dimensions influence only Guide authoring presentation and its endpoint guard;
-    /// Shape and Motif geometry keep their canonical local coordinates. Invalid workspace values
+    /// Shape uses a stable local view frame and Motif uses its tile frame; both keep canonical
+    /// geometry unchanged. Invalid workspace values
     /// disable the frame rather than manufacturing a substitute scale.
     pub(crate) fn configure_mode(
         &mut self,
@@ -257,19 +268,73 @@ impl Stage20fEditorState {
             AuthoredPathEditorMode::Motif => GuideAuthoringFrame::new(1.0, 1.0),
             AuthoredPathEditorMode::Shape => None,
         };
+        self.shape_frame = (mode == AuthoredPathEditorMode::Shape)
+            .then(|| GuideAuthoringFrame::new(2.0, 2.0))
+            .flatten();
+        self.shape_origin = Point2::new(-1.0, -1.0);
+        self.shape_frame_structure = None;
         self.motif_terminal_direction = None;
     }
 
-    /// Updates the Guide frame's canvas allocation while retaining the same uniform mapping.
+    /// Fits a newly selected Shape's anchor/control hull without changing canonical coordinates.
+    ///
+    /// The resource identity owns initial framing. Same-identity edits, drag previews, history
+    /// navigation and rebuilds retain it. A different resource resets only user pan/zoom; finite
+    /// degenerate hull axes gain a view extent without normalizing or rewriting the geometry.
+    /// Invalid or overflowing bounds leave the stable previous/default frame intact.
+    pub(crate) fn fit_selected_shape(&mut self, path: &CurvePath) {
+        if self.mode != Some(AuthoredPathEditorMode::Shape)
+            || self.selected_structure.is_none()
+            || self.shape_frame_structure == self.selected_structure
+        {
+            return;
+        }
+        let points = path.segments().iter().flat_map(|segment| match segment {
+            CurveSegment::Line(line) => [line.start(), line.start(), line.end(), line.end()],
+            CurveSegment::CubicBezier(curve) => [
+                curve.start(),
+                curve.control_1(),
+                curve.control_2(),
+                curve.end(),
+            ],
+        });
+        let Some(bounds) = Bounds::from_points(points) else {
+            return;
+        };
+        let width = bounds.max.x - bounds.min.x;
+        let height = bounds.max.y - bounds.min.y;
+        let minimum_extent = width.max(height).max(1.0) * 0.1;
+        let Some(mut frame) =
+            GuideAuthoringFrame::new(width.max(minimum_extent), height.max(minimum_extent))
+        else {
+            return;
+        };
+        let origin = Point2::new(
+            bounds.min.x - (frame.width - width) * 0.5,
+            bounds.min.y - (frame.height - height) * 0.5,
+        );
+        if !origin.is_finite() {
+            return;
+        }
+        if let Some(previous) = self.shape_frame {
+            frame.canvas_width = previous.canvas_width;
+            frame.canvas_height = previous.canvas_height;
+            frame.padding = previous.padding;
+        }
+        self.shape_frame = Some(frame);
+        self.shape_origin = origin;
+        self.shape_frame_structure = self.selected_structure;
+        self.pan = Point2::new(0.0, 0.0);
+        self.zoom = 1.0;
+    }
+
+    /// Updates retained Guide, Motif or Shape frame allocation without refitting edited geometry while retaining the same uniform mapping.
     pub(crate) fn set_guide_canvas_allocation(
         &mut self,
         canvas_width: f64,
         canvas_height: f64,
         padding: f64,
     ) {
-        let Some(frame) = self.guide_frame.as_mut() else {
-            return;
-        };
         if canvas_width.is_finite()
             && canvas_height.is_finite()
             && canvas_width > 0.0
@@ -277,9 +342,15 @@ impl Stage20fEditorState {
             && padding.is_finite()
             && padding >= 0.0
         {
-            frame.canvas_width = canvas_width;
-            frame.canvas_height = canvas_height;
-            frame.padding = padding.min(canvas_width.min(canvas_height) * 0.45);
+            for frame in self
+                .guide_frame
+                .iter_mut()
+                .chain(self.shape_frame.iter_mut())
+            {
+                frame.canvas_width = canvas_width;
+                frame.canvas_height = canvas_height;
+                frame.padding = padding.min(canvas_width.min(canvas_height) * 0.45);
+            }
         }
     }
 
@@ -771,12 +842,19 @@ impl Stage20fEditorState {
         self.selected_target = None;
         self.local_invalid = false;
     }
-    /// Converts document coordinates into screen coordinates under the finite editor viewport.
+    /// Converts canonical coordinates through the retained uniform fit and finite user viewport.
+    /// Shape fit, Guide workspace and Motif tile projections never alter authored coordinates.
     pub(crate) fn to_screen(&self, point: Point2) -> Point2 {
-        let point = self
-            .guide_frame
-            .map(|frame| frame.to_canvas(self.frame_presentation_point(point)))
-            .unwrap_or(point);
+        let point = if let Some(frame) = self.shape_frame {
+            frame.to_canvas(Point2::new(
+                point.x - self.shape_origin.x,
+                point.y - self.shape_origin.y,
+            ))
+        } else {
+            self.guide_frame
+                .map(|frame| frame.to_canvas(self.frame_presentation_point(point)))
+                .unwrap_or(point)
+        };
         Point2::new(
             point.x * self.zoom + self.pan.x,
             point.y * self.zoom + self.pan.y,
@@ -802,7 +880,8 @@ impl Stage20fEditorState {
         Some((self.to_screen(top_left), self.to_screen(bottom_right)))
     }
 
-    /// Converts finite screen coordinates to document coordinates through the current finite viewport inverse.
+    /// Converts finite screen coordinates through the exact user-viewport and retained-fit inverse.
+    /// Returns no coordinate for invalid input or a noninvertible presentation transform.
     pub(crate) fn to_document(&self, point: Point2) -> Option<Point2> {
         if !point.is_finite() || !self.pan.is_finite() || !self.zoom.is_finite() || self.zoom <= 0.0
         {
@@ -812,10 +891,14 @@ impl Stage20fEditorState {
             (point.x - self.pan.x) / self.zoom,
             (point.y - self.pan.y) / self.zoom,
         );
-        let document = self
-            .guide_frame
-            .map(|frame| frame.canvas_to_document(projected))
-            .unwrap_or(Some(projected))?;
+        let document = if let Some(frame) = self.shape_frame {
+            let local = frame.canvas_to_document(projected)?;
+            Point2::new(local.x + self.shape_origin.x, local.y + self.shape_origin.y)
+        } else {
+            self.guide_frame
+                .map(|frame| frame.canvas_to_document(projected))
+                .unwrap_or(Some(projected))?
+        };
         let document = self.document_point_from_frame_presentation(document);
         document.is_finite().then_some(document)
     }
@@ -1098,6 +1181,145 @@ impl Stage20fEditorState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Fits real default-diamond, unit-square, shifted-control and degenerate Shape hulls uniformly.
+    ///
+    /// Canonical path bytes remain unchanged. Every anchor/control fits the padded canvas, and
+    /// the inverse remains exact after user pan/zoom instead of storing normalized geometry.
+    ///
+    /// # Panics
+    /// Panics when valid test paths fail construction or a fit/inverse violates its finite bounds.
+    #[test]
+    fn shape_frame_fits_canonical_hulls_with_exact_inverse() {
+        let paths = [
+            CurvePath::polyline(
+                vec![
+                    Point2::new(0.0, -1.0),
+                    Point2::new(1.0, 0.0),
+                    Point2::new(0.0, 1.0),
+                    Point2::new(-1.0, 0.0),
+                ],
+                PathClosure::Closed,
+            )
+            .unwrap(),
+            CurvePath::polyline(
+                vec![
+                    Point2::new(0.0, 0.0),
+                    Point2::new(1.0, 0.0),
+                    Point2::new(1.0, 1.0),
+                    Point2::new(0.0, 1.0),
+                ],
+                PathClosure::Closed,
+            )
+            .unwrap(),
+            CurvePath::new(
+                vec![CurveSegment::CubicBezier(
+                    toniator_geometry::CubicBezierSegment::new(
+                        Point2::new(-9.0, 3.0),
+                        Point2::new(-12.0, 18.0),
+                        Point2::new(8.0, -6.0),
+                        Point2::new(-9.0, 3.0),
+                    )
+                    .unwrap(),
+                )],
+                PathClosure::Closed,
+            )
+            .unwrap(),
+            CurvePath::polyline(
+                vec![Point2::new(4.0, 1.0), Point2::new(4.0, 3.0)],
+                PathClosure::Closed,
+            )
+            .unwrap(),
+        ];
+        for path in paths {
+            let before = path.clone();
+            let mut state = Stage20fEditorState::default();
+            state.configure_mode(AuthoredPathEditorMode::Shape, 1024.0, 1024.0);
+            state.select_structure(AuthoredStructureId(1));
+            state.fit_selected_shape(&path);
+            state.set_guide_canvas_allocation(400.0, 260.0, 16.0);
+            for segment in path.segments() {
+                let points = match segment {
+                    CurveSegment::Line(line) => {
+                        [line.start(), line.start(), line.end(), line.end()]
+                    }
+                    CurveSegment::CubicBezier(curve) => [
+                        curve.start(),
+                        curve.control_1(),
+                        curve.control_2(),
+                        curve.end(),
+                    ],
+                };
+                for point in points {
+                    let screen = state.to_screen(point);
+                    assert!((16.0 - 1e-8..=384.0 + 1e-8).contains(&screen.x));
+                    assert!((16.0 - 1e-8..=244.0 + 1e-8).contains(&screen.y));
+                    let inverse = state.to_document(screen).unwrap();
+                    assert!((inverse.x - point.x).abs() < 1e-10);
+                    assert!((inverse.y - point.y).abs() < 1e-10);
+                }
+            }
+            state.set_viewport(Point2::new(13.0, -7.0), 2.5);
+            let inverse = state.to_document(state.to_screen(path.start())).unwrap();
+            assert!((inverse.x - path.start().x).abs() < 1e-10);
+            assert!((inverse.y - path.start().y).abs() < 1e-10);
+            assert_eq!(path, before);
+        }
+    }
+
+    /// Retains Shape framing across same-resource edits, reselect, resize, new-input cancellation and Undo.
+    /// A different selected identity refits its hull and resets only local user pan/zoom.
+    ///
+    /// # Panics
+    /// Panics when valid paths or the stable identity/allocation policy fail.
+    #[test]
+    fn shape_frame_refits_only_when_resource_identity_changes() {
+        let path = CurvePath::polyline(
+            vec![
+                Point2::new(-1.0, -1.0),
+                Point2::new(1.0, -1.0),
+                Point2::new(0.0, 1.0),
+            ],
+            PathClosure::Closed,
+        )
+        .unwrap();
+        let edited = CurvePath::polyline(
+            vec![
+                Point2::new(-30.0, -10.0),
+                Point2::new(20.0, -10.0),
+                Point2::new(0.0, 40.0),
+            ],
+            PathClosure::Closed,
+        )
+        .unwrap();
+        let mut state = Stage20fEditorState::default();
+        state.configure_mode(AuthoredPathEditorMode::Shape, 1000.0, 1000.0);
+        state.select_structure(AuthoredStructureId(1));
+        state.fit_selected_shape(&path);
+        state.set_guide_canvas_allocation(400.0, 260.0, 16.0);
+        state.set_viewport(Point2::new(20.0, 10.0), 1.5);
+        let fit = state.shape_frame;
+        let origin = state.shape_origin;
+        for current in [&edited, &path] {
+            state.select_structure(AuthoredStructureId(1));
+            state.fit_selected_shape(current);
+            assert_eq!(state.shape_frame, fit);
+            assert_eq!(state.shape_origin, origin);
+            assert_eq!(state.pan, Point2::new(20.0, 10.0));
+            assert_eq!(state.zoom, 1.5);
+        }
+        state.begin(AuthoredStructureKind::ClosedShape);
+        assert_eq!(state.shape_frame, fit);
+        state.cancel();
+        state.set_guide_canvas_allocation(300.0, 220.0, 12.0);
+        assert_eq!(state.shape_origin, origin);
+        assert_eq!(state.shape_frame.unwrap().width, fit.unwrap().width);
+        state.select_structure(AuthoredStructureId(2));
+        state.fit_selected_shape(&edited);
+        assert_ne!(state.shape_origin, origin);
+        assert_eq!(state.pan, Point2::new(0.0, 0.0));
+        assert_eq!(state.zoom, 1.0);
+    }
+
     /// Proves screen-space selection prefers anchors over overlapping segment samples.
     #[test]
     fn selection_prefers_anchor_then_segment() {
