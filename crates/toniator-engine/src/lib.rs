@@ -4272,7 +4272,7 @@ fn evaluate_cached_document_impl(
     cancellation.report_progress(EvaluationProgressStage::DecodingSource, 100, 1_000);
     cancellation.report_progress(EvaluationProgressStage::GeneratingGeometry, 100, 0);
     let mut summaries = Vec::with_capacity(topology.channels().len());
-    let mut layers = Vec::with_capacity(topology.channels().len());
+    let mut scene_inputs = Vec::with_capacity(topology.channels().len());
     let mut families = Vec::with_capacity(topology.channels().len());
     let mut realizations = Vec::with_capacity(topology.channels().len());
     // Only curves used by this completed evaluation enter its transaction. Geometry edits cannot
@@ -4915,7 +4915,7 @@ fn evaluate_cached_document_impl(
                     .collect::<Vec<_>>(),
             ),
         });
-        layers.push(document_render_layer(channel, &channel_outputs)?);
+        scene_inputs.push((*channel, channel_outputs));
         families.push((key, family, disposition));
         family_dispositions.push(disposition);
         realization_dispositions.push(realization_disposition);
@@ -4948,21 +4948,55 @@ fn evaluate_cached_document_impl(
         0,
     );
     let scene_started = Instant::now();
-    let built_scene = evaluate_stage(EvaluationStage::Scene, cancellation, || {
-        RenderScene::new_modeled(
-            document.canvas().clone(),
-            family_identity,
-            realization_identity,
-            model,
-            layers,
-        )
-        .map_err(EvaluationError::from_render)
-    })?;
-    let scene_key = built_scene.identity().scene_fingerprint().to_owned();
-    let (scene, scene_disposition) = match &accepted.scene {
-        Some((key, value)) if *key == scene_key => (Arc::clone(value), CacheDisposition::Hit),
-        _ => (Arc::new(built_scene), CacheDisposition::Miss),
-    };
+    let (scene_key, scene, scene_disposition, scene_guard) =
+        evaluate_stage(EvaluationStage::Scene, cancellation, || {
+            if let Some((key, scene, Some(guard))) = &accepted.scene
+                && guard.matches(
+                    document.canvas(),
+                    model,
+                    &family_identity,
+                    &realization_identity,
+                    &scene_inputs,
+                )
+            {
+                return Ok((
+                    key.clone(),
+                    Arc::clone(scene),
+                    CacheDisposition::Hit,
+                    Some(Arc::clone(guard)),
+                ));
+            }
+            #[cfg(test)]
+            SCENE_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
+            let layers = scene_inputs
+                .iter()
+                .map(|(channel, outputs)| document_render_layer(channel, outputs))
+                .collect::<Result<Vec<_>, _>>()?;
+            let guard = SceneReuseGuard::try_new(
+                document.canvas(),
+                model,
+                &family_identity,
+                &realization_identity,
+                &scene_inputs,
+            )
+            .map(Arc::new);
+            let built_scene = RenderScene::new_modeled(
+                document.canvas().clone(),
+                family_identity,
+                realization_identity,
+                model,
+                layers,
+            )
+            .map_err(EvaluationError::from_render)?;
+            let scene_key = built_scene.identity().scene_fingerprint().to_owned();
+            let (scene, disposition) = match &accepted.scene {
+                Some((key, value, _)) if *key == scene_key => {
+                    (Arc::clone(value), CacheDisposition::Hit)
+                }
+                _ => (Arc::new(built_scene), CacheDisposition::Miss),
+            };
+            Ok((scene_key, scene, disposition, guard))
+        })?;
     if let Some(performance) = performance.as_deref_mut() {
         performance.record(
             EvaluationPerformanceStage::Scene,
@@ -5164,7 +5198,7 @@ fn evaluate_cached_document_impl(
             realizations,
             coverage_curves,
             uniform_density_fits,
-            scene: (scene_disposition == CacheDisposition::Miss).then_some((scene_key, scene)),
+            scene: Some((scene_key, scene, scene_guard)),
             raster: (raster_disposition == CacheDisposition::Miss).then_some((raster_key, raster)),
         },
     })
@@ -6875,7 +6909,19 @@ fn document_render_layer(
     channel: &ModeledChannelState,
     outputs: &[Arc<DocumentOutputRealization>],
 ) -> Result<RenderLayer, EvaluationError> {
-    let color = match &channel.paint {
+    let color = document_render_color(channel);
+    let outputs = outputs
+        .iter()
+        .map(|output| document_render_output(output))
+        .collect::<Vec<_>>();
+    RenderLayer::new_outputs(channel.id, channel.visible, color, channel.opacity, outputs)
+        .map_err(EvaluationError::from_render)
+}
+
+/// Projects the existing renderer color, including its fixed sampled-source placeholder.
+/// This presentation projection neither resolves effective paint nor owns sampled primitive colors.
+fn document_render_color(channel: &ModeledChannelState) -> toniator_domain::ColorValue {
+    match &channel.paint {
         ChannelPaint::Solid(color) => color.clone(),
         ChannelPaint::SampledSource => toniator_domain::ColorValue {
             red: 0.0,
@@ -6883,13 +6929,7 @@ fn document_render_layer(
             blue: 0.0,
             alpha: 1.0,
         },
-    };
-    let outputs = outputs
-        .iter()
-        .map(|output| document_render_output(output))
-        .collect::<Vec<_>>();
-    RenderLayer::new_outputs(channel.id, channel.visible, color, channel.opacity, outputs)
-        .map_err(EvaluationError::from_render)
+    }
 }
 
 /// Shares one cached realization payload with its ordered renderer output.
@@ -7844,6 +7884,113 @@ struct MazeCacheContracts {
     limits: MazeLimits,
 }
 
+/// Retains one ordered channel's exact renderer presentation and immutable output owners.
+struct SceneChannelInput {
+    id: ChannelId,
+    visible: bool,
+    color: [u64; 4],
+    opacity: u64,
+    outputs: Vec<Arc<DocumentOutputRealization>>,
+}
+
+/// Guards a previously validated scene without becoming a public or persistent identity.
+/// Strong output owners prevent address reuse and cover canonical geometry and sampled paint.
+struct SceneReuseGuard {
+    canvas: (u64, u64),
+    model: HalftoneChannelModel,
+    family: String,
+    realization: String,
+    channels: Vec<SceneChannelInput>,
+}
+
+impl SceneReuseGuard {
+    /// Retains lightweight inputs using fallible variable-size allocations.
+    /// Allocation failure disables only this optional shortcut; canonical construction still runs.
+    fn try_new(
+        canvas: &CanvasSpec,
+        model: HalftoneChannelModel,
+        family: &str,
+        realization: &str,
+        inputs: &[(&ModeledChannelState, Vec<Arc<DocumentOutputRealization>>)],
+    ) -> Option<Self> {
+        let mut family_copy = String::new();
+        family_copy.try_reserve_exact(family.len()).ok()?;
+        family_copy.push_str(family);
+        let mut realization_copy = String::new();
+        realization_copy.try_reserve_exact(realization.len()).ok()?;
+        realization_copy.push_str(realization);
+        let mut channels = Vec::new();
+        channels.try_reserve_exact(inputs.len()).ok()?;
+        for (channel, outputs) in inputs {
+            let mut retained = Vec::new();
+            retained.try_reserve_exact(outputs.len()).ok()?;
+            retained.extend(outputs.iter().map(Arc::clone));
+            channels.push(SceneChannelInput {
+                id: channel.id,
+                visible: channel.visible,
+                color: Self::color_bits(channel),
+                opacity: channel.opacity.to_bits(),
+                outputs: retained,
+            });
+        }
+        Some(Self {
+            canvas: (canvas.width.to_bits(), canvas.height.to_bits()),
+            model,
+            family: family_copy,
+            realization: realization_copy,
+            channels,
+        })
+    }
+
+    /// Compares every ordered scene input without traversing immutable geometry or sampled paint.
+    /// Pointer equality is valid only while this guard retains the corresponding strong owner.
+    fn matches(
+        &self,
+        canvas: &CanvasSpec,
+        model: HalftoneChannelModel,
+        family: &str,
+        realization: &str,
+        inputs: &[(&ModeledChannelState, Vec<Arc<DocumentOutputRealization>>)],
+    ) -> bool {
+        self.canvas == (canvas.width.to_bits(), canvas.height.to_bits())
+            && self.model == model
+            && self.family == family
+            && self.realization == realization
+            && self.channels.len() == inputs.len()
+            && self
+                .channels
+                .iter()
+                .zip(inputs)
+                .all(|(saved, (channel, outputs))| {
+                    saved.id == channel.id
+                        && saved.visible == channel.visible
+                        && saved.color == Self::color_bits(channel)
+                        && saved.opacity == channel.opacity.to_bits()
+                        && saved.outputs.len() == outputs.len()
+                        && saved.outputs.iter().zip(outputs).all(|(old, current)| {
+                            old.output_layer_id == current.output_layer_id
+                                && Arc::ptr_eq(old, current)
+                        })
+                })
+    }
+
+    /// Uses exactly the layer's renderer projection and bitwise channel color components.
+    fn color_bits(channel: &ModeledChannelState) -> [u64; 4] {
+        let color = document_render_color(channel);
+        [
+            color.red.to_bits(),
+            color.green.to_bits(),
+            color.blue.to_bits(),
+            color.alpha.to_bits(),
+        ]
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SCENE_CONSTRUCTIONS: Cell<usize> = const { Cell::new(0) };
+}
+
 #[derive(Clone, Default)]
 struct DocumentDerivedCache {
     decoded_source: Option<(SourceCacheKey, Arc<SourceField>)>,
@@ -7854,7 +8001,7 @@ struct DocumentDerivedCache {
         DocumentUniformFitCacheKey,
         Arc<uniform_density::UniformDensityFit>,
     )>,
-    scene: Option<(String, Arc<RenderScene>)>,
+    scene: Option<(String, Arc<RenderScene>, Option<Arc<SceneReuseGuard>>)>,
     raster: Option<(String, Arc<RasterSurface>)>,
 }
 
@@ -7868,7 +8015,7 @@ struct DocumentCacheTransaction {
         DocumentUniformFitCacheKey,
         Arc<uniform_density::UniformDensityFit>,
     )>,
-    scene: Option<(String, Arc<RenderScene>)>,
+    scene: Option<(String, Arc<RenderScene>, Option<Arc<SceneReuseGuard>>)>,
     raster: Option<(String, Arc<RasterSurface>)>,
 }
 
@@ -9914,6 +10061,604 @@ pub(crate) mod test_support {
         assert!(Arc::ptr_eq(&evaluated.result.raster, cached_raster));
         assert_eq!(evaluated.result.scene(), cached_scene.as_ref());
         assert_eq!(evaluated.result.raster(), cached_raster.as_ref());
+    }
+
+    /// Builds a small current calibrated document without historical fixture adapters.
+    ///
+    /// # Panics
+    /// Panics if the bundled current default or its domain-owned density edit is invalid.
+    fn scene_guard_session() -> DocumentSession {
+        let document = Document::new_default_document(
+            CanvasSpec {
+                width: 64.0,
+                height: 48.0,
+            },
+            SourceReference::Assigned(SourceReferenceId::new("cancellation-test-source").unwrap()),
+        )
+        .unwrap();
+        let document = document
+            .edit_all_channel_start_configuration(&[(PropertyFieldId::Density, 12.5)])
+            .unwrap()
+            .bind(&document)
+            .unwrap();
+        DocumentSession::new(document).unwrap()
+    }
+
+    /// Proves warm guard reuse skips canonical construction and refreshes after equal-content new owners.
+    /// The ordinary semantic cache remains authoritative when pointer eligibility fails.
+    ///
+    /// # Panics
+    /// Panics if identities, RGBA, Arc reuse, constructor counts, or guard refresh differ.
+    #[test]
+    fn scene_guard_warm_reuse_and_semantic_fallback_refresh() {
+        let session = scene_guard_session();
+        let request = document_request(&session, valid_document_bytes());
+        let mut cache = DocumentDerivedCache::default();
+        SCENE_CONSTRUCTIONS.with(|count| count.set(0));
+        let first = evaluate_cached_document(
+            request.clone(),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        cache.commit(first.transaction.clone());
+        let warm = evaluate_cached_document(
+            request.clone(),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        assert_eq!(SCENE_CONSTRUCTIONS.with(Cell::get), 1);
+        assert!(Arc::ptr_eq(&first.result.scene, &warm.result.scene));
+        assert!(Arc::ptr_eq(&first.result.raster, &warm.result.raster));
+        assert_eq!(warm.diagnostics.aggregate.scene, CacheDisposition::Hit);
+        for (_, output) in &mut cache.realizations {
+            *output = Arc::new(output.as_ref().clone());
+        }
+        let fallback = evaluate_cached_document(
+            request.clone(),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        assert_eq!(SCENE_CONSTRUCTIONS.with(Cell::get), 2);
+        assert_eq!(fallback.diagnostics.aggregate.scene, CacheDisposition::Hit);
+        assert!(Arc::ptr_eq(&first.result.scene, &fallback.result.scene));
+        assert_eq!(first.result.raster(), fallback.result.raster());
+        cache.commit(fallback.transaction);
+        let refreshed = evaluate_cached_document(
+            request.clone(),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        assert_eq!(SCENE_CONSTRUCTIONS.with(Cell::get), 2);
+        assert!(Arc::ptr_eq(&first.result.scene, &refreshed.result.scene));
+        cache = DocumentDerivedCache::default();
+        let cleared = evaluate_cached_document(
+            request,
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        assert_eq!(SCENE_CONSTRUCTIONS.with(Cell::get), 3);
+        assert_eq!(cleared.diagnostics.aggregate.scene, CacheDisposition::Miss);
+        assert_eq!(first.result.scene(), cleared.result.scene());
+    }
+
+    /// Proves each ordered presentation/identity input rejects private shortcut reuse.
+    /// New output owners reject even equal content, covering geometry and sampled paint mutations.
+    ///
+    /// # Panics
+    /// Panics when an omitted input permits reuse or sampled placeholder projection diverges.
+    #[test]
+    fn scene_guard_exact_ordered_input_eligibility() {
+        let session = scene_guard_session();
+        let first = evaluate_cached_document(
+            document_request(&session, valid_document_bytes()),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .unwrap();
+        let guard = first
+            .transaction
+            .scene
+            .as_ref()
+            .unwrap()
+            .2
+            .as_ref()
+            .unwrap();
+        let channels = session.document().channel_topology().unwrap().channels();
+        let inputs = channels
+            .iter()
+            .zip(&guard.channels)
+            .map(|(channel, saved)| (channel, saved.outputs.clone()))
+            .collect::<Vec<_>>();
+        let canvas = session.document().canvas();
+        let model = session.document().channel_model().unwrap();
+        assert!(guard.matches(canvas, model, &guard.family, &guard.realization, &inputs));
+        for changed in [
+            CanvasSpec {
+                width: canvas.width + 1.0,
+                height: canvas.height,
+            },
+            CanvasSpec {
+                width: canvas.width,
+                height: canvas.height + 1.0,
+            },
+        ] {
+            assert!(!guard.matches(&changed, model, &guard.family, &guard.realization, &inputs));
+        }
+        assert!(!guard.matches(
+            canvas,
+            HalftoneChannelModel::Cmyk,
+            &guard.family,
+            &guard.realization,
+            &inputs
+        ));
+        assert!(!guard.matches(canvas, model, "different", &guard.realization, &inputs));
+        assert!(!guard.matches(canvas, model, &guard.family, "different", &inputs));
+        let mut reversed = inputs.clone();
+        reversed.reverse();
+        assert!(!guard.matches(canvas, model, &guard.family, &guard.realization, &reversed));
+        let mut changed_channels = channels.to_vec();
+        for field in 0..8 {
+            changed_channels.clone_from_slice(channels);
+            let channel = &mut changed_channels[0];
+            match field {
+                0 => channel.id = ChannelId(999),
+                1 => channel.visible = !channel.visible,
+                2 => channel.opacity = 0.25,
+                component => {
+                    let mut color = document_render_color(channel);
+                    match component {
+                        3 => color.red = 0.25,
+                        4 => color.green = 0.25,
+                        5 => color.blue = 0.25,
+                        6 => color.alpha = 0.25,
+                        _ => color.red = -0.0,
+                    }
+                    channel.paint = ChannelPaint::Solid(color);
+                }
+            }
+            let changed = changed_channels
+                .iter()
+                .zip(&guard.channels)
+                .map(|(channel, saved)| (channel, saved.outputs.clone()))
+                .collect::<Vec<_>>();
+            if field != 7
+                || document_render_color(&channels[0]).red.to_bits() != (-0.0_f64).to_bits()
+            {
+                assert!(!guard.matches(canvas, model, &guard.family, &guard.realization, &changed));
+            }
+        }
+        let mut new_owner = inputs.clone();
+        new_owner[0].1[0] = Arc::new(new_owner[0].1[0].as_ref().clone());
+        assert!(!guard.matches(canvas, model, &guard.family, &guard.realization, &new_owner));
+        let mut changed_id = inputs.clone();
+        let mut output = changed_id[0].1[0].as_ref().clone();
+        output.output_layer_id = PatternOutputLayerId(999);
+        changed_id[0].1[0] = Arc::new(output);
+        assert!(!guard.matches(
+            canvas,
+            model,
+            &guard.family,
+            &guard.realization,
+            &changed_id
+        ));
+        let mut ordered = inputs.clone();
+        let mut extra = ordered[0].1[0].as_ref().clone();
+        extra.output_layer_id = PatternOutputLayerId(998);
+        ordered[0].1.push(Arc::new(extra));
+        let ordered_guard =
+            SceneReuseGuard::try_new(canvas, model, &guard.family, &guard.realization, &ordered)
+                .unwrap();
+        ordered[0].1.reverse();
+        assert!(!ordered_guard.matches(canvas, model, &guard.family, &guard.realization, &ordered));
+        let mut sampled = channels[0].clone();
+        sampled.paint = ChannelPaint::SampledSource;
+        assert_eq!(
+            document_render_color(&sampled),
+            ColorValue {
+                red: 0.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0
+            }
+        );
+    }
+
+    /// Proves actual appearance commands preserve realization owners but rebuild truthful scene content.
+    ///
+    /// # Panics
+    /// Panics if canonical scene invalidation or immutable realization reuse is incorrect.
+    #[test]
+    fn scene_guard_appearance_edits_rebuild_without_realization() {
+        let mut session = scene_guard_session();
+        let bytes = valid_document_bytes();
+        let id = session.document().channel_topology().unwrap().channels()[0].id;
+        let mut cache = DocumentDerivedCache::default();
+        let first = evaluate_cached_document(
+            document_request(&session, Arc::clone(&bytes)),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        cache.commit(first.transaction);
+        for command in [
+            DocumentCommand::SetOpacity {
+                channel_id: id,
+                opacity: 0.5,
+            },
+            DocumentCommand::SetChannelPaint {
+                channel_id: id,
+                paint: ChannelPaint::Solid(ColorValue {
+                    red: 0.2,
+                    green: 0.3,
+                    blue: 0.4,
+                    alpha: 0.6,
+                }),
+            },
+            DocumentCommand::SetVisibility {
+                channel_id: id,
+                visible: false,
+            },
+        ] {
+            session.apply(&command).unwrap();
+            let edited = evaluate_cached_document(
+                document_request(&session, Arc::clone(&bytes)),
+                EvaluationLimits::default(),
+                &cache,
+                &NeverCancelled,
+            )
+            .unwrap();
+            assert_eq!(
+                edited.diagnostics.aggregate.realization,
+                CacheDisposition::Hit
+            );
+            assert_eq!(edited.diagnostics.aggregate.scene, CacheDisposition::Miss);
+            assert!(
+                edited
+                    .transaction
+                    .realizations
+                    .iter()
+                    .zip(&cache.realizations)
+                    .all(|(new, old)| Arc::ptr_eq(&new.1, &old.1))
+            );
+            cache.commit(edited.transaction);
+        }
+    }
+
+    /// Proves preview/output sizing, backing, and AA retain the validated scene with distinct rasters.
+    ///
+    /// # Panics
+    /// Panics if consumer-only requests rebuild scene construction or reuse an incompatible raster.
+    #[test]
+    fn scene_guard_raster_only_requests_preserve_scene() {
+        let session = scene_guard_session();
+        let request = document_request(&session, valid_document_bytes());
+        let mut cache = DocumentDerivedCache::default();
+        let first = evaluate_cached_document(
+            request.clone(),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        cache.commit(first.transaction);
+        let count = SCENE_CONSTRUCTIONS.with(Cell::get);
+        let requests = [
+            request
+                .clone()
+                .for_preview(PreviewRasterTarget::new(32, 24).unwrap()),
+            request.clone().for_preview(
+                PreviewRasterTarget::new(32, 24)
+                    .unwrap()
+                    .with_background(RasterBackground::OpaqueWhite),
+            ),
+            request.clone().for_output(
+                RasterBackground::OpaqueBlack,
+                Some(OutputRasterTarget::new(80, 60).unwrap()),
+                RasterAntialiasing::On,
+            ),
+            request.for_output(
+                RasterBackground::OpaqueBlack,
+                Some(OutputRasterTarget::new(80, 60).unwrap()),
+                RasterAntialiasing::Off,
+            ),
+        ];
+        for request in requests {
+            let changed = evaluate_cached_document(
+                request,
+                EvaluationLimits::default(),
+                &cache,
+                &NeverCancelled,
+            )
+            .unwrap();
+            assert_eq!(changed.diagnostics.aggregate.scene, CacheDisposition::Hit);
+            assert_eq!(changed.diagnostics.aggregate.raster, CacheDisposition::Miss);
+            assert!(Arc::ptr_eq(&first.result.scene, &changed.result.scene));
+            assert_eq!(SCENE_CONSTRUCTIONS.with(Cell::get), count);
+            cache.commit(changed.transaction);
+        }
+    }
+
+    /// Proves changed sampled paint invalidates scene reuse even when geometry is exactly equal.
+    /// A subsequent domain-owned rotation also changes canonical geometry and scene identity.
+    ///
+    /// # Panics
+    /// Panics if new source paint or transformed geometry reuses an obsolete accepted scene.
+    #[test]
+    fn scene_guard_geometry_and_sampled_paint_changes_rebuild() {
+        let mut session = scene_guard_session();
+        let template = ChannelTopologyTemplate {
+            pattern_instance: session.document().channel_topology().unwrap().channels()[0]
+                .pattern_instance
+                .clone(),
+        };
+        let model = HalftoneChannelModel::SourceColorAlpha;
+        let topology = session
+            .document()
+            .canonical_channel_topology(model, template)
+            .unwrap();
+        session
+            .apply(&DocumentCommand::ReplaceChannelTopology { model, topology })
+            .unwrap();
+        let mut cache = DocumentDerivedCache::default();
+        let first = evaluate_cached_document(
+            document_request(&session, flat_document_bytes()),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        cache.commit(first.transaction);
+        let bytes = Arc::<[u8]>::from(
+            encode_png(&RasterSurface::new(1, 1, vec![64, 128, 192, 255]).unwrap()).unwrap(),
+        );
+        let painted = evaluate_cached_document(
+            document_request(&session, Arc::clone(&bytes)),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        assert_eq!(painted.diagnostics.aggregate.scene, CacheDisposition::Miss);
+        assert_eq!(
+            first.result.scene().layers()[0].outputs()[0].geometry,
+            painted.result.scene().layers()[0].outputs()[0].geometry
+        );
+        assert_ne!(
+            first.result.scene().layers()[0].outputs()[0].primitive_paints,
+            painted.result.scene().layers()[0].outputs()[0].primitive_paints
+        );
+        cache.commit(painted.transaction);
+        let id = session.document().channel_topology().unwrap().channels()[0].id;
+        let rotate = session
+            .document()
+            .set_channel_pattern_rotation_for_effective(id, 19.0)
+            .unwrap();
+        session.apply(&rotate).unwrap();
+        let rotated = evaluate_cached_document(
+            document_request(&session, bytes),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        assert_eq!(rotated.diagnostics.aggregate.scene, CacheDisposition::Miss);
+        assert_ne!(
+            painted.result.scene().identity(),
+            rotated.result.scene().identity()
+        );
+    }
+
+    /// Cancels exactly one Scene checkpoint without altering accepted derived state.
+    struct CancelSceneCheckpoint {
+        checkpoint: EvaluationCheckpoint,
+        cancelled: AtomicBool,
+    }
+    impl CancellationProbe for CancelSceneCheckpoint {
+        /// Reads only this test's cancellation observation.
+        fn is_cancelled(&self) -> bool {
+            self.cancelled.load(Ordering::Acquire)
+        }
+        /// Marks cancellation at the selected canonical Scene boundary on cold or warm work.
+        fn observe_stage(&self, stage: EvaluationStage, checkpoint: EvaluationCheckpoint) {
+            if stage == EvaluationStage::Scene && checkpoint == self.checkpoint {
+                self.cancelled.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    /// Proves warm Before/After cancellation and failed requests cannot replace accepted scene/guard.
+    ///
+    /// # Panics
+    /// Panics if cancellation publishes, failure replaces cache state, or reset retains output owners.
+    #[test]
+    fn scene_guard_cancellation_failure_and_owner_release() {
+        let session = scene_guard_session();
+        let request = document_request(&session, valid_document_bytes());
+        let mut cache = DocumentDerivedCache::default();
+        let first = evaluate_cached_document(
+            request.clone(),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .unwrap();
+        cache.commit(first.transaction);
+        let scene = Arc::clone(&cache.scene.as_ref().unwrap().1);
+        let guard = Arc::clone(cache.scene.as_ref().unwrap().2.as_ref().unwrap());
+        let output = Arc::downgrade(&cache.realizations[0].1);
+        for checkpoint in [EvaluationCheckpoint::Before, EvaluationCheckpoint::After] {
+            let cancellation = CancelSceneCheckpoint {
+                checkpoint,
+                cancelled: AtomicBool::new(false),
+            };
+            assert!(matches!(
+                evaluate_cached_document(
+                    request.clone(),
+                    EvaluationLimits::default(),
+                    &cache,
+                    &cancellation
+                ),
+                Err(EvaluationRunError::Cancelled)
+            ));
+            assert!(Arc::ptr_eq(&scene, &cache.scene.as_ref().unwrap().1));
+            assert!(Arc::ptr_eq(
+                &guard,
+                cache.scene.as_ref().unwrap().2.as_ref().unwrap()
+            ));
+        }
+        let usage = cache
+            .realizations
+            .iter()
+            .map(|(_, output)| output.usage.members().len())
+            .sum::<usize>();
+        assert!(usage > 1);
+        let policy = EvaluationLimits::default().composite_output_limits();
+        let limits = EvaluationLimits::default()
+            .with_composite_output_limits(
+                CompositeOutputLimits::new(
+                    policy.maximum_output_units,
+                    usage - 1,
+                    policy.maximum_dependency_inspections,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let constructions = SCENE_CONSTRUCTIONS.with(Cell::get);
+        let error = evaluate_cached_document(request.clone(), limits, &cache, &NeverCancelled)
+            .err()
+            .unwrap();
+        let EvaluationRunError::Evaluation(error) = error else {
+            panic!("limit exhaustion is an evaluation error");
+        };
+        assert_eq!(
+            error.path(),
+            "realization.composite.limits.usage_memberships"
+        );
+        assert_eq!(SCENE_CONSTRUCTIONS.with(Cell::get), constructions);
+        let mut miss_cache = cache.snapshot();
+        miss_cache.realizations.clear();
+        for checkpoint in [EvaluationCheckpoint::Before, EvaluationCheckpoint::After] {
+            let cancellation = CancelSceneCheckpoint {
+                checkpoint,
+                cancelled: AtomicBool::new(false),
+            };
+            assert!(matches!(
+                evaluate_cached_document(
+                    request.clone(),
+                    EvaluationLimits::default(),
+                    &miss_cache,
+                    &cancellation
+                ),
+                Err(EvaluationRunError::Cancelled)
+            ));
+            assert!(Arc::ptr_eq(
+                &guard,
+                cache.scene.as_ref().unwrap().2.as_ref().unwrap()
+            ));
+        }
+        drop(miss_cache);
+        assert!(Arc::ptr_eq(
+            &guard,
+            cache.scene.as_ref().unwrap().2.as_ref().unwrap()
+        ));
+        let snapshot = cache.snapshot();
+        cache = DocumentDerivedCache::default();
+        assert!(cache.scene.is_none());
+        assert!(output.upgrade().is_some());
+        drop(snapshot);
+        drop(guard);
+        assert!(output.upgrade().is_none());
+    }
+
+    /// Proves stale scene candidates cannot publish guard refreshes and scheduler reset clears both.
+    ///
+    /// # Panics
+    /// Panics if a stale document token publishes cache state or cleared caches report reuse.
+    #[test]
+    fn scene_guard_stale_completion_and_scheduler_clear() {
+        let scheduler = EvaluationScheduler::new().unwrap();
+        let mut session = scene_guard_session();
+        let bytes = valid_document_bytes();
+        scheduler
+            .submit(document_request(&session, Arc::clone(&bytes)))
+            .unwrap();
+        let first = wait_for_document_completion(&scheduler);
+        assert!(scheduler.accept_completion(&first, &session).unwrap());
+        let guard = Arc::clone(
+            scheduler
+                .state
+                .lock()
+                .unwrap()
+                .cache
+                .scene
+                .as_ref()
+                .unwrap()
+                .2
+                .as_ref()
+                .unwrap(),
+        );
+        let id = session.document().channel_topology().unwrap().channels()[0].id;
+        session
+            .apply(&DocumentCommand::SetOpacity {
+                channel_id: id,
+                opacity: 0.5,
+            })
+            .unwrap();
+        scheduler
+            .submit(document_request(&session, Arc::clone(&bytes)))
+            .unwrap();
+        let stale = wait_for_document_completion(&scheduler);
+        assert_eq!(
+            stale.cache_diagnostics().unwrap().aggregate.scene,
+            CacheDisposition::Miss
+        );
+        session
+            .apply(&DocumentCommand::SetOpacity {
+                channel_id: id,
+                opacity: 0.25,
+            })
+            .unwrap();
+        assert!(!scheduler.accept_completion(&stale, &session).unwrap());
+        assert!(Arc::ptr_eq(
+            &guard,
+            scheduler
+                .state
+                .lock()
+                .unwrap()
+                .cache
+                .scene
+                .as_ref()
+                .unwrap()
+                .2
+                .as_ref()
+                .unwrap()
+        ));
+        scheduler.cancel_and_clear();
+        assert!(scheduler.state.lock().unwrap().cache.scene.is_none());
+        scheduler.submit(document_request(&session, bytes)).unwrap();
+        let reset = wait_for_document_completion(&scheduler);
+        assert_eq!(
+            reset.cache_diagnostics().unwrap().aggregate.scene,
+            CacheDisposition::Miss
+        );
+        assert_eq!(
+            reset.cache_diagnostics().unwrap().aggregate.realization,
+            CacheDisposition::Miss
+        );
+        assert!(scheduler.accept_completion(&reset, &session).unwrap());
+        scheduler.shutdown().unwrap();
     }
 
     /// Proves an evaluation result borrows the same immutable scene and raster Arcs retained for cache commit.

@@ -771,10 +771,13 @@ fn area_checked_overlay(
     Ok(shapes)
 }
 
-/// Normalizes every primitive independently, then unions only their already-positive fills.
+/// Normalizes every primitive independently, then unions their already-positive fills.
 ///
 /// Independently grid-collapsed contours consume the layer's absolute fill-error budget even
 /// beside retained paint. Checked split-mutation certificates share that same cumulative budget.
+/// A preview rectangle intersects the positive subjects in one checked operation on the same
+/// adapter, avoiding an intermediate global union and float-grid roundtrip. Unclipped consumers
+/// retain their original global union. Both branches charge actual request-wide Boolean work.
 ///
 /// # Errors
 /// Returns cancellation, precision, allocation, or Boolean diagnostics without painting partial pixels.
@@ -832,7 +835,6 @@ fn normalize_and_union(
     }
     omissions.record(omitted.value())?;
     work.check()?;
-    let mut unioned = area_overlay(&positive, rect, FillRule::NonZero, work, omissions)?;
     if let Some([left, top, right, bottom]) = clip {
         work.check()?;
         let rectangle = vec![vec![vec![
@@ -863,17 +865,18 @@ fn normalize_and_union(
             },
             4,
         )
-        .unsafe_add_source(&unioned, ShapeType::Subject)
+        .unsafe_add_source(&positive, ShapeType::Subject)
         .unsafe_add_source(&rectangle, ShapeType::Clip);
-        unioned = area_checked_overlay(
+        area_checked_overlay(
             &mut overlay,
             OverlayRule::Intersect,
             FillRule::NonZero,
             work,
             omissions,
-        )?;
+        )
+    } else {
+        area_overlay(&positive, rect, FillRule::NonZero, work, omissions)
     }
-    Ok(unioned)
 }
 
 /// Computes one contour's recentered signed Cartesian area for stable outer/hole orientation.
@@ -2143,5 +2146,438 @@ mod tests {
                 .max_boolean_operations(),
             usize::MAX
         );
+    }
+    /// Retains the exact pre-P1 operation solely as a numerical/output test oracle.
+    ///
+    /// Independent normalization, fixed-grid roundtrips and actual-operation charges stay
+    /// unchanged from the captured baseline; this function is never a production route.
+    ///
+    /// # Errors
+    /// Returns the baseline cancellation, precision, allocation or checked-work diagnostic.
+    fn p1_two_pass_reference(
+        raw: &[RawAreaPrimitive],
+        clip: Option<[f64; 4]>,
+        work: &mut RasterWork<'_>,
+        omissions: &mut AreaOmissionBudget,
+    ) -> Result<AreaShapes, RenderError> {
+        if raw.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut omitted = AreaSum::default();
+        for primitive in raw.iter().filter(|primitive| primitive.shape.is_empty()) {
+            omitted.add(primitive.omitted_area_bound);
+        }
+        if !raw.iter().any(|primitive| !primitive.shape.is_empty()) {
+            omissions.record(omitted.value())?;
+            return Ok(Vec::new());
+        }
+        let rect = area_adapter(raw, clip, work)?;
+        let mut positive = Vec::new();
+        for primitive in raw.iter().filter(|primitive| !primitive.shape.is_empty()) {
+            work.check()?;
+            let mut bound =
+                area_collapsed_contour_bound(&primitive.shape, primitive.fill_rule, rect, work)?;
+            let normalized = area_overlay(
+                std::slice::from_ref(&primitive.shape),
+                rect,
+                primitive.fill_rule,
+                work,
+                omissions,
+            )?;
+            let exact_empty = normalized.is_empty()
+                && primitive.shape.len() == 2
+                && exact_contours_cancel(
+                    &primitive.shape[0],
+                    &primitive.shape[1],
+                    primitive.fill_rule,
+                    work,
+                )?;
+            if normalized.is_empty() && !exact_empty {
+                bound = bound
+                    .max(primitive.omitted_area_bound)
+                    .max(area_perturbation_bound(&primitive.shape, work)?);
+            }
+            omitted.add(bound);
+            positive.try_reserve(normalized.len()).map_err(|_| {
+                area_error(
+                    "raster.allocation",
+                    "normalized area shape allocation failed",
+                )
+            })?;
+            positive.extend(normalized);
+        }
+        omissions.record(omitted.value())?;
+        work.check()?;
+        let mut unioned = area_overlay(&positive, rect, FillRule::NonZero, work, omissions)?;
+        if let Some([left, top, right, bottom]) = clip {
+            work.check()?;
+            let rectangle = vec![vec![vec![
+                [left, top],
+                [right, top],
+                [right, bottom],
+                [left, bottom],
+            ]]];
+            let adapter = FloatPointAdapter::<AreaPoint, i64>::try_with_scale_conservative(
+                rect,
+                AREA_BOOLEAN_SCALE,
+            )
+            .map_err(|_| {
+                area_error(
+                    "raster.area.precision",
+                    "clip grid cannot represent area bounds",
+                )
+            })?;
+            let mut options = OverlayOptions::<f64, i64>::default();
+            options.min_output_area = 0.0;
+            options.clean_result = false;
+            let mut overlay = FloatOverlay::<AreaPoint, i64>::new_custom(
+                adapter,
+                options,
+                Solver {
+                    precision: Precision::ABSOLUTE,
+                    ..Solver::AUTO
+                },
+                4,
+            )
+            .unsafe_add_source(&unioned, ShapeType::Subject)
+            .unsafe_add_source(&rectangle, ShapeType::Clip);
+            unioned = area_checked_overlay(
+                &mut overlay,
+                OverlayRule::Intersect,
+                FillRule::NonZero,
+                work,
+                omissions,
+            )?;
+        }
+        Ok(unioned)
+    }
+
+    /// Converts old/new clipped fills through unchanged model composition and final RGBA.
+    ///
+    /// Opaque runs remain grouped; translucent paints remain ordered separate terms.
+    ///
+    /// # Errors
+    /// Returns checked geometry, allocation, composition or cancellation diagnostics.
+    fn p1_pixels(
+        raw: &[RawAreaPrimitive],
+        clip: [f64; 4],
+        size: (u32, u32),
+        model: HalftoneChannelModel,
+        ordered: bool,
+        background: RasterBackground,
+        old: bool,
+    ) -> Result<RasterSurface, RenderError> {
+        let cancelled = || false;
+        let mut work = RasterWork::new(
+            RasterizationLimits::new(1_000_000)?,
+            RasterAntialiasing::On,
+            &cancelled,
+        );
+        let mut omissions = AreaOmissionBudget::default();
+        let (width, height) = size;
+        let mut pixels = begin_model_composition(model, width, height)?;
+        let colors: &[[f64; 3]] = match model {
+            HalftoneChannelModel::Rgb => &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            HalftoneChannelModel::Cmyk => &[
+                [0.0, 1.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ],
+            HalftoneChannelModel::SourceColorAlpha => &[[0.17, 0.71, 0.43]],
+        };
+        for rgb in colors {
+            let mut layer = allocate_linear_pixels(
+                width,
+                height,
+                background_pixel(RasterBackground::Transparent),
+            )?;
+            for group in 0..if ordered { raw.len() } else { 1 } {
+                let selected = if ordered { &raw[group..group + 1] } else { raw };
+                let shapes = if old {
+                    p1_two_pass_reference(selected, Some(clip), &mut work, &mut omissions)
+                } else {
+                    normalize_and_union(selected, Some(clip), &mut work, &mut omissions)
+                }?;
+                let color = ColorValue {
+                    red: rgb[0],
+                    green: rgb[1],
+                    blue: rgb[2],
+                    alpha: if ordered {
+                        0.23 + 0.17 * (group % 4) as f64
+                    } else {
+                        1.0
+                    },
+                };
+                for_each_area_pixel(&shapes, width, height, &mut work, |i, q| {
+                    layer.paint_shape(i, q, &color, if ordered { 0.73 } else { 1.0 })
+                })?;
+            }
+            compose_model_layer(model, &mut pixels, &layer, &cancelled)?;
+        }
+        finish_model_composition(model, &mut pixels, &cancelled)?;
+        apply_background(&mut pixels, background, &cancelled)?;
+        pixels_from_linear(width, height, pixels, &cancelled)
+    }
+
+    /// Checks exact final bytes including hidden transparent RGB for each model/paint/backing.
+    ///
+    /// # Panics
+    /// Panics on any changed byte or old/new checked diagnostic; no tolerance masks differences.
+    fn p1_assert_rgba(raw: &[RawAreaPrimitive], clip: [f64; 4], size: (u32, u32)) {
+        for model in [
+            HalftoneChannelModel::Rgb,
+            HalftoneChannelModel::Cmyk,
+            HalftoneChannelModel::SourceColorAlpha,
+        ] {
+            for ordered in [false, true] {
+                for background in [
+                    RasterBackground::Transparent,
+                    RasterBackground::OpaqueBlack,
+                    RasterBackground::OpaqueWhite,
+                ] {
+                    let old = p1_pixels(raw, clip, size, model, ordered, background, true).unwrap();
+                    let new =
+                        p1_pixels(raw, clip, size, model, ordered, background, false).unwrap();
+                    assert_eq!(
+                        old.pixels(),
+                        new.pixels(),
+                        "model={model:?} ordered={ordered} background={background:?} clip={clip:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Preserves reversed winding, holes, even-odd crossings and retained slivers under clipping.
+    ///
+    /// # Panics
+    /// Panics on unexpected diagnostics or any changed RGBA byte in a model/paint policy.
+    #[test]
+    fn p1_union_clip_typed_fills_match_two_pass_rgba() {
+        for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+            let mut hole = rectangle(1.125, 1.375, 4.875, 5.625);
+            hole.reverse();
+            let mut opposite = rectangle(2.75, 0.125, 6.875, 6.625);
+            opposite.reverse();
+            let raw = [
+                RawAreaPrimitive {
+                    shape: vec![rectangle(-0.5, -0.25, 7.5, 7.25), hole],
+                    fill_rule: rule,
+                    omitted_area_bound: 0.0,
+                },
+                RawAreaPrimitive {
+                    shape: vec![opposite],
+                    fill_rule: rule,
+                    omitted_area_bound: 0.0,
+                },
+                RawAreaPrimitive {
+                    shape: vec![vec![
+                        [0.375, 1.25],
+                        [5.75, 7.125],
+                        [0.375, 7.125],
+                        [5.75, 1.25],
+                    ]],
+                    fill_rule: FillRule::EvenOdd,
+                    omitted_area_bound: 0.0,
+                },
+                RawAreaPrimitive {
+                    shape: vec![rectangle(0.5, 0.875, 6.5, 0.875 + 1.0e-7)],
+                    fill_rule: FillRule::NonZero,
+                    omitted_area_bound: 0.0,
+                },
+            ];
+            for clip in [[0.25, 0.375, 6.75, 6.625], [-0.125, -0.25, 7.125, 7.75]] {
+                p1_assert_rgba(&raw, clip, (8, 8));
+            }
+        }
+    }
+
+    /// Checks slanted cross-primitive intersections one through four grid units from clip corners.
+    ///
+    /// Large/offset adapters exercise the baseline's intermediate float-grid roundtrip.
+    ///
+    /// # Panics
+    /// Panics on changed exact RGBA or an unexpected precision/certificate diagnostic.
+    #[test]
+    fn p1_union_clip_near_grid_crossings_match_two_pass_rgba() {
+        for offset in [0.0, 8192.0, 16380.0] {
+            for delta in [-4.0, -3.0, -2.0, -1.0, 1.0, 2.0, 3.0, 4.0] {
+                let x = offset + 0.25 + delta / AREA_BOOLEAN_SCALE;
+                let y = 0.375 - delta / AREA_BOOLEAN_SCALE;
+                let reach = if offset == 0.0 { 8.0 } else { 16384.0 };
+                let raw = [
+                    RawAreaPrimitive {
+                        shape: vec![vec![
+                            [0.0, y - x],
+                            [reach, y + reach - x],
+                            [reach, 4.0],
+                            [0.0, 4.0],
+                        ]],
+                        fill_rule: FillRule::NonZero,
+                        omitted_area_bound: 0.0,
+                    },
+                    RawAreaPrimitive {
+                        shape: vec![vec![
+                            [0.0, y + x],
+                            [reach, y + x - reach],
+                            [reach, 4.0],
+                            [0.0, 4.0],
+                        ]],
+                        fill_rule: FillRule::NonZero,
+                        omitted_area_bound: 0.0,
+                    },
+                ];
+                p1_assert_rgba(
+                    &raw,
+                    [offset + 0.25, 0.375, offset + 2.75, 2.625],
+                    ((offset + 4.0) as u32, 4),
+                );
+            }
+        }
+    }
+
+    /// Retains standalone sub-byte slivers and charges the combined clip's own split certificate.
+    ///
+    /// # Panics
+    /// Panics if a clipped sliver disappears, clipping is uncharged, or precision failure paints.
+    #[test]
+    fn p1_union_clip_retains_sliver_and_charges_clip_certificate_before_paint() {
+        let never = || false;
+        let limits = RasterizationLimits::new(100_000).unwrap();
+        let sliver = [RawAreaPrimitive {
+            shape: vec![rectangle(-0.25, 0.5, 1.75, 0.5 + 1.0e-7)],
+            fill_rule: FillRule::NonZero,
+            omitted_area_bound: 0.0,
+        }];
+        let clip = [0.25, 0.125, 0.875, 0.875];
+        for old in [true, false] {
+            let mut work = RasterWork::new(limits, RasterAntialiasing::On, &never);
+            let result = if old {
+                p1_two_pass_reference(
+                    &sliver,
+                    Some(clip),
+                    &mut work,
+                    &mut AreaOmissionBudget::default(),
+                )
+            } else {
+                normalize_and_union(
+                    &sliver,
+                    Some(clip),
+                    &mut work,
+                    &mut AreaOmissionBudget::default(),
+                )
+            }
+            .unwrap();
+            assert!(
+                pixel_area(&result, 0, 0) > 0.0,
+                "a retained positive sliver must survive before byte quantization"
+            );
+        }
+        p1_assert_rgba(&sliver, clip, (1, 1));
+        let raw = || RawAreaPrimitive {
+            shape: vec![vec![[0.05, 0.1], [0.95, 0.3], [0.2, 0.97]]],
+            fill_rule: FillRule::NonZero,
+            omitted_area_bound: 0.0,
+        };
+        let mut observed = AreaOmissionBudget::default();
+        let mut work = RasterWork::new(limits, RasterAntialiasing::On, &never);
+        normalize_and_union(&[raw()], None, &mut work, &mut observed).unwrap();
+        assert_eq!(
+            observed.0.value(),
+            0.0,
+            "the simple unclipped input has no split mutation"
+        );
+        let clip = Some([0.317, 0.293, 0.731, 0.809]);
+        let mut work = RasterWork::new(limits, RasterAntialiasing::On, &never);
+        normalize_and_union(&[raw()], clip, &mut work, &mut observed).unwrap();
+        let bound = observed.0.value();
+        assert!(bound > 0.0 && bound < MAX_OMITTED_PIXEL_AREA);
+        let mut omissions = AreaOmissionBudget::default();
+        omissions
+            .record(MAX_OMITTED_PIXEL_AREA - bound * 0.5)
+            .unwrap();
+        let mut pixels =
+            allocate_linear_pixels(1, 1, background_pixel(RasterBackground::Transparent)).unwrap();
+        let color = ColorValue {
+            red: 1.0,
+            green: 0.0,
+            blue: 0.0,
+            alpha: 1.0,
+        };
+        let mut work = RasterWork::new(limits, RasterAntialiasing::On, &never);
+        let error = paint_ordered_primitive(
+            &mut pixels,
+            raw(),
+            1,
+            1,
+            clip,
+            &color,
+            1.0,
+            &mut work,
+            &mut omissions,
+        )
+        .unwrap_err();
+        assert_eq!(error.path(), "raster.area.precision");
+        assert_eq!(pixels[0].alpha, 0.0);
+    }
+
+    /// Keeps actual-operation charges, cancellation and cumulative omission failures bounded.
+    ///
+    /// # Panics
+    /// Panics if removed work raises allowances, shared diagnostics differ or a fresh request fails.
+    #[test]
+    fn p1_union_clip_preserves_limits_cancel_and_omission_errors() {
+        let raw = [RawAreaPrimitive {
+            shape: vec![rectangle(-1.0, -1.0, 3.0, 3.0)],
+            fill_rule: FillRule::NonZero,
+            omitted_area_bound: 0.0,
+        }];
+        let clip_rect = [0.25, 0.375, 1.75, 1.625];
+        let clip = Some(clip_rect);
+        let never = || false;
+        let limits = RasterizationLimits::new(1_000).unwrap();
+        let mut old = RasterWork::new(limits, RasterAntialiasing::On, &never);
+        let mut new = RasterWork::new(limits, RasterAntialiasing::On, &never);
+        p1_two_pass_reference(&raw, clip, &mut old, &mut AreaOmissionBudget::default()).unwrap();
+        normalize_and_union(&raw, clip, &mut new, &mut AreaOmissionBudget::default()).unwrap();
+        assert!(new.remaining_boolean_operations > old.remaining_boolean_operations);
+        for reference in [true, false] {
+            let mut work = RasterWork::new(
+                limits.with_max_boolean_operations(0),
+                RasterAntialiasing::On,
+                &never,
+            );
+            let result = if reference {
+                p1_two_pass_reference(&raw, clip, &mut work, &mut AreaOmissionBudget::default())
+            } else {
+                normalize_and_union(&raw, clip, &mut work, &mut AreaOmissionBudget::default())
+            };
+            assert_eq!(
+                result.unwrap_err().path(),
+                "raster.limits.boolean_operations"
+            );
+            let cancelled = || true;
+            let mut work = RasterWork::new(limits, RasterAntialiasing::On, &cancelled);
+            let result = if reference {
+                p1_two_pass_reference(&raw, clip, &mut work, &mut AreaOmissionBudget::default())
+            } else {
+                normalize_and_union(&raw, clip, &mut work, &mut AreaOmissionBudget::default())
+            };
+            assert_eq!(result.unwrap_err().path(), "evaluation.cancelled");
+            let empty = [RawAreaPrimitive {
+                shape: Vec::new(),
+                fill_rule: FillRule::NonZero,
+                omitted_area_bound: MAX_OMITTED_PIXEL_AREA * 2.0,
+            }];
+            let mut work = RasterWork::new(limits, RasterAntialiasing::On, &never);
+            let result = if reference {
+                p1_two_pass_reference(&empty, clip, &mut work, &mut AreaOmissionBudget::default())
+            } else {
+                normalize_and_union(&empty, clip, &mut work, &mut AreaOmissionBudget::default())
+            };
+            assert_eq!(result.unwrap_err().path(), "raster.area.precision");
+        }
+        p1_assert_rgba(&raw, clip_rect, (2, 2));
     }
 }

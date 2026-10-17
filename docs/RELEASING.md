@@ -23,34 +23,34 @@ source used to build the packages. This does not submit the app to Flathub.
    bundles finish. Keep local evidence under `target/validation/`.
 
 The existing Windows development ZIP is a separately versioned 0.3.2 package
-built from its verified debug binaries. Do not attach or relabel it as a 0.4.3
+built from its verified debug binaries. Do not attach or relabel it as a 0.4.4
 Windows build; a current Windows package needs its own native build and checks.
 
 ## Publish
 
 After publication is authorized, push the source and a new annotated tag.
-For version 0.4.3:
+For version 0.4.4:
 
-The prior 0.4.2 release notes remain available at
-[docs/releases/v0.4.2.md](releases/v0.4.2.md).
+The prior 0.4.3 release notes remain available at
+[docs/releases/v0.4.3.md](releases/v0.4.3.md).
 
 ```sh
 git push origin main
-git tag -a v0.4.3 -m 'Toniator 0.4.3'
-git push origin refs/tags/v0.4.3
-gh release create v0.4.3 \
-  dist/Toniator-0.4.3-x86_64.AppImage \
-  dist/Toniator-0.4.3-x86_64.flatpak \
+git tag -a v0.4.4 -m 'Toniator 0.4.4'
+git push origin refs/tags/v0.4.4
+gh release create v0.4.4 \
+  dist/Toniator-0.4.4-x86_64.AppImage \
+  dist/Toniator-0.4.4-x86_64.flatpak \
   dist/SHA256SUMS dist/build-info.json \
   --verify-tag --draft --prerelease \
-  --title 'Toniator 0.4.3 — JPEG XL sources' \
-  --notes-file docs/releases/v0.4.3.md
+  --title 'Toniator 0.4.4 — Shared CPU performance and GUI refinements' \
+  --notes-file docs/releases/v0.4.4.md
 ```
 
 Review the draft and attachments, then publish:
 
 ```sh
-gh release edit v0.4.3 --draft=false
+gh release edit v0.4.4 --draft=false
 ```
 
 Download all four published assets into a fresh directory, verify their hashes,
@@ -60,3 +60,18 @@ prerelease status until a stable release is explicitly chosen.
 The same process can be performed through GitHub's Releases page by selecting
 the pushed tag, attaching the four files, and using the versioned release notes.
 Historical releases retain their original assets and identifiers.
+
+## Append a Windows build later
+
+Follow the tracked [0.4.4 Windows handoff](releases/v0.4.4-windows-handoff.md).
+Build exactly the peeled `v0.4.4` source commit and compare it with the Linux
+release's `build-info.json`; do not move the tag or relabel the old debug ZIP.
+Native Windows release build, portable-package smoke checks and complete notices
+are required before attachment. Current Windows packaging scripts remain tied
+to the historical 0.3.2 debug package and are not current release automation.
+If a source fix is needed, stop for a new checkpoint/version decision.
+
+Append distinct versioned Windows assets to the existing release, with
+`WINDOWS-SHA256SUMS` and `Windows-build-info.json`. Never replace Linux
+`SHA256SUMS`, `build-info.json`, AppImage or Flatpak assets; do not use upload
+`--clobber`. Preserve historical releases and prerelease status.

@@ -8,6 +8,10 @@ mod transform_regressions;
 #[cfg(test)]
 mod candidate_order_tests;
 
+/// Opt-in focused current index evidence; never invoked by production evaluations.
+#[cfg(feature = "test-evidence")]
+pub mod random_spatial_index_evidence;
+
 mod coverage_response;
 mod builtin_calibrations;
 pub use coverage_response::{CoverageCurve, CoverageKnot, GeometryResponseInput};
@@ -8434,26 +8438,32 @@ pub fn maximum_emitted_guide_spacing(
         ))
 }
 
-/// Extends a family fingerprint with every published site's exact nominal basis and diameter.
+/// Streams every published site's exact nominal basis and diameter into the existing FNV identity.
+/// Site emission order, little-endian words, float bits and diameter computation stay authoritative;
+/// no population-sized fingerprint staging buffer is retained.
+///
+/// # Panics
+/// Panics only on a platform where a valid usize ordinal cannot fit the existing u64 identity.
 fn family_site_fingerprint(base: &str, sites: &[FamilySite]) -> String {
-    let mut bytes = base.as_bytes().to_vec();
-    bytes.extend(b"|nominal-cell-basis-v1");
+    let mut state = Fnv1a64State::new();
+    state.write(base.bytes());
+    state.write(b"|nominal-cell-basis-v1".iter().copied());
     for site in sites {
-        bytes.extend(site.id.mechanism_id.0.to_le_bytes());
-        bytes.extend(
+        state.write(site.id.mechanism_id.0.to_le_bytes());
+        state.write(
             u64::try_from(site.id.ordinal)
                 .expect("usize fits u64")
                 .to_le_bytes(),
         );
-        bytes.extend(site.position.x.to_bits().to_le_bytes());
-        bytes.extend(site.position.y.to_bits().to_le_bytes());
-        bytes.extend(site.nominal_cell_basis.axis_a.x.to_bits().to_le_bytes());
-        bytes.extend(site.nominal_cell_basis.axis_a.y.to_bits().to_le_bytes());
-        bytes.extend(site.nominal_cell_basis.axis_b.x.to_bits().to_le_bytes());
-        bytes.extend(site.nominal_cell_basis.axis_b.y.to_bits().to_le_bytes());
-        bytes.extend(site.nominal_cell_basis.diameter().to_bits().to_le_bytes());
+        state.write(site.position.x.to_bits().to_le_bytes());
+        state.write(site.position.y.to_bits().to_le_bytes());
+        state.write(site.nominal_cell_basis.axis_a.x.to_bits().to_le_bytes());
+        state.write(site.nominal_cell_basis.axis_a.y.to_bits().to_le_bytes());
+        state.write(site.nominal_cell_basis.axis_b.x.to_bits().to_le_bytes());
+        state.write(site.nominal_cell_basis.axis_b.y.to_bits().to_le_bytes());
+        state.write(site.nominal_cell_basis.diameter().to_bits().to_le_bytes());
     }
-    format!("{base}:nominal-cell-basis:{}", fnv1a64(bytes))
+    format!("{base}:nominal-cell-basis:{}", state.finish())
 }
 
 /// Hashes complete resolved generic-guide intent and layout inputs under its placement contract.
@@ -8820,51 +8830,239 @@ struct RandomSiteEvaluation {
     diagnostics: RandomSiteDiagnostics,
 }
 
+/// Sentinel outside every allocated ordinal arena; it never represents an accepted site.
+const NO_SPATIAL_ORDINAL: usize = usize::MAX;
+/// Dense metadata eligibility only; larger creative workloads retain sparse indexing.
+const MAXIMUM_DENSE_SPATIAL_BYTES: usize = 16 * 1024 * 1024;
+
+/// Ordered accepted-ordinal chain and its complete pre-traversal work charge.
+#[derive(Clone, Copy)]
+struct SpatialBucket {
+    head: usize,
+    tail: usize,
+    count: usize,
+}
+impl SpatialBucket {
+    const EMPTY: Self = Self {
+        head: NO_SPATIAL_ORDINAL,
+        tail: NO_SPATIAL_ORDINAL,
+        count: 0,
+    };
+}
+
+/// Optional bounded direct lookup over the producer's finite cell envelope.
+struct DenseSpatialCells {
+    origin: (i64, i64),
+    columns: usize,
+    rows: usize,
+    buckets: Vec<SpatialBucket>,
+}
+impl DenseSpatialCells {
+    /// Tries a bounded dense layout without imposing a site/work ceiling or changing cell arithmetic.
+    /// Ineligible spans and failed reservations select sparse storage; initialization polls cancellation.
+    /// The reservation callback permits deterministic failure evidence without provoking host OOM.
+    ///
+    /// # Errors
+    /// Returns only cancellation; coordinate/span/allocation ineligibility falls back to sparse storage.
+    fn try_new(
+        bounds: Bounds,
+        cell_size: f64,
+        maximum_bytes: usize,
+        is_cancelled: &dyn Fn() -> bool,
+        reserve: impl FnOnce(&mut Vec<SpatialBucket>, usize) -> bool,
+    ) -> Result<Option<Self>, PatternPipelineError> {
+        let (Ok(min), Ok(max)) = (
+            spatial_cell(bounds.min, cell_size),
+            spatial_cell(bounds.max, cell_size),
+        ) else {
+            return Ok(None);
+        };
+        let Some(columns) = max
+            .0
+            .checked_sub(min.0)
+            .and_then(|n| n.checked_add(1))
+            .and_then(|n| usize::try_from(n).ok())
+        else {
+            return Ok(None);
+        };
+        let Some(rows) = max
+            .1
+            .checked_sub(min.1)
+            .and_then(|n| n.checked_add(1))
+            .and_then(|n| usize::try_from(n).ok())
+        else {
+            return Ok(None);
+        };
+        let Some(count) = columns.checked_mul(rows) else {
+            return Ok(None);
+        };
+        if count == 0
+            || count
+                .checked_mul(std::mem::size_of::<SpatialBucket>())
+                .is_none_or(|bytes| bytes > maximum_bytes)
+        {
+            return Ok(None);
+        }
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let mut buckets = Vec::new();
+        if !reserve(&mut buckets, count) {
+            return Ok(None);
+        }
+        for index in 0..count {
+            if index % 1024 == 0 && is_cancelled() {
+                return Err(PatternPipelineError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            buckets.push(SpatialBucket::EMPTY);
+        }
+        Ok(Some(Self {
+            origin: min,
+            columns,
+            rows,
+            buckets,
+        }))
+    }
+
+    /// Maps representable signed cell coordinates into the optional dense envelope without clipping.
+    /// Outside cells return None and retain the sparse lookup/insertion route.
+    fn offset(&self, key: (i64, i64)) -> Option<usize> {
+        let x = usize::try_from(key.0.checked_sub(self.origin.0)?).ok()?;
+        let y = usize::try_from(key.1.checked_sub(self.origin.1)?).ok()?;
+        if x >= self.columns || y >= self.rows {
+            return None;
+        }
+        y.checked_mul(self.columns)?.checked_add(x)
+    }
+}
+
+/// Applies the original checked division/floor mapping shared by dense and sparse storage.
+///
+/// # Errors
+/// Returns the original stable diagnostic for non-finite or unrepresentable cell coordinates.
+fn spatial_cell(point: Point2, cell_size: f64) -> Result<(i64, i64), PatternPipelineError> {
+    let x = (point.x / cell_size).floor();
+    let y = (point.y / cell_size).floor();
+    if !x.is_finite()
+        || !y.is_finite()
+        || x < i64::MIN as f64
+        || x > i64::MAX as f64
+        || y < i64::MIN as f64
+        || y > i64::MAX as f64
+    {
+        return Err(PatternPipelineError::new(
+            "coverage.random_sites.spatial_index",
+            "exclusion cell coordinate is not representable",
+        ));
+    }
+    Ok((x as i64, y as i64))
+}
+
+/// Shared exclusion lookup retaining accepted ordinals, never a second accepted-point population.
+/// Producers append every accepted ordinal contiguously, matching FamilySiteSet emission authority.
 struct SpatialIndex {
     cell_size: f64,
-    cells: HashMap<(i64, i64), Vec<usize>>,
+    dense: Option<DenseSpatialCells>,
+    cells: HashMap<(i64, i64), SpatialBucket>,
+    next: Vec<usize>,
     neighbor_work: usize,
     maximum_neighbor_work: usize,
 }
-
 impl SpatialIndex {
-    /// Creates an exclusion lookup with one persisted deterministic neighbor-work ceiling.
+    /// Creates the sparse evidence/control route with the same accepted-ordinal authority.
     ///
     /// # Errors
-    ///
-    /// Returns the stable spatial-index diagnostic when cell size is not
-    /// finite-positive; allocation, arithmetic, and cancellation remain checked
-    /// during use.
+    /// Returns a stable diagnostic when the cell size is not finite-positive.
+    #[cfg(any(test, feature = "test-evidence"))]
     fn new(cell_size: f64, maximum_neighbor_work: usize) -> Result<Self, PatternPipelineError> {
+        Self::with_bounds(cell_size, maximum_neighbor_work, None, &|| false)
+    }
+
+    /// Selects dense metadata opportunistically inside a known producer envelope, with sparse fallback.
+    /// This changes storage only; source identity, positions, ordinal order and work bounds stay external.
+    ///
+    /// # Errors
+    /// Returns invalid cell-size or cancellation diagnostics before exposing an index.
+    fn with_bounds(
+        cell_size: f64,
+        maximum_neighbor_work: usize,
+        bounds: Option<Bounds>,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, PatternPipelineError> {
+        Self::with_reservation(
+            cell_size,
+            maximum_neighbor_work,
+            bounds,
+            is_cancelled,
+            |cells, count| cells.try_reserve_exact(count).is_ok(),
+        )
+    }
+
+    /// Shares dense layout selection with a reservation seam used only by focused failure evidence.
+    ///
+    /// # Errors
+    /// Returns invalid cell-size or cancellation diagnostics; dense reservation failure uses sparse storage.
+    fn with_reservation(
+        cell_size: f64,
+        maximum_neighbor_work: usize,
+        bounds: Option<Bounds>,
+        is_cancelled: &dyn Fn() -> bool,
+        reserve: impl FnOnce(&mut Vec<SpatialBucket>, usize) -> bool,
+    ) -> Result<Self, PatternPipelineError> {
         if !cell_size.is_finite() || cell_size <= 0.0 {
             return Err(PatternPipelineError::new(
                 "coverage.random_sites.spatial_index",
                 "exclusion cell size must be positive and finite",
             ));
         }
+        let dense = bounds
+            .map(|bounds| {
+                DenseSpatialCells::try_new(
+                    bounds,
+                    cell_size,
+                    MAXIMUM_DENSE_SPATIAL_BYTES,
+                    is_cancelled,
+                    reserve,
+                )
+            })
+            .transpose()?
+            .flatten();
         Ok(Self {
             cell_size,
+            dense,
             cells: HashMap::new(),
+            next: Vec::new(),
             neighbor_work: 0,
             maximum_neighbor_work,
         })
     }
+
+    /// Maps a candidate with the original checked cell arithmetic independently of storage choice.
+    ///
+    /// # Errors
+    /// Returns the stable spatial-index coordinate diagnostic without mutating lookup state.
     fn cell(&self, point: Point2) -> Result<(i64, i64), PatternPipelineError> {
-        let x = (point.x / self.cell_size).floor();
-        let y = (point.y / self.cell_size).floor();
-        if !x.is_finite()
-            || !y.is_finite()
-            || x < i64::MIN as f64
-            || x > i64::MAX as f64
-            || y < i64::MIN as f64
-            || y > i64::MAX as f64
+        spatial_cell(point, self.cell_size)
+    }
+
+    /// Copies one chain descriptor from dense or sparse lookup without reordering its ordinals.
+    fn bucket(&self, key: (i64, i64)) -> Option<SpatialBucket> {
+        let bucket = if let Some((dense, offset)) = self
+            .dense
+            .as_ref()
+            .and_then(|dense| dense.offset(key).map(|offset| (dense, offset)))
         {
-            return Err(PatternPipelineError::new(
-                "coverage.random_sites.spatial_index",
-                "exclusion cell coordinate is not representable",
-            ));
-        }
-        Ok((x as i64, y as i64))
+            dense.buckets[offset]
+        } else {
+            *self.cells.get(&key)?
+        };
+        (bucket.count != 0).then_some(bucket)
     }
     /// Returns the first accepted-site ordinal within the configured exclusion distance.
     ///
@@ -8875,7 +9073,7 @@ impl SpatialIndex {
     /// # Errors
     ///
     /// Returns canonical cancellation, coordinate, or neighbor-work failures
-    /// without changing the index or accepted-site population.
+    /// without changing bucket links or accepted geometry; attempted neighbor work remains charged.
     fn find_conflict(
         &mut self,
         point: Point2,
@@ -8905,8 +9103,8 @@ impl SpatialIndex {
                         "exclusion neighbor coordinate overflowed",
                     ))?,
                 );
-                if let Some(indices) = self.cells.get(&key) {
-                    self.neighbor_work = self.neighbor_work.checked_add(indices.len()).ok_or(
+                if let Some(bucket) = self.bucket(key) {
+                    self.neighbor_work = self.neighbor_work.checked_add(bucket.count).ok_or(
                         PatternPipelineError::new(
                             "coverage.random_sites.neighbor_limit",
                             "exclusion neighbor work overflowed",
@@ -8918,7 +9116,8 @@ impl SpatialIndex {
                             "random-site neighbor check limit exceeded",
                         ));
                     }
-                    for &index in indices {
+                    let mut index = bucket.head;
+                    while index != NO_SPATIAL_ORDINAL {
                         // A populated cell can contain bounded-but-large work.
                         // Poll every deterministic index so cancellation cannot
                         // be delayed until the next candidate or cell.
@@ -8931,6 +9130,7 @@ impl SpatialIndex {
                         if point_distance(point, accepted[index].position) < distance {
                             return Ok(Some(index));
                         }
+                        index = self.next[index];
                     }
                 }
             }
@@ -8968,8 +9168,8 @@ impl SpatialIndex {
                         "Poisson neighbor coordinate overflowed",
                     ))?,
                 );
-                if let Some(indices) = self.cells.get(&key) {
-                    self.neighbor_work = self.neighbor_work.checked_add(indices.len()).ok_or(
+                if let Some(bucket) = self.bucket(key) {
+                    self.neighbor_work = self.neighbor_work.checked_add(bucket.count).ok_or(
                         PatternPipelineError::new(
                             "coverage.random_sites.neighbor_limit",
                             "Poisson neighbor work overflowed",
@@ -8981,41 +9181,66 @@ impl SpatialIndex {
                             "Poisson neighbor check limit exceeded",
                         ));
                     }
-                    if indices
-                        .iter()
-                        .any(|index| point_distance(point, accepted[*index]) < distance)
-                    {
-                        return Ok(true);
+                    let mut index = bucket.head;
+                    while index != NO_SPATIAL_ORDINAL {
+                        if point_distance(point, accepted[index]) < distance {
+                            return Ok(true);
+                        }
+                        index = self.next[index];
                     }
                 }
             }
         }
         Ok(false)
     }
-    /// Inserts one accepted-site ordinal through fallible cell and bucket growth.
+    /// Appends one contiguous accepted ordinal through fallible shared arena and bucket growth.
+    /// Dense envelope hints never drop out-of-bounds sites: they use sparse buckets instead.
+    /// Common sparse inserts hash once; only a full table checks whether growth is necessary.
     ///
     /// # Errors
+    /// Returns original coordinate/allocation diagnostics before publishing an appended chain link.
     ///
-    /// Returns stable coordinate or allocation diagnostics without appending
-    /// the ordinal when its cell cannot be represented or reserved.
+    /// # Panics
+    /// Debug builds panic if a producer violates contiguous accepted-ordinal emission authority.
     fn insert(&mut self, point: Point2, index: usize) -> Result<(), PatternPipelineError> {
+        debug_assert_eq!(
+            index,
+            self.next.len(),
+            "accepted ordinals append contiguously"
+        );
         let key = self.cell(point)?;
-        if !self.cells.contains_key(&key) {
-            self.cells.try_reserve(1).map_err(|_| {
-                PatternPipelineError::new(
-                    "coverage.random_sites.allocation",
-                    "random-site spatial index could not reserve another cell",
-                )
-            })?;
-        }
-        let indices = self.cells.entry(key).or_default();
-        indices.try_reserve(1).map_err(|_| {
+        self.next.try_reserve(1).map_err(|_| {
             PatternPipelineError::new(
                 "coverage.random_sites.allocation",
                 "random-site spatial index cell could not reserve another site",
             )
         })?;
-        indices.push(index);
+        let dense_offset = self.dense.as_ref().and_then(|dense| dense.offset(key));
+        let bucket = if let Some(offset) = dense_offset {
+            &mut self
+                .dense
+                .as_mut()
+                .expect("offset has dense storage")
+                .buckets[offset]
+        } else {
+            if self.cells.len() == self.cells.capacity() && !self.cells.contains_key(&key) {
+                self.cells.try_reserve(1).map_err(|_| {
+                    PatternPipelineError::new(
+                        "coverage.random_sites.allocation",
+                        "random-site spatial index could not reserve another cell",
+                    )
+                })?;
+            }
+            self.cells.entry(key).or_insert(SpatialBucket::EMPTY)
+        };
+        if bucket.count == 0 {
+            bucket.head = index;
+        } else {
+            self.next[bucket.tail] = index;
+        }
+        self.next.push(NO_SPATIAL_ORDINAL);
+        bucket.tail = index;
+        bucket.count += 1;
         Ok(())
     }
 }
@@ -9209,7 +9434,9 @@ fn evaluate_random_sites_with_progress_cancellable(
     }
     let mut sites = Vec::new();
     let mut spatial_index = (exclusion_distance > 0.0)
-        .then(|| SpatialIndex::new(exclusion_distance, usize::MAX))
+        .then(|| {
+            SpatialIndex::with_bounds(exclusion_distance, usize::MAX, Some(padded), is_cancelled)
+        })
         .transpose()?;
     let mut rejected_by_density = 0;
     let mut rejected_by_exclusion = 0;
@@ -9427,7 +9654,8 @@ fn bridson_candidates(
 ) -> Result<Vec<Point2>, PatternPipelineError> {
     let mut points = Vec::new();
     let mut active = Vec::new();
-    let mut index = SpatialIndex::new(distance, maximum_neighbor_work)?;
+    let mut index =
+        SpatialIndex::with_bounds(distance, maximum_neighbor_work, Some(bounds), is_cancelled)?;
     // Distributed initial seeds and exhausted local frontiers already cover the domain.
     // A bounded global search checks for missed islands without scaling failed work with density.
     let reseed_limit = 128.min(budget.max(1));
@@ -9550,6 +9778,8 @@ fn bridson_candidates(
             "Poisson placement effort limit was exhausted before domain saturation",
         ));
     }
+    drop(index);
+    drop(active);
     let count = points.len();
     spread_candidate_order(&mut points, count, bounds, is_cancelled)?;
     Ok(points)
@@ -9669,24 +9899,26 @@ fn spread_candidate_order(
             (start + RUN).min(keys.len()),
         )));
     }
-    let mut ordered = Vec::new();
-    ordered
+    let mut ordered_ordinals = Vec::new();
+    ordered_ordinals
         .try_reserve_exact(points.len())
         .map_err(|_| allocation())?;
     while let Some(std::cmp::Reverse(((_, ordinal), index, end))) = heap.pop() {
-        if ordered.len() % 1024 == 0 {
+        if ordered_ordinals.len() % 1024 == 0 {
             check()?;
         }
-        ordered.push(points[ordinal]);
+        ordered_ordinals.push(ordinal);
         if index + 1 < end {
             heap.push(std::cmp::Reverse((keys[index + 1], index + 1, end)));
         }
     }
+    drop(keys);
+    drop(heap);
     let mut intervals = std::collections::VecDeque::new();
     intervals
         .try_reserve(points.len())
         .map_err(|_| allocation())?;
-    intervals.push_back((0_usize, ordered.len()));
+    intervals.push_back((0_usize, ordered_ordinals.len()));
     let mut output = Vec::new();
     output
         .try_reserve_exact(points.len())
@@ -9696,7 +9928,7 @@ fn spread_candidate_order(
             check()?;
         }
         let middle = start + (end - start) / 2;
-        output.push(ordered[middle]);
+        output.push(points[ordered_ordinals[middle]]);
         if start < middle {
             intervals.push_back((start, middle));
         }
