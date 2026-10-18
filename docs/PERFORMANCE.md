@@ -6,9 +6,142 @@ below were collected during development from GUI source checkpoint
 `8ee739375313e11c07a325f297a9e91a257ac963` with the respective pilot changes;
 they are not new benchmarks of the packaged release. Implementation and scoped
 verification are complete. These measurements establish specific workload
-improvements, not universal speedups or user acceptance.
+improvements, not universal speedups or user acceptance. The later recovery and
+capacity work below is user-accepted for the 0.4.5 release preparation.
 
-## Shared implementation
+## 0.4.5: preview recovery and curve capacity
+
+The 2026-10-18 engineering checks cover the accepted 0.4.5 implementation,
+collected before its metadata-only version bump from a working tree based on
+`798fb5d86032a53636c09eeda58ee1755cc5a800`. The behavior is new since published
+0.4.4. User acceptance authorizes release preparation; package publication and
+fresh-download verification remain separate steps. The measured pre-bump app
+SHA-256 is `981696d9001b33994f40c9f994c082e9bea216b57cc338dd2a917d7e331d0827`;
+it identifies the measured binary, not the future 0.4.5 package. The new `v0.4.5`
+tag and attached build provenance will identify the release source and artifacts.
+Detailed evidence links in this section refer to checkout-local artifacts under
+`target/validation/preview-recovery-20261018/`; those artifacts are not shipped.
+
+### Recovery and ownership
+
+Main-preview recovery is shared across Pattern families. The app coordinator
+captures workspace/revision/frame identity and the complete exact raster target,
+including crop, scale, and backing. Attempt epochs and tickets do not create new
+intent. A matching failed request stays terminal before source cloning,
+preparation/decode jobs, or engine submission; unavailable viewport allocation
+does not clear that failure. Cancellation and stale completions do not become
+terminal errors or replace current ownership.
+
+The error overlay does not participate in canvas measurement. It retains the
+last accepted pixels, or the blank canvas before the first success, without
+changing the raster target. **Retry preview** admits one current attempt;
+**Dismiss preview error** hides presentation while the failure remains latched.
+A real edit, frame/view change, or workspace replacement can recover normally.
+Operation/Save errors keep independent identity through preview changes.
+The engine still owns ticket acceptance and atomic cache publication; the app
+coordinator owns no document, pixels, or evaluator cache. Retry/Dismiss are real
+GTK buttons with native actions and keyboard paths; sensitivity follows current
+failure ownership. Full diagnostics remain in the status tooltip and accessible
+description.
+
+### Capacity and numerical boundaries
+
+The proven parametric round/square spiral route no longer has the obsolete
+4,096-segment construction ceiling or fixed path/clipping count ceilings.
+Geometry-owned `CurveWorkLimits` supplies machine-addressable normal policy and
+validated nonzero finite bounds for constrained callers. Construction, copying,
+transforms, clipping, profile/outline growth, and fragment publication use checked
+counts, fallible incremental storage, and cancellation checks. Addressability
+checks do not promise that host RAM is available. Both `FamilyCacheKey` and
+`DocumentFamilyCacheKey` include the exact policy, so a permissive cached result
+cannot bypass a stricter request. Resource policy stays outside canonical content
+identity. Unrelated arc-length/intersection policies and numerical bounds remain
+unchanged; this pilot does not establish every family or possible failure cause.
+
+The reached raster numeric failures have a separate, narrow correction. At
+terminal flattening failure, repeated endpoint handles or an axis-aligned control
+hull between endpoints certify an exact chord. A genuine
+`raster.flatten.numeric` failure may instead roll back that original transformed
+cubic's partial staging and use its chord only when the outward padded control
+box fits the existing cumulative `1e-6` output-pixel-area budget per layer.
+Actual incurred debt is accumulated upward and charged once, including retained
+shapes and holes; consumed work stays charged. Circle potential-loss accounting
+remains separate. Nonfinite or excess debt fails atomically. This is a local,
+pre-grid winding-area bound, not a universal post-grid error proof. Successful
+flatten branches, shared predicates, tolerance, depth, and authored canonical
+geometry are unchanged.
+
+SVG contour flattening now subdivides for curvature accuracy rather than span
+alone. Lazy cubic-to-quadratic intervals use 10% of the unchanged `1e-8`
+canvas-relative tolerance; convex-hull chord certificates use the remaining
+90%. Exact certified straight curves emit endpoints. Checked work/storage,
+cancellation, primitive normalization, fill/paint order, clipping, and the fixed
+Boolean scale remain authoritative. The shared occupancy flattener is unchanged.
+There is no global precision reduction, new backend/dependency, or schema change.
+
+The user-flagged square-crossing SVG falls from **56,493,266 to 473,528 bytes**
+(about 119× smaller), with line commands reduced from **1,550,716 to 12,806**.
+Original baseline files are retained. Only eight recorded spiral SVG goldens
+intentionally change; all 14 baseline cases retain exact canonical/raw-f64,
+identity, RGBA, and PNG witnesses across both immutable source types. Old/new
+SVG rasterizations preserve visually reviewed topology, corners, crossings,
+holes, and endpoints, with small edge differences up to 18/255 in alpha or
+premultiplied RGB. SVG pixel identity is not claimed. The final transformed
+raster correction preserves all 112 frozen small-case artifacts and six original
+native artifacts exactly. The [source/capacity report](../target/validation/preview-recovery-20261018/phase-c/final-report.md)
+and [transformed-raster report](../target/validation/preview-recovery-20261018/phase-d/bounded-recovery/final-report.md)
+retain the scoped tests and equivalence records.
+
+### Observed completion and remaining costs
+
+The unchanged 5016×5016 GoatLocker document completes actual GTK preview in one
+observed **7.624788 s** interval from source-job start to observed current-ticket
+acceptance, sampled every 100 ms; peak app RSS is **1,743,832 KiB**. It remains
+settled for 60.087 s with one source job, submission, and acceptance. Pending
+edit/Undo restores clean current acceptance in 1.927547 s without stale
+publication; Zoom/Fit and Close/Recent reopen also pass. The original previously
+failed, so this is successful completion evidence, not a before/after speedup.
+Three cold/three warm small controls show no material regression within their
+scoped checks, not a universal performance guarantee.
+
+Actual app native transparent PNG has decoded RGBA identical to headless output,
+including hidden RGB; PNG compression/metadata bytes differ. The native SVG is
+**98,454,149 bytes**, with four editable paths and no embedded images, and is
+byte-identical to repeated headless output. Export completion is distinct from
+an external viewer's cost of rasterizing the existing CMYK filter graph.
+
+Independent Inkscape and pinned resvg inspections at 1500×1500 show the expected
+composition. Native 5016×5016 resvg inspection succeeds in **49.856 s** at
+**11,040,692 KiB** peak RSS under a separately bounded 14 GiB/120 s observer.
+Its earlier 8 GiB run was stopped; native Inkscape was stopped after 602.93 s
+with an incomplete image and 10,346,768 KiB peak RSS. Neither stopped attempt
+counts as success. Native SVG inspection and PNG agree visually, with rasterizer
+antialiasing differences rather than pixel identity. librsvg 2.62 produces cyan
+and transparency for this file: an external renderer compatibility limit.
+Off-canvas filter-atlas clipping is an inference, not a proven specification
+defect. See the [renderer review](../target/validation/preview-recovery-20261018/phase-d/svg-inspection/cmyk-renderer-review.md)
+and [final product report](../target/validation/preview-recovery-20261018/phase-d/final-report.md),
+which supersedes that review's pending native-resvg status.
+
+Measured in-flight geometry/profile/outline cancellation is below the nominal
+250 ms target in the recorded samples. Synchronous SVG Boolean processing reaches
+**420.392 ms**, and the existing early source-decode cancellation gap remains.
+These are explicit dependency limits; no general latency guarantee is claimed.
+Private GTK evidence covers distinct-family 60-second failure stability,
+pre-ticket routing, Retry/Dismiss, retained pixels/Save errors, and a 480×360
+HighContrast/Sans 20 overlay. Four disposable XDG roots and private sockets were
+verified, and all owned private units/processes are stopped. These
+automated Sway results do not establish human assistive-technology or physical
+keyboard acceptance, GNOME/Mutter, portal, native Windows, or physical-print
+acceptance.
+
+## Published 0.4.4 performance measurements
+
+The remaining sections describe the 2026-10-16 comparisons and their original
+measurement boundaries. Later completion evidence above does not turn those
+historical SVG timeouts into successful baseline runs.
+
+### Shared implementation
 
 - **Clipped raster union:** independently normalized positive subjects are
   intersected with the unchanged canvas rectangle in one checked NonZero
@@ -44,7 +177,7 @@ population, saturation and diagnostics retain their existing contracts.
 Production changes introduce no new dependency, unsafe code, custom hasher,
 parallel acceptance or 160-byte `FamilySite` representation rewrite.
 
-## Observed gains
+### Observed gains
 
 Each row compares that pilot's baseline and candidate; rows are not additive.
 PNG/SVG identify the intrinsic source artwork, not an export format. Release
@@ -76,7 +209,7 @@ is application latency, not compositor paint latency. P1 separately records
 21.033 → 13.785 s median PNG acceptance and 18.983 → 11.530 s single SVG
 acceptance. These are separate comparisons against earlier binaries.
 
-## Memory, exactness and cancellation
+### Memory, exactness and cancellation
 
 P3b diagnostic allocation windows exclude setup, source decode, hash/report work,
 allocator metadata, stack and RSS. Fine Even requested peak capacity falls
@@ -118,7 +251,7 @@ corrected with fixed wrappers. All 14 owned services are independently inactive,
 all recorded application PIDs are absent, and all 48 preservation hashes pass.
 No GTK control or accessibility schema is added by the performance changes.
 
-## Reproduce current configurations
+### Reproduce current configurations
 
 Run from the repository root. The 12 source-free current-format
 [performance Presets](../fixtures/performance/README.md) contain configurations
@@ -163,7 +296,7 @@ companion `*-gui` directories. P0/P1/P2 extended matrices require some retained
 current TON-018 fixtures; the entire historical matrix is not reproducible from
 an otherwise clean checkout. Retain original evidence and use fresh directories.
 
-## Hardware, choices and remaining limits
+### Hardware, choices and remaining limits
 
 The measured host is Fedora 44, Ryzen 9 5900X (12 cores/24 threads), 32 GiB RAM,
 RX 6900 XT with amdgpu/RADV Mesa 26.2.4, and rustc 1.94.1. Vulkan 1.4 was detected;
@@ -199,7 +332,7 @@ also profiles animation and large 8× export; it does not establish acceleration
 for every workload. Automated Sway evidence does not establish human,
 GNOME/Mutter, portal, physical-keyboard or physical-print acceptance.
 
-## Credits
+### Credits
 
 The clipped-union change reuses existing iOverlay 9.0.0 checked NonZero
 intersection, by Nail Sharipov/iShape-Rust, under MIT OR Apache-2.0. Existing

@@ -29,11 +29,13 @@ struct RawAreaPrimitive {
     shape: AreaShape,
     fill_rule: FillRule,
     omitted_area_bound: f64,
+    /// Already incurred local curve recovery error, charged even when the shape stays healthy.
+    incurred_area_error_bound: f64,
 }
 
 /// Tracks conservative absolute fill error below representable output-pixel geometry.
 #[derive(Default)]
-struct AreaOmissionBudget(AreaSum);
+struct AreaOmissionBudget(AreaSum, f64);
 
 impl AreaOmissionBudget {
     /// Charges a conservative area bound across all primitives in one layer.
@@ -48,7 +50,7 @@ impl AreaOmissionBudget {
             ));
         }
         self.0.add(bound);
-        if self.0.value() > MAX_OMITTED_PIXEL_AREA {
+        if self.total_bound() > MAX_OMITTED_PIXEL_AREA {
             return Err(area_error(
                 "raster.area.precision",
                 "geometry exceeds the absolute fill approximation budget",
@@ -56,6 +58,75 @@ impl AreaOmissionBudget {
         }
         Ok(())
     }
+
+    /// Charges already incurred local recovery error once with upward positive accumulation.
+    /// Zero debt leaves the original compensated circle/grid accounting bit-for-bit unchanged.
+    /// # Errors
+    /// Rejects nonfinite/negative debt or a combined layer bound above the existing authority.
+    fn record_incurred(&mut self, bound: f64) -> Result<(), RenderError> {
+        self.1 = area_error_bound_sum(self.1, bound)?;
+        if self.total_bound() > MAX_OMITTED_PIXEL_AREA {
+            return Err(area_error(
+                "raster.area.precision",
+                "geometry exceeds the absolute fill approximation budget",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns the original bound at zero recovery debt and an upward combined bound otherwise.
+    fn total_bound(&self) -> f64 {
+        if self.1 == 0.0 {
+            self.0.value()
+        } else {
+            (self.0.value().next_up() + self.1).next_up()
+        }
+    }
+}
+
+/// Adds finite nonnegative recovery bounds upward without changing zero-debt behavior.
+/// # Errors
+/// Rejects nonfinite, negative, overflowing or independently over-budget local debt.
+fn area_error_bound_sum(total: f64, additional: f64) -> Result<f64, RenderError> {
+    if !total.is_finite() || !additional.is_finite() || total < 0.0 || additional < 0.0 {
+        return Err(area_error(
+            "raster.area.precision",
+            "incurred area error bound is not finite",
+        ));
+    }
+    if additional == 0.0 {
+        return Ok(total);
+    }
+    let next = (total + additional).next_up();
+    if !next.is_finite() || next > MAX_OMITTED_PIXEL_AREA {
+        return Err(area_error(
+            "raster.area.precision",
+            "geometry exceeds the absolute fill approximation budget",
+        ));
+    }
+    Ok(next)
+}
+
+/// Bounds a failed original transformed cubic's replacement by its chord inside its outward hull box.
+/// Each box side includes the existing grid displacement as a prudent local pad. This is not a
+/// universal post-grid guarantee: adapter/grid/split precision remains separately accounted.
+/// # Errors
+/// Rejects nonfinite or over-budget whole-cubic hulls instead of weakening positional tolerance.
+fn area_cubic_recovery_bound(points: [Point2; 4]) -> Result<f64, RenderError> {
+    if points.iter().any(|point| !point.is_finite()) {
+        return Err(area_error(
+            "raster.area.precision",
+            "cubic recovery hull is not finite",
+        ));
+    }
+    let min_x = points.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+    let max_x = points.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+    let min_y = points.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+    let max_y = points.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+    let pad = (2.0 * AREA_GRID_DISPLACEMENT).next_up();
+    let width = ((max_x - min_x).next_up() + pad).next_up();
+    let height = ((max_y - min_y).next_up() + pad).next_up();
+    area_error_bound_sum(0.0, (width * height).next_up())
 }
 
 /// One linear signed-edge contribution limited to a concrete output-pixel row.
@@ -134,6 +205,9 @@ fn area_push_point(
 ///
 /// # Errors
 /// Returns cancellation, numeric nonconvergence, edge-budget, or allocation diagnostics.
+/// At numeric termination only, repeated endpoint handles or an axis-aligned control hull
+/// between endpoints certify an exact chord with zero geometric error. Existing tolerance,
+/// depth and all previously successful branches remain unchanged.
 fn area_flatten_cubic(
     p: [Point2; 4],
     tolerance: f64,
@@ -153,6 +227,18 @@ fn area_flatten_cubic(
     let e = midpoint(b, c);
     let f = midpoint(d, e);
     if depth >= 60 || f == p[0] || f == p[3] {
+        let between =
+            |value: f64, start: f64, end: f64| value >= start.min(end) && value <= start.max(end);
+        if (p[1] == p[0] && p[2] == p[3])
+            || (p.iter().all(|point| point.x == p[0].x)
+                && between(p[1].y, p[0].y, p[3].y)
+                && between(p[2].y, p[0].y, p[3].y))
+            || (p.iter().all(|point| point.y == p[0].y)
+                && between(p[1].x, p[0].x, p[3].x)
+                && between(p[2].x, p[0].x, p[3].x))
+        {
+            return area_push_point(points, p[3], work);
+        }
         return Err(area_error(
             "raster.flatten.numeric",
             "area cubic cannot meet output-pixel tolerance",
@@ -162,19 +248,24 @@ fn area_flatten_cubic(
     area_flatten_cubic([f, e, c, p[3]], tolerance, depth + 1, points, work)
 }
 
-/// Converts one exact canonical contour to a closed output-pixel polygon without changing its fill rule.
+/// Converts a canonical contour to a closed output-pixel polygon with its original fill rule.
+/// Only numeric flattening failure recovers the whole original cubic as its chord and records
+/// its outward padded hull area as incurred pre-grid winding error. Existing grid and split
+/// checks remain separate authorities; this local bound is not a universal post-grid bound.
 ///
 /// # Errors
-/// Returns cancellation, flattening, edge-budget, coordinate, or allocation diagnostics.
+/// Returns cancellation, flattening, edge-budget, coordinate, allocation, or
+/// `raster.area.precision` diagnostics when whole-cubic or aggregate recovery exceeds its bound.
 fn area_contour(
     segments: &[CurveSegment],
     transform: CanonicalRasterTransform,
     work: &mut RasterWork<'_>,
-) -> Result<Option<AreaContour>, RenderError> {
+) -> Result<(Option<AreaContour>, f64), RenderError> {
     let Some(first) = segments.first() else {
-        return Ok(None);
+        return Ok((None, 0.0));
     };
     let mut points = Vec::new();
+    let mut incurred_area_error_bound = 0.0;
     let start = transform.point(first.start());
     work.check()?;
     if !start.is_finite() {
@@ -205,7 +296,18 @@ fn area_contour(
                 let tolerance = CURVE_PIXEL_TOLERANCE
                     .min(extent / 64.0)
                     .max(f64::MIN_POSITIVE);
-                area_flatten_cubic(p, tolerance, 0, &mut points, work)?;
+                let checkpoint = points.len();
+                if let Err(error) = area_flatten_cubic(p, tolerance, 0, &mut points, work) {
+                    if error.path() != "raster.flatten.numeric" {
+                        return Err(error);
+                    }
+                    let bound = area_cubic_recovery_bound(p)?;
+                    incurred_area_error_bound =
+                        area_error_bound_sum(incurred_area_error_bound, bound)?;
+                    // Discard only this original cubic's partial staging; consumed work is retained.
+                    points.truncate(checkpoint);
+                    area_push_point(&mut points, p[3], work)?;
+                }
             }
         }
     }
@@ -223,9 +325,9 @@ fn area_contour(
             ));
         }
         // A one- or two-point line-only closed contour has exactly zero area.
-        return Ok(None);
+        return Ok((None, incurred_area_error_bound));
     }
-    Ok(Some(points))
+    Ok((Some(points), incurred_area_error_bound))
 }
 
 /// Tessellates a positive transformed circle with bounded absolute sagitta and sub-1% relative area error.
@@ -360,6 +462,7 @@ fn for_each_area_primitive(
                             shape: shape.unwrap_or_default(),
                             fill_rule: FillRule::NonZero,
                             omitted_area_bound,
+                            incurred_area_error_bound: 0.0,
                         },
                         work,
                     )?;
@@ -381,15 +484,17 @@ fn for_each_area_primitive(
                             shape: shape.unwrap_or_default(),
                             fill_rule: FillRule::NonZero,
                             omitted_area_bound,
+                            incurred_area_error_bound: 0.0,
                         })
                     }
                     CanonicalMark::ClosedPath(mark) => {
-                        area_contour(mark.path.segments(), transform, work)?.map(|contour| {
-                            RawAreaPrimitive {
-                                shape: vec![contour],
-                                fill_rule: area_fill_rule(mark.fill_rule),
-                                omitted_area_bound: 0.0,
-                            }
+                        let (contour, incurred_area_error_bound) =
+                            area_contour(mark.path.segments(), transform, work)?;
+                        contour.map(|contour| RawAreaPrimitive {
+                            shape: vec![contour],
+                            fill_rule: area_fill_rule(mark.fill_rule),
+                            omitted_area_bound: 0.0,
+                            incurred_area_error_bound,
                         })
                     }
                 };
@@ -402,8 +507,12 @@ fn for_each_area_primitive(
         GeometryOutput::CanonicalStrokes(strokes) => {
             for (index, stroke) in strokes.iter().enumerate() {
                 let mut shape = Vec::new();
+                let mut incurred_area_error_bound = 0.0;
                 for contour in &stroke.outline.contours {
-                    if let Some(contour) = area_contour(&contour.segments, transform, work)? {
+                    let (contour, bound) = area_contour(&contour.segments, transform, work)?;
+                    incurred_area_error_bound =
+                        area_error_bound_sum(incurred_area_error_bound, bound)?;
+                    if let Some(contour) = contour {
                         shape.try_reserve(1).map_err(|_| {
                             area_error("raster.allocation", "stroke contour list allocation failed")
                         })?;
@@ -417,6 +526,7 @@ fn for_each_area_primitive(
                             shape,
                             fill_rule: area_fill_rule(stroke.outline.fill_rule),
                             omitted_area_bound: 0.0,
+                            incurred_area_error_bound,
                         },
                         work,
                     )?;
@@ -426,13 +536,16 @@ fn for_each_area_primitive(
         }
         GeometryOutput::CanonicalRegions(regions) => {
             for (index, region) in regions.regions().iter().enumerate() {
-                if let Some(contour) = area_contour(region.ring.segments(), transform, work)? {
+                let (contour, incurred_area_error_bound) =
+                    area_contour(region.ring.segments(), transform, work)?;
+                if let Some(contour) = contour {
                     visit(
                         index,
                         RawAreaPrimitive {
                             shape: vec![contour],
                             fill_rule: FillRule::NonZero,
                             omitted_area_bound: 0.0,
+                            incurred_area_error_bound,
                         },
                         work,
                     )?;
@@ -780,7 +893,9 @@ fn area_checked_overlay(
 /// retain their original global union. Both branches charge actual request-wide Boolean work.
 ///
 /// # Errors
-/// Returns cancellation, precision, allocation, or Boolean diagnostics without painting partial pixels.
+/// Returns cancellation, precision, allocation or Boolean diagnostics without painting partial pixels.
+/// Already incurred local recovery debt is charged once for every primitive, independently of
+/// healthy geometry or holes; potential circle/subgrid loss retains its existing separate semantics.
 fn normalize_and_union(
     raw: &[RawAreaPrimitive],
     clip: Option<[f64; 4]>,
@@ -789,6 +904,9 @@ fn normalize_and_union(
 ) -> Result<AreaShapes, RenderError> {
     if raw.is_empty() {
         return Ok(Vec::new());
+    }
+    for primitive in raw {
+        omissions.record_incurred(primitive.incurred_area_error_bound)?;
     }
     let mut omitted = AreaSum::default();
     for primitive in raw.iter().filter(|primitive| primitive.shape.is_empty()) {
@@ -1512,6 +1630,574 @@ pub(super) fn rasterize_area_layer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toniator_geometry::{CubicBezierSegment, LineSegment};
+
+    /// Preserves the exact captured one-ULP native chord when absolute products cancel badly.
+    /// # Panics
+    /// Panics if endpoint publication, edge accounting, cancellation or neighboring-curve
+    /// rejection changes at the existing numeric-termination boundary.
+    #[test]
+    fn captured_goatlocker_chord_numeric_termination_is_exact_and_checked() {
+        let start = Point2::new(
+            f64::from_bits(0x40b3aa90552c92ca),
+            f64::from_bits(0x40b3aa922b783388),
+        );
+        let end = Point2::new(
+            f64::from_bits(0x40b3aa90552c92c9),
+            f64::from_bits(0x40b3aa922b783389),
+        );
+        let tolerance = 2.0097183471152322e-14;
+        let mut work = RasterWork::new(
+            RasterizationLimits::new(1).expect("one edge"),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        let mut points = Vec::new();
+        area_flatten_cubic(
+            [start, start, end, end],
+            tolerance,
+            0,
+            &mut points,
+            &mut work,
+        )
+        .expect("exact chord");
+        assert_eq!(points, vec![[end.x, end.y]]);
+        assert_eq!(work.remaining_edges, 0);
+        assert_eq!(
+            area_flatten_cubic(
+                [start, start, end, end],
+                tolerance,
+                0,
+                &mut points,
+                &mut work
+            )
+            .unwrap_err()
+            .path(),
+            "raster.limits.flattened_edges"
+        );
+        assert_eq!(points.len(), 1);
+        let mut cancelled = RasterWork::new(
+            RasterizationLimits::new(1).unwrap(),
+            RasterAntialiasing::On,
+            &|| true,
+        );
+        assert_eq!(
+            area_flatten_cubic(
+                [start, start, end, end],
+                tolerance,
+                0,
+                &mut points,
+                &mut cancelled
+            )
+            .unwrap_err()
+            .path(),
+            "evaluation.cancelled"
+        );
+        let neighbor = Point2::new(start.x, f64::from_bits(start.y.to_bits() + 1));
+        let mut work = RasterWork::new(
+            RasterizationLimits::new(1).unwrap(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        assert_eq!(
+            area_flatten_cubic(
+                [start, neighbor, end, end],
+                tolerance,
+                60,
+                &mut points,
+                &mut work
+            )
+            .unwrap_err()
+            .path(),
+            "raster.flatten.numeric"
+        );
+        assert_eq!(work.remaining_edges, 1);
+    }
+
+    /// Preserves the exact captured Fit-transformed axis chord with an interior handle at numeric termination.
+    /// # Panics
+    /// Panics if exact endpoint/edge publication, cancellation or curved-neighbor rejection changes.
+    #[test]
+    fn captured_fit_axis_chord_numeric_termination_is_exact_and_checked() {
+        let x = f64::from_bits(0x4081c9fa2963ce44);
+        let p = [
+            0x407c67f3f57db512,
+            0x407c67f3f57db512,
+            0x407c67f3f57db511,
+            0x407c67f3f57db510,
+        ]
+        .map(|bits| Point2::new(x, f64::from_bits(bits)));
+        let tolerance = 3.552713678800501e-15;
+        let canonical = [
+            0x40a39d7de350e240,
+            0x40a39d7de350e23f,
+            0x40a39d7de350e23e,
+            0x40a39d7de350e23d,
+        ]
+        .map(|bits| Point2::new(f64::from_bits(0x40a38faea20af715), f64::from_bits(bits)));
+        let scale = 908.0 / 5016.0;
+        let mapped = canonical.map(|q| Point2::new(116.0 + q.x * scale, q.y * scale));
+        assert_eq!(
+            mapped.map(|q| q.y.to_bits()),
+            [
+                0x407c67f3f57db512,
+                0x407c67f3f57db511,
+                0x407c67f3f57db510,
+                0x407c67f3f57db50e
+            ]
+        );
+        let mut transformed_work = RasterWork::new(
+            RasterizationLimits::new(8).unwrap(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        let mut transformed_points = Vec::new();
+        area_flatten_cubic(
+            mapped,
+            tolerance,
+            0,
+            &mut transformed_points,
+            &mut transformed_work,
+        )
+        .unwrap();
+        assert_eq!(transformed_points.last(), Some(&[mapped[3].x, mapped[3].y]));
+        assert_eq!(
+            transformed_work.remaining_edges,
+            8 - transformed_points.len()
+        );
+        for points in [p, p.map(|point| Point2::new(point.y, point.x))] {
+            let mut work = RasterWork::new(
+                RasterizationLimits::new(1).unwrap(),
+                RasterAntialiasing::On,
+                &|| false,
+            );
+            let mut result = Vec::new();
+            area_flatten_cubic(points, tolerance, 1, &mut result, &mut work).unwrap();
+            assert_eq!(result, vec![[points[3].x, points[3].y]]);
+            assert_eq!(work.remaining_edges, 0);
+            assert_eq!(
+                area_flatten_cubic(points, tolerance, 1, &mut result, &mut work)
+                    .unwrap_err()
+                    .path(),
+                "raster.limits.flattened_edges"
+            );
+            assert_eq!(result.len(), 1);
+            let mut work = RasterWork::new(
+                RasterizationLimits::new(1).unwrap(),
+                RasterAntialiasing::On,
+                &|| true,
+            );
+            assert_eq!(
+                area_flatten_cubic(points, tolerance, 1, &mut result, &mut work)
+                    .unwrap_err()
+                    .path(),
+                "evaluation.cancelled"
+            );
+        }
+        let mut neighbor = p;
+        neighbor[1].x = f64::from_bits(p[1].x.to_bits() + 1);
+        let mut work = RasterWork::new(
+            RasterizationLimits::new(1).unwrap(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        let mut result = Vec::new();
+        assert_eq!(
+            area_flatten_cubic(neighbor, tolerance, 60, &mut result, &mut work)
+                .unwrap_err()
+                .path(),
+            "raster.flatten.numeric"
+        );
+        assert!(result.is_empty());
+        assert_eq!(work.remaining_edges, 1);
+    }
+
+    /// Builds the captured640Fit cubic inside a healthy closed contour without normalizing away its recovery debt.
+    /// # Panics
+    /// Panics if the captured finite controls or exact line endpoints cannot be constructed.
+    fn captured_fit_recovery_contour(scale: f64) -> Vec<CurveSegment> {
+        let points = [
+            (0x4073f00a9fa349db, 0x406e2cc0b65e0292),
+            (0x4073f00a9fa349dc, 0x406e2cc0b65e0292),
+            (0x4073f00a9fa349dc, 0x406e2cc0b65e0293),
+            (0x4073f00a9fa349dd, 0x406e2cc0b65e0293),
+        ]
+        .map(|(x, y)| Point2::new(f64::from_bits(x) * scale, f64::from_bits(y) * scale));
+        let mut segments = vec![CurveSegment::CubicBezier(
+            CubicBezierSegment::new(points[0], points[1], points[2], points[3]).unwrap(),
+        )];
+        let corners = [
+            points[3],
+            Point2::new(points[3].x + 0.5 * scale, points[3].y),
+            Point2::new(points[3].x + 0.5 * scale, points[3].y + 0.5 * scale),
+            Point2::new(points[0].x, points[0].y + 0.5 * scale),
+            points[0],
+        ];
+        segments.extend(
+            corners
+                .windows(2)
+                .map(|pair| CurveSegment::Line(LineSegment::new(pair[0], pair[1]).unwrap())),
+        );
+        segments
+    }
+
+    /// Recovers only an actual numeric cubic failure with outward whole-hull debt and original work/cancel authority.
+    /// # Panics
+    /// Panics on lost healthy geometry, uncharged debt, refunded work, masked cancellation or budget admission.
+    #[test]
+    fn bounded_numeric_curve_recovery_retains_work_and_charges_healthy_shape() {
+        let segments = captured_fit_recovery_contour(1.0);
+        let mut work = RasterWork::new(
+            RasterizationLimits::new(100).unwrap(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        let (shape, debt) =
+            area_contour(&segments, CanonicalRasterTransform::native(), &mut work).unwrap();
+        let contour = shape.unwrap();
+        assert!(debt > 0.0 && debt < MAX_OMITTED_PIXEL_AREA);
+        assert_eq!(contour.len(), 5);
+        assert_eq!(
+            work.remaining_edges, 94,
+            "one discarded partial endpoint still consumes work"
+        );
+        let mut omissions = AreaOmissionBudget::default();
+        let raw = RawAreaPrimitive {
+            shape: vec![contour],
+            fill_rule: FillRule::NonZero,
+            omitted_area_bound: 2.0,
+            incurred_area_error_bound: debt,
+        };
+        assert!(
+            !normalize_and_union(&[raw], None, &mut work, &mut omissions)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            omissions.total_bound() >= debt && omissions.total_bound() < debt * 1.0000001,
+            "actual debt is charged once; potential healthy-shape loss is not charged"
+        );
+        let mut work = RasterWork::new(
+            RasterizationLimits::new(1).unwrap(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        assert_eq!(
+            area_contour(&segments, CanonicalRasterTransform::native(), &mut work)
+                .unwrap_err()
+                .path(),
+            "raster.limits.flattened_edges"
+        );
+        assert_eq!(work.remaining_edges, 0);
+        let mut work = RasterWork::new(
+            RasterizationLimits::new(100).unwrap(),
+            RasterAntialiasing::On,
+            &|| true,
+        );
+        assert_eq!(
+            area_contour(&segments, CanonicalRasterTransform::native(), &mut work)
+                .unwrap_err()
+                .path(),
+            "evaluation.cancelled"
+        );
+        assert_eq!(work.remaining_edges, 100);
+        let mut work = RasterWork::new(
+            RasterizationLimits::new(100).unwrap(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        assert_eq!(
+            area_contour(
+                &captured_fit_recovery_contour(2.0_f64.powi(40)),
+                CanonicalRasterTransform::native(),
+                &mut work
+            )
+            .unwrap_err()
+            .path(),
+            "raster.area.precision"
+        );
+    }
+
+    /// Propagates actual recovered debt through validated closed marks and multi-contour strokes.
+    /// # Panics
+    /// Panics on dropped caller debt, duplicate charging, changed degenerate behavior or invalid fixtures.
+    #[test]
+    fn bounded_numeric_curve_recovery_propagates_typed_primitive_debt() {
+        use toniator_domain::{PathStrokeStyle, PatternMechanismId};
+        use toniator_geometry::{
+            build_canonical_regions_cancellable, CanonicalFilledOutline, CanonicalOutlineContour,
+            CanonicalPathMark, CanonicalRegionLimits, CanonicalRegionProposal,
+            CanonicalRegionSourceGroup, CanonicalRegionSourceId, CurvePath, FamilySiteId,
+            FamilySiteProvenance, PathClosure, PathLocation, SiteScope, StrokeProfileSample,
+            StructuralPathInstanceId, StructuralPathSourceId,
+        };
+        let segments = captured_fit_recovery_contour(1.0);
+        let path = CurvePath::new(segments.clone(), PathClosure::Closed).unwrap();
+        let mut work = RasterWork::new(
+            RasterizationLimits::new(100_000).unwrap(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        let (_, debt) =
+            area_contour(&segments, CanonicalRasterTransform::native(), &mut work).unwrap();
+        let mark = CanonicalPathMark::new(
+            FamilySiteId {
+                mechanism_id: PatternMechanismId(1),
+                ordinal: 0,
+            },
+            path.clone(),
+            SiteScope::Canvas,
+            FamilySiteProvenance::Random {
+                candidate_ordinal: 0,
+                accepted_ordinal: 0,
+                exclusion_neighbor_ordinal: None,
+            },
+            CanonicalFillRule::NonZero,
+        )
+        .unwrap();
+        let location = PathLocation::new(0, 0.0).unwrap();
+        let stroke = CanonicalStroke::new(
+            StructuralPathInstanceId {
+                source: StructuralPathSourceId::ParametricCurve(PatternMechanismId(1)),
+                repetition_index: 0,
+                component_ordinal: 0,
+            },
+            None,
+            path.clone(),
+            1.0,
+            PathStrokeStyle::default(),
+            vec![StrokeProfileSample {
+                location,
+                center: path.point_at(location).unwrap(),
+                normalized_thickness: 1.0,
+                width: 1.0,
+            }],
+            CanonicalFilledOutline {
+                contours: vec![
+                    CanonicalOutlineContour {
+                        segments: segments.clone(),
+                    },
+                    CanonicalOutlineContour {
+                        segments: segments.clone(),
+                    },
+                ],
+                fill_rule: CanonicalFillRule::NonZero,
+                bounds: Some(path.bounds().unwrap()),
+            },
+        )
+        .unwrap();
+        let regions = build_canonical_regions_cancellable(
+            CanonicalRegionProposal {
+                output_layer_id: toniator_domain::PatternOutputLayerId(1),
+                source_groups: vec![CanonicalRegionSourceGroup {
+                    source_id: CanonicalRegionSourceId::SiteOwners(vec![FamilySiteId {
+                        mechanism_id: PatternMechanismId(1),
+                        ordinal: 0,
+                    }]),
+                    components: vec![CurvePath::polyline(
+                        vec![
+                            Point2::new(0.0, 0.0),
+                            Point2::new(1.0, 0.0),
+                            Point2::new(0.0, 1.0),
+                        ],
+                        PathClosure::Closed,
+                    )
+                    .unwrap()],
+                }],
+            },
+            CanonicalRegionLimits::default(),
+            || false,
+        )
+        .unwrap()
+        .0;
+        for (geometry, expected) in [
+            (
+                GeometryOutput::CanonicalMarks(vec![CanonicalMark::ClosedPath(mark)]),
+                debt,
+            ),
+            (
+                GeometryOutput::CanonicalStrokes(vec![stroke]),
+                area_error_bound_sum(area_error_bound_sum(0.0, debt).unwrap(), debt).unwrap(),
+            ),
+            (GeometryOutput::CanonicalRegions(regions), 0.0),
+        ] {
+            let mut visits = 0;
+            for_each_area_primitive(
+                &geometry,
+                CanonicalRasterTransform::native(),
+                [0.0, 0.0, 1000.0, 1000.0],
+                &mut work,
+                |_, raw, work| {
+                    visits += 1;
+                    assert_eq!(raw.incurred_area_error_bound, expected);
+                    let mut omissions = AreaOmissionBudget::default();
+                    omissions.record(MAX_OMITTED_PIXEL_AREA).unwrap();
+                    let result = normalize_and_union(&[raw], None, work, &mut omissions);
+                    if expected > 0.0 {
+                        assert_eq!(result.unwrap_err().path(), "raster.area.precision");
+                    } else {
+                        assert!(!result.unwrap().is_empty());
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(visits, 1);
+        }
+        let a = Point2::new(0.0, 0.0);
+        let b = Point2::new(1.0, 0.0);
+        let lines = [
+            CurveSegment::Line(LineSegment::new(a, b).unwrap()),
+            CurveSegment::Line(LineSegment::new(b, a).unwrap()),
+        ];
+        assert_eq!(
+            area_contour(&lines, CanonicalRasterTransform::native(), &mut work).unwrap(),
+            (None, 0.0)
+        );
+        let collapsed = [
+            CurveSegment::CubicBezier(CubicBezierSegment::new(a, a, b, b).unwrap()),
+            CurveSegment::Line(LineSegment::new(b, a).unwrap()),
+        ];
+        assert_eq!(
+            area_contour(&collapsed, CanonicalRasterTransform::native(), &mut work)
+                .unwrap_err()
+                .path(),
+            "raster.area.precision"
+        );
+        let points = [
+            (0x408c24f2137c6717, 0x4082b59d25e5338d),
+            (0x408c24f2137c6717, 0x4082b59d25e5338c),
+            (0x408c24f2137c6716, 0x4082b59d25e5338c),
+            (0x408c24f2137c6716, 0x4082b59d25e5338b),
+        ]
+        .map(|(x, y)| Point2::new(f64::from_bits(x), f64::from_bits(y)));
+        let captured = CurveSegment::CubicBezier(
+            CubicBezierSegment::new(points[0], points[1], points[2], points[3]).unwrap(),
+        );
+        let corners = [
+            points[3],
+            Point2::new(points[3].x + 0.5, points[3].y),
+            Point2::new(points[3].x + 0.5, points[3].y + 0.5),
+            Point2::new(points[0].x, points[0].y + 0.5),
+            points[0],
+        ];
+        let mut large = vec![captured];
+        large.extend(
+            corners
+                .windows(2)
+                .map(|p| CurveSegment::Line(LineSegment::new(p[0], p[1]).unwrap())),
+        );
+        let (shape, debt) =
+            area_contour(&large, CanonicalRasterTransform::native(), &mut work).unwrap();
+        assert!(
+            shape.is_some() && debt > 0.0,
+            "captured1800Fit failure incurs positive whole-cubic debt"
+        );
+    }
+
+    /// Rejects nonfinite/underflow/aggregate error hazards while retaining the existing healthy-circle potential-loss rule.
+    /// # Panics
+    /// Panics if incurred error escapes healthy/hole accounting or changes zero-debt circle admission.
+    #[test]
+    fn bounded_numeric_curve_recovery_observes_finite_layer_budget_and_circle_potential() {
+        assert_eq!(
+            area_cubic_recovery_bound([Point2::new(f64::NAN, 0.0); 4])
+                .unwrap_err()
+                .path(),
+            "raster.area.precision"
+        );
+        assert_eq!(
+            area_cubic_recovery_bound([
+                Point2::new(-f64::MAX, 0.0),
+                Point2::new(f64::MAX, 0.0),
+                Point2::new(0.0, 1.0),
+                Point2::new(0.0, 0.0)
+            ])
+            .unwrap_err()
+            .path(),
+            "raster.area.precision"
+        );
+        let tiny = f64::from_bits(1);
+        assert!(area_error_bound_sum(0.0, tiny).unwrap() >= tiny);
+        assert!(
+            area_cubic_recovery_bound([
+                Point2::new(0.0, 0.0),
+                Point2::new(tiny, 0.0),
+                Point2::new(0.0, tiny),
+                Point2::new(tiny, tiny)
+            ])
+            .unwrap()
+                > 0.0
+        );
+        assert_eq!(
+            area_error_bound_sum(0.0, f64::INFINITY).unwrap_err().path(),
+            "raster.area.precision"
+        );
+        let mut hole = rectangle(0.25, 0.25, 0.75, 0.75);
+        hole.reverse();
+        for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+            let raw = [
+                RawAreaPrimitive {
+                    shape: vec![rectangle(0.0, 0.0, 1.0, 1.0), hole.clone()],
+                    fill_rule: rule,
+                    omitted_area_bound: 2.0,
+                    incurred_area_error_bound: MAX_OMITTED_PIXEL_AREA * 0.6,
+                },
+                RawAreaPrimitive {
+                    shape: vec![rectangle(0.0, 0.0, 1.0, 1.0)],
+                    fill_rule: rule,
+                    omitted_area_bound: 2.0,
+                    incurred_area_error_bound: MAX_OMITTED_PIXEL_AREA * 0.6,
+                },
+            ];
+            let mut work = RasterWork::new(
+                RasterizationLimits::new(100_000).unwrap(),
+                RasterAntialiasing::On,
+                &|| false,
+            );
+            let mut omissions = AreaOmissionBudget::default();
+            assert_eq!(
+                normalize_and_union(&raw, None, &mut work, &mut omissions)
+                    .unwrap_err()
+                    .path(),
+                "raster.area.precision"
+            );
+        }
+        let mut work = RasterWork::new(
+            RasterizationLimits::new(100_000).unwrap(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        let (shape, potential) = area_circle(
+            Point2::new(0.5, 0.5),
+            0.1,
+            CanonicalRasterTransform::native(),
+            &mut work,
+        )
+        .unwrap();
+        assert!(potential > MAX_OMITTED_PIXEL_AREA);
+        let mut omissions = AreaOmissionBudget::default();
+        normalize_and_union(
+            &[RawAreaPrimitive {
+                shape: shape.unwrap(),
+                fill_rule: FillRule::NonZero,
+                omitted_area_bound: potential,
+                incurred_area_error_bound: 0.0,
+            }],
+            None,
+            &mut work,
+            &mut omissions,
+        )
+        .unwrap();
+        assert_eq!(omissions.total_bound(), 0.0);
+        let mut omissions = AreaOmissionBudget::default();
+        omissions.record(MAX_OMITTED_PIXEL_AREA).unwrap();
+        assert_eq!(
+            omissions.record_incurred(tiny).unwrap_err().path(),
+            "raster.area.precision",
+            "even tiny actual debt cannot bypass a fully consumed layer bound"
+        );
+    }
 
     /// Builds one counter-clockwise analytic rectangular contour.
     fn rectangle(x0: f64, y0: f64, x1: f64, y1: f64) -> AreaContour {
@@ -1582,11 +2268,13 @@ mod tests {
                 shape: vec![rectangle(0.0, 0.0, 0.6, 1.0)],
                 fill_rule: FillRule::NonZero,
                 omitted_area_bound: 0.0,
+                incurred_area_error_bound: 0.0,
             },
             RawAreaPrimitive {
                 shape: vec![rectangle(0.3, 0.0, 0.9, 1.0)],
                 fill_rule: FillRule::NonZero,
                 omitted_area_bound: 0.0,
+                incurred_area_error_bound: 0.0,
             },
         ];
         let unioned =
@@ -1597,11 +2285,13 @@ mod tests {
                 shape: vec![rectangle(0.0, 0.0, 0.5, 1.0)],
                 fill_rule: FillRule::NonZero,
                 omitted_area_bound: 0.0,
+                incurred_area_error_bound: 0.0,
             },
             RawAreaPrimitive {
                 shape: vec![rectangle(0.5, 0.0, 1.0, 1.0)],
                 fill_rule: FillRule::NonZero,
                 omitted_area_bound: 0.0,
+                incurred_area_error_bound: 0.0,
             },
         ];
         let unioned = normalize_and_union(
@@ -1631,11 +2321,13 @@ mod tests {
                 shape: vec![square.clone(), square.clone()],
                 fill_rule: FillRule::EvenOdd,
                 omitted_area_bound: 0.0,
+                incurred_area_error_bound: 0.0,
             },
             RawAreaPrimitive {
                 shape: vec![square, reversed],
                 fill_rule: FillRule::NonZero,
                 omitted_area_bound: 0.0,
+                incurred_area_error_bound: 0.0,
             },
         ];
         let mut omissions = AreaOmissionBudget::default();
@@ -1665,6 +2357,7 @@ mod tests {
                 shape: shape.unwrap(),
                 fill_rule: FillRule::NonZero,
                 omitted_area_bound: bound,
+                incurred_area_error_bound: 0.0,
             }];
             let normalized =
                 normalize_and_union(&raw, None, &mut work, &mut AreaOmissionBudget::default())
@@ -1688,6 +2381,7 @@ mod tests {
             shape: shape.unwrap(),
             fill_rule: FillRule::NonZero,
             omitted_area_bound: bound,
+            incurred_area_error_bound: 0.0,
         }];
         let ellipse =
             normalize_and_union(&raw, None, &mut work, &mut AreaOmissionBudget::default()).unwrap();
@@ -1697,6 +2391,7 @@ mod tests {
             shape: vec![rectangle(-1.0, -1.0, 2.0, 2.0)],
             fill_rule: FillRule::NonZero,
             omitted_area_bound: 0.0,
+            incurred_area_error_bound: 0.0,
         }];
         let clipped = normalize_and_union(
             &clipped,
@@ -1731,6 +2426,7 @@ mod tests {
                 shape: vec![rectangle(0.0, 0.0, 0.5, 1.0)],
                 fill_rule: FillRule::NonZero,
                 omitted_area_bound: 0.0,
+                incurred_area_error_bound: 0.0,
             };
             paint_ordered_primitive(
                 &mut pixels,
@@ -1772,6 +2468,7 @@ mod tests {
                     shape: shape.unwrap(),
                     fill_rule: FillRule::NonZero,
                     omitted_area_bound: bound,
+                    incurred_area_error_bound: 0.0,
                 });
             }
         }
@@ -1834,6 +2531,7 @@ mod tests {
             shape: Vec::new(),
             fill_rule: FillRule::NonZero,
             omitted_area_bound: bound,
+            incurred_area_error_bound: 0.0,
         }];
         assert!(
             normalize_and_union(&raw, None, &mut work, &mut omissions)
@@ -1852,6 +2550,7 @@ mod tests {
             shape: Vec::new(),
             fill_rule: FillRule::NonZero,
             omitted_area_bound: bound,
+            incurred_area_error_bound: 0.0,
         }];
         assert_eq!(
             normalize_and_union(&raw, None, &mut work, &mut omissions)
@@ -1896,6 +2595,7 @@ mod tests {
                         shape,
                         fill_rule: rule,
                         omitted_area_bound: 0.0,
+                        incurred_area_error_bound: 0.0,
                     }],
                     None,
                     &mut work,
@@ -1928,6 +2628,7 @@ mod tests {
             shape: vec![healthy.clone()],
             fill_rule: FillRule::NonZero,
             omitted_area_bound: 0.0,
+            incurred_area_error_bound: 0.0,
         }];
         normalize_and_union(&raw, clip, &mut work, &mut omissions).unwrap();
         assert_eq!(omissions.0.value(), 0.0);
@@ -1939,6 +2640,7 @@ mod tests {
             shape: vec![healthy, strip.clone()],
             fill_rule: FillRule::NonZero,
             omitted_area_bound: 0.0,
+            incurred_area_error_bound: 0.0,
         }];
         omissions
             .record(MAX_OMITTED_PIXEL_AREA - 1.5 * bound)
@@ -1959,6 +2661,7 @@ mod tests {
             shape: vec![strip],
             fill_rule: FillRule::NonZero,
             omitted_area_bound: bound * 0.5,
+            incurred_area_error_bound: 0.0,
         }];
         assert!(
             normalize_and_union(&raw, clip, &mut work, &mut omissions)
@@ -2020,6 +2723,7 @@ mod tests {
                     shape,
                     fill_rule: rule,
                     omitted_area_bound: 0.0,
+                    incurred_area_error_bound: 0.0,
                 }],
                 None,
                 &mut work,
@@ -2081,6 +2785,7 @@ mod tests {
             shape: raw_shape.clone(),
             fill_rule: FillRule::EvenOdd,
             omitted_area_bound: 0.0,
+            incurred_area_error_bound: 0.0,
         };
         let mut work = RasterWork::new(limits, RasterAntialiasing::On, &cancelled);
         let mut observed = AreaOmissionBudget::default();
@@ -2133,6 +2838,7 @@ mod tests {
             shape: vec![rectangle(0.0, 0.0, 1.0, 1.0)],
             fill_rule: FillRule::NonZero,
             omitted_area_bound: 0.0,
+            incurred_area_error_bound: 0.0,
         };
         let error =
             normalize_and_union(&[raw], None, &mut work, &mut AreaOmissionBudget::default())
@@ -2365,11 +3071,13 @@ mod tests {
                     shape: vec![rectangle(-0.5, -0.25, 7.5, 7.25), hole],
                     fill_rule: rule,
                     omitted_area_bound: 0.0,
+                    incurred_area_error_bound: 0.0,
                 },
                 RawAreaPrimitive {
                     shape: vec![opposite],
                     fill_rule: rule,
                     omitted_area_bound: 0.0,
+                    incurred_area_error_bound: 0.0,
                 },
                 RawAreaPrimitive {
                     shape: vec![vec![
@@ -2380,11 +3088,13 @@ mod tests {
                     ]],
                     fill_rule: FillRule::EvenOdd,
                     omitted_area_bound: 0.0,
+                    incurred_area_error_bound: 0.0,
                 },
                 RawAreaPrimitive {
                     shape: vec![rectangle(0.5, 0.875, 6.5, 0.875 + 1.0e-7)],
                     fill_rule: FillRule::NonZero,
                     omitted_area_bound: 0.0,
+                    incurred_area_error_bound: 0.0,
                 },
             ];
             for clip in [[0.25, 0.375, 6.75, 6.625], [-0.125, -0.25, 7.125, 7.75]] {
@@ -2416,6 +3126,7 @@ mod tests {
                         ]],
                         fill_rule: FillRule::NonZero,
                         omitted_area_bound: 0.0,
+                        incurred_area_error_bound: 0.0,
                     },
                     RawAreaPrimitive {
                         shape: vec![vec![
@@ -2426,6 +3137,7 @@ mod tests {
                         ]],
                         fill_rule: FillRule::NonZero,
                         omitted_area_bound: 0.0,
+                        incurred_area_error_bound: 0.0,
                     },
                 ];
                 p1_assert_rgba(
@@ -2449,6 +3161,7 @@ mod tests {
             shape: vec![rectangle(-0.25, 0.5, 1.75, 0.5 + 1.0e-7)],
             fill_rule: FillRule::NonZero,
             omitted_area_bound: 0.0,
+            incurred_area_error_bound: 0.0,
         }];
         let clip = [0.25, 0.125, 0.875, 0.875];
         for old in [true, false] {
@@ -2479,6 +3192,7 @@ mod tests {
             shape: vec![vec![[0.05, 0.1], [0.95, 0.3], [0.2, 0.97]]],
             fill_rule: FillRule::NonZero,
             omitted_area_bound: 0.0,
+            incurred_area_error_bound: 0.0,
         };
         let mut observed = AreaOmissionBudget::default();
         let mut work = RasterWork::new(limits, RasterAntialiasing::On, &never);
@@ -2532,6 +3246,7 @@ mod tests {
             shape: vec![rectangle(-1.0, -1.0, 3.0, 3.0)],
             fill_rule: FillRule::NonZero,
             omitted_area_bound: 0.0,
+            incurred_area_error_bound: 0.0,
         }];
         let clip_rect = [0.25, 0.375, 1.75, 1.625];
         let clip = Some(clip_rect);
@@ -2569,6 +3284,7 @@ mod tests {
                 shape: Vec::new(),
                 fill_rule: FillRule::NonZero,
                 omitted_area_bound: MAX_OMITTED_PIXEL_AREA * 2.0,
+                incurred_area_error_bound: 0.0,
             }];
             let mut work = RasterWork::new(limits, RasterAntialiasing::On, &never);
             let result = if reference {

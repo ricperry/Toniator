@@ -1,43 +1,86 @@
 use crate::{Bounds, Point2};
 
 use super::{
-    CubicBezierSegment, CurveError, CurvePath, CurveSegment, LineSegment, MAX_CLIPPING_FRAGMENTS,
-    MAX_SUBDIVISION_DEPTH, MAX_WORK_ITEMS,
+    CubicBezierSegment, CurveError, CurvePath, CurveSegment, CurveWorkLimits, LineSegment,
+    MAX_SUBDIVISION_DEPTH, check_curve_cancelled, reserve_curve,
     segment::{cubic_range, split_cubic},
 };
 
-/// Clips one path into source-ordered open fragments without adding boundary or seam geometry.
-pub(crate) fn clip_path(path: &CurvePath, bounds: Bounds) -> Result<Vec<CurvePath>, CurveError> {
+/// Clips one path with checked incremental storage while preserving source order and snapping.
+/// # Errors
+/// Returns finite work/output policy, cancellation, allocation, topology or numeric diagnostics.
+pub(crate) fn clip_path(
+    path: &CurvePath,
+    bounds: Bounds,
+    limits: CurveWorkLimits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<CurvePath>, CurveError> {
     validate_bounds(bounds)?;
+    if path.segments().len() > limits.maximum_segments {
+        return Err(CurveError::new(
+            "curve.path.segments.limit",
+            "curve path exceeds the configured segment limit",
+        ));
+    }
     let mut fully_contained = true;
     for segment in path.segments() {
+        check_curve_cancelled(cancelled)?;
         fully_contained &= segment_contained(*segment, bounds)?;
     }
     if fully_contained {
-        return Ok(vec![path.clone()]);
+        if path.segments().len() > limits.maximum_clipped_segments
+            || limits.maximum_clipping_fragments == 0
+        {
+            return Err(CurveError::new(
+                "curve.path.clipping.segment_limit",
+                "clipped output segment limit exceeded",
+            ));
+        }
+        let mut paths = Vec::new();
+        reserve_curve(&mut paths, 1)?;
+        paths.push(path.cloned_with_limits_cancellable(limits, cancelled)?);
+        return Ok(paths);
     }
     let mut groups: Vec<Vec<CurveSegment>> = Vec::new();
-    let mut root_budget = RootBudget::new(MAX_WORK_ITEMS);
+    let mut root_budget = RootBudget::new(limits.maximum_clipping_work, cancelled);
+    let mut output_count = 0_usize;
     for segment in path.segments().iter().copied() {
+        check_curve_cancelled(cancelled)?;
         let pieces = clip_segment(segment, bounds, &mut root_budget)?;
         for piece in pieces {
+            check_curve_cancelled(cancelled)?;
+            output_count = output_count.checked_add(1).ok_or(CurveError::new(
+                "curve.path.count_overflow",
+                "clipped segment count overflows",
+            ))?;
+            if output_count > limits.maximum_clipped_segments {
+                return Err(CurveError::new(
+                    "curve.path.clipping.segment_limit",
+                    "clipped output segment limit exceeded",
+                ));
+            }
             if let Some(previous) = groups
                 .last_mut()
                 .filter(|group| group.last().is_some_and(|last| last.end() == piece.start()))
             {
+                reserve_curve(previous, 1)?;
                 previous.push(piece);
             } else {
-                groups.push(vec![piece]);
+                if groups.len() >= limits.maximum_clipping_fragments {
+                    return Err(CurveError::new(
+                        "curve.path.clipping.fragment_limit",
+                        "clipping fragment limit exceeded",
+                    ));
+                }
+                let mut group = Vec::new();
+                reserve_curve(&mut group, 1)?;
+                group.push(piece);
+                reserve_curve(&mut groups, 1)?;
+                groups.push(group);
             }
         }
     }
-    if groups.len() > MAX_CLIPPING_FRAGMENTS {
-        return Err(CurveError::new(
-            "curve.path.clipping.fragment_limit",
-            "clipping fragment limit exceeded",
-        ));
-    }
-    CurvePath::fragments_from_segment_groups(groups)
+    CurvePath::fragments_from_segment_groups(groups, limits, cancelled)
 }
 
 /// Validates public bounds despite public legacy fields allowing post-construction mutation.
@@ -64,6 +107,8 @@ fn segment_contained(segment: CurveSegment, bounds: Bounds) -> Result<bool, Curv
 }
 
 /// Clips one source segment while preserving its authored kind and direction.
+/// # Errors
+/// Propagates checked storage, cancellation and existing numeric/depth policy diagnostics atomically.
 fn clip_segment(
     segment: CurveSegment,
     bounds: Bounds,
@@ -71,7 +116,12 @@ fn clip_segment(
 ) -> Result<Vec<CurveSegment>, CurveError> {
     match segment {
         CurveSegment::Line(line) => {
-            clip_line(line, bounds).map(|piece| piece.into_iter().collect())
+            let mut pieces = Vec::new();
+            if let Some(piece) = clip_line(line, bounds)? {
+                reserve_curve(&mut pieces, 1)?;
+                pieces.push(piece);
+            }
+            Ok(pieces)
         }
         CurveSegment::CubicBezier(cubic) => clip_cubic(cubic, bounds, root_budget),
     }
@@ -131,6 +181,8 @@ fn clip_line(line: LineSegment, bounds: Bounds) -> Result<Option<CurveSegment>, 
 }
 
 /// Isolates cubic intervals with nonempty strict interior inside the finite clipping rectangle.
+/// # Errors
+/// Propagates checked storage, cancellation and existing numeric/depth policy diagnostics atomically.
 fn clip_cubic(
     cubic: CubicBezierSegment,
     bounds: Bounds,
@@ -138,24 +190,27 @@ fn clip_cubic(
 ) -> Result<Vec<CurveSegment>, CurveError> {
     let ranges =
         cubic_inside_ranges_with_budget(cubic, bounds, MAX_SUBDIVISION_DEPTH, root_budget)?;
-    ranges
-        .into_iter()
-        .map(|(start, end)| {
-            let fragment = cubic_range(cubic, start, end)?;
-            let start_point = snap_to_bounds(fragment.start(), bounds);
-            let end_point = snap_to_bounds(fragment.end(), bounds);
-            Ok(CurveSegment::CubicBezier(CubicBezierSegment::new(
-                start_point,
-                fragment.control_1(),
-                fragment.control_2(),
-                end_point,
-            )?))
-        })
-        .collect()
+    let mut pieces = Vec::new();
+    for (start, end) in ranges {
+        check_curve_cancelled(root_budget.cancelled)?;
+        let fragment = cubic_range(cubic, start, end)?;
+        let start_point = snap_to_bounds(fragment.start(), bounds);
+        let end_point = snap_to_bounds(fragment.end(), bounds);
+        reserve_curve(&mut pieces, 1)?;
+        pieces.push(CurveSegment::CubicBezier(CubicBezierSegment::new(
+            start_point,
+            fragment.control_1(),
+            fragment.control_2(),
+            end_point,
+        )?));
+    }
+    Ok(pieces)
 }
 
 /// Finds ordered cubic parameter ranges whose conservative construction boxes lie inside bounds.
 #[cfg(test)]
+/// # Errors
+/// Propagates checked storage, cancellation and existing numeric/depth policy diagnostics atomically.
 fn cubic_inside_ranges(
     cubic: CubicBezierSegment,
     bounds: Bounds,
@@ -168,37 +223,40 @@ fn cubic_inside_ranges(
             "clipping subdivision work limit exceeded",
         ));
     }
-    let mut budget = RootBudget::new(maximum_work_items);
+    let mut budget = RootBudget::new(maximum_work_items, &|| false);
     cubic_inside_ranges_with_budget(cubic, bounds, maximum_depth, &mut budget)
 }
 
 /// Finds cubic clipping intervals while charging a caller-owned path-wide root-isolation budget.
+/// # Errors
+/// Propagates checked storage, cancellation and existing numeric/depth policy diagnostics atomically.
 fn cubic_inside_ranges_with_budget(
     cubic: CubicBezierSegment,
     bounds: Bounds,
     maximum_depth: u8,
     budget: &mut RootBudget,
 ) -> Result<Vec<(f64, f64)>, CurveError> {
-    let mut parameters = vec![0.0, 1.0];
+    let mut parameters = Vec::new();
+    reserve_curve(&mut parameters, 2)?;
+    parameters.push(0.0);
+    parameters.push(1.0);
     for (coordinate, boundary) in [
         (Axis::X, bounds.min.x),
         (Axis::X, bounds.max.x),
         (Axis::Y, bounds.min.y),
         (Axis::Y, bounds.max.y),
     ] {
-        parameters.extend(axis_roots(
-            cubic,
-            coordinate,
-            boundary,
-            bounds,
-            maximum_depth,
-            budget,
-        )?);
+        for root in axis_roots(cubic, coordinate, boundary, bounds, maximum_depth, budget)? {
+            check_curve_cancelled(budget.cancelled)?;
+            reserve_curve(&mut parameters, 1)?;
+            parameters.push(root);
+        }
     }
-    parameters.sort_by(f64::total_cmp);
+    sort_parameters_cancellable(&mut parameters, budget.cancelled)?;
     parameters.dedup_by(|first, second| (*first - *second).abs() <= super::PARAMETER_TOLERANCE);
     let mut ranges = Vec::new();
     for pair in parameters.windows(2) {
+        check_curve_cancelled(budget.cancelled)?;
         let start = pair[0];
         let end = pair[1];
         if end - start <= super::PARAMETER_TOLERANCE {
@@ -206,10 +264,33 @@ fn cubic_inside_ranges_with_budget(
         }
         let midpoint = CurveSegment::CubicBezier(cubic).point_at((start + end) * 0.5)?;
         if bounds.contains(midpoint) {
-            append_range(&mut ranges, start, end);
+            append_range(&mut ranges, start, end)?;
         }
     }
     Ok(ranges)
+}
+
+/// Sorts the small cubic-root list stably without hidden scratch allocation.
+/// # Errors
+/// Returns cancellation while retaining the existing total_cmp order for equal parameters.
+fn sort_parameters_cancellable(
+    parameters: &mut [f64],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), CurveError> {
+    for index in 1..parameters.len() {
+        check_curve_cancelled(cancelled)?;
+        let mut position = index;
+        while position > 0
+            && parameters[position]
+                .total_cmp(&parameters[position - 1])
+                .is_lt()
+        {
+            check_curve_cancelled(cancelled)?;
+            parameters.swap(position, position - 1);
+            position -= 1;
+        }
+    }
+    Ok(())
 }
 
 /// Selects the one coordinate axis used to isolate cubic intersections with a clipping edge.
@@ -220,6 +301,8 @@ enum Axis {
 }
 
 /// Finds all cubic crossings and tangencies with one finite clipping coordinate by control-value isolation.
+/// # Errors
+/// Propagates checked storage, cancellation and existing numeric/depth policy diagnostics atomically.
 fn axis_roots(
     cubic: CubicBezierSegment,
     axis: Axis,
@@ -228,7 +311,9 @@ fn axis_roots(
     maximum_depth: u8,
     budget: &mut RootBudget,
 ) -> Result<Vec<f64>, CurveError> {
-    let mut stack = vec![(cubic, 0.0, 1.0, 0_u8)];
+    let mut stack = Vec::new();
+    reserve_curve(&mut stack, 1)?;
+    stack.push((cubic, 0.0, 1.0, 0_u8));
     let mut roots = Vec::new();
     while let Some((node, start, end, depth)) = stack.pop() {
         budget.consume()?;
@@ -252,11 +337,13 @@ fn axis_roots(
             continue;
         }
         if minimum >= -tolerance && maximum <= tolerance {
+            reserve_curve(&mut roots, 2)?;
             roots.push(start);
             roots.push(end);
             continue;
         }
         if end - start <= super::PARAMETER_TOLERANCE && maximum - minimum <= tolerance {
+            reserve_curve(&mut roots, 1)?;
             roots.push((start + end) * 0.5);
         } else if depth >= maximum_depth {
             return Err(CurveError::new(
@@ -266,6 +353,7 @@ fn axis_roots(
         } else {
             let (left, right) = split_cubic(node, 0.5)?;
             let middle = (start + end) * 0.5;
+            reserve_curve(&mut stack, 2)?;
             stack.push((right, middle, end, depth + 1));
             stack.push((left, start, middle, depth + 1));
         }
@@ -282,15 +370,17 @@ fn axis_value(point: Point2, axis: Axis) -> f64 {
 }
 
 /// Tracks shared root-isolation work across all four clipping boundaries for one public operation.
-struct RootBudget {
+struct RootBudget<'a> {
+    cancelled: &'a dyn Fn() -> bool,
     work_items: usize,
     maximum_work_items: usize,
 }
 
-impl RootBudget {
-    /// Creates a private aggregate clipping budget without making limits caller-adjustable.
-    const fn new(maximum_work_items: usize) -> Self {
+impl<'a> RootBudget<'a> {
+    /// Creates aggregate clipping work ownership with explicit cancellation and finite caller policy.
+    const fn new(maximum_work_items: usize, cancelled: &'a dyn Fn() -> bool) -> Self {
         Self {
+            cancelled,
             work_items: 0,
             maximum_work_items,
         }
@@ -298,6 +388,7 @@ impl RootBudget {
 
     /// Charges one deterministic subdivision node and fails before partial ranges are published.
     fn consume(&mut self) -> Result<(), CurveError> {
+        check_curve_cancelled(self.cancelled)?;
         self.work_items = self.work_items.checked_add(1).ok_or(CurveError::new(
             "curve.path.clipping.subdivision_limit",
             "clipping subdivision work limit exceeded",
@@ -312,12 +403,16 @@ impl RootBudget {
 }
 
 /// Appends a source-ordered interval, coalescing only exact adjacent parameter ranges.
-fn append_range(ranges: &mut Vec<(f64, f64)>, start: f64, end: f64) {
+/// # Errors
+/// Propagates checked storage, cancellation and existing numeric/depth policy diagnostics atomically.
+fn append_range(ranges: &mut Vec<(f64, f64)>, start: f64, end: f64) -> Result<(), CurveError> {
     if let Some(previous) = ranges.last_mut().filter(|previous| previous.1 == start) {
         previous.1 = end;
     } else {
+        reserve_curve(ranges, 1)?;
         ranges.push((start, end));
     }
+    Ok(())
 }
 
 /// Snaps only coordinates lying at a clipping edge onto that exact finite bound.

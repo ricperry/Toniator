@@ -1,38 +1,81 @@
-//! Main-preview identity and last-success acceptance coordination.
-//!
-//! This module has no GTK or evaluator implementation dependency. It records
-//! only application-side identity so the engine remains authoritative for
-//! document-token and scheduler-ticket acceptance.
+//! Main-preview intent, terminal failure and last-success coordination.
+//! GTK, pixels, documents, evaluation and cache publication remain caller-owned.
+
+use toniator_engine::PreviewRasterTarget;
+
+/// Captures authoritative frame identity and the complete exact renderer target.
+/// Tickets and media epochs identify attempts and deliberately do not create new intent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PreviewIntent {
+    pub(crate) frame: (u64, u64, u64),
+    pub(crate) target: PreviewRasterTarget,
+}
 
 /// Pairs an engine ticket with the app workspace that submitted it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PreviewSubmission {
-    /// Identifies the workspace that submitted the request.
     pub(crate) workspace_generation: u64,
-    /// Identifies the scheduler request inside that workspace.
     pub(crate) ticket: u64,
 }
 
-/// Tracks queued/submitted work and the last result accepted by the application.
-///
-/// The coordinator preserves a last accepted preview while a newer request is
-/// pending or rejected. It never owns pixels, GTK paintables, a document, or
-/// scheduler cache; callers install those only after engine acceptance.
+/// Retains one terminal diagnostic independently of whether its overlay is dismissed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PreviewFailure {
+    pub(crate) intent: PreviewIntent,
+    pub(crate) diagnostic: String,
+    pub(crate) visible: bool,
+}
+
+/// Coordinates queued/preparing/submitted intent while retaining last-success identity.
+/// It owns no pixels, document, evaluator, GTK or cache; engine acceptance remains authoritative.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PreviewCoordinator {
     refresh_queued: bool,
+    intent: Option<PreviewIntent>,
     submission: Option<PreviewSubmission>,
     last_accepted_ticket: Option<u64>,
+    failure: Option<PreviewFailure>,
 }
 
 impl PreviewCoordinator {
-    /// Records invalidated preview intent before GTK's idle boundary can submit a scheduler ticket.
+    /// Records an unallocated refresh for existing view-model consumers without inventing intent.
+    /// A terminal failure remains latched until a concrete frame/target can be compared.
+    #[cfg(test)]
     pub(crate) fn queue_refresh(&mut self) {
+        self.clear_submission();
         self.refresh_queued = true;
-        self.submission = None;
     }
 
-    /// Records one submitted scheduler ticket for the current workspace.
+    /// Admits new exact intent before caller invalidation/decode side effects.
+    /// Equal failed or already pending intent is inert; unavailable allocation remains queued.
+    pub(crate) fn queue_intent(&mut self, intent: Option<PreviewIntent>) -> bool {
+        if intent.is_none() && self.failure.is_some() {
+            return false;
+        }
+        if intent.is_some_and(|value| {
+            self.is_failed(value) || (self.is_pending() && self.intent == Some(value))
+        }) {
+            return false;
+        }
+        self.clear_submission();
+        self.refresh_queued = true;
+        self.intent = intent;
+        self.failure = None;
+        true
+    }
+
+    /// Captures concrete source-preparation ownership before cloning sources or starting a job.
+    pub(crate) fn prepare(&mut self, intent: PreviewIntent) -> bool {
+        if self.is_failed(intent) {
+            return false;
+        }
+        self.refresh_queued = true;
+        self.intent = Some(intent);
+        self.failure = None;
+        true
+    }
+
+    /// Records a submitted ticket without changing its captured source/frame/target authority.
     pub(crate) fn submit(&mut self, workspace_generation: u64, ticket: u64) {
         self.refresh_queued = false;
         self.submission = Some(PreviewSubmission {
@@ -41,53 +84,125 @@ impl PreviewCoordinator {
         });
     }
 
-    /// Clears queued and submitted identity when a workspace is replaced or closed.
+    /// Clears pending ownership without dismissing a terminal failure or losing accepted pixels.
     pub(crate) fn clear_submission(&mut self) {
         self.refresh_queued = false;
         self.submission = None;
+        self.intent = None;
     }
 
-    /// Reports queued or submitted work without treating the last accepted image as pending.
+    /// Clears all workspace-owned coordination on Close/replacement; old callbacks stay stale.
+    pub(crate) fn clear_workspace(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Reports queued/preparing/submitted work independently of retained accepted pixels.
     pub(crate) const fn is_pending(&self) -> bool {
         self.refresh_queued || self.submission.is_some()
     }
 
-    /// Returns the current request identity for observational event evidence.
+    /// Returns the captured current intent while preparation or evaluation owns it.
+    pub(crate) const fn intent(&self) -> Option<PreviewIntent> {
+        self.intent
+    }
+
+    /// Returns the current engine submission identity for stale-result acceptance.
     pub(crate) const fn submission(&self) -> Option<PreviewSubmission> {
         self.submission
     }
 
-    /// Records a matching successful terminal completion and clears only its pending identity.
-    ///
-    /// A rejected ticket leaves `last_accepted_ticket` unchanged so callers can
-    /// keep rendering the prior successful preview. A matching success clears its own pending
-    /// ticket before recording the new last-success identity; a stale completion leaves both
-    /// fields unchanged.
+    /// Tests exact failed creative/presentation intent without considering attempt identity.
+    pub(crate) fn is_failed(&self, intent: PreviewIntent) -> bool {
+        self.failure
+            .as_ref()
+            .is_some_and(|failure| failure.intent == intent)
+    }
+
+    /// Returns terminal failure including its independent overlay visibility.
+    pub(crate) fn failure(&self) -> Option<&PreviewFailure> {
+        self.failure.as_ref()
+    }
+
+    /// Records accepted success only for the matching current workspace/ticket.
     pub(crate) fn accept(&mut self, workspace_generation: u64, ticket: u64) -> bool {
         if !accepts_submission(workspace_generation, self.submission, ticket) {
             return false;
         }
-        self.submission = None;
+        self.clear_submission();
         self.last_accepted_ticket = Some(ticket);
+        self.failure = None;
         true
     }
 
-    /// Clears a matching failed terminal completion without losing a prior successful ticket.
-    pub(crate) fn fail(&mut self, workspace_generation: u64, ticket: u64) -> bool {
+    /// Latches a matching submitted failure while preserving the previous accepted ticket.
+    pub(crate) fn fail(
+        &mut self,
+        workspace_generation: u64,
+        ticket: u64,
+        diagnostic: String,
+    ) -> bool {
         if !accepts_submission(workspace_generation, self.submission, ticket) {
             return false;
         }
-        self.submission = None;
+        let intent = self.intent;
+        self.clear_submission();
+        if let Some(intent) = intent {
+            self.failure = Some(PreviewFailure {
+                intent,
+                diagnostic,
+                visible: true,
+            });
+        }
         true
     }
 
-    /// Returns the last scheduler ticket accepted by application identity rules.
+    /// Latches only the captured matching pre-ticket preparation/submission failure.
+    pub(crate) fn fail_preparation(&mut self, intent: PreviewIntent, diagnostic: String) -> bool {
+        if self.intent != Some(intent) || self.submission.is_some() {
+            return false;
+        }
+        self.clear_submission();
+        self.failure = Some(PreviewFailure {
+            intent,
+            diagnostic,
+            visible: true,
+        });
+        true
+    }
+
+    /// Clears a matching canceled/stale ticket without turning cancellation into a failure.
+    pub(crate) fn cancel(&mut self, workspace_generation: u64, ticket: u64) -> bool {
+        if !accepts_submission(workspace_generation, self.submission, ticket) {
+            return false;
+        }
+        self.clear_submission();
+        true
+    }
+
+    /// Hides only the current diagnostic presentation; equal automatic intent remains terminal.
+    pub(crate) fn dismiss(&mut self) {
+        if let Some(failure) = self.failure.as_mut() {
+            failure.visible = false;
+        }
+    }
+
+    /// Admits one explicit new attempt only for the still-current failed exact intent.
+    pub(crate) fn retry(&mut self, intent: PreviewIntent) -> bool {
+        if !self.is_failed(intent) {
+            return false;
+        }
+        self.failure = None;
+        self.clear_submission();
+        true
+    }
+
+    /// Returns the last application-accepted ticket while pixels remain externally owned.
     pub(crate) const fn last_accepted_ticket(&self) -> Option<u64> {
         self.last_accepted_ticket
     }
 }
 
-/// Rejects results that originated from a replaced app workspace.
+/// Rejects results originating from superseded tickets or replaced workspaces.
 pub(crate) fn accepts_submission(
     current_workspace_generation: u64,
     submission: Option<PreviewSubmission>,
@@ -103,63 +218,157 @@ pub(crate) fn accepts_submission(
 mod tests {
     use super::*;
 
-    /// Proves new viewport intent rejects an old raster before its replacement receives a ticket.
+    /// Builds a checked target witness without creating any document or GTK state.
+    /// # Panics
+    /// Panics only if the positive witness extent is rejected by renderer target validation.
+    fn intent(revision: u64, width: u32) -> PreviewIntent {
+        PreviewIntent {
+            frame: (1, revision, 0),
+            target: PreviewRasterTarget::new(width, 80).expect("target"),
+        }
+    }
+
+    /// Proves failed equal refresh/dismiss remain terminal and Retry admits exactly one attempt.
+    /// # Panics
+    /// Panics if attempt identity creates intent or dismissed failure permits automatic work.
     #[test]
-    fn viewport_intent_rejects_previous_raster_during_debounce() {
+    fn terminal_intent_dismissal_and_one_retry_preserve_last_success() {
         let mut coordinator = PreviewCoordinator::default();
+        coordinator.prepare(intent(0, 100));
+        coordinator.submit(1, 1);
+        assert!(coordinator.accept(1, 1));
+        let failed = intent(1, 100);
+        assert!(coordinator.queue_intent(Some(failed)));
+        coordinator.prepare(failed);
+        coordinator.submit(1, 2);
+        assert!(coordinator.fail(1, 2, "typed failure".into()));
+        assert!(!coordinator.queue_intent(Some(failed)));
+        assert!(!coordinator.prepare(failed));
+        coordinator.dismiss();
+        assert!(!coordinator.failure().unwrap().visible);
+        assert!(!coordinator.queue_intent(Some(failed)));
+        assert_eq!(coordinator.last_accepted_ticket(), Some(1));
+        assert!(coordinator.retry(failed));
+        assert!(!coordinator.retry(failed));
+        assert!(coordinator.queue_intent(Some(failed)));
+        coordinator.prepare(failed);
+        coordinator.submit(1, 3);
+        assert!(coordinator.accept(1, 3));
+        assert!(coordinator.failure().is_none());
+    }
+
+    /// Proves frame/revision/complete target changes create legitimate intent independently of family.
+    /// # Panics
+    /// Panics if real presentation/authored changes are suppressed by an older failure.
+    #[test]
+    fn changed_revision_frame_viewport_and_backdrop_recover_normally() {
+        let original = intent(1, 100);
+        for changed in [
+            intent(2, 100),
+            intent(1, 101),
+            PreviewIntent {
+                frame: (1, 1, 9),
+                ..original
+            },
+            PreviewIntent {
+                target: original
+                    .target
+                    .with_background(toniator_engine::RasterBackground::OpaqueBlack),
+                ..original
+            },
+        ] {
+            let mut coordinator = PreviewCoordinator::default();
+            coordinator.prepare(original);
+            assert!(coordinator.fail_preparation(original, "preparation".into()));
+            assert!(coordinator.queue_intent(Some(changed)));
+            assert!(coordinator.failure().is_none());
+        }
+    }
+
+    /// Distinguishes crop origin, exact scale and workspace while ignoring attempt epochs.
+    /// # Panics
+    /// Panics if an actual raster transform or workspace change aliases a failed intent.
+    #[test]
+    fn exact_crop_scale_and_workspace_are_failure_identity() {
+        let original = intent(1, 100);
+        for changed in [
+            PreviewIntent {
+                target: PreviewRasterTarget::for_viewport(100, 80, 1.0, 0.0, 1.0).expect("crop"),
+                ..original
+            },
+            PreviewIntent {
+                target: PreviewRasterTarget::for_viewport(100, 80, 0.0, 0.0, 2.0).expect("scale"),
+                ..original
+            },
+            PreviewIntent {
+                frame: (2, 1, 0),
+                ..original
+            },
+        ] {
+            let mut coordinator = PreviewCoordinator::default();
+            coordinator.prepare(original);
+            assert!(coordinator.fail_preparation(original, "failed".into()));
+            assert!(coordinator.queue_intent(Some(changed)));
+            coordinator.prepare(changed);
+            coordinator.submit(changed.frame.0, 9);
+            assert!(!coordinator.accept(99, 9));
+            assert!(coordinator.accept(changed.frame.0, 9));
+        }
+    }
+
+    /// Proves stale preparation/tickets cannot clear newer pending intent or create failure.
+    /// # Panics
+    /// Panics if stale completion owns the newer request or changes accepted identity.
+    #[test]
+    fn stale_and_cancelled_completions_never_latch_terminal_failure() {
+        let mut coordinator = PreviewCoordinator::default();
+        let old = intent(1, 100);
+        let new = intent(2, 100);
+        coordinator.prepare(old);
         coordinator.submit(1, 4);
-        assert!(coordinator.accept(1, 4));
+        coordinator.queue_intent(Some(new));
+        coordinator.prepare(new);
+        assert!(!coordinator.fail_preparation(old, "stale".into()));
+        assert_eq!(coordinator.intent(), Some(new));
         coordinator.submit(1, 5);
-        coordinator.queue_refresh();
-        assert!(!coordinator.accept(1, 5));
-        assert_eq!(coordinator.last_accepted_ticket(), Some(4));
-        coordinator.submit(1, 6);
-        assert!(!coordinator.accept(1, 5));
-        assert!(coordinator.accept(1, 6));
-    }
-
-    /// Preserves the accepted ticket while stale or superseded completions arrive.
-    #[test]
-    fn coordinator_rejects_stale_generation_without_losing_last_success() {
-        let mut coordinator = PreviewCoordinator::default();
-        coordinator.submit(4, 11);
-        assert!(coordinator.accept(4, 11));
-        coordinator.submit(5, 12);
-        assert!(!coordinator.accept(5, 11));
-        assert_eq!(coordinator.last_accepted_ticket(), Some(11));
-        assert!(coordinator.accept(5, 12));
-        assert_eq!(coordinator.last_accepted_ticket(), Some(12));
-        assert_eq!(coordinator.submission(), None);
-    }
-    /// Proves matching failure clears only its pending identity and preserves the last image ticket.
-    #[test]
-    fn matching_failure_and_explicit_clear_preserve_last_success() {
-        let mut coordinator = PreviewCoordinator::default();
-        coordinator.submit(2, 10);
-        assert!(coordinator.accept(2, 10));
-        coordinator.submit(2, 11);
-        assert!(!coordinator.fail(2, 10));
-        assert_eq!(coordinator.submission().map(|value| value.ticket), Some(11));
-        assert!(coordinator.fail(2, 11));
-        assert_eq!(coordinator.submission(), None);
-        assert_eq!(coordinator.last_accepted_ticket(), Some(10));
-        coordinator.submit(3, 12);
-        coordinator.clear_submission();
-        assert_eq!(coordinator.submission(), None);
-        assert_eq!(coordinator.last_accepted_ticket(), Some(10));
-    }
-
-    /// Proves invalidation is pending before scheduler submission and transfers atomically to a ticket.
-    #[test]
-    fn queued_refresh_remains_pending_until_submission_or_clear() {
-        let mut coordinator = PreviewCoordinator::default();
-        coordinator.queue_refresh();
-        assert!(coordinator.is_pending());
-        assert_eq!(coordinator.submission(), None);
-        coordinator.submit(7, 21);
-        assert!(coordinator.is_pending());
-        assert_eq!(coordinator.submission().map(|value| value.ticket), Some(21));
-        coordinator.clear_submission();
+        assert!(!coordinator.fail(1, 4, "stale".into()));
+        assert!(!coordinator.cancel(1, 4));
+        assert!(coordinator.cancel(1, 5));
         assert!(!coordinator.is_pending());
+        assert!(coordinator.failure().is_none());
+    }
+
+    /// Proves pre-ticket failure clears queued progress and replacement revokes its ownership.
+    /// # Panics
+    /// Panics if source failures lack terminal ownership or survive workspace replacement.
+    #[test]
+    fn preparation_failure_and_close_are_atomic() {
+        let mut coordinator = PreviewCoordinator::default();
+        let current = intent(1, 100);
+        assert!(coordinator.queue_intent(Some(current)));
+        coordinator.prepare(current);
+        assert!(coordinator.fail_preparation(current, "source.decode".into()));
+        assert!(!coordinator.is_pending());
+        assert!(coordinator.is_failed(current));
+        coordinator.clear_workspace();
+        assert!(coordinator.failure().is_none());
+        assert!(!coordinator.fail_preparation(current, "late".into()));
+        assert!(coordinator.queue_intent(Some(current)));
+    }
+
+    /// Keeps failure terminal while GTK has no allocation to establish changed exact intent.
+    /// # Panics
+    /// Panics if an unallocated refresh clears failure or manufactures pending decode work.
+    #[test]
+    fn unavailable_allocation_preserves_terminal_failure_until_concrete_intent() {
+        let mut coordinator = PreviewCoordinator::default();
+        let current = intent(1, 100);
+        coordinator.prepare(current);
+        assert!(coordinator.fail_preparation(current, "source.decode".into()));
+        assert!(!coordinator.queue_intent(None));
+        assert!(coordinator.is_failed(current));
+        assert!(!coordinator.is_pending());
+        assert!(!coordinator.queue_intent(Some(current)));
+        assert!(coordinator.queue_intent(Some(intent(2, 100))));
     }
 }

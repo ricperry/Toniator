@@ -2,14 +2,15 @@ use toniator_domain::{CurveWinding, ParametricCurve, SpiralCurve, SpiralShape};
 
 use crate::{Point2, Vector2};
 
-use super::{CubicBezierSegment, CurveError, CurvePath, CurveSegment, PathClosure};
+use super::{
+    CubicBezierSegment, CurveError, CurvePath, CurveSegment, CurveWorkLimits, PathClosure,
+    curve_count, curve_storage_count, reserve_curve,
+};
 
 /// Maximum analytic-to-cubic positional residual in document units.
 const ROUND_SPIRAL_RESIDUAL_LIMIT: f64 = 1.0 / 64.0;
 /// Maximum dyadic refinements from an initially quarter-turn-or-smaller span.
 const ROUND_SPIRAL_MAX_SUBDIVISION_DEPTH: u32 = 24;
-/// Inclusive structural limit shared with finite path consumers.
-const PARAMETRIC_CURVE_MAX_SEGMENTS: usize = 4_096;
 
 /// Converts validated finite parametric intent into one canonical open CurvePath at `origin`.
 /// The caller chooses presentation placement; this construction never consults canvas bounds.
@@ -22,9 +23,26 @@ pub fn construct_parametric_curve_path_cancellable(
     origin: Point2,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CurvePath, CurveError> {
+    construct_parametric_curve_path_with_limits_cancellable(
+        curve,
+        origin,
+        CurveWorkLimits::default(),
+        is_cancelled,
+    )
+}
+
+/// Constructs complete analytic intent under explicit storage policy without canvas clipping.
+/// # Errors
+/// Returns cancellation, finite/count/address/allocation, policy or canonical path diagnostics.
+pub fn construct_parametric_curve_path_with_limits_cancellable(
+    curve: &ParametricCurve,
+    origin: Point2,
+    limits: CurveWorkLimits,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CurvePath, CurveError> {
     match curve {
         ParametricCurve::Spiral(spiral) => {
-            construct_spiral_curve_path(spiral, origin, is_cancelled)
+            construct_spiral_curve_path(spiral, origin, limits, is_cancelled)
         }
     }
 }
@@ -37,8 +55,19 @@ pub fn construct_parametric_curve_path_cancellable(
 fn construct_spiral_curve_path(
     spiral: &SpiralCurve,
     origin: Point2,
+    limits: CurveWorkLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CurvePath, CurveError> {
+    if spiral.shape == SpiralShape::Square
+        && (!origin.is_finite()
+            || !spiral.radial_spacing.is_finite()
+            || !spiral.phase_degrees.is_finite())
+    {
+        return Err(CurveError::new(
+            "curve.path.polyline.vertices",
+            "polyline vertices must be finite",
+        ));
+    }
     let sign = match spiral.winding {
         CurveWinding::Clockwise => -1.0,
         CurveWinding::CounterClockwise => 1.0,
@@ -47,18 +76,19 @@ fn construct_spiral_curve_path(
     match spiral.shape {
         SpiralShape::Round => {
             let total = core::f64::consts::TAU * spiral.turns;
-            let minimum_count = (total / core::f64::consts::FRAC_PI_2).ceil() as usize;
-            if minimum_count == 0 || minimum_count > PARAMETRIC_CURVE_MAX_SEGMENTS {
+            let minimum_count = curve_count((total / core::f64::consts::FRAC_PI_2).ceil())?;
+            if minimum_count == 0 || minimum_count > limits.maximum_segments {
                 return Err(CurveError::new(
                     "curve.parametric.segment_limit",
                     "spiral construction exceeds the CurvePath segment limit",
                 ));
             }
-            let mut segments = Vec::with_capacity(minimum_count);
+            curve_storage_count::<CurveSegment>(minimum_count)?;
+            let mut segments = Vec::new();
             let mut block_start = 0.0;
             let mut previous_full_turn_count = 4_usize;
-            let whole_turns = spiral.turns.floor() as usize;
-            for block_index in 0..spiral.turns.ceil() as usize {
+            let whole_turns = curve_count(spiral.turns.floor())?;
+            for block_index in 0..curve_count(spiral.turns.ceil())? {
                 if is_cancelled() {
                     return Err(CurveError::new(
                         "evaluation.cancelled",
@@ -73,7 +103,7 @@ fn construct_spiral_curve_path(
                         "spiral parameter spans must remain positive",
                     ));
                 }
-                let minimum = (span / core::f64::consts::FRAC_PI_2).ceil() as usize;
+                let minimum = curve_count((span / core::f64::consts::FRAC_PI_2).ceil())?;
                 let full_turn = block_index < whole_turns;
                 let mut count = if full_turn {
                     previous_full_turn_count.max(minimum)
@@ -81,7 +111,7 @@ fn construct_spiral_curve_path(
                     minimum
                 };
                 loop {
-                    if count > PARAMETRIC_CURVE_MAX_SEGMENTS - segments.len() {
+                    if count > limits.maximum_segments - segments.len() {
                         return Err(CurveError::new(
                             "curve.parametric.segment_limit",
                             "spiral construction exceeds the CurvePath segment limit",
@@ -99,7 +129,10 @@ fn construct_spiral_curve_path(
                     )? {
                         break;
                     }
-                    count += 1;
+                    count = count.checked_add(1).ok_or(CurveError::new(
+                        "curve.path.count_overflow",
+                        "curve count exceeds machine representation",
+                    ))?;
                 }
                 let mut start_theta = block_start;
                 for index in 0..count {
@@ -117,6 +150,7 @@ fn construct_spiral_curve_path(
                         start_theta,
                         end_theta,
                         0,
+                        limits,
                         is_cancelled,
                     )?;
                     start_theta = end_theta;
@@ -126,19 +160,32 @@ fn construct_spiral_curve_path(
                 }
                 block_start = block_end;
             }
-            CurvePath::new(segments, PathClosure::Open)
+            CurvePath::new_with_limits_cancellable(
+                segments,
+                PathClosure::Open,
+                limits,
+                is_cancelled,
+            )
         }
         SpiralShape::Square => {
             let quarter_turns = spiral.turns * 4.0;
-            let count = quarter_turns.ceil() as usize;
-            if count == 0 || count > PARAMETRIC_CURVE_MAX_SEGMENTS {
+            let count = curve_count(quarter_turns.ceil())?;
+            if count == 0 || count > limits.maximum_segments {
                 return Err(CurveError::new(
                     "curve.parametric.segment_limit",
                     "spiral construction exceeds the CurvePath segment limit",
                 ));
             }
-            let mut vertices = Vec::with_capacity(count + 1);
+            curve_storage_count::<CurveSegment>(count)?;
+            let vertex_count = count.checked_add(1).ok_or(CurveError::new(
+                "curve.path.count_overflow",
+                "square vertex count overflows",
+            ))?;
+            curve_storage_count::<Point2>(vertex_count)?;
+            let mut vertices = Vec::new();
             let mut point = origin;
+            super::check_curve_cancelled(is_cancelled)?;
+            reserve_curve(&mut vertices, 1)?;
             vertices.push(point);
             let (sin, cos) = phase.sin_cos();
             let mut direction = Vector2::new(cos, sin);
@@ -155,6 +202,13 @@ fn construct_spiral_curve_path(
                     point.x + length * direction.x,
                     point.y + length * direction.y,
                 );
+                if !length.is_finite() || !point.is_finite() {
+                    return Err(CurveError::new(
+                        "curve.path.polyline.vertices",
+                        "polyline vertices must be finite",
+                    ));
+                }
+                reserve_curve(&mut vertices, 1)?;
                 vertices.push(point);
                 direction = if sign > 0.0 {
                     Vector2::new(-direction.y, direction.x)
@@ -162,7 +216,12 @@ fn construct_spiral_curve_path(
                     Vector2::new(direction.y, -direction.x)
                 };
             }
-            CurvePath::polyline(vertices, PathClosure::Open)
+            CurvePath::polyline_with_limits_cancellable(
+                vertices,
+                PathClosure::Open,
+                limits,
+                is_cancelled,
+            )
         }
     }
 }
@@ -238,6 +297,7 @@ fn append_adaptive_round_spiral_span(
     start_theta: f64,
     end_theta: f64,
     depth: u32,
+    limits: CurveWorkLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CurveError> {
     if is_cancelled() {
@@ -257,12 +317,13 @@ fn append_adaptive_round_spiral_span(
         start_theta,
         end_theta,
     )? {
-        if segments.len() >= PARAMETRIC_CURVE_MAX_SEGMENTS {
+        if segments.len() >= limits.maximum_segments {
             return Err(CurveError::new(
                 "curve.parametric.segment_limit",
                 "spiral construction exceeds the CurvePath segment limit",
             ));
         }
+        reserve_curve(segments, 1)?;
         segments.push(CurveSegment::CubicBezier(segment));
         return Ok(());
     }
@@ -282,6 +343,7 @@ fn append_adaptive_round_spiral_span(
         start_theta,
         midpoint,
         depth + 1,
+        limits,
         is_cancelled,
     )?;
     append_adaptive_round_spiral_span(
@@ -293,6 +355,7 @@ fn append_adaptive_round_spiral_span(
         midpoint,
         end_theta,
         depth + 1,
+        limits,
         is_cancelled,
     )
 }
@@ -599,9 +662,11 @@ mod tests {
             "evaluation.cancelled"
         );
         assert_eq!(
-            construct_parametric_curve_path_cancellable(
+            construct_parametric_curve_path_with_limits_cancellable(
                 &spiral(SpiralShape::Square, 1025.0, CurveWinding::Clockwise),
                 Point2::new(0.0, 0.0),
+                CurveWorkLimits::new(4096, usize::MAX, usize::MAX, usize::MAX)
+                    .expect("finite limit"),
                 &|| false
             )
             .unwrap_err()

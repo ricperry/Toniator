@@ -74,7 +74,7 @@ use personal_pattern_management::{
 };
 #[cfg(test)]
 use preview_coordinator::PreviewSubmission;
-use preview_coordinator::accepts_submission;
+use preview_coordinator::{PreviewIntent, accepts_submission};
 use toniator_domain::DensityMetric2D;
 use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureAttachment,
@@ -3745,6 +3745,122 @@ struct MainOutputGroup {
 /// Indexes retained native output composition by the domain-owned output identity.
 type MainOutputGroups = BTreeMap<PatternOutputLayerId, MainOutputGroup>;
 
+/// Holds one explicitly opted-in harness routing fault; ordinary application runs have none.
+/// The existing automation evidence opt-in is mandatory and no document setting is added.
+struct PreviewFailureHook {
+    boundary: String,
+    after_success: bool,
+}
+
+impl PreviewFailureHook {
+    /// Reads a bounded one-shot harness fault only when private automation evidence is enabled.
+    /// Unknown values disable the seam; no user settings or source bytes are changed.
+    fn from_environment() -> Option<Self> {
+        std::env::var_os("TONIATOR_AUTOMATION_EVENTS")?;
+        let value = std::env::var("TONIATOR_PREVIEW_FAILURE_ONCE").ok()?;
+        let (boundary, after_success) = value
+            .strip_suffix("-after-success")
+            .map_or((value.as_str(), false), |boundary| (boundary, true));
+        matches!(boundary, "prepare" | "decode" | "submit" | "texture").then(|| Self {
+            boundary: boundary.to_owned(),
+            after_success,
+        })
+    }
+}
+
+/// Builds a presentation-only error group inside the mapped canvas without measuring it.
+/// Native buttons retain their visible vocabulary, keyboard activation and GTK actions;
+/// wrapping text and responsive actions fit narrow/large-text canvases without changing targets.
+fn build_preview_error_overlay(
+    viewer: &gtk::Overlay,
+) -> (gtk::Box, gtk::Label, gtk::Button, gtk::Button) {
+    let overlay = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    overlay.set_halign(gtk::Align::Fill);
+    overlay.set_valign(gtk::Align::End);
+    overlay.set_margin_start(16);
+    overlay.set_margin_end(16);
+    overlay.set_margin_top(12);
+    overlay.set_margin_bottom(12);
+    overlay.add_css_class("osd");
+    overlay.update_property(&[gtk::accessible::Property::Label("Preview error")]);
+    let heading = gtk::Label::new(Some("Preview unavailable"));
+    heading.add_css_class("heading");
+    heading.set_xalign(0.0);
+    let message = gtk::Label::new(None);
+    message.set_wrap(true);
+    message.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    message.set_xalign(0.0);
+    message.set_max_width_chars(70);
+    let actions = gtk::FlowBox::new();
+    actions.set_selection_mode(gtk::SelectionMode::None);
+    actions.set_homogeneous(false);
+    actions.set_min_children_per_line(1);
+    actions.set_max_children_per_line(2);
+    actions.set_column_spacing(6);
+    actions.set_row_spacing(6);
+    let retry = gtk::Button::with_label("Retry preview");
+    let dismiss = gtk::Button::with_label("Dismiss preview error");
+    actions.insert(&retry, -1);
+    actions.insert(&dismiss, -1);
+    overlay.append(&heading);
+    overlay.append(&message);
+    overlay.append(&actions);
+    viewer.add_overlay(&overlay);
+    viewer.set_measure_overlay(&overlay, false);
+    viewer.set_clip_overlay(&overlay, true);
+    overlay.set_visible(false);
+    (overlay, message, retry, dismiss)
+}
+
+/// Returns one manufactured typed-error routing witness at its opted-in production boundary.
+/// This tests controller routing, not actual decoder/allocator/texture failure creation.
+fn injected_preview_error(state: &mut AppState, boundary: &str) -> Option<String> {
+    let hook = state.preview_failure_hook.as_ref()?;
+    if hook.boundary != boundary
+        || (hook.after_success && state.preview_coordinator.last_accepted_ticket().is_none())
+    {
+        return None;
+    }
+    let path = match boundary {
+        "prepare" => "preview.test.preparation",
+        "decode" => "preview.test.decode",
+        "submit" => "preview.test.submission",
+        "texture" => "preview.test.texture",
+        _ => return None,
+    };
+    state.preview_failure_hook = None;
+    emit_automation_state(state, "preview_failure_injected", None);
+    Some(
+        toniator_engine::EvaluationError::new(path, "One-shot private harness routing witness")
+            .to_string(),
+    )
+}
+
+/// Captures current frame and exact target before invalidation or source-job side effects.
+/// A retained attempted target is used only while GTK has no current allocation.
+fn main_preview_intent(state: &AppState) -> Option<PreviewIntent> {
+    Some(PreviewIntent {
+        frame: main_preview_frame_identity(state)?,
+        target: main_viewport_target(state).or(state.preview_target)?,
+    })
+}
+
+/// Retries only the still-current failure once, without mutating document/history or operation errors.
+fn retry_main_preview(state: &Rc<RefCell<AppState>>) {
+    {
+        let mut state = state.borrow_mut();
+        let Some(intent) = main_preview_intent(&state) else {
+            return;
+        };
+        if !state.preview_coordinator.retry(intent) {
+            return;
+        }
+        emit_automation_state(&mut state, "preview_retry", None);
+        set_preview_pending(&mut state);
+    }
+    schedule_main_preview_submission(state);
+}
+
 struct AppState {
     still_export_cancel: Option<Arc<AtomicBool>>,
     still_export_progress: Option<gtk::Window>,
@@ -3782,6 +3898,11 @@ struct AppState {
     source_texture_generation: Option<u64>,
     presented_texture: Option<(gtk::gdk::Texture, MainViewMode, f64, f64)>,
     preview_progress: gtk::Box,
+    preview_error: gtk::Box,
+    preview_error_label: gtk::Label,
+    retry_preview: gtk::Button,
+    dismiss_preview_error: gtk::Button,
+    preview_failure_hook: Option<PreviewFailureHook>,
     preview_overall_progress_label: gtk::Label,
     preview_progress_label: gtk::Label,
     preview_progress_bar: gtk::ProgressBar,
@@ -4237,6 +4358,8 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     let error = shell.error();
     let picture = shell.picture();
     let viewer = shell.viewer();
+    let (preview_error, preview_error_label, retry_preview, dismiss_preview_error) =
+        build_preview_error_overlay(&viewer);
     let viewport_scroll = shell.viewport_scroll();
     let zoom_out = shell.zoom_out();
     let zoom_label = shell.zoom_label();
@@ -4379,6 +4502,11 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         source_texture_generation: None,
         presented_texture: None,
         preview_progress,
+        preview_error,
+        preview_error_label,
+        retry_preview,
+        dismiss_preview_error,
+        preview_failure_hook: PreviewFailureHook::from_environment(),
         preview_overall_progress_label,
         preview_progress_label,
         preview_progress_bar,
@@ -4458,6 +4586,23 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         .borrow()
         .cancel_pattern_calibration
         .connect_clicked(move |_| cancel_inspector_calibration(&cancel_state));
+    {
+        let retry_state = Rc::clone(&state);
+        state
+            .borrow()
+            .retry_preview
+            .connect_clicked(move |_| retry_main_preview(&retry_state));
+        let dismiss_state = Rc::clone(&state);
+        state
+            .borrow()
+            .dismiss_preview_error
+            .connect_clicked(move |_| {
+                let mut state = dismiss_state.borrow_mut();
+                state.preview_coordinator.dismiss();
+                sync_main_preview_pending(&state);
+                emit_automation_state(&mut state, "preview_error_dismissed", None);
+            });
+    }
     state.borrow_mut().print_png_preview_self = Rc::downgrade(&state);
     start_process_memory_updates(&state);
     if let Some(notice) = state.borrow().catalog_notice.as_deref() {
@@ -22854,6 +22999,16 @@ fn remember_inspector_draft(
 /// Invalidates the accepted preview target and records queued work before idle submission.
 /// Source-less documents retain the empty artwork action and never queue an impossible preview.
 fn set_preview_pending(state: &mut AppState) {
+    let intent = main_preview_intent(state);
+    if state
+        .workspace
+        .as_ref()
+        .is_some_and(workspace_requires_initial_preview)
+        && !state.preview_coordinator.queue_intent(intent)
+    {
+        sync_main_preview_pending(state);
+        return;
+    }
     state.media_epoch = state.media_epoch.saturating_add(1);
     state.media_preview_key = None;
     if let Some(worker) = state.media_worker.as_mut() {
@@ -22871,7 +23026,6 @@ fn set_preview_pending(state: &mut AppState) {
         set_page(state, Page::Empty);
         return;
     }
-    state.preview_coordinator.queue_refresh();
     state.preview_progress_bar.set_fraction(0.0);
     state.preview_progress_bar.set_text(Some("Overall 0%"));
     state
@@ -22892,14 +23046,39 @@ fn set_preview_pending(state: &mut AppState) {
     set_page(state, page_while_preview_pending(state.preview.is_some()));
 }
 
-/// Synchronizes canvas pending presentation with queued or submitted coordinator work.
+/// Projects pending work and concise truthful failure status without measuring the overlay.
+/// Full coordinator diagnostics remain available through the status tooltip and accessibility
+/// description; visible text depends only on whether accepted pixels remain available.
 fn sync_main_preview_pending(state: &AppState) {
     let pending = state.preview_coordinator.is_pending();
     state.preview_progress.set_visible(pending);
-    state.picture.set_tooltip_text(Some(preview_tooltip(
-        pending,
-        state.preview_coordinator.last_accepted_ticket().is_some(),
-    )));
+    let failure = state.preview_coordinator.failure();
+    state
+        .preview_error
+        .set_visible(failure.is_some_and(|failure| failure.visible));
+    state.retry_preview.set_sensitive(
+        failure.is_some_and(|failure| main_preview_intent(state) == Some(failure.intent)),
+    );
+    state
+        .dismiss_preview_error
+        .set_sensitive(failure.is_some_and(|failure| failure.visible));
+    if let Some(failure) = failure {
+        let retained = if state.preview.is_some() {
+            "Showing the last preview."
+        } else {
+            "No preview yet."
+        };
+        state.preview_error_label.set_label(retained);
+        state.preview_error_label.set_tooltip_text(Some(&failure.diagnostic));
+        state.preview_error_label.update_property(&[
+            gtk::accessible::Property::Description(&failure.diagnostic),
+        ]);
+    }
+    state.picture.set_tooltip_text(Some(if failure.is_some() {
+        "Preview unavailable. Retry preview or change the artwork or settings."
+    } else {
+        preview_tooltip(pending, state.preview.is_some())
+    }));
 }
 
 /// Returns concise artist-facing text for one engine-owned evaluation phase.
@@ -22925,12 +23104,10 @@ const fn preview_progress_stage_label(
 
 /// Preserves the stable evaluator diagnostic behind the main preview's artist-facing failure.
 fn main_preview_failure_message(error: Option<&toniator_engine::EvaluationError>) -> String {
-    match error {
-        Some(error) => {
-            format!("Couldn’t render this pattern. Your last preview is still shown. {error}")
-        }
-        None => "Couldn’t render this pattern. Your last preview is still shown.".to_owned(),
-    }
+    error.map_or_else(
+        || "Evaluation did not produce a result.".to_owned(),
+        ToString::to_string,
+    )
 }
 
 /// Selects the canvas tooltip from queued/submitted work and last-success identity.
@@ -29611,13 +29788,15 @@ fn handle_preview_completion(
     });
     match accepted {
         Ok(true) => match completion.result() {
-            Some(result) => match texture_from_surface(result.raster()) {
+            Some(result) => match injected_preview_error(&mut app_state, "texture")
+                .map_or_else(|| texture_from_surface(result.raster()), Err)
+            {
                 Ok(texture) => {
                     app_state
                         .preview_coordinator
                         .accept(workspace_generation, ticket);
-                    sync_main_preview_pending(&app_state);
                     app_state.preview = Some(texture);
+                    sync_main_preview_pending(&app_state);
                     app_state.accepted_preview_target = app_state.preview_target;
                     let identity = main_preview_frame_identity(&app_state);
                     if app_state
@@ -29636,33 +29815,31 @@ fn handle_preview_completion(
                     emit_automation_state(&mut app_state, "preview_accepted", Some(ticket));
                 }
                 Err(error) => {
-                    app_state
-                        .preview_coordinator
-                        .fail(workspace_generation, ticket);
-                    sync_main_preview_pending(&app_state);
                     show_preview_error(&mut app_state, error);
                 }
             },
             None => {
                 let message = main_preview_failure_message(completion.error());
-                app_state
-                    .preview_coordinator
-                    .fail(workspace_generation, ticket);
-                sync_main_preview_pending(&app_state);
-                show_preview_error(&mut app_state, message);
+                if completion
+                    .error()
+                    .is_some_and(|error| error.path() == "evaluation.cancelled")
+                {
+                    app_state
+                        .preview_coordinator
+                        .cancel(workspace_generation, ticket);
+                    sync_main_preview_pending(&app_state);
+                } else {
+                    show_preview_error(&mut app_state, message);
+                }
             }
         },
         Ok(false) => {
             app_state
                 .preview_coordinator
-                .fail(workspace_generation, ticket);
+                .cancel(workspace_generation, ticket);
             sync_main_preview_pending(&app_state);
         }
         Err(error) => {
-            app_state
-                .preview_coordinator
-                .fail(workspace_generation, ticket);
-            sync_main_preview_pending(&app_state);
             show_preview_error(&mut app_state, error.to_string());
         }
     }
@@ -29989,7 +30166,7 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
         state.pending_png_export_chooser = false;
         state.pending_png_export_surface_epoch = None;
         state.workspace_generation = state.workspace_generation.saturating_add(1);
-        state.preview_coordinator.clear_submission();
+        state.preview_coordinator.clear_workspace();
         sync_main_preview_pending(&state);
         state.inspector_runtime.reset_for_workspace();
         let pattern_editor_window = state.pattern_editor.take().map(|surface| {
@@ -30111,7 +30288,7 @@ fn clear_workspace(state: &Rc<RefCell<AppState>>) {
         state.pending_png_export_surface_epoch = None;
         state.generation = state.generation.saturating_add(1);
         state.workspace_generation = state.workspace_generation.saturating_add(1);
-        state.preview_coordinator.clear_submission();
+        state.preview_coordinator.clear_workspace();
         state.media_preview_key = None;
         if let Some(worker) = state.media_worker.as_mut() {
             worker.cancel();
@@ -30267,12 +30444,17 @@ fn submit_if_viewport_ready(state: &mut AppState) {
     let Some(target) = main_viewport_target(state) else {
         return;
     };
-    if state.preview_target == Some(target) {
+    let Some(frame) = main_preview_frame_identity(state) else {
+        return;
+    };
+    if state
+        .preview_coordinator
+        .is_failed(PreviewIntent { frame, target })
+        || state.preview_target == Some(target)
+    {
         return;
     }
     if let Err(error) = submit_current_source(state, target) {
-        state.preview_coordinator.clear_submission();
-        sync_main_preview_pending(state);
         show_preview_error(state, error);
     }
 }
@@ -30281,6 +30463,9 @@ fn submit_if_viewport_ready(state: &mut AppState) {
 ///
 /// # Errors
 /// Rejects missing source/worker state without modifying document history or accepted pixels.
+/// # Panics
+/// Panics only if same-thread source ownership changes after the captured workspace preflight,
+/// which would violate the controller borrow and no-callback invariant.
 fn submit_current_source(
     state: &mut AppState,
     target: toniator_engine::PreviewRasterTarget,
@@ -30295,6 +30480,21 @@ fn submit_current_source(
         epoch: state.media_epoch,
         frame: state.endpoint.frame(workspace.document()),
     };
+    let intent = PreviewIntent {
+        frame: key.frame_identity(),
+        target,
+    };
+    if !state.preview_coordinator.prepare(intent) {
+        return Ok(());
+    }
+    state.preview_target = Some(target);
+    if let Some(error) = injected_preview_error(state, "prepare") {
+        return Err(error);
+    }
+    let workspace = state
+        .workspace
+        .as_ref()
+        .expect("captured workspace remains current");
     let session = workspace.history.session().clone();
     let sources = workspace.sources.clone();
     state
@@ -30303,7 +30503,7 @@ fn submit_current_source(
         .ok_or("Source preview worker is unavailable")?
         .submit(key, session, sources, target);
     state.media_preview_key = Some(key);
-    state.preview_target = Some(target);
+    emit_automation_state(state, "preview_source_preparation_started", None);
     sync_main_preview_pending(state);
     set_inspector_status(state, "Preparing source frame…");
     Ok(())
@@ -30333,8 +30533,20 @@ fn handle_media_preview_completion(
     }) {
         return;
     }
+    let Some(intent) = state.preview_coordinator.intent() else {
+        return;
+    };
+    if intent.frame != completion.key.frame_identity()
+        || state.preview_coordinator.is_failed(intent)
+    {
+        return;
+    }
     state.media_preview_key = None;
     let result = completion.result.and_then(|prepared| {
+        if let Some(error) = injected_preview_error(&mut state, "decode") {
+            return Err(error);
+        }
+
         let model = state
             .workspace
             .as_ref()
@@ -30351,6 +30563,14 @@ fn handle_media_preview_completion(
             &glib::Bytes::from_owned(rgba),
             display.width as usize * 4,
         );
+        if state.preview_coordinator.intent() != Some(intent)
+            || state.preview_coordinator.is_failed(intent)
+        {
+            return Ok(());
+        }
+        if let Some(error) = injected_preview_error(&mut state, "submit") {
+            return Err(error);
+        }
         let ticket = state
             .scheduler
             .submit(prepared.request)
@@ -30365,7 +30585,6 @@ fn handle_media_preview_completion(
         Ok(())
     });
     if let Err(error) = result {
-        state.preview_coordinator.clear_submission();
         show_preview_error(&mut state, error);
     }
     sync_main_preview_pending(&state);
@@ -30416,6 +30635,13 @@ fn emit_automation_state(state: &mut AppState, event: &str, ticket: Option<u64>)
         "has_savepoint": savepoint,
         "lifecycle": lifecycle,
         "viewport_raster": state.preview_target.map(|target| serde_json::json!({"width": target.width(), "height": target.height(), "crop": target.viewport(), "fit": state.view_state.is_fit(), "zoom": state.view_state.zoom(), "picture_width": state.picture.width(), "picture_height": state.picture.height(), "page_width": state.viewport_scroll.hadjustment().page_size(), "page_height": state.viewport_scroll.vadjustment().page_size(), "device_scale": state.viewport_scroll.scale_factor()})),
+        "preview_pending": state.preview_coordinator.is_pending(),
+        "preview_failed": state.preview_coordinator.failure().is_some(),
+        "preview_error_visible": state.preview_coordinator.failure().is_some_and(|failure|failure.visible),
+        "preview_failure_diagnostic": state.preview_coordinator.failure().map(|failure|failure.diagnostic.as_str()),
+        "preview_has_pixels": state.preview.is_some(),
+        "operation_error_present": state.main_error_identity.is_some(),
+        "canvas_allocation": {"picture_width":state.picture.width(),"picture_height":state.picture.height(),"page_width":state.viewport_scroll.hadjustment().page_size(),"page_height":state.viewport_scroll.vadjustment().page_size()},
         "preview_identity": ticket.map(|ticket| serde_json::json!({"ticket": ticket, "workspace_generation": workspace_generation, "document_revision": revision})),
     });
     if let Some(sink) = state.automation.as_mut() {
@@ -30658,15 +30884,28 @@ fn show_error(state: &mut AppState, message: String) {
     set_page(state, page_after_preview_error(state.preview.is_some()));
 }
 
-/// Reports a preview failure whose next refresh may replace the transient render diagnostic.
-/// Retained operation errors keep priority. A new preview message updates only notice-presentation
-/// bookkeeping and GTK text; document, history, source bytes, and diagnostic facts stay unchanged.
+/// Latches a matching queued/preparing/submitted failure in the unmeasured canvas overlay.
+/// Operation/save identities, banners, document/history and last-good pixels remain independent.
 fn show_preview_error(state: &mut AppState, message: String) {
-    if state.main_error_identity.is_some() {
+    let changed = if let Some(submission) = state.preview_coordinator.submission() {
+        state
+            .preview_coordinator
+            .fail(submission.workspace_generation, submission.ticket, message)
+    } else if let Some(intent) = state.preview_coordinator.intent() {
+        state.preview_coordinator.fail_preparation(intent, message)
+    } else {
+        false
+    };
+    if !changed {
         return;
     }
-    show_error(state, message);
-    state.main_error_identity = None;
+    sync_main_preview_pending(state);
+    set_page(state, Page::Success);
+    set_inspector_status(
+        state,
+        "Preview unavailable. Retry preview or change the artwork or settings.",
+    );
+    emit_automation_state(state, "preview_failed", None);
 }
 
 /// Allows a successful save retry to clear only the captured current operation-error identity.
@@ -35518,6 +35757,8 @@ mod tests {
     }
 
     /// Keeps queued work artist-visible and preserves stable evaluator diagnostics on failure.
+    /// # Panics
+    /// Panics if pending labels or the unchanged evaluator diagnostic are misrepresented.
     #[test]
     fn preview_status_text_tracks_queued_work_and_specific_failures() {
         assert_eq!(preview_tooltip(true, true), "Rendering preview…");
@@ -35542,7 +35783,7 @@ mod tests {
         );
         assert_eq!(
             main_preview_failure_message(Some(&error)),
-            "Couldn’t render this pattern. Your last preview is still shown. pattern.family.geometry: generated geometry is invalid"
+            "pattern.family.geometry: generated geometry is invalid"
         );
     }
 

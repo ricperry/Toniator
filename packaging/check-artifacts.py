@@ -22,7 +22,7 @@ if versions:
 record['artifacts'] = []
 lines = []
 for suffix in ['AppImage', 'flatpak']:
-    path = DIST / ('Toniator-0.4.4-x86_64.' + suffix)
+    path = DIST / ('Toniator-0.4.5-x86_64.' + suffix)
     if not path.exists():
         continue
     digest = hashlib.sha256(path.read_bytes()).hexdigest()

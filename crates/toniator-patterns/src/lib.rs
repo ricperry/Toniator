@@ -52,7 +52,7 @@ pub use toniator_geometry::{
     CanonicalCircleMark, CanonicalFillRule, CanonicalMark, CanonicalPathMark,
     CanonicalRegionLimits, CanonicalRegionProposal, CanonicalRegionSet, CanonicalRegionSourceGroup,
     CanonicalRegionSourceId, CanonicalStroke, CanonicalStrokeSourceId, ConnectionPathId,
-    ConnectionPathLimits, ConnectionPathSet, CubicBezierSegment, CurveError, CurvePath,
+    ConnectionPathLimits, ConnectionPathSet, CubicBezierSegment, CurveError, CurvePath, CurveWorkLimits,
     CurveSegment, FamilySite, FamilySiteError, FamilySiteId, FamilySiteProvenance, FamilySiteSet,
     GUIDE_FACE_CONTRACT_ID, GuideFaceLimits, GuideFaceRequest, GuideInstanceId,
     GuideIntersectionProvenance, IntersectionSite, LineSegment, MAZE_WALL_CONTRACT_ID,
@@ -5075,10 +5075,32 @@ pub fn evaluate_typed_family_product_with_source_progress_cancellable(
     is_cancelled: &dyn Fn() -> bool,
     report_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<TypedFamilyOutput, PatternPipelineError> {
+    evaluate_typed_family_product_with_curve_limits_progress_cancellable(
+        family,
+        request,
+        source,
+        CurveWorkLimits::default(),
+        is_cancelled,
+        report_progress,
+    )
+}
+
+/// Evaluates current family intent under explicit geometry policy without changing canonical identity.
+/// # Errors
+/// Returns typed family/numeric/policy/allocation/cancellation errors without partial publication.
+pub fn evaluate_typed_family_product_with_curve_limits_progress_cancellable(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+    source: Option<&SourceField>,
+    curve_limits: CurveWorkLimits,
+    is_cancelled: &dyn Fn() -> bool,
+    report_progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<TypedFamilyOutput, PatternPipelineError> {
     if family.parametric_curve.is_some() {
         return evaluate_parametric_curve_with_progress_cancellable(
             family,
             request,
+            curve_limits,
             is_cancelled,
             report_progress,
         );
@@ -5087,6 +5109,8 @@ pub fn evaluate_typed_family_product_with_source_progress_cancellable(
         return evaluate_generic_curve_guides_with_progress_cancellable(
             family,
             request,
+            curve_limits,
+            None,
             is_cancelled,
             report_progress,
         );
@@ -5609,6 +5633,12 @@ pub fn evaluate_typed_maze_walls_from_family_cancellable(
     .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_CURVE_RESERVATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CURVE_FRAGMENT_PUBLICATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Reserves bounded material Stage 20M vectors through one stable allocation diagnostic mapping.
 ///
 /// # Errors
@@ -5622,6 +5652,12 @@ fn reserve_stage20m<T>(
     path: &'static str,
     message: &'static str,
 ) -> Result<(), PatternPipelineError> {
+    #[cfg(test)]
+    if values.capacity().saturating_sub(values.len()) < additional
+        && FAIL_CURVE_RESERVATION.with(|flag| flag.replace(false))
+    {
+        return Err(PatternPipelineError::new(path, message));
+    }
     values
         .try_reserve(additional)
         .map_err(|_| PatternPipelineError::new(path, message))
@@ -5729,6 +5765,7 @@ fn site_adjacency_error(error: SiteAdjacencyError) -> PatternPipelineError {
 fn evaluate_parametric_curve_with_progress_cancellable(
     family: &FamilyCapability,
     request: &GridInspectRequest,
+    curve_limits: CurveWorkLimits,
     is_cancelled: &dyn Fn() -> bool,
     report_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<TypedFamilyOutput, PatternPipelineError> {
@@ -5749,9 +5786,10 @@ fn evaluate_parametric_curve_with_progress_cancellable(
             )
         })
         .transpose()?;
-    let local_path = toniator_geometry::construct_parametric_curve_path_cancellable(
+    let local_path = toniator_geometry::construct_parametric_curve_path_with_limits_cancellable(
         &effective_curve,
         Point2::new(0.0, 0.0),
+        curve_limits,
         is_cancelled,
     )?;
     report_progress(50, 1_000);
@@ -5764,7 +5802,11 @@ fn evaluate_parametric_curve_with_progress_cancellable(
         "pattern.parametric.origin",
         "canvas center placement must remain finite",
     ))?;
-    let path = local_path.transformed(origin_at_canvas_center)?;
+    let path = local_path.transformed_with_limits_cancellable(
+        origin_at_canvas_center,
+        curve_limits,
+        is_cancelled,
+    )?;
     let dimension_id = GuideDimensionId(family.provenance.mechanism_ids[0].0);
     let dimension = GuideDimension {
         id: dimension_id,
@@ -5798,15 +5840,62 @@ fn evaluate_parametric_curve_with_progress_cancellable(
     let nested_progress = |completed, total| {
         report_family_progress_portion(report_progress, 100, 900, completed, total);
     };
-    let mut output = evaluate_generic_curve_guides_with_progress_cancellable(
+    let output = evaluate_generic_curve_guides_with_progress_cancellable(
         &reusable,
         request,
+        curve_limits,
+        Some(family),
         is_cancelled,
         &nested_progress,
     )?;
-    output.family = family.clone();
     report_progress(1_000, 1_000);
     Ok(output)
+}
+
+/// Copies current family metadata while reserving/canceling each generated resolved path copy.
+/// # Errors
+/// Returns geometry allocation/policy/cancellation failures without publishing a partial family.
+fn clone_curve_family_cancellable(
+    family: &FamilyCapability,
+    limits: CurveWorkLimits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<FamilyCapability, PatternPipelineError> {
+    let generic_guides = if let Some(generic) = &family.generic_guides {
+        let mut resolved_paths = Vec::new();
+        for (source, path) in &generic.resolved_paths {
+            reserve_stage20m(
+                &mut resolved_paths,
+                1,
+                "coverage.curved_guides.allocation",
+                "curve family path allocation failed",
+            )?;
+            resolved_paths.push((
+                *source,
+                path.cloned_with_limits_cancellable(limits, cancelled)?,
+            ));
+        }
+        Some(GenericGuideCapability {
+            dimensions: generic.dimensions.clone(),
+            resolved_paths,
+            structural_source: generic.structural_source,
+            absolute_site_interval: generic.absolute_site_interval,
+            single_nominal_spacing: generic.single_nominal_spacing,
+        })
+    } else {
+        None
+    };
+    Ok(FamilyCapability {
+        product: family.product,
+        provenance: family.provenance.clone(),
+        dimensions: family.dimensions.clone(),
+        site_selection: family.site_selection.clone(),
+        merge_epsilon: family.merge_epsilon,
+        along_interval_multiplier: family.along_interval_multiplier,
+        along_phase: family.along_phase,
+        random: family.random.clone(),
+        generic_guides,
+        parametric_curve: family.parametric_curve.clone(),
+    })
 }
 
 /// Proves that surviving outer offset components span authored endpoints and the requested normal side.
@@ -6725,6 +6814,8 @@ fn scaled_random_capability(
 fn evaluate_generic_curve_guides_with_progress_cancellable(
     family: &FamilyCapability,
     request: &GridInspectRequest,
+    curve_limits: CurveWorkLimits,
+    published_family: Option<&FamilyCapability>,
     is_cancelled: &dyn Fn() -> bool,
     report_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<TypedFamilyOutput, PatternPipelineError> {
@@ -6816,9 +6907,13 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 "coverage.curved_guides.proof",
                 "curved-guide coverage could not prove a complete generation envelope",
             ))?;
-    let stable_authored_domain = channel_transform.inverse_bounds(canvas).ok_or(
-        PatternPipelineError::new("coverage.curved_guides.proof", "authored guide canvas frame must remain finite"),
-    )?;
+    let stable_authored_domain =
+        channel_transform
+            .inverse_bounds(canvas)
+            .ok_or(PatternPipelineError::new(
+                "coverage.curved_guides.proof",
+                "authored guide canvas frame must remain finite",
+            ))?;
     let mut guides = Vec::new();
     let mut guide_nominal_bases = BTreeMap::new();
     let mut grouped = Vec::<Vec<StructuralPathInstance>>::new();
@@ -6845,7 +6940,8 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
             "coverage.curved_guides.proof",
             "curved-guide coverage could not prove a complete generation envelope",
         ))?;
-        let unscaled_base = prototype.transformed(baseline)?;
+        let unscaled_base =
+            prototype.transformed_with_limits_cancellable(baseline, curve_limits, is_cancelled)?;
         let base = if matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { .. }) {
             let stable = scale_authored_guide_to_generation_span(&unscaled_base, stable_authored_domain)?;
             extend_authored_guide_to_generation_span(&stable, local_domain)?
@@ -7076,7 +7172,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 + maximum_offset_travel;
             tile_authored_guide_end_to_end(&base, local_domain, longitudinal_margin)?
         } else {
-            base.clone()
+            base.cloned_with_limits_cancellable(curve_limits, is_cancelled)?
         };
         let evaluate_index = |index: i64,
                               crossing_barriers: &[&CurvePath]|
@@ -7127,14 +7223,26 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                         "coverage.curved_guides.proof",
                         "curved-guide coverage could not prove a complete generation envelope",
                     ))?;
-                    let path = evaluation_base.transformed(local)?;
-                    Ok(vec![toniator_geometry::OffsetPathComponent {
+                    let path = evaluation_base.transformed_with_limits_cancellable(
+                        local,
+                        curve_limits,
+                        is_cancelled,
+                    )?;
+                    let mut components = Vec::new();
+                    reserve_stage20m(
+                        &mut components,
+                        1,
+                        "family.curve.allocation",
+                        "curve component allocation failed",
+                    )?;
+                    components.push(toniator_geometry::OffsetPathComponent {
                         component_ordinal: 0,
                         source_start: PathLocation::new(0, 0.0)?,
                         source_end: PathLocation::new(evaluation_base.segments().len() - 1, 1.0)?,
                         path,
                         planar_switch_nodes: Vec::new(),
-                    }])
+                    });
+                    Ok(components)
                 }
             }
         };
@@ -7387,20 +7495,55 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                         ),
                     },
                     source_structure_id: *source_structure_id,
-                    path: component.path.transformed(channel_transform)?,
+                    path: component.path.transformed_with_limits_cancellable(
+                        channel_transform,
+                        curve_limits,
+                        is_cancelled,
+                    )?,
                 };
                 guide_nominal_bases.insert(instance.id, basis);
-                this_dimension.push(instance.clone());
-                for fragment in instance.path.clip_to_bounds(document_domain)? {
+                reserve_stage20m(
+                    &mut this_dimension,
+                    1,
+                    "coverage.curved_guides.allocation",
+                    "guide instance allocation failed",
+                )?;
+                this_dimension.push(StructuralPathInstance {
+                    id: instance.id,
+                    source_structure_id: instance.source_structure_id,
+                    path: instance
+                        .path
+                        .cloned_with_limits_cancellable(curve_limits, is_cancelled)?,
+                });
+                for fragment in instance.path.clip_to_bounds_with_limits_cancellable(
+                    document_domain,
+                    curve_limits,
+                    is_cancelled,
+                )? {
+                    #[cfg(test)]
+                    CURVE_FRAGMENT_PUBLICATION.with(|flag| flag.set(true));
+                    if is_cancelled() {
+                        return Err(PatternPipelineError::new("evaluation.cancelled", "evaluation was cancelled"));
+                    }
                     let fragment = if uses_tiled_authored_normal_offset {
                         stabilize_planar_constant_gap_path(&fragment, PathOffsetLimits::default())?
                     } else {
                         fragment
                     };
-                    let mut published = instance.clone();
-                    published.id.component_ordinal = published_component_ordinal;
-                    published.path = fragment;
+                    let mut id = instance.id;
+                    id.component_ordinal = published_component_ordinal;
+                    let published = StructuralPathInstance {
+                        id,
+                        source_structure_id: instance.source_structure_id,
+                        path: fragment,
+                    };
                     guide_nominal_bases.insert(published.id, basis);
+                    reserve_stage20m(
+                        &mut guides,
+                        1,
+                        "coverage.curved_guides.allocation",
+                        "guide fragment allocation failed",
+                    )?;
                     guides.push(published);
                     published_component_ordinal = published_component_ordinal
                         .checked_add(1)
@@ -7428,6 +7571,12 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 "constant-gap cleanup left an unpaired endpoint inside the generation domain",
             ));
         }
+        reserve_stage20m(
+            &mut grouped,
+            1,
+            "coverage.curved_guides.allocation",
+            "guide group allocation failed",
+        )?;
         grouped.push(this_dimension);
         report_progress(400 * (dimension_index + 1) / dimension_total, 1_000);
     }
@@ -7445,7 +7594,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
             instance.path = path;
         }
     }
-    let fingerprint = generic_curve_fingerprint(family, request, generic);
+    let fingerprint = generic_curve_fingerprint(family, request, generic, is_cancelled)?;
     let path_set = StructuralPathSet::new(
         fingerprint.clone(),
         family.provenance.mechanism_ids[0],
@@ -7544,7 +7693,11 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
     .map_err(family_site_error)?;
     report_progress(1_000, 1_000);
     Ok(TypedFamilyOutput {
-        family: family.clone(),
+        family: clone_curve_family_cancellable(
+            published_family.unwrap_or(family),
+            curve_limits,
+            is_cancelled,
+        )?,
         sites: site_set,
         diagnostics: None,
         structure: TypedFamilyStructure {
@@ -8474,18 +8627,74 @@ fn generic_curve_fingerprint(
     family: &FamilyCapability,
     request: &GridInspectRequest,
     generic: &GenericGuideCapability,
-) -> String {
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<String, PatternPipelineError> {
     let prefix = if generic.structural_source.is_some() {
         b"toniator-stage-20d-guide-family-v1|arc-policy-fixed-90-degree-cubic-v1".as_slice()
     } else {
         b"toniator-stage-20d-guide-family-v2-centered-local-origin|arc-policy-fixed-90-degree-cubic-v1"
             .as_slice()
     };
-    let mut bytes = prefix.to_vec();
+    let mut bytes = Vec::new();
+    reserve_stage20m(
+        &mut bytes,
+        prefix.len(),
+        "coverage.curved_guides.allocation",
+        "curve fingerprint allocation failed",
+    )?;
+    if is_cancelled() {
+        return Err(PatternPipelineError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    reserve_stage20m(
+        &mut bytes,
+        128,
+        "coverage.curved_guides.allocation",
+        "curve fingerprint allocation failed",
+    )?;
+    bytes.extend(prefix);
+    if is_cancelled() {
+        return Err(PatternPipelineError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    reserve_stage20m(
+        &mut bytes,
+        128,
+        "coverage.curved_guides.allocation",
+        "curve fingerprint allocation failed",
+    )?;
     bytes.extend(family.provenance.definition_id.to_le_bytes());
     for id in &family.provenance.mechanism_ids {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        reserve_stage20m(
+            &mut bytes,
+            128,
+            "coverage.curved_guides.allocation",
+            "curve fingerprint allocation failed",
+        )?;
         bytes.extend(id.0.to_le_bytes());
     }
+    if is_cancelled() {
+        return Err(PatternPipelineError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    reserve_stage20m(
+        &mut bytes,
+        128,
+        "coverage.curved_guides.allocation",
+        "curve fingerprint allocation failed",
+    )?;
     bytes.push(match family.product {
         StructuralProductCapability::GuideIntersections => 1,
         StructuralProductCapability::AlongGuideSites => 2,
@@ -8493,9 +8702,45 @@ fn generic_curve_fingerprint(
         StructuralProductCapability::ParametricPaths => 4,
     });
     for id in &family.site_selection {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        reserve_stage20m(
+            &mut bytes,
+            128,
+            "coverage.curved_guides.allocation",
+            "curve fingerprint allocation failed",
+        )?;
         bytes.extend(id.0.to_le_bytes());
     }
+    if is_cancelled() {
+        return Err(PatternPipelineError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    reserve_stage20m(
+        &mut bytes,
+        128,
+        "coverage.curved_guides.allocation",
+        "curve fingerprint allocation failed",
+    )?;
     bytes.extend(family.merge_epsilon.unwrap_or(0.0).to_bits().to_le_bytes());
+    if is_cancelled() {
+        return Err(PatternPipelineError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    reserve_stage20m(
+        &mut bytes,
+        128,
+        "coverage.curved_guides.allocation",
+        "curve fingerprint allocation failed",
+    )?;
     bytes.extend(
         family
             .along_interval_multiplier
@@ -8503,14 +8748,86 @@ fn generic_curve_fingerprint(
             .to_bits()
             .to_le_bytes(),
     );
+    if is_cancelled() {
+        return Err(PatternPipelineError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    reserve_stage20m(
+        &mut bytes,
+        128,
+        "coverage.curved_guides.allocation",
+        "curve fingerprint allocation failed",
+    )?;
     bytes.extend(family.along_phase.unwrap_or(0.0).to_bits().to_le_bytes());
     for dimension in &generic.dimensions {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        reserve_stage20m(
+            &mut bytes,
+            128,
+            "coverage.curved_guides.allocation",
+            "curve fingerprint allocation failed",
+        )?;
         bytes.extend(dimension.id.0.to_le_bytes());
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        reserve_stage20m(
+            &mut bytes,
+            128,
+            "coverage.curved_guides.allocation",
+            "curve fingerprint allocation failed",
+        )?;
         bytes.extend(dimension.baseline_angle_degrees.to_bits().to_le_bytes());
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        reserve_stage20m(
+            &mut bytes,
+            128,
+            "coverage.curved_guides.allocation",
+            "curve fingerprint allocation failed",
+        )?;
         bytes.extend(dimension.phase.to_bits().to_le_bytes());
         match &dimension.prototype {
             GuidePrototype::AuthoredOpenPath { structure_id } => {
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                reserve_stage20m(
+                    &mut bytes,
+                    128,
+                    "coverage.curved_guides.allocation",
+                    "curve fingerprint allocation failed",
+                )?;
                 bytes.push(1);
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                reserve_stage20m(
+                    &mut bytes,
+                    128,
+                    "coverage.curved_guides.allocation",
+                    "curve fingerprint allocation failed",
+                )?;
                 bytes.extend(structure_id.0.to_le_bytes());
             }
             GuidePrototype::CircularArc {
@@ -8519,6 +8836,18 @@ fn generic_curve_fingerprint(
                 start_angle_degrees,
                 sweep_angle_degrees,
             } => {
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                reserve_stage20m(
+                    &mut bytes,
+                    128,
+                    "coverage.curved_guides.allocation",
+                    "curve fingerprint allocation failed",
+                )?;
                 bytes.push(2);
                 for value in [
                     center.x,
@@ -8527,6 +8856,18 @@ fn generic_curve_fingerprint(
                     *start_angle_degrees,
                     *sweep_angle_degrees,
                 ] {
+                    if is_cancelled() {
+                        return Err(PatternPipelineError::new(
+                            "evaluation.cancelled",
+                            "evaluation was cancelled",
+                        ));
+                    }
+                    reserve_stage20m(
+                        &mut bytes,
+                        128,
+                        "coverage.curved_guides.allocation",
+                        "curve fingerprint allocation failed",
+                    )?;
                     bytes.extend(value.to_bits().to_le_bytes());
                 }
             }
@@ -8537,18 +8878,114 @@ fn generic_curve_fingerprint(
                 direction_degrees,
                 spacing_multiplier,
             } => {
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                reserve_stage20m(
+                    &mut bytes,
+                    128,
+                    "coverage.curved_guides.allocation",
+                    "curve fingerprint allocation failed",
+                )?;
                 bytes.push(2);
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                reserve_stage20m(
+                    &mut bytes,
+                    128,
+                    "coverage.curved_guides.allocation",
+                    "curve fingerprint allocation failed",
+                )?;
                 bytes.extend(direction_degrees.to_bits().to_le_bytes());
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                reserve_stage20m(
+                    &mut bytes,
+                    128,
+                    "coverage.curved_guides.allocation",
+                    "curve fingerprint allocation failed",
+                )?;
                 bytes.extend(spacing_multiplier.to_bits().to_le_bytes());
             }
             GuideRepetition::NormalOffset { spacing, cleanup } => {
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                reserve_stage20m(
+                    &mut bytes,
+                    128,
+                    "coverage.curved_guides.allocation",
+                    "curve fingerprint allocation failed",
+                )?;
                 bytes.push(3);
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                reserve_stage20m(
+                    &mut bytes,
+                    128,
+                    "coverage.curved_guides.allocation",
+                    "curve fingerprint allocation failed",
+                )?;
                 bytes.extend(spacing.to_bits().to_le_bytes());
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                reserve_stage20m(
+                    &mut bytes,
+                    128,
+                    "coverage.curved_guides.allocation",
+                    "curve fingerprint allocation failed",
+                )?;
                 bytes.push(match cleanup {
                     OffsetCleanup::DissolveCrossings => 1,
                 });
                 let limits = PathOffsetLimits::default();
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                reserve_stage20m(
+                    &mut bytes,
+                    128,
+                    "coverage.curved_guides.allocation",
+                    "curve fingerprint allocation failed",
+                )?;
                 bytes.extend(PATH_OFFSET_ALGORITHM_CONTRACT_ID.as_bytes());
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                reserve_stage20m(
+                    &mut bytes,
+                    128,
+                    "coverage.curved_guides.allocation",
+                    "curve fingerprint allocation failed",
+                )?;
                 bytes.push(limits.maximum_subdivision_depth);
                 for limit in [
                     limits.maximum_segments,
@@ -8556,18 +8993,66 @@ fn generic_curve_fingerprint(
                     limits.maximum_cleanup_pairs,
                     limits.maximum_cusp_isolation_work,
                 ] {
+                    if is_cancelled() {
+                        return Err(PatternPipelineError::new(
+                            "evaluation.cancelled",
+                            "evaluation was cancelled",
+                        ));
+                    }
+                    reserve_stage20m(
+                        &mut bytes,
+                        128,
+                        "coverage.curved_guides.allocation",
+                        "curve fingerprint allocation failed",
+                    )?;
                     bytes.extend(
                         u64::try_from(limit)
                             .expect("path-offset fixed limit fits u64")
                             .to_le_bytes(),
                     );
                 }
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                reserve_stage20m(
+                    &mut bytes,
+                    128,
+                    "coverage.curved_guides.allocation",
+                    "curve fingerprint allocation failed",
+                )?;
                 bytes.extend(limits.tolerance.to_bits().to_le_bytes());
             }
         }
     }
     for (source, path) in &generic.resolved_paths {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        reserve_stage20m(
+            &mut bytes,
+            128,
+            "coverage.curved_guides.allocation",
+            "curve fingerprint allocation failed",
+        )?;
         bytes.extend(source.map_or(0, |id| id.0).to_le_bytes());
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        reserve_stage20m(
+            &mut bytes,
+            128,
+            "coverage.curved_guides.allocation",
+            "curve fingerprint allocation failed",
+        )?;
         bytes.extend(
             u64::try_from(path.segments().len())
                 .expect("usize fits u64")
@@ -8576,13 +9061,61 @@ fn generic_curve_fingerprint(
         for segment in path.segments() {
             match segment {
                 CurveSegment::Line(line) => {
+                    if is_cancelled() {
+                        return Err(PatternPipelineError::new(
+                            "evaluation.cancelled",
+                            "evaluation was cancelled",
+                        ));
+                    }
+                    reserve_stage20m(
+                        &mut bytes,
+                        128,
+                        "coverage.curved_guides.allocation",
+                        "curve fingerprint allocation failed",
+                    )?;
                     bytes.push(1);
                     for point in [line.start(), line.end()] {
+                        if is_cancelled() {
+                            return Err(PatternPipelineError::new(
+                                "evaluation.cancelled",
+                                "evaluation was cancelled",
+                            ));
+                        }
+                        reserve_stage20m(
+                            &mut bytes,
+                            128,
+                            "coverage.curved_guides.allocation",
+                            "curve fingerprint allocation failed",
+                        )?;
                         bytes.extend(point.x.to_bits().to_le_bytes());
+                        if is_cancelled() {
+                            return Err(PatternPipelineError::new(
+                                "evaluation.cancelled",
+                                "evaluation was cancelled",
+                            ));
+                        }
+                        reserve_stage20m(
+                            &mut bytes,
+                            128,
+                            "coverage.curved_guides.allocation",
+                            "curve fingerprint allocation failed",
+                        )?;
                         bytes.extend(point.y.to_bits().to_le_bytes());
                     }
                 }
                 CurveSegment::CubicBezier(cubic) => {
+                    if is_cancelled() {
+                        return Err(PatternPipelineError::new(
+                            "evaluation.cancelled",
+                            "evaluation was cancelled",
+                        ));
+                    }
+                    reserve_stage20m(
+                        &mut bytes,
+                        128,
+                        "coverage.curved_guides.allocation",
+                        "curve fingerprint allocation failed",
+                    )?;
                     bytes.push(2);
                     for point in [
                         cubic.start(),
@@ -8590,7 +9123,31 @@ fn generic_curve_fingerprint(
                         cubic.control_2(),
                         cubic.end(),
                     ] {
+                        if is_cancelled() {
+                            return Err(PatternPipelineError::new(
+                                "evaluation.cancelled",
+                                "evaluation was cancelled",
+                            ));
+                        }
+                        reserve_stage20m(
+                            &mut bytes,
+                            128,
+                            "coverage.curved_guides.allocation",
+                            "curve fingerprint allocation failed",
+                        )?;
                         bytes.extend(point.x.to_bits().to_le_bytes());
+                        if is_cancelled() {
+                            return Err(PatternPipelineError::new(
+                                "evaluation.cancelled",
+                                "evaluation was cancelled",
+                            ));
+                        }
+                        reserve_stage20m(
+                            &mut bytes,
+                            128,
+                            "coverage.curved_guides.allocation",
+                            "curve fingerprint allocation failed",
+                        )?;
                         bytes.extend(point.y.to_bits().to_le_bytes());
                     }
                 }
@@ -8607,16 +9164,67 @@ fn generic_curve_fingerprint(
         request.translation_y,
         request.support_radius,
     ] {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        reserve_stage20m(
+            &mut bytes,
+            128,
+            "coverage.curved_guides.allocation",
+            "curve fingerprint allocation failed",
+        )?;
         bytes.extend(value.to_bits().to_le_bytes());
     }
+    if is_cancelled() {
+        return Err(PatternPipelineError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    reserve_stage20m(
+        &mut bytes,
+        128,
+        "coverage.curved_guides.allocation",
+        "curve fingerprint allocation failed",
+    )?;
     bytes.extend(request.guard_steps.to_le_bytes());
+    if is_cancelled() {
+        return Err(PatternPipelineError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    reserve_stage20m(
+        &mut bytes,
+        128,
+        "coverage.curved_guides.allocation",
+        "curve fingerprint allocation failed",
+    )?;
     bytes.extend(
         u64::try_from(request.max_family_candidates)
             .expect("usize fits u64")
             .to_le_bytes(),
     );
+    if is_cancelled() {
+        return Err(PatternPipelineError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    reserve_stage20m(
+        &mut bytes,
+        128,
+        "coverage.curved_guides.allocation",
+        "curve fingerprint allocation failed",
+    )?;
     bytes.extend(ANTIALIAS_MARGIN.to_bits().to_le_bytes());
-    format!("toniator-stage-20d-guide-family-v1:{}", fnv1a64(bytes))
+    Ok(format!(
+        "toniator-stage-20d-guide-family-v1:{}",
+        fnv1a64(bytes)
+    ))
 }
 
 /// Converts a validated family-site failure into the typed evaluation error boundary.
@@ -12919,7 +13527,7 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
             "pattern.output_layers.guide_paths",
             "guide-path output requires derived guide paths",
         ))?;
-    let mut strokes = Vec::with_capacity(paths.paths().len());
+    let mut strokes = Vec::new();
     let mut profile_samples = 0_usize;
     let mut outline_segments = 0_usize;
     for guide in paths.paths() {
@@ -12939,8 +13547,7 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
         let pixel_footprint = (canvas.width / f64::from(source.identity().width))
             .min(canvas.height / f64::from(source.identity().height));
         let profile_sample_interval = nominal_basis.max(pixel_footprint);
-        let mut profile: Vec<StrokeProfileSample> =
-            Vec::with_capacity(guide.path.segments().len() * 2);
+        let mut profile: Vec<StrokeProfileSample> = Vec::new();
         for (segment_index, segment) in guide.path.segments().iter().enumerate() {
             let start = stroke_sample(
                 segment,
@@ -12974,8 +13581,13 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
                         "canonical stroke profile exceeds the sample limit",
                     ));
                 }
-                profile.push(start);
-                profile_samples += 1;
+                append_stroke_sample(
+                    &mut profile,
+                    &mut profile_samples,
+                    max_profile_samples,
+                    start,
+                    is_cancelled,
+                )?;
             }
             append_adaptive_stroke_interval(
                 segment,
@@ -12998,15 +13610,28 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
                 is_cancelled,
             )?;
         }
+        let mut widths = Vec::new();
+        for sample in &profile {
+            if is_cancelled() {
+                return Err(PatternPipelineError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            reserve_stage20m(
+                &mut widths,
+                1,
+                "realization.stroke.allocation",
+                "stroke width input allocation failed",
+            )?;
+            widths.push(VariableWidthPathSample {
+                location: sample.location,
+                width: sample.width,
+            });
+        }
         let outline = build_variable_width_outline_cancellable(
             &guide.path,
-            &profile
-                .iter()
-                .map(|sample| VariableWidthPathSample {
-                    location: sample.location,
-                    width: sample.width,
-                })
-                .collect::<Vec<_>>(),
+            &widths,
             output.guide_paths().expect("validated guide output").1,
             response.bias,
             1.0 / 8.0,
@@ -13036,8 +13661,13 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
                 outline
                     .contours
                     .iter()
-                    .map(|contour| contour.segments.len())
-                    .sum::<usize>(),
+                    .try_fold(0_usize, |total, contour| {
+                        total.checked_add(contour.segments.len())
+                    })
+                    .ok_or(PatternPipelineError::new(
+                        "realization.stroke.outline_limit",
+                        "stroke outline segment total overflows",
+                    ))?,
             )
             .ok_or(PatternPipelineError::new(
                 "realization.stroke.outline_limit",
@@ -13049,11 +13679,19 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
                 "canonical stroke outline exceeds the segment limit",
             ));
         }
+        reserve_stage20m(
+            &mut strokes,
+            1,
+            "realization.stroke.allocation",
+            "stroke output allocation failed",
+        )?;
         strokes.push(
             CanonicalStroke::new(
                 guide.id,
                 guide.source_structure_id,
-                guide.path.clone(),
+                guide
+                    .path
+                    .cloned_with_limits_cancellable(CurveWorkLimits::default(), is_cancelled)?,
                 nominal_basis,
                 output.guide_paths().expect("validated guide output").1,
                 profile,
@@ -13067,12 +13705,37 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
             })?,
         );
     }
-    let mut bytes = family.family_fingerprint().as_bytes().to_vec();
+    let mut bytes = Vec::new();
+    reserve_stage20m(
+        &mut bytes,
+        family.family_fingerprint().len(),
+        "realization.stroke.allocation",
+        "stroke fingerprint allocation failed",
+    )?;
+    bytes.extend(family.family_fingerprint().as_bytes());
+    reserve_stage20m(
+        &mut bytes,
+        CANONICAL_STROKE_OUTLINE_CONTRACT_ID.len() + 24,
+        "realization.stroke.allocation",
+        "stroke fingerprint allocation failed",
+    )?;
     bytes.extend(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.as_bytes());
     bytes.extend(response.minimum_thickness.to_bits().to_le_bytes());
     bytes.extend(response.maximum_thickness.to_bits().to_le_bytes());
     bytes.extend(response.bias.to_bits().to_le_bytes());
     for stroke in &strokes {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        reserve_stage20m(
+            &mut bytes,
+            128,
+            "realization.stroke.allocation",
+            "stroke fingerprint allocation failed",
+        )?;
         match &stroke.source_id {
             toniator_geometry::CanonicalStrokeSourceId::Structural(id) => {
                 append_structural_path_instance_identity(&mut bytes, *id);
@@ -13097,6 +13760,18 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
             }
         }
         for sample in &stroke.profile {
+            if is_cancelled() {
+                return Err(PatternPipelineError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            reserve_stage20m(
+                &mut bytes,
+                64,
+                "realization.stroke.allocation",
+                "stroke fingerprint allocation failed",
+            )?;
             bytes.extend(sample.center.x.to_bits().to_le_bytes());
             bytes.extend(sample.center.y.to_bits().to_le_bytes());
             bytes.extend(sample.location.segment_index().to_le_bytes());
@@ -13104,6 +13779,18 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
             bytes.extend(sample.normalized_thickness.to_bits().to_le_bytes());
         }
         for contour in &stroke.outline.contours {
+            if is_cancelled() {
+                return Err(PatternPipelineError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            reserve_stage20m(
+                &mut bytes,
+                8,
+                "realization.stroke.allocation",
+                "stroke fingerprint allocation failed",
+            )?;
             bytes.extend((contour.segments.len() as u64).to_le_bytes());
         }
     }
@@ -14073,6 +14760,41 @@ fn stroke_sample(
     })
 }
 
+/// Appends one exact profile knot only after aggregate checked count and fallible reservation.
+/// # Errors
+/// Returns cancellation, profile policy/count or allocation failure without partial publication.
+fn append_stroke_sample(
+    profile: &mut Vec<StrokeProfileSample>,
+    total: &mut usize,
+    maximum: usize,
+    sample: StrokeProfileSample,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), PatternPipelineError> {
+    if cancelled() {
+        return Err(PatternPipelineError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    let next =
+        total
+            .checked_add(1)
+            .filter(|next| *next <= maximum)
+            .ok_or(PatternPipelineError::new(
+                "realization.stroke.profile_limit",
+                "canonical stroke profile exceeds the sample limit",
+            ))?;
+    reserve_stage20m(
+        profile,
+        1,
+        "realization.stroke.allocation",
+        "stroke profile allocation failed",
+    )?;
+    profile.push(sample);
+    *total = next;
+    Ok(())
+}
+
 /// Appends the right endpoint once centerline shape and pattern-scale response spacing are resolved.
 ///
 /// Source response is sampled at nominal pattern-spacing or source-pixel-footprint resolution
@@ -14188,8 +14910,13 @@ fn append_adaptive_stroke_interval(
         )?;
     } else {
         if profile.is_empty() {
-            profile.push(left);
-            *profile_samples += 1;
+            append_stroke_sample(
+                profile,
+                profile_samples,
+                max_profile_samples,
+                left,
+                is_cancelled,
+            )?;
         }
         if *profile_samples >= max_profile_samples {
             return Err(PatternPipelineError::new(
@@ -14197,8 +14924,13 @@ fn append_adaptive_stroke_interval(
                 "canonical stroke profile exceeds the sample limit",
             ));
         }
-        profile.push(right);
-        *profile_samples += 1;
+        append_stroke_sample(
+            profile,
+            profile_samples,
+            max_profile_samples,
+            right,
+            is_cancelled,
+        )?;
     }
     Ok(())
 }
@@ -15413,6 +16145,80 @@ fn fnv1a64(bytes: impl IntoIterator<Item = u8>) -> String {
 mod stage20m_allocation_tests {
     use super::*;
 
+    /// Cancels the actual first fragment publication after complete clipping and before metadata/storage growth.
+    /// # Panics
+    /// Panics if Single/NoAlong publication misses its cancellation poll or subsequent recovery differs.
+    #[test]
+    fn curve_fragment_publication_observes_late_cancellation() {
+        let definition=toniator_domain::PatternDefinition::parametric_curve(
+            toniator_domain::PatternDefinitionId(901),"Publication witness",PatternMechanismId(902),None,
+            PatternOutputLayerId(903),ParametricCurve::Spiral(SpiralCurve {
+                shape:SpiralShape::Round,turns:223.25,radial_spacing:16.0,phase_degrees:37.0,winding:CurveWinding::Clockwise,
+            }),CurveRepetition::Single,None,toniator_domain::CoveragePolicy{guard_steps:1,additional_margin:0.0});
+        let plan=resolve_pattern_pipeline(&definition).unwrap();
+        let request=GridInspectRequest { canvas:CanvasSpec{width:1024.0,height:1024.0},
+            density:ResolvedDensityMetric2D{across_x:100.0,across_y:100.0},rotation_degrees:13.0,
+            translation_x:7.0,translation_y:-9.0,guard_steps:1,support_radius:2.0,max_family_candidates:usize::MAX };
+        CURVE_FRAGMENT_PUBLICATION.with(|flag|flag.set(false));
+        let error=evaluate_typed_family_product_with_curve_limits_progress_cancellable(&plan.family,&request,None,
+            CurveWorkLimits::default(),&||CURVE_FRAGMENT_PUBLICATION.with(std::cell::Cell::get),&|_,_|{}).unwrap_err();
+        assert_eq!(error.path(),"evaluation.cancelled");
+        assert!(CURVE_FRAGMENT_PUBLICATION.with(std::cell::Cell::get));
+        CURVE_FRAGMENT_PUBLICATION.with(|flag|flag.set(false));
+        let recovered=evaluate_typed_family_product_with_curve_limits_progress_cancellable(&plan.family,&request,None,
+            CurveWorkLimits::default(),&||false,&|_,_|{}).unwrap();
+        assert!(!recovered.structural_path_set().unwrap().paths().is_empty());
+        CURVE_FRAGMENT_PUBLICATION.with(|flag|flag.set(false));
+    }
+
+    /// Verifies the reached profile append helper checks cancellation, aggregate overflow and reported allocation.
+    /// # Panics
+    /// Panics if a failed append publishes a knot/count or later exact-boundary growth cannot recover.
+    #[test]
+    fn curve_profile_append_is_checked_fallible_and_atomic() {
+        let sample = StrokeProfileSample {
+            location: PathLocation::new(0, 0.0).unwrap(),
+            center: Point2::new(0.0, 0.0),
+            normalized_thickness: 1.0,
+            width: 2.0,
+        };
+        let mut profile = Vec::new();
+        let mut total = 0;
+        assert_eq!(
+            append_stroke_sample(&mut profile, &mut total, 1, sample, &|| true)
+                .unwrap_err()
+                .path(),
+            "evaluation.cancelled"
+        );
+        FAIL_CURVE_RESERVATION.with(|flag| flag.set(true));
+        assert_eq!(
+            append_stroke_sample(&mut profile, &mut total, 1, sample, &|| false)
+                .unwrap_err()
+                .path(),
+            "realization.stroke.allocation"
+        );
+        assert!(profile.is_empty());
+        assert_eq!(total, 0);
+        append_stroke_sample(&mut profile, &mut total, 1, sample, &|| false).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(profile.len(), 1);
+        assert_eq!(
+            append_stroke_sample(&mut profile, &mut total, 1, sample, &|| false)
+                .unwrap_err()
+                .path(),
+            "realization.stroke.profile_limit"
+        );
+        total = usize::MAX;
+        assert_eq!(
+            append_stroke_sample(&mut profile, &mut total, usize::MAX, sample, &|| false)
+                .unwrap_err()
+                .path(),
+            "realization.stroke.profile_limit"
+        );
+        assert_eq!(total, usize::MAX);
+        assert_eq!(profile.len(), 1);
+    }
+
     /// Exercises Stage 20M's fallible vector reservation mapping without a process-wide allocator.
     #[test]
     fn impossible_reservation_reports_the_requested_stage20m_allocation_path() {
@@ -15536,21 +16342,10 @@ mod random_prng_contract_tests {
         let bounds = Bounds::new(Point2::new(0.0, 0.0), Point2::new(100.0, 100.0)).unwrap();
         let mut first_rng = StablePrng::new(19);
         let first =
-            bridson_candidates(bounds, 8.0, 80, 200_000, 5_000_000, &mut first_rng, &|| {
-                false
-            })
-            .unwrap();
+            bridson_candidates(bounds, 8.0, 80, 200_000, &mut first_rng, &|| false).unwrap();
         let mut second_rng = StablePrng::new(19);
-        let second = bridson_candidates(
-            bounds,
-            8.0,
-            80,
-            200_000,
-            5_000_000,
-            &mut second_rng,
-            &|| false,
-        )
-        .unwrap();
+        let second =
+            bridson_candidates(bounds, 8.0, 80, 200_000, &mut second_rng, &|| false).unwrap();
         assert_eq!(first, second);
         assert!(first.len() >= 80);
         let prefix = &first[..80];
@@ -15578,10 +16373,7 @@ mod random_prng_contract_tests {
     #[test]
     fn bridson_poisson_rejects_incomplete_budget() {
         let bounds = Bounds::new(Point2::new(0.0, 0.0), Point2::new(100.0, 100.0)).unwrap();
-        let error =
-            bridson_candidates(bounds, 8.0, 80, 10, 1_000, &mut StablePrng::new(3), &|| {
-                false
-            })
+        let error = bridson_candidates(bounds, 8.0, 80, 10, &mut StablePrng::new(3), &|| false)
             .unwrap_err();
         assert_eq!(error.path(), "coverage.random_sites.attempts");
     }

@@ -61,6 +61,7 @@ use toniator_domain::{
     HalftoneChannelModel, HalftoneChannelRole, ModeledChannelState,
 };
 use toniator_patterns::{
+    CurveWorkLimits,
     Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID, CanonicalRegionLimits,
     CanonicalRegionSet, CurvePath, CurveSegment, FamilyCapability, GUIDE_FACE_CONTRACT_ID,
     GenericGuideCapability, GridFamilyOutput, GuideFaceLimits, GuideFaceRequest,
@@ -72,7 +73,7 @@ use toniator_patterns::{
     build_typed_site_adjacency_cancellable, build_voronoi_regions_cancellable,
     connection_program_contract_id, evaluate_straight_grid,
     evaluate_typed_connection_paths_with_source_cancellable,
-    evaluate_typed_family_product_with_source_progress_cancellable,
+    evaluate_typed_family_product_with_curve_limits_progress_cancellable,
     evaluate_typed_maze_walls_from_family_cancellable, family_requires_decoded_source,
     maximum_emitted_guide_spacing, maximum_nominal_cell_diameter, realize_circular_marks,
     realize_region_output_with_progress_cancellable, voronoi_region_references,
@@ -400,6 +401,7 @@ impl Default for CompositeOutputLimits {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvaluationLimits {
     max_family_candidates: usize,
+    curve_work: CurveWorkLimits,
     max_flattened_raster_edges: usize,
     max_transformed_curve_segment_instances: usize,
     max_stroke_profile_samples: usize,
@@ -456,6 +458,7 @@ impl EvaluationLimits {
         let default_offsets = PathOffsetLimits::default();
         Self {
             max_family_candidates,
+            curve_work: CurveWorkLimits::default(),
             max_flattened_raster_edges: unlimited,
             max_transformed_curve_segment_instances: unlimited,
             max_stroke_profile_samples: unlimited,
@@ -505,6 +508,18 @@ impl EvaluationLimits {
                 maximum_dependency_inspections: unlimited,
             },
         }
+    }
+
+    /// Supplies explicit geometry-owned canonical construction/clipping policy to current callers.
+    /// The validated policy participates only in family cache admission, not authored identity.
+    pub fn with_curve_work_limits(mut self, limits: CurveWorkLimits) -> Self {
+        self.curve_work = limits;
+        self
+    }
+
+    /// Returns the canonical curve policy for checked family generation and cache admission.
+    pub const fn curve_work_limits(self) -> CurveWorkLimits {
+        self.curve_work
     }
 
     pub const fn max_family_candidates(self) -> usize {
@@ -1172,6 +1187,7 @@ struct FamilyCacheKey {
     definition: FamilyDefinitionKey,
     required_support_radius: u64,
     max_family_candidates: usize,
+    curve_work: CurveWorkLimits,
     structural_source: Option<RealizationSourceIdentity>,
 }
 
@@ -1733,14 +1749,16 @@ fn evaluate_generic_family_stage(
     family: &FamilyCapability,
     request: &GridInspectRequest,
     source: &SourceField,
+    curve_limits: CurveWorkLimits,
     cancellation: &dyn CancellationProbe,
     report_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<TypedFamilyOutput, EvaluationRunError> {
     match evaluate_stage(EvaluationStage::Family, cancellation, || {
-        evaluate_typed_family_product_with_source_progress_cancellable(
+        evaluate_typed_family_product_with_curve_limits_progress_cancellable(
             family,
             request,
             family_requires_decoded_source(family).then_some(source),
+            curve_limits,
             &|| cancellation.is_cancelled(),
             report_progress,
         )
@@ -1880,6 +1898,7 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
         )?
         .to_bits(),
         max_family_candidates: limits.max_family_candidates(),
+        curve_work: limits.curve_work_limits(),
         structural_source: family_requires_decoded_source(&plan.family)
             .then(|| realization_source_identity(source.identity())),
     };
@@ -1907,6 +1926,7 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
                 &plan.family,
                 &grid,
                 &source,
+                limits.curve_work_limits(),
                 cancellation,
                 &|_, _| {},
             )?),
@@ -4363,6 +4383,7 @@ fn evaluate_cached_document_impl(
                             max_family_candidates: limits.max_family_candidates(),
                         },
                         &source,
+                        limits.curve_work_limits(),
                         cancellation,
                         &|completed, total| {
                             cancellation.report_progress(
@@ -4515,12 +4536,17 @@ fn evaluate_cached_document_impl(
                 .then(|| document.effective_mark_density(channel.id, output_capability.layer_id))
                 .transpose()
                 .map_err(EvaluationError::from_domain)?;
-            let uniform_marks = !structural_preview && uniform_density
-                .is_some_and(|density| density.mode == toniator_domain::MarkDensityMode::Uniform);
+            let uniform_marks = !structural_preview
+                && uniform_density.is_some_and(|density| {
+                    density.mode == toniator_domain::MarkDensityMode::Uniform
+                });
             let uniform_fit = if uniform_marks {
                 let saved = request.snapshot.saved_calibration_for(channel.id)
                     .map_err(EvaluationError::from_domain)?
-                    .ok_or(EvaluationError::new("calibration.missing", "Pattern geometry needs a saved calibration; Recalibrate"))?;
+                    .ok_or(EvaluationError::new(
+                        "calibration.missing",
+                        "Pattern geometry needs a saved calibration; Recalibrate",
+                    ))?;
                 realization_key.uniform_calibration = Some(saved.clone());
                 let uniform = saved.uniform().ok_or(EvaluationError::new(
                     "calibration.uniform.missing", "Uniform marks need a saved population calibration; Recalibrate",
@@ -4550,10 +4576,17 @@ fn evaluate_cached_document_impl(
                     Some((_, fit)) => Arc::clone(fit),
                     None => {
                         let nominal_spacing = maximum_nominal_cell_diameter(
-                            &plan.family, document.canvas(), &effective.resolved_density,
-                        ).map_err(EvaluationError::from_pipeline)? / 2.0_f64.sqrt();
-                        Arc::new(uniform_density::UniformDensityFit::from_saved(uniform, nominal_spacing)?)
-                    },
+                            &plan.family,
+                            document.canvas(),
+                            &effective.resolved_density,
+                        )
+                        .map_err(EvaluationError::from_pipeline)?
+                            / 2.0_f64.sqrt();
+                        Arc::new(uniform_density::UniformDensityFit::from_saved(
+                            uniform,
+                            nominal_spacing,
+                        )?)
+                    }
                 };
                 if !uniform_density_fits
                     .iter()
@@ -4595,7 +4628,10 @@ fn evaluate_cached_document_impl(
             let calibrated_curve = if calibrate {
                 let saved = request.snapshot.saved_calibration_for(channel.id)
                     .map_err(EvaluationError::from_domain)?
-                    .ok_or(EvaluationError::new("calibration.missing", "Pattern geometry needs a saved calibration; Recalibrate"))?;
+                    .ok_or(EvaluationError::new(
+                        "calibration.missing",
+                        "Pattern geometry needs a saved calibration; Recalibrate",
+                    ))?;
                 let coverage_key = document_coverage_cache_key(&realization_key, &source, saved);
                 let curve = match coverage_curves
                     .iter()
@@ -4605,15 +4641,18 @@ fn evaluate_cached_document_impl(
                     Some((_, curve)) => curve.clone(),
                     None => {
                         let (minimum, maximum) = match &output_setting.response {
-                            toniator_domain::PatternGeometryResponse::Marks(value) =>
-                                (value.minimum_fill, value.maximum_fill),
-                            toniator_domain::PatternGeometryResponse::Connected(value) =>
-                                (value.minimum_thickness, value.maximum_thickness),
-                            toniator_domain::PatternGeometryResponse::Regions(value) =>
-                                (value.minimum_fill, value.maximum_fill),
+                            toniator_domain::PatternGeometryResponse::Marks(value) => {
+                                (value.minimum_fill, value.maximum_fill)
+                            }
+                            toniator_domain::PatternGeometryResponse::Connected(value) => {
+                                (value.minimum_thickness, value.maximum_thickness)
+                            }
+                            toniator_domain::PatternGeometryResponse::Regions(value) => {
+                                (value.minimum_fill, value.maximum_fill)
+                            }
                         };
                         Some(Arc::new(coverage::from_saved(saved, minimum, maximum)?))
-                    },
+                    }
                 };
                 if !coverage_curves.iter().any(|(key, _)| *key == coverage_key) {
                     coverage_curves.push((coverage_key, curve.clone()));
@@ -6979,6 +7018,7 @@ struct DocumentFamilyContentKey {
 struct DocumentFamilyCacheKey {
     content: DocumentFamilyContentKey,
     candidate_limit: usize,
+    curve_work: CurveWorkLimits,
 }
 
 /// Reports whether a document-family cache entry has identical content and a sufficiently broad envelope.
@@ -7113,6 +7153,7 @@ fn document_family_cache_key(
                 .then(|| realization_source_identity(source.identity())),
         },
         candidate_limit: limits.max_family_candidates(),
+        curve_work: limits.curve_work_limits(),
     })
 }
 
@@ -15004,8 +15045,45 @@ mod cache_key_tests {
             },
             required_support_radius: 4.5_f64.to_bits(),
             max_family_candidates: EvaluationLimits::DEFAULT_MAX_FAMILY_CANDIDATES,
+            curve_work: CurveWorkLimits::default(),
             structural_source: None,
         }
+    }
+
+    /// Separates exact finite curve admission policy in both family caches from canonical content.
+    /// # Panics
+    /// Panics if loose cache entries can bypass finite construction/clipping policy or policy leaks
+    /// into the document-family content identity that supplies canonical geometry fingerprints.
+    #[test]
+    fn curve_work_policy_misses_both_family_cache_keys_without_changing_content() {
+        let broad = family(1.0);
+        let mut finite = broad.clone();
+        finite.curve_work = CurveWorkLimits::new(1, 2, 3, 4).expect("finite policy");
+        assert!(!family_key_supports(&broad, &finite));
+        assert!(family_key_supports(&broad, &broad));
+        let content = DocumentFamilyContentKey {
+            canvas: broad.canvas,
+            density: broad.density,
+            rotation: broad.rotation,
+            translation: broad.translation,
+            guard_steps: broad.guard_steps,
+            required_support_radius: broad.required_support_radius,
+            definition: broad.definition.clone(),
+            structural_source: broad.structural_source.clone(),
+        };
+        let loose = DocumentFamilyCacheKey {
+            content: content.clone(),
+            candidate_limit: usize::MAX,
+            curve_work: broad.curve_work,
+        };
+        let strict = DocumentFamilyCacheKey {
+            content: content.clone(),
+            candidate_limit: usize::MAX,
+            curve_work: finite.curve_work,
+        };
+        assert_eq!(loose.content, strict.content);
+        assert!(!document_family_key_supports(&loose, &strict));
+        assert!(document_family_key_supports(&strict, &strict));
     }
 
     /// Proves a lower maximum fill reuses a broad family envelope while a wider request misses.

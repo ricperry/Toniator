@@ -1,5 +1,7 @@
 //! Renderer-independent conversion of variable-width centerlines into filled outlines.
 
+use crate::curves::{check_curve_cancelled, reserve_curve};
+
 use crate::{
     Bounds, CanonicalFillRule, CubicBezierSegment, CurveError, CurvePath, CurveSegment,
     LineSegment, PathClosure, PathLocation, Point2, Vector2,
@@ -75,7 +77,7 @@ impl VariableWidthOutlineLimits {
 ///
 /// # Errors
 ///
-/// Returns stable validation, cancellation, numeric, or segment-limit diagnostics without
+/// Returns stable validation, cancellation, allocation, numeric, or segment-limit diagnostics without
 /// exposing a partial outline.
 #[allow(clippy::too_many_arguments)]
 pub fn build_variable_width_outline_cancellable(
@@ -105,30 +107,42 @@ pub fn build_variable_width_outline_cancellable(
             "variable-width outlines require at least one width sample",
         ));
     }
-    validate_samples(path, samples)?;
-    if samples.iter().all(|sample| sample.width == 0.0) {
+    validate_samples(path, samples, is_cancelled)?;
+    let mut first_zero = None;
+    let mut all_zero = true;
+    for (index, sample) in samples.iter().enumerate() {
+        check_curve_cancelled(is_cancelled)?;
+        if sample.width == 0.0 {
+            if first_zero.is_none() {
+                first_zero = Some(index);
+            }
+        } else {
+            all_zero = false;
+        }
+    }
+    if all_zero {
         return Ok(CanonicalFilledOutline {
             contours: Vec::new(),
             fill_rule: CanonicalFillRule::NonZero,
             bounds: None,
         });
     }
-    let rotated: Vec<VariableWidthPathSample>;
+    let mut rotated: Vec<VariableWidthPathSample> = Vec::new();
     let samples = if path.closure() == PathClosure::Closed
         && samples[0].width > 0.0
         && samples.last().expect("nonempty samples").width > 0.0
-        && samples.iter().any(|sample| sample.width == 0.0)
+        && let Some(zero) = first_zero
     {
-        let zero = samples
-            .iter()
-            .position(|sample| sample.width == 0.0)
-            .expect("checked zero sample");
-        rotated = samples[zero..]
+        for sample in samples[zero..]
             .iter()
             .chain(samples[..zero].iter())
             .copied()
             .chain(std::iter::once(samples[zero]))
-            .collect::<Vec<_>>();
+        {
+            check_curve_cancelled(is_cancelled)?;
+            reserve_curve(&mut rotated, 1)?;
+            rotated.push(sample);
+        }
         rotated.as_slice()
     } else {
         samples
@@ -141,6 +155,7 @@ pub fn build_variable_width_outline_cancellable(
             return Err(cancelled());
         }
         while start < samples.len() && samples[start].width == 0.0 {
+            check_curve_cancelled(is_cancelled)?;
             start += 1;
         }
         if start == samples.len() {
@@ -148,6 +163,7 @@ pub fn build_variable_width_outline_cancellable(
         }
         let mut end = start + 1;
         while end < samples.len() && samples[end].width > 0.0 {
+            check_curve_cancelled(is_cancelled)?;
             end += 1;
         }
         let run_start = if start > 0 && samples[start - 1].width == 0.0 {
@@ -163,6 +179,7 @@ pub fn build_variable_width_outline_cancellable(
         let run =
             simplify_positive_run(path, &samples[run_start..run_end], tolerance, is_cancelled)?;
         if run.len() == 1 {
+            reserve_curve(&mut contours, 1)?;
             contours.push(single_sample_disc(
                 path,
                 run[0],
@@ -171,22 +188,39 @@ pub fn build_variable_width_outline_cancellable(
                 is_cancelled,
             )?);
         } else {
-            contours.extend(build_positive_run(
+            let run_contours = build_positive_run(
                 path,
                 &run,
                 bias,
                 path.closure() == PathClosure::Closed && start == 0 && end == samples.len(),
                 &mut remaining_segments,
                 is_cancelled,
-            )?);
+            )?;
+            for contour in run_contours {
+                check_curve_cancelled(is_cancelled)?;
+                reserve_curve(&mut contours, 1)?;
+                contours.push(contour);
+            }
         }
         start = end;
     }
-    let bounds = Bounds::from_points(
-        contours
-            .iter()
-            .flat_map(|contour| contour.segments.iter().flat_map(outline_segment_points)),
-    );
+    let mut extrema: Option<(Point2, Point2)> = None;
+    for contour in &contours {
+        for segment in &contour.segments {
+            check_curve_cancelled(is_cancelled)?;
+            for point in outline_segment_points(segment) {
+                if let Some((min, max)) = extrema.as_mut() {
+                    min.x = min.x.min(point.x);
+                    min.y = min.y.min(point.y);
+                    max.x = max.x.max(point.x);
+                    max.y = max.y.max(point.y);
+                } else {
+                    extrema = Some((point, point));
+                }
+            }
+        }
+    }
+    let bounds = extrema.and_then(|(min, max)| Bounds::new(min, max));
     Ok(CanonicalFilledOutline {
         contours,
         fill_rule: CanonicalFillRule::NonZero,
@@ -202,9 +236,11 @@ pub fn build_variable_width_outline_cancellable(
 fn validate_samples(
     path: &CurvePath,
     samples: &[VariableWidthPathSample],
+    is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CurveError> {
     let mut previous: Option<PathLocation> = None;
     for sample in samples {
+        check_curve_cancelled(is_cancelled)?;
         if !sample.width.is_finite() || sample.width < 0.0 {
             return Err(CurveError::new(
                 "curve.outline.width",
@@ -251,7 +287,7 @@ fn single_sample_disc(
     let center = add(centerline, normal.scale(-bias * radius));
     let left = add(center, normal.scale(radius));
     let right = add(center, normal.scale(-radius));
-    let mut segments = Vec::with_capacity(4);
+    let mut segments = Vec::new();
     let forward = add(center, tangent.scale(radius));
     let backward = add(center, tangent.scale(-radius));
     push_round_arc(
@@ -305,14 +341,20 @@ fn build_positive_run(
     remaining_segments: &mut usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<CanonicalOutlineContour>, CurveError> {
-    let vertices = samples
-        .iter()
-        .map(|sample| outline_vertex(path, *sample, bias))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut vertices = Vec::new();
+    for sample in samples {
+        check_curve_cancelled(is_cancelled)?;
+        reserve_curve(&mut vertices, 1)?;
+        vertices.push(outline_vertex(path, *sample, bias)?);
+    }
     if closed {
         let left = build_closed_rail(&vertices, true, remaining_segments, is_cancelled)?;
         let right = build_closed_rail(&vertices, false, remaining_segments, is_cancelled)?;
-        return Ok(vec![left, right]);
+        let mut contours = Vec::new();
+        reserve_curve(&mut contours, 2)?;
+        contours.push(left);
+        contours.push(right);
+        return Ok(contours);
     }
     let mut segments = Vec::new();
     for pair in vertices.windows(2) {
@@ -332,6 +374,7 @@ fn build_positive_run(
         remaining_segments,
     )?;
     for pair in vertices.windows(2).rev() {
+        check_curve_cancelled(is_cancelled)?;
         push_join_or_rail(&mut segments, pair[1], pair[0], false, remaining_segments)?;
     }
     push_round_cap(
@@ -342,7 +385,10 @@ fn build_positive_run(
         false,
         remaining_segments,
     )?;
-    Ok(vec![CanonicalOutlineContour { segments }])
+    let mut contours = Vec::new();
+    reserve_curve(&mut contours, 1)?;
+    contours.push(CanonicalOutlineContour { segments });
+    Ok(contours)
 }
 
 /// Builds one independently closed rail for a positive closed centerline.
@@ -359,11 +405,18 @@ fn build_closed_rail(
     remaining_segments: &mut usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CanonicalOutlineContour, CurveError> {
-    let ordered = if left {
-        vertices.to_vec()
-    } else {
-        vertices.iter().copied().rev().collect()
-    };
+    let mut ordered = Vec::new();
+    for index in 0..vertices.len() {
+        check_curve_cancelled(is_cancelled)?;
+        reserve_curve(&mut ordered, 1)?;
+        ordered.push(
+            vertices[if left {
+                index
+            } else {
+                vertices.len() - 1 - index
+            }],
+        );
+    }
     let mut segments = Vec::new();
     for pair in ordered.windows(2) {
         if is_cancelled() {
@@ -391,9 +444,11 @@ fn simplify_positive_run(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<VariableWidthPathSample>, CurveError> {
     let mut keep = Vec::new();
-    keep.try_reserve_exact(samples.len())
-        .map_err(|_| simplification_allocation_error())?;
-    keep.resize(samples.len(), false);
+    for _ in samples {
+        check_curve_cancelled(is_cancelled)?;
+        reserve_curve(&mut keep, 1)?;
+        keep.push(false);
+    }
     keep[0] = true;
     keep[samples.len() - 1] = true;
     for index in 1..samples.len() - 1 {
@@ -430,15 +485,13 @@ fn simplify_positive_run(
         }
     }
     let mut retained = Vec::new();
-    retained
-        .try_reserve_exact(keep.iter().filter(|retained| **retained).count())
-        .map_err(|_| simplification_allocation_error())?;
-    retained.extend(
-        samples
-            .iter()
-            .enumerate()
-            .filter_map(|(index, sample)| keep[index].then_some(*sample)),
-    );
+    for (index, sample) in samples.iter().enumerate() {
+        check_curve_cancelled(is_cancelled)?;
+        if keep[index] {
+            reserve_curve(&mut retained, 1)?;
+            retained.push(*sample);
+        }
+    }
     Ok(retained)
 }
 
@@ -632,6 +685,7 @@ fn push_line(
             "variable-width outline exceeds the configured segment limit",
         ));
     }
+    reserve_curve(segments, 1)?;
     segments.push(CurveSegment::Line(LineSegment::new(start, end)?));
     *remaining_segments -= 1;
     Ok(())
@@ -744,6 +798,7 @@ fn push_cubic(
             "variable-width outline exceeds the configured segment limit",
         ));
     }
+    reserve_curve(segments, 1)?;
     segments.push(CurveSegment::CubicBezier(CubicBezierSegment::new(
         start, control_1, control_2, end,
     )?));
@@ -752,16 +807,20 @@ fn push_cubic(
 }
 
 /// Returns all construction points retained by one derived contour segment.
-fn outline_segment_points(segment: &CurveSegment) -> Vec<Point2> {
-    match segment {
-        CurveSegment::Line(line) => vec![line.start(), line.end()],
-        CurveSegment::CubicBezier(cubic) => vec![
-            cubic.start(),
-            cubic.control_1(),
-            cubic.control_2(),
-            cubic.end(),
-        ],
-    }
+fn outline_segment_points(segment: &CurveSegment) -> impl Iterator<Item = Point2> + use<> {
+    let (points, count) = match segment {
+        CurveSegment::Line(line) => ([line.start(), line.end(), line.end(), line.end()], 2),
+        CurveSegment::CubicBezier(cubic) => (
+            [
+                cubic.start(),
+                cubic.control_1(),
+                cubic.control_2(),
+                cubic.end(),
+            ],
+            4,
+        ),
+    };
+    points.into_iter().take(count)
 }
 
 /// Adds two finite geometric values without hiding numeric overflow.

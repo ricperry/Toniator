@@ -1,8 +1,9 @@
 use crate::{AffineTransform2D, Bounds, Point2, Vector2};
 
 use super::{
-    CubicBezierSegment, CurveError, CurveSegment, LineSegment, MAX_CLIPPED_SEGMENTS,
-    PathIntersection, arc_length::PathArcLength, clipping, intersections, parameter,
+    CubicBezierSegment, CurveError, CurveSegment, CurveWorkLimits, LineSegment, PathIntersection,
+    arc_length::PathArcLength, check_curve_cancelled, clipping, curve_storage_count, intersections,
+    parameter, reserve_curve,
 };
 
 /// Authored topological closure of a connected path.
@@ -61,19 +62,33 @@ impl CurvePath {
     ///
     /// Returns a stable empty, limit, continuity, or closure failure before exposing a path.
     pub fn new(segments: Vec<CurveSegment>, closure: PathClosure) -> Result<Self, CurveError> {
+        Self::new_with_limits_cancellable(segments, closure, CurveWorkLimits::default(), &|| false)
+    }
+
+    /// Validates owned finite connected topology under explicit policy and cancellation.
+    /// # Errors
+    /// Returns empty, finite policy, continuity, closure or cancellation failure atomically.
+    pub fn new_with_limits_cancellable(
+        segments: Vec<CurveSegment>,
+        closure: PathClosure,
+        limits: CurveWorkLimits,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, CurveError> {
+        check_curve_cancelled(cancelled)?;
         if segments.is_empty() {
             return Err(CurveError::new(
                 "curve.path.segments.empty",
                 "curve paths require at least one segment",
             ));
         }
-        if segments.len() > 4_096 {
+        if segments.len() > limits.maximum_segments {
             return Err(CurveError::new(
                 "curve.path.segments.limit",
-                "curve paths support at most 4096 segments",
+                "curve path exceeds the configured segment limit",
             ));
         }
         for pair in segments.windows(2) {
+            check_curve_cancelled(cancelled)?;
             if pair[0].end() != pair[1].start() {
                 return Err(CurveError::new(
                     "curve.path.continuity",
@@ -111,23 +126,73 @@ impl CurvePath {
     /// Returns `curve.path.polyline.vertices` for fewer than two or non-finite vertices, or a
     /// stable general path failure if the bounded constructed segment list is invalid.
     pub fn polyline(vertices: Vec<Point2>, closure: PathClosure) -> Result<Self, CurveError> {
-        if vertices.len() < 2 || vertices.iter().any(|point| !point.is_finite()) {
+        Self::polyline_with_limits_cancellable(
+            vertices,
+            closure,
+            CurveWorkLimits::default(),
+            &|| false,
+        )
+    }
+
+    /// Builds ordered line segments by fallible incremental growth, preserving exact vertices.
+    /// # Errors
+    /// Returns invalid vertices, cancellation, finite policy, allocation or path validation errors.
+    pub fn polyline_with_limits_cancellable(
+        vertices: Vec<Point2>,
+        closure: PathClosure,
+        limits: CurveWorkLimits,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, CurveError> {
+        if vertices.len() < 2 {
             return Err(CurveError::new(
                 "curve.path.polyline.vertices",
                 "polylines require at least two finite vertices",
             ));
         }
-        let mut segments = vertices
-            .windows(2)
-            .map(|pair| LineSegment::new(pair[0], pair[1]).map(CurveSegment::Line))
-            .collect::<Result<Vec<_>, _>>()?;
+        for vertex in &vertices {
+            check_curve_cancelled(cancelled)?;
+            if !vertex.is_finite() {
+                return Err(CurveError::new(
+                    "curve.path.polyline.vertices",
+                    "polylines require at least two finite vertices",
+                ));
+            }
+        }
+        let count = (vertices.len() - 1)
+            .checked_add(usize::from(
+                closure == PathClosure::Closed && vertices.last() != vertices.first(),
+            ))
+            .ok_or(CurveError::new(
+                "curve.path.count_overflow",
+                "polyline segment count overflows",
+            ))?;
+        curve_storage_count::<CurveSegment>(count)?;
+        if count > limits.maximum_segments {
+            return Err(CurveError::new(
+                "curve.path.segments.limit",
+                "curve path exceeds the configured segment limit",
+            ));
+        }
+        let mut segments = Vec::new();
+        for pair in vertices.windows(2) {
+            check_curve_cancelled(cancelled)?;
+            if segments.len() >= limits.maximum_segments {
+                return Err(CurveError::new(
+                    "curve.path.segments.limit",
+                    "curve path exceeds the configured segment limit",
+                ));
+            }
+            reserve_curve(&mut segments, 1)?;
+            segments.push(CurveSegment::Line(LineSegment::new(pair[0], pair[1])?));
+        }
         if closure == PathClosure::Closed && vertices.last() != vertices.first() {
+            reserve_curve(&mut segments, 1)?;
             segments.push(CurveSegment::Line(LineSegment::new(
-                *vertices.last().expect("two vertices"),
+                vertices[vertices.len() - 1],
                 vertices[0],
             )?));
         }
-        Self::new(segments, closure)
+        Self::new_with_limits_cancellable(segments, closure, limits, cancelled)
     }
 
     /// Returns source segments in immutable authored order.
@@ -238,7 +303,42 @@ impl CurvePath {
     ///
     /// Returns clipping limits or numeric failures without partial fragment output.
     pub fn clip_to_bounds(&self, bounds: Bounds) -> Result<Vec<Self>, CurveError> {
-        clipping::clip_path(self, bounds)
+        self.clip_to_bounds_with_limits_cancellable(bounds, CurveWorkLimits::default(), &|| false)
+    }
+
+    /// Clips complete ordered geometry under explicit work/output policy and cancellation.
+    /// # Errors
+    /// Returns finite policy, allocation, root-depth, numeric or cancellation failures atomically.
+    pub fn clip_to_bounds_with_limits_cancellable(
+        &self,
+        bounds: Bounds,
+        limits: CurveWorkLimits,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<Self>, CurveError> {
+        clipping::clip_path(self, bounds, limits, cancelled)
+    }
+
+    /// Copies exact segments incrementally without invoking an infallible deep clone.
+    /// # Errors
+    /// Returns finite policy, allocation or cancellation failure before exposing a partial copy.
+    pub fn cloned_with_limits_cancellable(
+        &self,
+        limits: CurveWorkLimits,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, CurveError> {
+        if self.segments.len() > limits.maximum_segments {
+            return Err(CurveError::new(
+                "curve.path.segments.limit",
+                "curve path exceeds the configured segment limit",
+            ));
+        }
+        let mut segments = Vec::new();
+        for segment in &self.segments {
+            check_curve_cancelled(cancelled)?;
+            reserve_curve(&mut segments, 1)?;
+            segments.push(*segment);
+        }
+        Self::new_with_limits_cancellable(segments, self.closure, limits, cancelled)
     }
 
     /// Applies the existing affine authority to all construction points while retaining topology.
@@ -247,12 +347,31 @@ impl CurvePath {
     ///
     /// Returns `curve.path.transform.non_finite` without a partial transformed path.
     pub fn transformed(&self, transform: AffineTransform2D) -> Result<Self, CurveError> {
-        let segments = self
-            .segments
-            .iter()
-            .map(|segment| segment.transformed(transform))
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::new(segments, self.closure)
+        self.transformed_with_limits_cancellable(transform, CurveWorkLimits::default(), &|| false)
+    }
+
+    /// Transforms points in exact source order with fallible incremental storage and cancellation.
+    /// # Errors
+    /// Returns numeric, finite policy, allocation, topology or cancellation failure atomically.
+    pub fn transformed_with_limits_cancellable(
+        &self,
+        transform: AffineTransform2D,
+        limits: CurveWorkLimits,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, CurveError> {
+        if self.segments.len() > limits.maximum_segments {
+            return Err(CurveError::new(
+                "curve.path.segments.limit",
+                "curve path exceeds the configured segment limit",
+            ));
+        }
+        let mut segments = Vec::new();
+        for segment in &self.segments {
+            check_curve_cancelled(cancelled)?;
+            reserve_curve(&mut segments, 1)?;
+            segments.push(segment.transformed(transform)?);
+        }
+        Self::new_with_limits_cancellable(segments, self.closure, limits, cancelled)
     }
 
     /// Moves one authored anchor and retains the adjacent cubic handle vectors relative to it.
@@ -503,21 +622,39 @@ impl CurvePath {
             ))
     }
 
-    /// Builds clipping output only after enforcing the path-wide output-segment limit.
+    /// Publishes all ordered fragments only after checked aggregate policy validation.
+    /// # Errors
+    /// Returns aggregate count, finite policy, allocation, topology or cancellation failure.
     pub(crate) fn fragments_from_segment_groups(
         groups: Vec<Vec<CurveSegment>>,
+        limits: CurveWorkLimits,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<Self>, CurveError> {
-        let count = groups.iter().map(Vec::len).sum::<usize>();
-        if count > MAX_CLIPPED_SEGMENTS {
+        let count = groups
+            .iter()
+            .try_fold(0_usize, |total, group| total.checked_add(group.len()))
+            .ok_or(CurveError::new(
+                "curve.path.count_overflow",
+                "clipped segment count overflows",
+            ))?;
+        if count > limits.maximum_clipped_segments {
             return Err(CurveError::new(
                 "curve.path.clipping.segment_limit",
                 "clipped output segment limit exceeded",
             ));
         }
-        groups
-            .into_iter()
-            .map(|segments| Self::new(segments, PathClosure::Open))
-            .collect()
+        let mut paths = Vec::new();
+        for segments in groups {
+            check_curve_cancelled(cancelled)?;
+            reserve_curve(&mut paths, 1)?;
+            paths.push(Self::new_with_limits_cancellable(
+                segments,
+                PathClosure::Open,
+                limits,
+                cancelled,
+            )?);
+        }
+        Ok(paths)
     }
 }
 

@@ -4,12 +4,12 @@
 //! this module. Each member is positive filled geometry before nonzero winding
 //! combines members, so touching and overlapping members paint once.
 
-use super::{GeometryOutput, RenderError, color_hex, vector_occupancy::flatten_contour};
+use super::{GeometryOutput, RenderError, color_hex};
 use i_overlay::{
     core::{fill_rule::FillRule, overlay_rule::OverlayRule},
     float::scale::FixedScaleFloatOverlay,
 };
-use kurbo::{CubicBez, ParamCurveArea as _, Point};
+use kurbo::{CubicBez, ParamCurve as _, ParamCurveArea as _, Point, QuadBez};
 use std::fmt::Write as _;
 use toniator_domain::{CanvasSpec, ColorValue};
 use toniator_geometry::{CanonicalFillRule, CanonicalMark, CurveSegment, Point2};
@@ -386,20 +386,17 @@ impl<'a> SvgJoin<'a> {
         for segments in contours {
             self.check()?;
             validate_contour(segments)?;
-            let contour = flatten_contour(
-                segments,
-                self.axis,
-                FLATTEN_TOLERANCE,
-                self.remaining_edges,
-                self.cancelled,
-            )
-            .map_err(|error| match error.path() {
-                "evaluation.cancelled" => err("svg.cancelled", "SVG serialization was cancelled"),
-                "vector.limits.flattened_edges" => {
-                    err("svg.limits.edges", "SVG edge limit exceeded")
-                }
-                _ => error,
-            })?;
+            let contour =
+                flatten_svg_contour(segments, self.axis, self.remaining_edges, self.cancelled)
+                    .map_err(|error| match error.path() {
+                        "evaluation.cancelled" => {
+                            err("svg.cancelled", "SVG serialization was cancelled")
+                        }
+                        "vector.limits.flattened_edges" => {
+                            err("svg.limits.edges", "SVG edge limit exceeded")
+                        }
+                        _ => error,
+                    })?;
             self.edges(contour.len())?;
             for point in &contour {
                 if point.iter().any(|value| {
@@ -418,8 +415,8 @@ impl<'a> SvgJoin<'a> {
             CanonicalFillRule::EvenOdd => FillRule::EvenOdd,
             CanonicalFillRule::NonZero => FillRule::NonZero,
         };
-        let empty: Contour = Vec::new();
         self.check()?;
+        let empty: Contour = Vec::new();
         let normalized = shape
             .overlay_with_fixed_scale_as::<i64>(&empty, OverlayRule::Subject, fill, BOOLEAN_SCALE)
             .map_err(|_| {
@@ -465,6 +462,226 @@ impl<'a> SvgJoin<'a> {
         }
         Ok(())
     }
+}
+
+/// Appends one normalized SVG polygon vertex after exact work, cancellation and storage checks.
+/// # Errors
+/// Returns cancellation, finite-coordinate, edge-limit or reported allocation failure atomically.
+fn push_svg_vertex(
+    points: &mut Contour,
+    point: Point,
+    budget: usize,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(), RenderError> {
+    if cancelled() {
+        return Err(err("svg.cancelled", "SVG serialization was cancelled"));
+    }
+    if !point.is_finite() {
+        return Err(err("vector.contour", "flattened SVG contour is not finite"));
+    }
+    if points.len() >= budget {
+        return Err(err("svg.limits.edges", "SVG edge limit exceeded"));
+    }
+    points
+        .try_reserve(1)
+        .map_err(|_| err("svg.allocation", "SVG flattening allocation failed"))?;
+    points.push([point.x, point.y]);
+    Ok(())
+}
+
+/// Flattens one canonical contour using curvature accuracy rather than chord-length subdivision.
+/// The unchanged 1e-8 canvas-relative tolerance is split between cubic-to-quadratic (10%)
+/// and quadratic-to-polyline (90%) error. Lazy cubic intervals avoid a retained quadratic vector;
+/// fallible storage and cancellation remain request-local. Other vector consumers stay unchanged.
+/// # Errors
+/// Returns cancellation, checked finite/work/storage diagnostics without publishing a partial contour.
+fn flatten_svg_contour(
+    segments: &[CurveSegment],
+    axis: f64,
+    budget: usize,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Contour, RenderError> {
+    let first = segments
+        .first()
+        .ok_or(err("vector.contour", "filled contour has no segments"))?;
+    if segments.len() > budget {
+        return Err(err("svg.limits.edges", "SVG edge limit exceeded"));
+    }
+    let mut points = Vec::new();
+    push_svg_vertex(
+        &mut points,
+        Point::new(first.start().x / axis, first.start().y / axis),
+        budget,
+        cancelled,
+    )?;
+    let mut work = 0usize;
+    for segment in segments {
+        if cancelled() {
+            return Err(err("svg.cancelled", "SVG serialization was cancelled"));
+        }
+        match segment {
+            CurveSegment::Line(line) => push_svg_vertex(
+                &mut points,
+                Point::new(line.end().x / axis, line.end().y / axis),
+                budget,
+                cancelled,
+            )?,
+            CurveSegment::CubicBezier(c) => {
+                let cubic = CubicBez::new(
+                    (c.start().x / axis, c.start().y / axis),
+                    (c.control_1().x / axis, c.control_1().y / axis),
+                    (c.control_2().x / axis, c.control_2().y / axis),
+                    (c.end().x / axis, c.end().y / axis),
+                );
+                if ![cubic.p0, cubic.p1, cubic.p2, cubic.p3]
+                    .into_iter()
+                    .all(|p| p.is_finite())
+                {
+                    return Err(err("vector.contour", "filled cubic is not finite"));
+                }
+                flatten_svg_cubic(cubic, &mut points, &mut work, budget, cancelled)?;
+            }
+        }
+    }
+    if cancelled() {
+        return Err(err("svg.cancelled", "SVG serialization was cancelled"));
+    }
+    if points.len() >= 2 && points.first() == points.last() {
+        points.pop();
+    }
+    if points.len() < 3 {
+        return Err(err(
+            "vector.contour",
+            "flattened filled contour is not finite and closed",
+        ));
+    }
+    Ok(points)
+}
+
+/// Emits an exact monotone chord or lazy accuracy-bounded quadratic intervals for one cubic.
+/// Endpoint-collapsed controls and axis-aligned controls between endpoints certify exact chord geometry.
+/// Kurbo's derived arithmetic/count is validated before its cast/iterator can cause unbounded work.
+/// # Errors
+/// Returns finite/count/addressability, configured work, cancellation or allocation failure.
+fn flatten_svg_cubic(
+    cubic: CubicBez,
+    points: &mut Contour,
+    work: &mut usize,
+    budget: usize,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(), RenderError> {
+    if cancelled() {
+        return Err(err("svg.cancelled", "SVG serialization was cancelled"));
+    }
+    let between = |value: f64, a: f64, b: f64| value >= a.min(b) && value <= a.max(b);
+    if (cubic.p1 == cubic.p0 && cubic.p2 == cubic.p3)
+        || (cubic.p0.x == cubic.p1.x
+            && cubic.p1.x == cubic.p2.x
+            && cubic.p2.x == cubic.p3.x
+            && between(cubic.p1.y, cubic.p0.y, cubic.p3.y)
+            && between(cubic.p2.y, cubic.p0.y, cubic.p3.y))
+        || (cubic.p0.y == cubic.p1.y
+            && cubic.p1.y == cubic.p2.y
+            && cubic.p2.y == cubic.p3.y
+            && between(cubic.p1.x, cubic.p0.x, cubic.p3.x)
+            && between(cubic.p2.x, cubic.p0.x, cubic.p3.x))
+    {
+        return push_svg_vertex(points, cubic.p3, budget, cancelled);
+    }
+    let accuracy = FLATTEN_TOLERANCE * 0.1;
+    let p1x2 = 3.0 * cubic.p1.to_vec2() - cubic.p0.to_vec2();
+    let p2x2 = 3.0 * cubic.p2.to_vec2() - cubic.p3.to_vec2();
+    let ratio = (p2x2 - p1x2).hypot2() / (432.0 * accuracy * accuracy);
+    if !ratio.is_finite() {
+        return Err(err(
+            "svg.precision.flatten",
+            "SVG cubic subdivision arithmetic is not finite",
+        ));
+    }
+    let quads = cubic.to_quads(accuracy);
+    let (minimum, maximum) = quads.size_hint();
+    let count = points
+        .len()
+        .checked_add(minimum)
+        .ok_or(err("svg.limits.edges", "SVG flattening count overflows"))?;
+    if maximum != Some(minimum)
+        || count > budget
+        || work.checked_add(minimum).is_none_or(|count| count > budget)
+        || count
+            .checked_mul(core::mem::size_of::<[f64; 2]>())
+            .is_none_or(|bytes| bytes > isize::MAX as usize)
+    {
+        return Err(err(
+            "svg.limits.edges",
+            "SVG flattening exceeds work or addressable storage",
+        ));
+    }
+    for (_, _, quad) in quads {
+        flatten_svg_quad(quad, points, work, budget, cancelled)?;
+    }
+    Ok(())
+}
+
+/// Emits quadratic chords only when a convex-hull deviation certificate fits the remaining 90% error.
+/// For any quadratic point, the control point has weight at most one half; distance to the chord
+/// is convex, so half the control-to-segment distance bounds the entire curve in both directions.
+/// Ordered de Casteljau subdivision observes cancellation at every bounded local interval and
+/// retains cusp/reversal extrema that a zero-curvature line shortcut would otherwise omit.
+/// # Errors
+/// Returns checked work/storage, finite geometry or cancellation errors before contour publication.
+fn flatten_svg_quad(
+    quad: QuadBez,
+    points: &mut Contour,
+    work: &mut usize,
+    budget: usize,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(), RenderError> {
+    let mut pending = Vec::new();
+    pending
+        .try_reserve(1)
+        .map_err(|_| err("svg.allocation", "SVG flattening allocation failed"))?;
+    pending.push(quad);
+    while let Some(quad) = pending.pop() {
+        if cancelled() {
+            return Err(err("svg.cancelled", "SVG serialization was cancelled"));
+        }
+        *work = work
+            .checked_add(1)
+            .filter(|count| *count <= budget)
+            .ok_or(err(
+                "svg.limits.edges",
+                "SVG flattening work exceeds edge limit",
+            ))?;
+        let delta = quad.p2 - quad.p0;
+        let length = delta.hypot();
+        let offset = quad.p1 - quad.p0;
+        let distance = if length == 0.0 {
+            offset.hypot()
+        } else {
+            let direction = delta / length;
+            (offset - direction * offset.dot(direction).clamp(0.0, length)).hypot()
+        };
+        if !distance.is_finite() {
+            return Err(err("vector.contour", "quadratic hull is not finite"));
+        }
+        if distance * 0.5 > FLATTEN_TOLERANCE * 0.9 {
+            let (left, right) = quad.subdivide();
+            if left == quad || right == quad {
+                return Err(err(
+                    "svg.precision.flatten",
+                    "SVG quadratic cannot meet flattening tolerance",
+                ));
+            }
+            pending
+                .try_reserve(2)
+                .map_err(|_| err("svg.allocation", "SVG flattening allocation failed"))?;
+            pending.push(right);
+            pending.push(left);
+        } else {
+            push_svg_vertex(points, quad.p2, budget, cancelled)?;
+        }
+    }
+    Ok(())
 }
 
 /// One conservative control hull for a line or coordinate-monotonic cubic.
@@ -1050,6 +1267,317 @@ fn err(path: &'static str, message: &'static str) -> RenderError {
 mod tests {
     use super::*;
     use toniator_geometry::{CubicBezierSegment, CurvePath, PathClosure};
+
+    /// Checks the geometric error budget independently on bowed, inflected, cusp, loop and tiny cubics.
+    /// Cubic-to-quadratic third-difference bounds certify each lazy interval; dense Hausdorff samples
+    /// supplement that proof and do not replace it. Straight monotone chords publish only their endpoint.
+    /// # Panics
+    /// Panics if error allocation, exact chord emission, finite preflight or cancellation changes.
+    #[test]
+    fn svg_adaptive_cubic_quality_and_exact_chords_are_bounded() {
+        let cases = [
+            CubicBez::new((0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)),
+            CubicBez::new((0.0, 0.0), (0.2, 1.0), (0.8, -1.0), (1.0, 0.0)),
+            CubicBez::new((0.0, 0.0), (1.0, 1.0), (-1.0, -1.0), (0.0, 0.0)),
+            CubicBez::new((0.0, 0.0), (1.0, 1.0), (-1.0, 1.0), (0.0, 0.0)),
+            CubicBez::new(
+                (0.5, 0.5),
+                (0.5 + 1e-12, 0.5),
+                (0.5, 0.5 + 1e-12),
+                (0.5 + 1e-12, 0.5 + 1e-12),
+            ),
+            CubicBez::new(
+                (100.0, 100.0),
+                (100.0, 101.0),
+                (101.0, 101.0),
+                (101.0, 100.0),
+            ),
+        ];
+        for cubic in cases {
+            // The proof is in real arithmetic; this separately bounded allowance accounts for
+            // recentered f64 evaluation at the valid translated coordinates in the witness.
+            let rounding = 32.0
+                * f64::EPSILON
+                * [cubic.p0, cubic.p1, cubic.p2, cubic.p3]
+                    .into_iter()
+                    .map(|p| p.x.abs().max(p.y.abs()))
+                    .fold(1.0, f64::max);
+            for (t0, t1, quad) in cubic.to_quads(FLATTEN_TOLERANCE * 0.1) {
+                let sub = cubic.subsegment(t0..t1);
+                let third = (sub.p3 - sub.p2) - 2.0 * (sub.p2 - sub.p1) + (sub.p1 - sub.p0);
+                let bound = third.hypot() / (12.0 * 3.0_f64.sqrt());
+                assert!(
+                    bound <= FLATTEN_TOLERANCE * 0.1 + rounding,
+                    "cubic/quad bound={bound}"
+                );
+                let mut quad_points = vec![[quad.p0.x, quad.p0.y]];
+                flatten_svg_quad(quad, &mut quad_points, &mut 0, usize::MAX, &|| false).unwrap();
+                use kurbo::ParamCurveNearest as _;
+                // Noncollinear quadratics have unique local point addresses. Collinear reversal
+                // extrema are checked below against their independent analytic closed form.
+                let a = quad.p1 - quad.p0;
+                let b = quad.p2 - quad.p0;
+                if a.cross(b) != 0.0 {
+                    for pair in quad_points.windows(2) {
+                        let t0 = quad.nearest(Point::new(pair[0][0], pair[0][1]), 1e-14).t;
+                        let t1 = quad.nearest(Point::new(pair[1][0], pair[1][1]), 1e-14).t;
+                        let sub = quad.subsegment(t0..t1);
+                        let chord_bound =
+                            0.5 * test_point_segment_distance(sub.p1, pair[0], pair[1]);
+                        assert!(
+                            chord_bound <= FLATTEN_TOLERANCE * 0.9 + rounding,
+                            "independent quadratic/chord bound={chord_bound} cubic={cubic:?} quad={quad:?} ts={t0},{t1} pair={pair:?}"
+                        );
+                    }
+                }
+                for i in 0..=16 {
+                    let u = f64::from(i) / 16.0;
+                    assert!(
+                        (cubic.eval(t0 + (t1 - t0) * u) - quad.eval(u)).hypot() <= bound + rounding
+                    );
+                }
+            }
+            let mut points = vec![[cubic.p0.x, cubic.p0.y]];
+            flatten_svg_cubic(cubic, &mut points, &mut 0, usize::MAX, &|| false).unwrap();
+            if cubic == cases[2] {
+                let extremum = 1.0 / (2.0 * 3.0_f64.sqrt());
+                let maximum = points
+                    .iter()
+                    .map(|p| p[0])
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let minimum = points.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
+                assert!((maximum - extremum).abs() <= FLATTEN_TOLERANCE);
+                assert!((minimum + extremum).abs() <= FLATTEN_TOLERANCE);
+            }
+            for i in 0..=1024 {
+                let point = cubic.eval(f64::from(i) / 1024.0);
+                let distance = points
+                    .windows(2)
+                    .map(|pair| test_point_segment_distance(point, pair[0], pair[1]))
+                    .fold(f64::INFINITY, f64::min);
+                assert!(
+                    distance <= FLATTEN_TOLERANCE + rounding,
+                    "cubic/polyline diagnostic={distance}"
+                );
+            }
+        }
+        for cubic in [
+            CubicBez::new((0.0, 0.0), (0.0, 0.0), (1.0, 1.0), (1.0, 1.0)),
+            CubicBez::new((0.0, 0.0), (1.0, 0.0), (1.0, 0.0), (4.0, 0.0)),
+            CubicBez::new((0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0)),
+        ] {
+            let mut points = vec![[cubic.p0.x, cubic.p0.y]];
+            flatten_svg_cubic(cubic, &mut points, &mut 0, usize::MAX, &|| false).unwrap();
+            assert_eq!(
+                points,
+                vec![[cubic.p0.x, cubic.p0.y], [cubic.p3.x, cubic.p3.y]]
+            );
+        }
+        let mut points = Vec::new();
+        assert_eq!(
+            flatten_svg_cubic(cases[0], &mut points, &mut 0, 1, &|| false)
+                .unwrap_err()
+                .path(),
+            "svg.limits.edges"
+        );
+        assert!(points.is_empty());
+        let extreme = CubicBez::new((0.0, 0.0), (1e308, 1e308), (-1e308, 1e308), (1.0, 0.0));
+        assert_eq!(
+            flatten_svg_cubic(extreme, &mut points, &mut 0, usize::MAX, &|| false)
+                .unwrap_err()
+                .path(),
+            "svg.precision.flatten"
+        );
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        assert_eq!(
+            flatten_svg_cubic(cases[0], &mut points, &mut 0, usize::MAX, &|| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 == 12
+            })
+            .unwrap_err()
+            .path(),
+            "svg.cancelled"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 12);
+    }
+
+    /// Computes an independent recentered point-to-closed-line-segment distance for quality witnesses.
+    fn test_point_segment_distance(point: Point, a: [f64; 2], b: [f64; 2]) -> f64 {
+        let start = Point::new(a[0], a[1]);
+        let delta = Point::new(b[0], b[1]) - start;
+        let t = if delta.hypot2() == 0.0 {
+            0.0
+        } else {
+            ((point - start).dot(delta) / delta.hypot2()).clamp(0.0, 1.0)
+        };
+        (point - (start + delta * t)).hypot()
+    }
+
+    /// Preserves analytic circle holes, mixed winding, self-overlap and touching boundaries under both fills.
+    /// Witnesses lie well away from boundaries; line clipping remains covered by its directed winding test.
+    /// # Panics
+    /// Panics if normalized fill membership changes, finite limits are ignored or cancellation is lost.
+    #[test]
+    fn svg_adaptive_normalization_preserves_fill_topology() {
+        let circle = |radius: f64, reverse: bool| {
+            let k = radius * 0.5522847498307936;
+            let mut curves = vec![
+                CubicBez::new(
+                    (0.5 + radius, 0.5),
+                    (0.5 + radius, 0.5 + k),
+                    (0.5 + k, 0.5 + radius),
+                    (0.5, 0.5 + radius),
+                ),
+                CubicBez::new(
+                    (0.5, 0.5 + radius),
+                    (0.5 - k, 0.5 + radius),
+                    (0.5 - radius, 0.5 + k),
+                    (0.5 - radius, 0.5),
+                ),
+                CubicBez::new(
+                    (0.5 - radius, 0.5),
+                    (0.5 - radius, 0.5 - k),
+                    (0.5 - k, 0.5 - radius),
+                    (0.5, 0.5 - radius),
+                ),
+                CubicBez::new(
+                    (0.5, 0.5 - radius),
+                    (0.5 + k, 0.5 - radius),
+                    (0.5 + radius, 0.5 - k),
+                    (0.5 + radius, 0.5),
+                ),
+            ];
+            if reverse {
+                curves = curves
+                    .into_iter()
+                    .rev()
+                    .map(|c| CubicBez::new(c.p3, c.p2, c.p1, c.p0))
+                    .collect();
+            }
+            curves
+                .into_iter()
+                .map(|c| {
+                    CurveSegment::CubicBezier(
+                        CubicBezierSegment::new(
+                            Point2::new(c.p0.x, c.p0.y),
+                            Point2::new(c.p1.x, c.p1.y),
+                            Point2::new(c.p2.x, c.p2.y),
+                            Point2::new(c.p3.x, c.p3.y),
+                        )
+                        .unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for reverse in [false, true] {
+            let outer = circle(0.4, false);
+            let inner = circle(0.2, reverse);
+            let shape = vec![
+                flatten_svg_contour(&outer, 1.0, usize::MAX, &|| false).unwrap(),
+                flatten_svg_contour(&inner, 1.0, usize::MAX, &|| false).unwrap(),
+            ];
+            for fill in [FillRule::EvenOdd, FillRule::NonZero] {
+                let normalized = shape
+                    .overlay_with_fixed_scale_as::<i64>(
+                        &Vec::<[f64; 2]>::new(),
+                        OverlayRule::Subject,
+                        fill,
+                        BOOLEAN_SCALE,
+                    )
+                    .unwrap();
+                let rings: Vec<_> = normalized.iter().flatten().map(Vec::as_slice).collect();
+                for (point, expected) in [
+                    ([0.5, 0.5], fill == FillRule::NonZero && !reverse),
+                    ([0.8, 0.5], true),
+                    ([0.95, 0.5], false),
+                    ([0.5, 0.95], false),
+                ] {
+                    assert_eq!(test_nonzero_contains(&rings, point), expected);
+                }
+            }
+        }
+        let rectangle = |x0, x1| {
+            CurvePath::polyline(
+                vec![
+                    Point2::new(x0, 0.1),
+                    Point2::new(x1, 0.1),
+                    Point2::new(x1, 0.9),
+                    Point2::new(x0, 0.9),
+                ],
+                PathClosure::Closed,
+            )
+            .unwrap()
+        };
+        let left = rectangle(-0.2, 0.5);
+        let right = rectangle(0.5, 1.2);
+        let shape = vec![
+            flatten_svg_contour(left.segments(), 1.0, usize::MAX, &|| false).unwrap(),
+            flatten_svg_contour(right.segments(), 1.0, usize::MAX, &|| false).unwrap(),
+        ];
+        let clip = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        for fill in [FillRule::EvenOdd, FillRule::NonZero] {
+            let normalized = shape
+                .overlay_with_fixed_scale_as::<i64>(
+                    &clip,
+                    OverlayRule::Intersect,
+                    fill,
+                    BOOLEAN_SCALE,
+                )
+                .unwrap();
+            let rings: Vec<_> = normalized.iter().flatten().map(Vec::as_slice).collect();
+            for (point, expected) in [
+                ([0.25, 0.5], true),
+                ([0.75, 0.5], true),
+                ([-0.1, 0.5], false),
+                ([1.1, 0.5], false),
+                ([0.5, 0.95], false),
+            ] {
+                assert_eq!(test_nonzero_contains(&rings, point), expected);
+            }
+        }
+        let bowtie = CurvePath::polyline(
+            vec![
+                Point2::new(0.1, 0.1),
+                Point2::new(0.9, 0.9),
+                Point2::new(0.1, 0.9),
+                Point2::new(0.9, 0.1),
+            ],
+            PathClosure::Closed,
+        )
+        .unwrap();
+        let shape =
+            vec![flatten_svg_contour(bowtie.segments(), 1.0, usize::MAX, &|| false).unwrap()];
+        for fill in [FillRule::EvenOdd, FillRule::NonZero] {
+            let normalized = shape
+                .overlay_with_fixed_scale_as::<i64>(
+                    &Vec::<[f64; 2]>::new(),
+                    OverlayRule::Subject,
+                    fill,
+                    BOOLEAN_SCALE,
+                )
+                .unwrap();
+            let rings: Vec<_> = normalized.iter().flatten().map(Vec::as_slice).collect();
+            assert!(test_nonzero_contains(&rings, [0.5, 0.2]));
+            assert!(test_nonzero_contains(&rings, [0.5, 0.8]));
+            assert!(!test_nonzero_contains(&rings, [0.2, 0.5]));
+        }
+    }
+
+    /// Classifies far-from-boundary witnesses with an independent directed ray-crossing count.
+    fn test_nonzero_contains(rings: &[&[[f64; 2]]], point: [f64; 2]) -> bool {
+        let mut winding = 0i32;
+        for ring in rings {
+            for (index, a) in ring.iter().enumerate() {
+                let b = ring[(index + 1) % ring.len()];
+                if (a[1] <= point[1] && b[1] > point[1]) || (b[1] <= point[1] && a[1] > point[1]) {
+                    let x = a[0] + (point[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1]);
+                    if x > point[0] {
+                        winding += if b[1] > a[1] { 1 } else { -1 };
+                    }
+                }
+            }
+        }
+        winding != 0
+    }
 
     /// Exercises both compound fill rules directly without inventing EvenOdd canonical strokes.
     ///
