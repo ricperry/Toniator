@@ -1,515 +1,272 @@
-<a href="assets/icon-final.svg"><img src="assets/appicon.png" alt="Toniator RGB halftone icon" width="112" /></a>
+<a href="assets/icon-final.svg"><img src="assets/appicon.png" alt="Toniator icon" width="96" /></a>
 
 # Toniator
 
-**Turn images into halftone artwork made from dots, lines, curves, and shapes.**
+**Turn images into artwork made from dots, flowing curves, scattered shapes, cells, and mazes.**
 
-Toniator is a native Linux application for artists and designers who want to
-explore the patterns behind an image. Open artwork, choose a Pattern, adjust its
-scale and appearance, and export a PNG or editable SVG. Work in RGB, CMYK, or
-source colors, with independent Pattern settings for each color channel.
+Open an image, explore a Pattern, and make it your own. Toniator is a native
+desktop app with independent color channels, a visual Pattern Wizard, and PNG
+or editable SVG output. It is free software under [GPL-3.0-only](LICENSE).
 
-Built with Rust and GTK4, Toniator includes a visual Pattern Wizard, a personal
-Pattern library, and a headless command-line renderer. It is free software under
-the [GPL-3.0-only license](LICENSE).
+[![Toniator 0.4.5 editing a portrait made from source-colored Poisson-disk marks](docs/examples/showcase/screenshots/editor.png)](docs/examples/showcase/screenshots/editor.png)
 
-**Current prerelease: 0.4.5.**
-[Download the Linux packages](https://github.com/ricperry/Toniator/releases/tag/v0.4.5) ·
-[Windows release assets](https://github.com/ricperry/Toniator/releases) ·
-[native Windows build instructions](docs/windows-build.md) ·
-[known issues](ISSUES.md).
+*The actual Toniator 0.4.5 editor. Source for the artwork above:*
 
-## Examples
+<a href="docs/examples/showcase/source-portrait.png"><img src="docs/examples/showcase/source-portrait.png" alt="Original continuous-tone painted portrait used in the editor" width="180" /></a>
 
-The same [source artwork](assets/raster-sample.png), rendered as circular marks
-in two color modes. These are actual 1024×1024 PNG exports from Toniator 0.2.0,
-with no image editing afterward. Open either image to inspect it at full size.
+The portrait source was created with AI for these demonstrations. Every pattern
+effect below is rendered by Toniator; screenshots are captured from the real app.
+Click any image to inspect its full size.
 
-| RGB — colored marks on black | CMYK — overlapping ink colors on white |
-| --- | --- |
-| ![RGB circular halftone artwork](docs/examples/rgb-dots.png) | ![CMYK circular halftone artwork](docs/examples/cmyk-dots.png) |
+## Get Toniator
 
-Toniator also turns vector artwork into new editable geometry:
-[source SVG](assets/vector-sample.svg) → [exported SVG](docs/examples/vector-dots.svg).
-See [example settings and reproduction commands](docs/examples/README.md).
-
-## Download and run
-
-Download **one** of the x86_64 Linux packages from the
-[0.4.5 release](https://github.com/ricperry/Toniator/releases/tag/v0.4.5).
-Both include the graphical app and CLI, with application ID
-`io.github.ricperry.Toniator`.
-
-**Upgrading from 0.3.1 or earlier:** the Flatpak ID changed from
-`com.sbdd.Toniator`. The new Flatpak installs separately and uses a new private
-data directory. Existing settings and personal Patterns are not moved or deleted.
-Your `.toniator` projects remain ordinary files and can be opened from their
-existing locations if they use a supported format. Keep the old installation
-until you have recovered any settings or personal Patterns you need.
-
-### AppImage
-
-In the folder containing your download:
+Download the **0.4.5 Linux prerelease** from
+[GitHub Releases](https://github.com/ricperry/Toniator/releases/tag/v0.4.5).
+Choose an AppImage or Flatpak:
 
 ```bash
+# AppImage
 chmod +x Toniator-0.4.5-x86_64.AppImage
 ./Toniator-0.4.5-x86_64.AppImage
-```
 
-The AppImage's recorded minimum glibc version is in the attached
-`build-info.json`. Fedora 44/Wayland is the tested development environment;
-broad distribution compatibility is not established. If FUSE mounting is
-unavailable, run it with:
-
-```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.5-x86_64.AppImage
-```
-
-### Flatpak
-
-With Flatpak installed, run:
-
-```bash
+# Or Flatpak
 flatpak install --user ./Toniator-0.4.5-x86_64.flatpak
 flatpak run io.github.ricperry.Toniator
 ```
 
-The bundle uses the shared GNOME 50 runtime, which Flatpak may download during
-installation. It is distributed here on GitHub; it is not a Flathub listing.
-Flatpak keeps its own settings, recent files, and personal Patterns under
-`~/.var/app/io.github.ricperry.Toniator/`, separate from a native or AppImage installation.
-
-Download `SHA256SUMS` alongside the packages to verify their integrity with
-`sha256sum --ignore-missing -c SHA256SUMS`. See the
-[packaging guide](packaging/README.md) for permissions and build details.
-
-### Windows builds
-
-Windows packages are distributed separately; check the
-[release assets](https://github.com/ricperry/Toniator/releases) for their matching
-versions. To build the 0.4.5 source natively with MSVC and without WSL, follow
-the [Windows build instructions](docs/windows-build.md) and the
-[same-source 0.4.5 handoff](docs/releases/v0.4.5-windows-handoff.md).
-This Linux release does not establish native Windows verification of 0.4.5.
-The checked-in packaging scripts still describe the historical 0.3.2 debug ZIP;
-they require a separately verified recipe for a current release package.
-
-The [historical Windows development release](https://github.com/ricperry/Toniator/releases/tag/v0.3.2-windows-dev.20260927)
-is an unsigned portable 0.3.2 build with no installer. Its video tools require the
-optional `Setup-Media.ps1` download. Extract the complete ZIP, double-click
-`Toniator.vbs` for the GUI, or run `Toniator-CLI.cmd` from a terminal. The guide
-records tested behavior and known limits.
+[Installation, upgrades, and Windows](docs/INSTALLING.md) ·
+[Build from source](docs/BUILDING.md) · [Release notes](docs/releases/v0.4.5.md)
 
 ## Make your first artwork
 
-The fixed welcome window appears over the editor. Click the editor behind it,
-press Escape, or close welcome to begin with an empty document. Recent Files
-scrolls within its own bounded area.
+1. Choose **Start New Project** in the welcome window and open an image.
+   Try the included [raster](assets/raster-sample.png) or
+   [vector](assets/vector-sample.svg) artwork. In the editor, **New** starts an
+   empty document; **Open artwork…** adds your image.
+2. Pick a **Model**: **RGB** for colored light on black, **CMYK** for overlapping
+   ink colors on white, or **Source color + alpha** to paint shapes with the
+   image's own colors and transparency.
+3. Click **Change…** in **Pattern Recipe**. Select a gallery card and choose
+   **Apply Pattern**, or **Customize** to explore how it is constructed.
+4. Start with **All** channels. Adjust **Feature size**: smaller values add finer
+   detail; larger values emphasize the pattern. Try **Rotation** and offsets,
+   then select an individual channel to give it a different arrangement.
+5. Use **Preview / Source** to compare with the original. Zoom in to inspect
+   details, drag to pan when zoomed beyond Fit, and choose **Fit** to see it all.
+6. Open **Main Menu → Save** to keep an editable `.toniator` project, including
+   its source artwork. Choose **Export image…** for PNG or SVG.
 
-1. Click **Start New Project** and select an image or existing `.toniator`
-   project; **Recent Files** provides quick access later. In the editor, primary
-   **New** creates an editable document without source artwork. Use **Open artwork…**
-   on the empty canvas, or the **New options** dropdown for Open, image-sequence
-   import, and document Presets. Saving a project and exporting artwork require
-   source artwork.
-2. Choose a color mode and edit **All** channels together or select one channel.
-3. Use **Change…** to choose a Pattern. Use it as supplied or edit its layout,
-   placement, and styling in the Pattern Wizard.
-4. Adjust Feature size, rotation, and appearance. Use **Preview / Source** to
-   compare the result with your original artwork, and zoom or Fit to inspect it.
-   When zoomed beyond Fit, drag the artwork with the left mouse button to pan.
-   Zooming and panning refresh the visible viewport at display resolution to
-   keep the enlarged preview sharp.
-5. Save a `.toniator` project to keep the source image and editable settings.
-   Export **PNG** for a raster image or **SVG** for editable vector geometry.
+**A quick starting point:** after opening your image, choose
+**New options → Select preset…** to try a complete built-in look such as
+Magazine CMYK, Skinny Curve, or Controlled Splatter CMYK.
 
-Personal Patterns can be saved, updated, copied, renamed, and moved to recoverable
-trash. Saving a Pattern to your library is separate from applying it to artwork.
+## Explore the pattern behind the image
 
-To customize a Pattern, select its gallery card and choose **Customize**. The
-wizard follows four decisions:
+The gallery supplies a starting point; the Wizard exposes its construction.
+Choose **Guides**, **Scatter**, or **Spiral curve**, adjust the family options,
+choose what it draws, and review before applying. **Back** lets you experiment;
+**Apply Pattern** changes the document in one undoable step.
 
-1. **Family** — choose guides, scattered points, or a parametric curve.
-2. **Family options** — choose the arrangement or algorithm and adjust its settings.
-3. **Drawing** — choose placement, shapes, connections, and appearance. Available
-   controls follow the capabilities of your current Pattern.
-4. **Review** — compare the preview, go Back to adjust it, or Apply Pattern as one
-   undoable document change. Cancel discards the wizard's private edits after
-   confirmation. **Save Pattern…** optionally stores a reusable library entry;
-   saving does not apply it to the document.
+| Choose a Pattern | Shape its distribution |
+| --- | --- |
+| [![Real Pattern Gallery with Poisson Disk Marks selected](docs/examples/showcase/screenshots/pattern-gallery.png)](docs/examples/showcase/screenshots/pattern-gallery.png) | [![Real Pattern Wizard showing scatter spacing, Poisson-disk distribution, and Lloyd relaxation](docs/examples/showcase/screenshots/distribution-wizard.png)](docs/examples/showcase/screenshots/distribution-wizard.png) |
 
-The wizard preview uses a small, neutral light-to-dark sample to make Patterns
-easy to compare. It is a study of the Pattern, not a preview of your own artwork.
-It renders in the background on a bounded sample canvas, including connection
-Patterns. Moving between wizard pages does not wait for a render. The Wizard is
-structure-only: its disposable preview uses neutral response bounds (minimum 0,
-maximum 1), and response ranges and region sampling are not editable there.
+The Wizard studies every Pattern against the same built-in black-to-white
+source shown here, so its small preview is easy to compare across Patterns.
+Your portrait remains behind the dialog.
 
-The main **Settings** inspector has a fixed preferred width that scales with
-text size. Show or hide it with **Settings**; narrow windows show Settings at full
-width, with **Back to canvas** pinned above the scrolling controls and Escape to
-return. Toggling Settings preserves the edit target, zoom, pan, and inspector
-scroll position. Recipe details, Output options, and Print preparation start
-collapsed where applicable; passive memory readouts are under **Diagnostics**
-in Advanced Settings. Shared dialogs keep long content scrollable above their
-actions, including visible validation reasons when an operation cannot proceed.
+<a href="assets/stage20s-preset-icon-source.svg"><img src="assets/stage20s-preset-icon-source.svg" alt="Black-to-white gradient source used by the Pattern Wizard and gallery studies" width="96" /></a>
 
-In the main inspector, **Feature size** controls pattern fineness across families:
-smaller values tighten spacing and produce more detail; larger values make the
-pattern coarser. Scatter separation and cluster spread, spiral pitch, and
-along-curve point spacing scale together. Spirals adjust their turn count to
-retain approximately the same outer extent. Saved recipe proportions remain
-unchanged. The editable minimum is **0.01**; zero is rejected.
-Guide/grid Patterns show every repeated guide as a thin blue 1pt line, revealing
-the full underlying arrangement. Parametric Patterns show their underlying curve
-in the same way. Orange 1px indicators show every visible point site, including
-positions where a drawn mark is too small to see. These overlays are preview aids
-and are not exported.
-On Review, construction is also checked in the background at your document's
-size. Apply requires a successful current check; Back and Cancel remain available.
-Invalid entries and incomplete choices are checked while editing. In **All** mode, choices reflect
-compatible channel settings; select a channel to edit it independently.
+For scattered points, try **Random**, **Poisson disk**, **Jittered cells**, or
+**Clustered**. Change the variation number for another repeatable arrangement;
+use **Point density** to follow the artwork, **Keep points apart** for separation,
+and **Relax points (Lloyd)** to smooth the distribution. These control where
+points live; drawing and Advanced settings control what appears at those points.
 
-Live rendering cancels obsolete requests after edits and reuses unaffected stages
-from the last accepted render. Unfinished or unaccepted stages are recomputed.
-Version 0.4.4 also reduces clipped-preview union work and Random/Dispersion
-allocation overhead, and skips repeated scene construction for exact accepted
-inputs. See [measured performance and reproduction](docs/PERFORMANCE.md) for
-workload-specific gains, automatic fallback, and remaining limits. These changes
-are included in 0.4.4 and require no new backend or setup.
-Personal Pattern thumbnails also render in the background. Still-image exports
-offer **Cancel export** and use the artwork captured when the export started.
+## Gallery: one source, many constructions
 
-**Preview recovery in 0.4.5:**
-If a preview fails, **Preview unavailable** appears over the canvas while the
-last successful preview stays visible; a first failure says **No preview yet**.
-**Retry preview** makes one new attempt. **Dismiss preview error** hides the
-message without restarting work. Changing settings, frames, or the view requests
-a preview for the changed state. Preview failures and retries preserve independent
-operation and Save errors. The status tooltip contains the full preview diagnostic.
+These are **20 full-detail PNG exports from Toniator 0.4.5**, with no image
+editing or pixel upscaling. The files are 2048×2048, 1800×1240, or 2508×2508;
+the small images here link to the original exports. Each group shows its source
+once. [Open the editable projects, settings, and reproduction guide](docs/examples/README.md).
 
-Version 0.4.5 also lets dense round and square spirals render beyond
-their former segment limits. SVG export avoids unnecessary nodes on nearly
-straight curve sections while retaining its existing accuracy target. Large
-artwork can still need substantial memory, especially when an external viewer
-renders a CMYK SVG. See [current measurements and limits](docs/PERFORMANCE.md#045-preview-recovery-and-curve-capacity)
-for the verified scope, output checks, and renderer compatibility limits.
+### Portrait studies
 
-Each channel’s Pattern draws one kind of output: shapes, lines, or filled areas.
-Mix Patterns by choosing different settings or Patterns for individual channels.
-To combine multiple renders within the same channel, export them separately and
-composite them in another application. Older experimental multi-layer Patterns
-are unsupported; their files are not modified or automatically flattened.
+**Source — original painted portrait, 1254×1254:**
 
-For scattered points, **Random** allows irregular gaps, **Poisson disk** keeps a
-minimum distance with irregular spacing, **Jittered cells** places one point in
-each cell, and **Clustered** gathers points into organic groups. Cluster centers
-are specified per 100 points; spread controls the size of those groups.
-Changing the variation number gives another repeatable arrangement. **Point
-density** controls whether placement follows artwork; **Keep points apart** adds
-an exclusion rule. These are separate from how large the drawn marks become.
+<a href="docs/examples/showcase/source-portrait.png"><img src="docs/examples/showcase/source-portrait.png" alt="Source for all seven portrait studies: a continuous-tone woman with dark curls and foliage" width="260" /></a>
 
-Enable **Relax points (Lloyd)** to smooth the arrangement by moving points toward
-their local cell centers. **Follow artwork density** makes this relaxation follow
-the channel's source weighting; otherwise it aims for even spacing. **Relaxation
-steps** controls how far the arrangement settles. More relaxation can soften
-clusters. Turning relaxation off retains its settings for later use.
+Source-colored marks retain the painting's palette. RGB screens and CMYK waves
+turn the same image into bolder graphic textures.
 
-Use **Main Menu → Help and feedback…**, **About Toniator**, or **F1** for the
-version, license, user guide, source code, and issue-reporting links. Operation
-errors remain visible through preview changes. Dismiss or document replacement
-clears the message; a successful Save retry clears its error while newer errors
-remain.
+| Source color · Poisson marks | Curve Motif · repeated custom curve | Clustered Connections |
+| --- | --- | --- |
+| [![Source-colored Poisson marks](docs/examples/showcase/portrait-source-color.png)](docs/examples/showcase/portrait-source-color.png) | [![Portrait drawn with repeated curve motifs](docs/examples/showcase/portrait-motif.png)](docs/examples/showcase/portrait-motif.png) | [![Portrait drawn with short clustered random connections](docs/examples/showcase/portrait-clustered-links.png)](docs/examples/showcase/portrait-clustered-links.png) |
+| **One Guide Lines** | **Grid Voronoi** | **Three-Guide Maze** |
+| [![Portrait drawn with straight line screens](docs/examples/showcase/portrait-lines.png)](docs/examples/showcase/portrait-lines.png) | [![Portrait drawn as scaled Voronoi cells on a grid](docs/examples/showcase/portrait-grid-voronoi.png)](docs/examples/showcase/portrait-grid-voronoi.png) | [![Portrait drawn as three-guide maze walls](docs/examples/showcase/portrait-three-guide-maze.png)](docs/examples/showcase/portrait-three-guide-maze.png) |
+| **CMYK custom waves** | | |
+| [![Portrait drawn with curved CMYK guide paths](docs/examples/showcase/portrait-waves.png)](docs/examples/showcase/portrait-waves.png) | | |
 
-**New options → Select preset…** offers fourteen built-in document configurations.
-Selection uses the normal confirmation and applies all channel settings in one
-undoable change while preserving your artwork, canvas, and project identity.
-The built-in collection is independent of your personal Preset files.
+### Curves, spirals, and scattered points
 
-**New options → Save preset** saves the whole design configuration
-as a source-free `.toniator-preset`. **Load preset...** accepts that format or an
-intact `.toniator` project, applies all channel settings, and keeps your current
-artwork and canvas. Loading is one undoable change; saving a Preset does not save
-the project. Open artwork before loading a Preset.
-Undo and Redo operate on document edits. **Close** returns to startup; **Exit**
-quits. Both prompt when a document has unsaved changes. The app follows the
-system light/dark preference where supported.
+**Source — included raster artwork, 1024×1024:**
 
-Supported still-image inputs: PNG, SVG, JPEG, WebP, BMP, TIFF, OpenEXR, AVIF,
-and JPEG XL (`.jxl`). JPEG XL decoding is native Rust and retains the original
-encoded source in saved projects. ICC conversion, grayscale, 16-bit inputs,
-orientation, and straight alpha normalize to Toniator's existing straight-sRGB8
-source representation; this does not preserve HDR or high-bit-depth output.
-Primary associated/premultiplied alpha is rejected with a straight-alpha diagnostic.
-PNG exports offer background, antialiasing, and **1x, 2x, 4x, 8x, or Custom**
-output sizes based on the document canvas, independent of preview zoom. SVG
-exports keep a transparent background. RGB PNG defaults to black, CMYK to
-white, and source-color output to transparent.
+<a href="assets/raster-sample.png"><img src="assets/raster-sample.png" alt="Source for all seven renders below: colored gradients and transparency around a dark center" width="260" /></a>
 
-Ordinary still PNG exports stream in bounded row bands, allowing large images without
-allocating a full output raster. Requested dimensions and print DPI are retained
-even when the full-size preview or advisory Review is unavailable. Dense Pattern
-geometry can still use substantial memory. Cancellation before publication
-preserves an existing destination file.
+| Round Spiral Line | Round Spiral Marks | Square Spiral |
+| --- | --- | --- |
+| [![Raster source drawn as a continuous round spiral](docs/examples/showcase/raster-round-spiral-line.png)](docs/examples/showcase/raster-round-spiral-line.png) | [![Raster source drawn as marks along a round spiral](docs/examples/showcase/raster-round-spiral-marks.png)](docs/examples/showcase/raster-round-spiral-marks.png) | [![Raster source drawn as a continuous square spiral](docs/examples/showcase/raster-square-spiral.png)](docs/examples/showcase/raster-square-spiral.png) |
+| **Poisson Disk Marks** | **Source-Weighted Voronoi** | **Two-Guide Maze** |
+| [![Raster source drawn with an irregular evenly spaced dot arrangement](docs/examples/showcase/raster-scatter.png)](docs/examples/showcase/raster-scatter.png) | [![Raster source drawn with artwork-weighted irregular Voronoi cells](docs/examples/showcase/raster-voronoi.png)](docs/examples/showcase/raster-voronoi.png) | [![Raster source drawn as two-guide maze walls](docs/examples/showcase/raster-maze.png)](docs/examples/showcase/raster-maze.png) |
+| **Fine CMYK waves** | | |
+| [![Raster source drawn with a fine curved CMYK line screen](docs/examples/showcase/raster-curves.png)](docs/examples/showcase/raster-curves.png) | | |
 
-### Animate artwork
+### Vector artwork becomes new geometry
 
-Toniator supports a Start/End animation workflow and silent video exports.
-JPEG XL animations retain frame timing and blended frames for one finite source
-pass; embedded loop counts do not repeat playback. Image sequences accept JPEG XL
-stills and reject animated entries.
+**Source — included SVG artwork, 900×620:**
 
-1. Start a project with a video or animated image, or use **New → Import image
-   sequence…** to review an ordered image list and its frame rate. Still images
-   can also supply the artwork for an animation.
-2. Edit **Start frame** with the normal Pattern, channel and appearance controls.
-   In Advanced settings, assign **Color** with the picker or HEX entry and use
-   **Alpha** for strength. These controls edit the currently selected frame.
-3. Select **End frame** below the canvas. Its first selection copies the Start
-   settings. Make the desired changes, then toggle between frames to inspect
-   them. Each frame retains its settings. Changing one channel's Pattern
-   reinitializes only its dependent End settings, preserving the other channels.
-4. Choose interpolation in a property's Animation disclosure when needed.
-   Use **Animation settings…** in the main menu for exact frame rate and source
-   interval. The renderer interpolates supported continuous values between the
-   two states; this version has no playback or scrubbing.
-5. Export a PNG sequence or lossless **FFV1/Matroska** video. Optional
-   **AV1/WebM** provides a smaller lossy sharing file with an opaque background.
-   Choose a destination each time or save a personal folder default. Video uses
-   private temporary PNGs, with recovery options if encoding fails.
+<a href="assets/vector-sample.svg"><img src="assets/vector-sample.svg" alt="Source for all six renders below: a shaded blue sphere, a dark T panel, and a translucent white wave over a color gradient" width="380" /></a>
 
-Save the `.toniator` project to retain its source media and animation settings.
-Project Preset loading keeps the current artwork and timing. Audio is retained
-inside the original source but exports are silent. Variable-rate sources are
-sampled at the displayed project rate; frames may repeat or be skipped.
-Development builds need FFmpeg and ffprobe on PATH for video input, GIF and
-animated AVIF decoding, and video export; native JPEG XL decoding does not need those tools. The AppImage and
-Flatpak bundle their own software tools;
-see [the packaging guide](packaging/README.md).
+| Custom curved guides | Magazine CMYK dots | Triagrid Diamond Marks |
+| --- | --- | --- |
+| [![Vector source rendered with curved RGB guides](docs/examples/showcase/vector-curves.png)](docs/examples/showcase/vector-curves.png) | [![Vector source rendered with fine CMYK dot screens](docs/examples/showcase/vector-dots.png)](docs/examples/showcase/vector-dots.png) | [![Vector source rendered with diamond shapes on a triangular grid](docs/examples/showcase/vector-diamonds.png)](docs/examples/showcase/vector-diamonds.png) |
+| **Three-Guide Cells** | **Two-Guide Cells** | **Triagrid Spanning Tree** |
+| [![Vector source rendered as triangular guide-face regions](docs/examples/showcase/vector-three-guide-cells.png)](docs/examples/showcase/vector-three-guide-cells.png) | [![Vector source rendered as inset two-guide cells](docs/examples/showcase/vector-two-guide-cells.png)](docs/examples/showcase/vector-two-guide-cells.png) | [![Vector source rendered as branching spanning-tree connections](docs/examples/showcase/vector-spanning-tree.png)](docs/examples/showcase/vector-spanning-tree.png) |
 
-## Build from source
+## Mix Patterns by channel
 
-Requirements: **Rust 1.94+**, a C compiler, `pkg-config`, **GTK 4.12+**, GLib
-development tools, `blueprint-compiler`, and the native `dav1d` development
-library for AVIF decoding. On Fedora, install the system dependencies with:
+Each channel can have its own construction and transform. This example reuses
+the **SVG source displayed above**, combining straight lines, scattered circles,
+and diamonds. Select a named channel before changing its Pattern or offsets.
 
-```bash
-sudo dnf install git gcc pkgconf-pkg-config gtk4-devel glib2-devel \
-  blueprint-compiler libdav1d-devel
-```
+| Mixed RGB artwork · 1800×1240 | G channel selected in the real editor |
+| --- | --- |
+| [![Vector artwork with different Patterns and transforms on R, G, and B](docs/examples/print-animation/vector-mixed-channels.png)](docs/examples/print-animation/vector-mixed-channels.png) | [![Green channel inspector showing its Random-family Pattern and independent transform](docs/examples/print-animation/screenshots/mixed-channel-G.png)](docs/examples/print-animation/screenshots/mixed-channel-G.png) |
 
-Install a current Rust toolchain through [rustup](https://rustup.rs/), then:
+| Channel | Pattern | Feature size | Rotation | X / Y offset |
+| --- | --- | ---: | ---: | --- |
+| R | One Guide Lines | 1.5 | 15° | +12 / −8 |
+| G | Poisson Disk Marks | 0.95 | −10° | −16 / +10 |
+| B | Triagrid Diamond Marks | 1.25 | 30° | +8 / +18 |
 
-```bash
-git clone https://github.com/ricperry/Toniator.git
-cd Toniator
-cargo build --release --locked -p toniator-app -p toniator-cli
-./target/release/toniator-app
-```
+[Open this editable project](docs/examples/print-animation/vector-mixed-channels.toniator)
+or [see the exact channel settings](docs/examples/print-animation/README.md#mix-patterns-and-transforms).
 
-To open the included sample directly:
+## Keep experimenting
 
-```bash
-./target/release/toniator-app assets/raster-sample.png
-```
+**Change one channel at a time.** Select R/G/B or C/M/Y/K to vary its Pattern,
+rotation, spacing, paint, or response. Return to **All** for shared edits.
+**Advanced Settings…** separates **Fill response** (how much is drawn) from
+**Source weighting** (where artwork-dependent points gather).
 
-For development, `cargo run -p toniator-app` builds and launches the application.
-For a headless build, use `cargo build --release --locked -p toniator-cli`;
-GTK and Blueprint are unnecessary, but the native `dav1d` dependency still applies.
+**Save the right thing.** A `.toniator` project holds artwork and editable state.
+A personal **Pattern** saves a reusable construction from the Wizard.
+A **Document Preset** saves the whole channel/design configuration without source
+artwork: use **New options → Save preset**, then **Load preset…** on another
+image. Loading a Document Preset keeps your current artwork and canvas.
 
-For the verified native Windows development build and its current limits, see
-[Windows build notes](docs/windows-build.md).
+**Compare before exporting.** The Source view shows the original in the same
+canvas framing; it does not alter the design. Here it displays the SVG source
+used by the vector gallery above:
 
-### Command-line rendering
+[![Toniator Source view showing the original vector artwork](docs/examples/showcase/screenshots/source-comparison.png)](docs/examples/showcase/screenshots/source-comparison.png)
 
-Render a source image using the default circular-mark Pattern:
+## Export your artwork
 
-```bash
-mkdir -p target/validation/examples
-./target/release/toniator render \
-  --input assets/raster-sample.png \
-  --output target/validation/examples/halftone.png \
-  --channel-model cmyk --density 30 --density-aspect 1 \
-  --rotation 0 --offset-x 0 --offset-y 0 --guard-steps 2
-```
+Use **Main Menu → Export image…**, choose PNG or SVG and a destination.
+For PNG, select background, antialiasing, and **1× native, 2×, 4×, 8×, or Custom**
+size. Export resolution is independent of preview zoom. SVG preserves editable
+vector geometry and a transparent background.
 
-Use an `.svg` output filename for vector export. Render a saved project using
-its stored settings with `toniator render -i artwork.toniator -o artwork.svg`.
-Run `toniator --help` or `toniator render --help` for the supported commands.
+[![Toniator PNG export options with a real 2x preview of the curved vector example](docs/examples/showcase/screenshots/png-export.png)](docs/examples/showcase/screenshots/png-export.png)
 
-In an AppImage, prepend `./Toniator-0.4.5-x86_64.AppImage --cli` in place of
-`toniator`. The Flatpak CLI is available through
-`flatpak run --command=toniator io.github.ricperry.Toniator`; direct CLI file paths must be
-accessible inside its sandbox.
+*PNG options for the custom curved-guides result in the vector gallery; its
+original SVG source is displayed above.*
 
-### Build or publish the packages
+## Alpha and DTG/DTF preparation
 
-The [packaging guide](packaging/README.md) covers building AppImage and Flatpak
-bundles with the GNOME SDK. [Release instructions](docs/RELEASING.md) explain
-GitHub tags, release notes, and uploading the packages.
+**Source color + alpha** retains source transparency and leaves gaps between
+marks. Here the same portrait has an AI-extracted transparent cut-out as its
+source; Toniator creates the open Poisson-disk marks.
 
-## Capabilities and limitations
+| Transparent source · 1254×1254 | Native transparent PNG · 2000×2000 |
+| --- | --- |
+| [![Transparent cut-out source for the print examples](docs/examples/print-animation/source-cutout.png)](docs/examples/print-animation/source-cutout.png) | [![Toniator source-colored portrait with genuine transparent space between marks and around the silhouette](docs/examples/print-animation/portrait-alpha.png)](docs/examples/print-animation/portrait-alpha.png) |
 
-Toniator is prerelease software. Project formats can change between development
-versions; obsolete formats are rejected rather than automatically migrated.
-Document-level Presets store a design configuration; the personal Pattern library
-stores reusable structural recipes.
+For DTG/DTF preparation, enable **Print preparation → Prepare for garment
+printing** in PNG options. Set the physical size and DPI, then inspect alpha and
+optional small-mark, narrow-feature, and gap corrections at a useful zoom.
+The garment color below is **preview-only**; the exported PNG retains transparency.
 
-Advanced Settings has independent **Fill response** and **Source weighting**
-groups. Each exposes source component, inversion, gain, offset, black/white
-points, gamma, contrast and cutoff; Weighting also has its own strength and
-curve. The Pattern definition controls whether artwork weighting affects
-placement and which structure draws. Advanced owns per-channel response ranges
-(0–1 defaults with editable minima), region sampling and Mark sizing.
-Explanatory tooltips and Fine adjustments are available here. Pattern changes
-preserve the two independent source-consumer configurations.
+[![Real PNG print-preparation dialog showing the portrait on a blue garment preview backdrop](docs/examples/print-animation/screenshots/prepared-preview.png)](docs/examples/print-animation/screenshots/prepared-preview.png)
 
-Mark sizing is static and shared by Start and End; eligible scale and response-
-range fields animate through Start, End and easing. The optional Uniform Fill
-mask is Off at cutoff 0, with tone fields disabled until the cutoff is positive.
-Variable keeps artwork-weighted point density while Fill response controls mark
-size. Compatible Patterns preserve matching responses; switching output among
-Marks, Lines and Regions applies defaults to affected response ranges and region
-sampling. Source interpretation stays separate from paint; black remains below
-white throughout interpolation. Fill cutoff suppresses below-cutoff output even
-when minimum geometry is positive, and Weighting cutoff acts before its curve
-and strength. ALL applies changed fields; X/Y offset is beside Rotation.
+Both close-ups below use the same **2000×2000 target, 200% zoom, and pan**.
+These are native preview-region captures; click for the complete app screenshot.
 
-Eligible single-output solid RGB and CMYK Variable Mark, line, and region
-responses use a saved calibration for each finished structural Pattern
-revision. The calibration uses measured opaque geometric-union coverage to
-adjust sampled fill or line thickness, counting the rendered union including
-overlaps and crossings while keeping the source-derived family, topology, and
-source weighting fixed. It is saved with the Pattern and embedded in applied
-projects and Document Presets. Artwork, Feature size, channel rotation, and
-response edits reuse it; finishing a structural edit replaces it, and Advanced
-provides manual Recalibrate. With a named channel selected, Recalibrate updates
-only that channel; All updates every channel and the shared baseline. Individual
-Shape rotation and continuous animation retain the saved response. Rotating
-marks can intentionally change overlap and tone; End frame displays a warning
-when Shape rotation is animated. Reopening and ordinary edits do not fit again.
-Source sampling, alpha/cutoff suppression, and authored response endpoints
-remain in effect.
+| Ordinary antialiased alpha | Binary alpha + optional corrections |
+| --- | --- |
+| [![Native ordinary PNG preview close-up with antialiased mark edges](docs/examples/print-animation/screenshots/alpha-zoom.png)](docs/examples/print-animation/screenshots/alpha-zoom-full.png) | [![Matched prepared PNG preview close-up with corrected narrow features and gaps](docs/examples/print-animation/screenshots/prepared-zoom.png)](docs/examples/print-animation/screenshots/prepared-zoom-full.png) |
 
-Artwork-weighted Mark outputs default to **Uniform** sizing in Advanced. Their
-full-tone size targets 99.9% statistical geometric coverage; source-independent
-candidates are then thinned according to artwork weighting. Zero source tone
-selects no marks. The Uniform size scale ranges from 0 to 2 (default 1) and
-remains an artistic adjustment after calibration.
-Minimum-center-distance exclusion remains eligible for Uniform; the stricter
-Visible Mark Margin preserves non-overlap by requiring Variable sizing.
+This example uses **200×200 mm at 254 DPI**, then 4 px minimum feature width,
+3 px isolated-mark removal, and 2 px gap fill. These are illustrative settings
+for this artwork; choose thresholds for your printing process. Preparation
+thresholds alpha at 128, then applies the enabled corrections.
 
-The Pattern Wizard chooses construction and structure. Advanced owns channel
-response ranges, region sampling, and mark sizing. These coverage methods
-estimate overall opaque coverage, not exact local or continuous-plane coverage.
-Sparse or holed custom shapes can exceed bounded fitting limits, single outputs
-retain stochastic variation and natural edge spill, and local dispersion,
-cross-channel correlation, palette saturation, ICC profiles, and physical
-printing remain outside their scope.
+[Ordinary RGBA PNG](docs/examples/print-animation/portrait-alpha.png) ·
+[Binary alpha only](docs/examples/print-animation/portrait-binary.png) ·
+[Prepared RGBA PNG](docs/examples/print-animation/portrait-prepared.png) ·
+[Editable project](docs/examples/print-animation/portrait-alpha.toniator) ·
+[Settings and pixel checks](docs/examples/print-animation/README.md#alpha-and-garment-print-preparation)
 
-Artwork-weighted Patterns support Rotation and X/Y offsets. Weighting is
-recalculated at transformed positions; a notice explains how to restore the
-original alignment with neutral controls. Both source consumers initially use the
-channel's matching color component, and Advanced can change them independently.
-Explicit Luminance remains available for monochrome artwork.
+## Animate the artwork
 
-**Export video** also exposes frame rate and duration, with a live frame count,
-and **0.5x, 1x, 2x, 4x, 8x, or Custom** output sizes based on the document canvas.
-Video projects initialize timing from their source. Export applies timing changes
-to the document as one undoable edit; closing the sheet before exporting discards
-them. Optional first/last frames select an export subset. PNG sequences,
-lossless FFV1/Matroska and optional AV1/WebM remain available.
+Author **Start** and **End**, choose interpolation and timing, then use
+**Export video…** for a PNG sequence, lossless FFV1/Matroska, or AV1/WebM.
+Still artwork, videos, animated JPEG XL, and imported image sequences can supply
+the source. [Animation walkthrough](docs/USING_TONIATOR.md#animate-artwork).
 
-**Published 0.4.0 formats (historical):** project document schema **11** in
-media container **2**, with a strict reader for pre-change schema **10** that
-supplies default print-preparation settings. Opening that project leaves its
-file untouched; saving writes schema 11. The pre-G1a v0.3.3 application cannot
-read schema 11. Document Presets used format **3** with frozen configuration
-schema **10**, and Pattern format **5**. Other unsupported or hybrid document
-schemas were rejected; projects were not downgraded automatically.
+### Change scale and rotation
 
-**Current 0.4.5 formats:** project document schema **17** in media
-container **2**, Document Preset format **3** with configuration schema **16**,
-and standalone Pattern format **8**. Projects and Document Presets persist saved
-Pattern calibration. Supported older Document Presets have a deterministic
-conversion path that preserves the original bytes; ordinary projects remain
-current-only, and superseded project schemas are rejected. These format versions
-are unchanged from 0.4.3 through 0.4.5, but projects containing JPEG XL sources require 0.4.3 or
-later and cannot be opened by older binaries.
+Using the **original portrait in [Portrait studies](#portrait-studies)**, this three-second study
+moves Feature size from approximately 1.538 to 0.625 and Rotation from 0° to 60°.
+Toniator renders all intermediate frames with smooth-in/out interpolation.
 
-The published 0.4.0 source includes a headless, advisory garment preflight. For
-example:
+[![Animated source-colored portrait changing mark scale and rotation](docs/examples/print-animation/portrait-motion.gif)](docs/examples/print-animation/portrait-motion.webm)
 
-```bash
-cargo run --locked -p toniator-cli -- preflight \
-  --input artwork.toniator --unit mm \
-  --print-width 300 --print-height 400 \
-  --positive-threshold 0.8 --gap-threshold 0.6
-```
+[Native 1254×1254 video](docs/examples/print-animation/portrait-motion.webm) ·
+[Editable animation project](docs/examples/print-animation/portrait-motion.toniator) ·
+[Source](docs/examples/showcase/source-portrait.png)
 
-Replace these example values with the intended complete-canvas placement and
-process-specific thresholds; they are not Toniator recommendations. Command-line
-overrides are used for that report and never saved to the project. The analysis
-inventories the final transparent output even when either width check is
-disabled. Its `--help` identifies the command as advisory and says it never
-certifies print safety. The v0.4.0 CLI includes this command.
+### Move channels independently
 
-PNG export options include **Prepare for garment printing**, off by default.
-When enabled, maximum physical width and height in mm or in plus DPI set one
-aspect-preserving pixel size and matching PNG density. Preparation makes pixels
-with alpha at least 128 fully opaque and lower-alpha pixels transparent. It can
-remove isolated marks, thicken narrow features, or treat
-narrow gaps by filling or growing them. Each correction has its own threshold;
-zero disables it. With all three correction widths at zero, prepared PNGs also
-use streaming. Nonzero corrections currently support up to 32,000,000 pixels;
-the dialog explains this limit before export. The preview updates automatically
-when its requested size is supported and shows the same prepared
-pixels as the exported file. Wide PNG windows place settings beside the preview
-with a draggable divider, zoom, and pan. Narrow windows or large text stack the
-same controls and preview in scrolling content above pinned actions; resizing
-retains field edits, preview view, and the wide divider position. This divider
-belongs to PNG options; the main Settings inspector has a fixed width.
-Background and custom fills have separate swatches; both provide
-**Use garment color**, which copies the viewer swatch once. These settings do
-not change the project or ordinary PNG exports. The result is not a print-safety
-certification. See the
-[garment preparation plan](docs/GARMENT_PRINT_PREPARATION_PLAN.md)
-for exact behavior and validation limits.
+The mixed-channel **SVG artwork above** keeps its three Patterns and Feature
+sizes fixed. Only each channel's Rotation and X/Y offsets animate, producing
+independent motion through the image.
 
-The updated main preview can also be panned by dragging the artwork with the
-primary mouse button when zoomed beyond Fit.
+[![Animated vector artwork with independent R, G, and B rotations and translations](docs/examples/print-animation/vector-channel-motion.gif)](docs/examples/print-animation/vector-channel-motion.webm)
 
-Known limitations include slow previews at very fine feature sizes, first-use
-personal thumbnail latency, and an intermittent reported RGB-to-CMYK crash.
-Second-launch forwarding, stale Preset actions, wizard dismissal and progress
-reporting are fixed; dense circular-mark previews also avoid a quadratic lookup.
-Details and follow-up work are in [ISSUES.md](ISSUES.md).
-Package workflow checks use an isolated Wayland compositor; they do not claim
-exhaustive GNOME/Mutter or native file-portal acceptance.
+[Native 900×620 video](docs/examples/print-animation/vector-channel-motion.webm) ·
+[Editable animation project](docs/examples/print-animation/vector-channel-motion.toniator) ·
+[Source](assets/vector-sample.svg) ·
+[Channel endpoints and reproduction](docs/examples/print-animation/README.md#animate-independent-channels)
 
-## Project documentation
+Both native exports contain **48 frames at 16 fps**. The inline GIFs are
+720-pixel-wide sharing derivatives: 24 sampled frames at approximately 8 fps,
+with palette conversion. They contain no invented intermediate frames.
 
-- [Known issues and limitations](ISSUES.md)
-- [Pattern Wizard regression checks](docs/PATTERN_WIZARD_TESTING.md)
-- [Example artwork and reproduction commands](docs/examples/README.md)
-- [Package installation and build guide](packaging/README.md)
-- [Release notes](docs/releases/v0.4.5.md)
-- [Previous release notes](docs/releases/v0.4.4.md)
-- [Architecture and design specifications](Project%20Specification/ArchitectureSchema.md)
+## More help
 
-The [Addendum](Project%20Specification/Addendum.md) takes precedence over other
-design specifications. The GTK app and CLI share the same domain, evaluation,
-and rendering core. Contributions should preserve that separation and include
-focused checks and inspection of affected output. GTK controls need meaningful
-accessibility names, roles, states, and keyboard paths.
+[Detailed usage guide](docs/USING_TONIATOR.md) ·
+[Example projects and exact settings](docs/examples/README.md) ·
+[Command-line rendering](docs/BUILDING.md#command-line-rendering) ·
+[Known issues](ISSUES.md) · [Package guide](packaging/README.md)
 
-Release binaries are distributed through GitHub Releases. Historical implementations,
-local planning records, and design experiments are not part of the current source tree.
+Toniator is prerelease software; keep original artwork and important projects.
+Developers can start with the [architecture](Project%20Specification/ArchitectureSchema.md)
+and [normative Addendum](Project%20Specification/Addendum.md). The GUI and headless
+CLI share the same evaluation and rendering core.
 
-## Support development
-
-If you find Toniator useful, you can support development with an optional
-[tip on Ko-fi](https://ko-fi.com/silentbutdigitaldesigns).
-
-For artwork and design products, visit
+If Toniator is useful to you, an optional
+[Ko-fi tip](https://ko-fi.com/silentbutdigitaldesigns) supports development.
+Artwork and design products are available from
 [Silent But Digital Designs](https://silentbutdigitaldesigns.com).

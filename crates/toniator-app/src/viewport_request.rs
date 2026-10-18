@@ -3,10 +3,109 @@
 use toniator_domain::CanvasSpec;
 use toniator_engine::PreviewRasterTarget;
 
-/// Resolves contain layout and a scrolled Picture origin into physical raster intent.
-///
-/// Picture coordinates include GTK's current scroll translation. Fit retains the complete fitted
-/// scene; manual zoom requests only the visible page, including transparent canvas margins.
+/// Keys the exact attempted viewport without rounding away allocation or pan distinctions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Attempt {
+    pub(crate) canvas: [u64; 2],
+    pub(crate) page: [u64; 2],
+    pub(crate) picture: [u64; 2],
+    pub(crate) origin: [u64; 2],
+    pub(crate) device_scale: i32,
+    pub(crate) fit: bool,
+}
+
+/// Distinguishes absent GTK allocation from a concrete target or a genuine checked rejection.
+pub(crate) enum Resolution {
+    Unallocated,
+    Ready(PreviewRasterTarget),
+    Rejected {
+        error: toniator_engine::RenderError,
+        attempt: Attempt,
+    },
+}
+
+/// Resolves checked viewport intent while leaving nonpositive, not-yet-mapped allocation quiet.
+/// Positive malformed/extreme allocations retain exact producer errors without changing pixel limits.
+pub(crate) fn resolve(
+    canvas: &CanvasSpec,
+    page: (f64, f64),
+    picture: (f64, f64),
+    picture_origin: (f64, f64),
+    device_scale: i32,
+    fit: bool,
+) -> Resolution {
+    if device_scale <= 0
+        || [page.0, page.1, picture.0, picture.1]
+            .iter()
+            .any(|value| *value <= 0.0)
+    {
+        return Resolution::Unallocated;
+    }
+    let attempt = Attempt {
+        canvas: [canvas.width.to_bits(), canvas.height.to_bits()],
+        page: [page.0.to_bits(), page.1.to_bits()],
+        picture: [picture.0.to_bits(), picture.1.to_bits()],
+        origin: [picture_origin.0.to_bits(), picture_origin.1.to_bits()],
+        device_scale,
+        fit,
+    };
+    let reject = |error| Resolution::Rejected { error, attempt };
+    if [
+        page.0,
+        page.1,
+        picture.0,
+        picture.1,
+        canvas.width,
+        canvas.height,
+        picture_origin.0,
+        picture_origin.1,
+    ]
+    .iter()
+    .any(|value| !value.is_finite())
+        || canvas.width <= 0.0
+        || canvas.height <= 0.0
+    {
+        return reject(toniator_engine::RenderError::new(
+            "preview.target",
+            "viewport allocation and canvas must be finite with positive dimensions",
+        ));
+    }
+    let scale = f64::from(device_scale);
+    let width = (page.0 * scale).round();
+    let height = (page.1 * scale).round();
+    if !width.is_finite()
+        || !height.is_finite()
+        || width > f64::from(u32::MAX)
+        || height > f64::from(u32::MAX)
+    {
+        return reject(toniator_engine::RenderError::new(
+            "preview.target.addressability",
+            "physical viewport dimensions exceed representable integer extent",
+        ));
+    }
+    let result = if fit {
+        PreviewRasterTarget::new(width as u32, height as u32)
+    } else {
+        let logical_scale = (picture.0 / canvas.width).min(picture.1 / canvas.height);
+        let canvas_x = picture_origin.0 + (picture.0 - canvas.width * logical_scale) * 0.5;
+        let canvas_y = picture_origin.1 + (picture.1 - canvas.height * logical_scale) * 0.5;
+        PreviewRasterTarget::for_viewport(
+            width as u32,
+            height as u32,
+            -canvas_x / logical_scale,
+            -canvas_y / logical_scale,
+            logical_scale * scale,
+        )
+    };
+    match result {
+        Ok(target) => Resolution::Ready(target),
+        Err(error) => reject(error),
+    }
+}
+
+/// Projects checked intent for read-only consumers without logging or retry side effects.
+/// Fit/crop arithmetic remains in `resolve`; callers needing failure authority inspect its typed result.
+#[cfg(test)]
 pub(crate) fn target(
     canvas: &CanvasSpec,
     page: (f64, f64),
@@ -15,42 +114,10 @@ pub(crate) fn target(
     device_scale: i32,
     fit: bool,
 ) -> Option<PreviewRasterTarget> {
-    let scale = f64::from(device_scale);
-    if device_scale <= 0
-        || [
-            page.0,
-            page.1,
-            picture.0,
-            picture.1,
-            canvas.width,
-            canvas.height,
-        ]
-        .iter()
-        .any(|value| !value.is_finite() || *value <= 0.0)
-        || !picture_origin.0.is_finite()
-        || !picture_origin.1.is_finite()
-    {
-        return None;
+    match resolve(canvas, page, picture, picture_origin, device_scale, fit) {
+        Resolution::Ready(target) => Some(target),
+        Resolution::Unallocated | Resolution::Rejected { .. } => None,
     }
-    let width = (page.0 * scale).round();
-    let height = (page.1 * scale).round();
-    if width > f64::from(u32::MAX) || height > f64::from(u32::MAX) {
-        return None;
-    }
-    if fit {
-        return PreviewRasterTarget::new(width as u32, height as u32).ok();
-    }
-    let logical_scale = (picture.0 / canvas.width).min(picture.1 / canvas.height);
-    let canvas_x = picture_origin.0 + (picture.0 - canvas.width * logical_scale) * 0.5;
-    let canvas_y = picture_origin.1 + (picture.1 - canvas.height * logical_scale) * 0.5;
-    PreviewRasterTarget::for_viewport(
-        width as u32,
-        height as u32,
-        -canvas_x / logical_scale,
-        -canvas_y / logical_scale,
-        logical_scale * scale,
-    )
-    .ok()
 }
 
 /// Places a crop texture in the document-sized Paintable, independently of current pan or scale.
@@ -73,6 +140,8 @@ mod tests {
     use super::*;
 
     /// Proves centering, scroll translation and device scale retain one document-space crop.
+    /// # Panics
+    /// Panics if valid Fit/crop mapping or device-scale placement changes.
     #[test]
     fn viewport_crop_pan_center_and_hidpi() {
         let canvas = CanvasSpec {
@@ -121,6 +190,8 @@ mod tests {
 
     /// Proves fractional zoom contains the exact canvas aspect inside rounded widget dimensions.
     /// Raster placement uses the same uniform scale and subpixel centering at both device scales.
+    /// # Panics
+    /// Panics if valid fractional scale loses exact contained mapping.
     #[test]
     fn viewport_crop_fractional_zoom_preserves_uniform_physical_scale() {
         for (width, height) in [(900.0, 620.0), (1.0, 100.0), (100.0, 1.0)] {

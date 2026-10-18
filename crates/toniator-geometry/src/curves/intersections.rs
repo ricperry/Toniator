@@ -1,10 +1,139 @@
 use crate::{Bounds, Point2};
 
 use super::{
-    CurveError, CurvePath, CurveSegment, LineSegment, MAX_INTERSECTIONS, MAX_SEGMENT_PAIRS,
-    MAX_SUBDIVISION_DEPTH, MAX_WORK_ITEMS, PARAMETER_TOLERANCE, PathLocation, coincident, distance,
-    parameter, snap_parameter, tolerance,
+    CurveError, CurvePath, CurveSegment, LineSegment, MAX_SUBDIVISION_DEPTH, PARAMETER_TOLERANCE,
+    PathLocation, check_curve_cancelled, coincident, curve_storage_count, distance, parameter,
+    reserve_curve, snap_parameter, tolerance,
 };
+
+/// Caller-owned intersection work policy; normal geometry has no creative count ceiling.
+/// Numerical predicates and deterministic subdivision depth remain independent authorities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct IntersectionWorkLimits {
+    maximum_segment_pairs: usize,
+    maximum_subdivision_work: usize,
+    maximum_results: usize,
+}
+
+impl IntersectionWorkLimits {
+    /// Validates explicit nonzero pair, shared subdivision and post-dedup result bounds.
+    /// # Errors
+    /// Rejects zero bounds before any geometry or storage is produced.
+    pub fn new(pairs: usize, work: usize, results: usize) -> Result<Self, CurveError> {
+        if [pairs, work, results].contains(&0) {
+            return Err(CurveError::new(
+                "curve.path.intersections.limits",
+                "intersection work limits must be nonzero",
+            ));
+        }
+        Ok(Self {
+            maximum_segment_pairs: pairs,
+            maximum_subdivision_work: work,
+            maximum_results: results,
+        })
+    }
+    /// Returns the maximum Cartesian segment-pair count admitted by this explicit policy.
+    pub const fn maximum_segment_pairs(self) -> usize {
+        self.maximum_segment_pairs
+    }
+    /// Returns the shared number of parameter boxes admitted across all candidate pairs.
+    pub const fn maximum_subdivision_work(self) -> usize {
+        self.maximum_subdivision_work
+    }
+    /// Returns the maximum published contacts after canonical stable deduplication.
+    pub const fn maximum_results(self) -> usize {
+        self.maximum_results
+    }
+}
+
+impl Default for IntersectionWorkLimits {
+    /// Supplies machine-representable normal work without artistic pair/result ceilings.
+    fn default() -> Self {
+        Self {
+            maximum_segment_pairs: usize::MAX,
+            maximum_subdivision_work: usize::MAX,
+            maximum_results: usize::MAX,
+        }
+    }
+}
+
+/// Stably orders Copy contacts with checked scratch storage and cancellation in every merge.
+/// Equal keys keep the earlier traversal contact, preserving the original dedup winner.
+/// # Errors
+/// Returns cancellation, addressability or reported allocation failure without publishing results.
+fn stable_sort_cancellable<T: Copy>(
+    values: &mut Vec<T>,
+    compare: impl Fn(&T, &T) -> std::cmp::Ordering,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), CurveError> {
+    check_curve_cancelled(cancelled)?;
+    if values.len() < 2 {
+        return Ok(());
+    }
+    let mut scratch = Vec::new();
+    reserve_curve(&mut scratch, values.len())?;
+    for value in values.iter().copied() {
+        check_curve_cancelled(cancelled)?;
+        scratch.push(value);
+    }
+    let len = values.len();
+    let mut width = 1;
+    while width < len {
+        let mut base = 0;
+        while base < len {
+            let middle = base.saturating_add(width).min(len);
+            let end = middle.saturating_add(width).min(len);
+            let (mut left, mut right) = (base, middle);
+            for slot in &mut scratch[base..end] {
+                check_curve_cancelled(cancelled)?;
+                if left < middle
+                    && (right >= end || !compare(&values[left], &values[right]).is_gt())
+                {
+                    *slot = values[left];
+                    left += 1;
+                } else {
+                    *slot = values[right];
+                    right += 1;
+                }
+            }
+            base = end;
+        }
+        std::mem::swap(values, &mut scratch);
+        width = width.checked_mul(2).unwrap_or(len);
+    }
+    check_curve_cancelled(cancelled)
+}
+
+/// Keeps the first adjacent equivalent contact with cancellable in-place compaction.
+/// # Errors
+/// Returns cancellation before locally staged contacts can be published.
+fn deduplicate_cancellable<T: Copy>(
+    values: &mut Vec<T>,
+    equivalent: impl Fn(&T, &T) -> bool,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), CurveError> {
+    let mut written = 0;
+    for index in 0..values.len() {
+        check_curve_cancelled(cancelled)?;
+        let value = values[index];
+        if written == 0 || !equivalent(&values[written - 1], &value) {
+            values[written] = value;
+            written += 1;
+        }
+    }
+    values.truncate(written);
+    check_curve_cancelled(cancelled)
+}
+
+/// Stores one bounded analytic contact through the same checked production reserve boundary.
+/// # Errors
+/// Returns addressability or actual allocation failure before the contact is appended.
+fn single_contact(contact: SegmentIntersection) -> Result<Vec<SegmentIntersection>, CurveError> {
+    let mut values = Vec::new();
+    reserve_curve(&mut values, 1)?;
+    values.push(contact);
+    Ok(values)
+}
 
 /// Deterministic classification of a finite curve contact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,112 +221,142 @@ impl PathIntersection {
     }
 }
 
-/// Intersects two segments under the public fixed work and result budgets.
+/// Intersects two segments with normal count policy and unchanged numerical depth/predicates.
+/// # Errors
+/// Returns numeric/overlap, addressability, allocation or deterministic depth diagnostics atomically.
 pub(crate) fn segment_intersections(
     first: CurveSegment,
     second: CurveSegment,
 ) -> Result<Vec<SegmentIntersection>, CurveError> {
-    let mut budget = IntersectionBudget::new(MAX_WORK_ITEMS);
+    let mut budget = IntersectionBudget::new(usize::MAX, &|| false);
     let mut intersections = segment_intersections_with_budget(first, second, &mut budget)?;
-    sort_and_deduplicate(&mut intersections)?;
-    if intersections.len() > MAX_INTERSECTIONS {
-        return Err(CurveError::new(
-            "curve.path.intersections.result_limit",
-            "intersection result limit exceeded",
-        ));
-    }
+    sort_and_deduplicate(&mut intersections, budget.cancelled)?;
     Ok(intersections)
 }
 
-/// Intersects segments while charging a caller-owned shared subdivision budget.
+/// Intersects segments while charging caller-owned shared subdivision work and cancellation.
+/// # Errors
+/// Returns cancellation or original geometric diagnostics without partial contact publication.
 fn segment_intersections_with_budget(
     first: CurveSegment,
     second: CurveSegment,
-    budget: &mut IntersectionBudget,
+    budget: &mut IntersectionBudget<'_>,
 ) -> Result<Vec<SegmentIntersection>, CurveError> {
-    match (first, second) {
+    budget.check()?;
+    let result = match (first, second) {
         (CurveSegment::Line(first), CurveSegment::Line(second)) => line_line(first, second),
         _ => subdivision_intersections(first, second, MAX_SUBDIVISION_DEPTH, budget),
-    }
+    }?;
+    budget.check()?;
+    Ok(result)
 }
 
-/// Intersects path segment pairs and canonicalizes only equivalent topological endpoints.
+/// Collects finite segment bounds with exact reached storage and cancellation before each append.
+/// # Errors
+/// Returns cancellation, original coordinate, addressability or reported allocation diagnostics.
+fn path_bounds(path: &CurvePath, cancelled: &dyn Fn() -> bool) -> Result<Vec<Bounds>, CurveError> {
+    curve_storage_count::<Bounds>(path.segments().len())?;
+    let mut bounds = Vec::new();
+    for segment in path.segments() {
+        check_curve_cancelled(cancelled)?;
+        let bound = segment.bounds()?;
+        reserve_curve(&mut bounds, 1)?;
+        bounds.push(bound);
+    }
+    Ok(bounds)
+}
+
+/// Streams original-order segment pairs, rejects conservative disjoint bounds and canonicalizes contacts.
+/// Pair policy counts Cartesian pairs; expensive subdivision only sees overlapping finite boxes.
+/// Results are stably sorted/deduplicated before finite result admission and final cancellation.
+/// # Errors
+/// Returns explicit policy, cancellation, count/addressability, allocation or unchanged numerical errors.
 pub(crate) fn path_intersections(
     first: &CurvePath,
     second: &CurvePath,
+    limits: IntersectionWorkLimits,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<PathIntersection>, CurveError> {
+    check_curve_cancelled(cancelled)?;
     let pairs = first
         .segments()
         .len()
         .checked_mul(second.segments().len())
         .ok_or(CurveError::new(
-            "curve.path.intersections.pair_limit",
-            "path intersection pair limit exceeded",
+            "curve.path.count_overflow",
+            "intersection pair count exceeds machine representation",
         ))?;
-    if pairs > MAX_SEGMENT_PAIRS {
+    if pairs > limits.maximum_segment_pairs {
         return Err(CurveError::new(
             "curve.path.intersections.pair_limit",
             "path intersection pair limit exceeded",
         ));
     }
-    let first_bounds = first
-        .segments()
-        .iter()
-        .map(CurveSegment::bounds)
-        .collect::<Result<Vec<_>, _>>()?;
-    let second_bounds = second
-        .segments()
-        .iter()
-        .map(CurveSegment::bounds)
-        .collect::<Result<Vec<_>, _>>()?;
+    let first_bounds = path_bounds(first, cancelled)?;
+    let second_bounds = path_bounds(second, cancelled)?;
     let mut output = Vec::new();
-    let mut budget = IntersectionBudget::new(MAX_WORK_ITEMS);
+    let mut budget = IntersectionBudget::new(limits.maximum_subdivision_work, cancelled);
     for (first_index, first_segment) in first.segments().iter().copied().enumerate() {
         for (second_index, second_segment) in second.segments().iter().copied().enumerate() {
+            budget.check()?;
             if !bounds_overlap(first_bounds[first_index], second_bounds[second_index])? {
                 continue;
             }
             for intersection in
                 segment_intersections_with_budget(first_segment, second_segment, &mut budget)?
             {
-                output.push(PathIntersection {
+                budget.check()?;
+                let contact = PathIntersection {
                     first_location: canonical_location(
                         first,
                         first_index,
                         intersection.first_parameter(),
+                        cancelled,
                     )?,
                     second_location: canonical_location(
                         second,
                         second_index,
                         intersection.second_parameter(),
+                        cancelled,
                     )?,
                     point: intersection.point(),
                     kind: intersection.kind(),
-                });
+                };
+                reserve_curve(&mut output, 1)?;
+                output.push(contact);
             }
         }
     }
-    output.sort_by(path_intersection_order);
-    output.dedup_by(|first_value, second_value| {
-        locations_equivalent(first_value.first_location, second_value.first_location)
-            && locations_equivalent(first_value.second_location, second_value.second_location)
-            && coincident(first_value.point, second_value.point).unwrap_or(false)
-    });
-    if output.len() > MAX_INTERSECTIONS {
+    stable_sort_cancellable(&mut output, path_intersection_order, cancelled)?;
+    deduplicate_cancellable(
+        &mut output,
+        |a, b| {
+            locations_equivalent(a.first_location, b.first_location)
+                && locations_equivalent(a.second_location, b.second_location)
+                && coincident(a.point, b.point).unwrap_or(false)
+        },
+        cancelled,
+    )?;
+    if output.len() > limits.maximum_results {
         return Err(CurveError::new(
             "curve.path.intersections.result_limit",
             "intersection result limit exceeded",
         ));
     }
+    budget.check()?;
     Ok(output)
 }
 
 /// Converts equivalent adjacent endpoint visits into the earliest stored topological location.
+/// # Errors
+/// Returns cancellation or invalid canonical parameter diagnostics; no storage is allocated.
 fn canonical_location(
     path: &CurvePath,
     index: usize,
     parameter_value: f64,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<PathLocation, CurveError> {
+    check_curve_cancelled(cancelled)?;
     let parameter_value = snap_parameter(parameter_value);
     if parameter_value == 0.0 && index > 0 {
         if path.segments()[index].start() == path.segments()[index].end() {
@@ -206,6 +365,7 @@ fn canonical_location(
                 && path.segments()[earliest - 1].start() == path.segments()[earliest - 1].end()
                 && path.segments()[earliest - 1].end() == path.segments()[earliest].start()
             {
+                check_curve_cancelled(cancelled)?;
                 earliest -= 1;
             }
             if earliest != index {
@@ -258,38 +418,36 @@ fn locations_equivalent(first: PathLocation, second: PathLocation) -> bool {
         && (first.parameter() - second.parameter()).abs() <= PARAMETER_TOLERANCE
 }
 
-/// Sorts and deduplicates segment contacts only when both parameters and points agree.
-fn sort_and_deduplicate(intersections: &mut Vec<SegmentIntersection>) -> Result<(), CurveError> {
-    intersections.sort_by(|first, second| {
-        first
-            .first_parameter()
-            .total_cmp(&second.first_parameter())
-            .then_with(|| {
-                first
-                    .second_parameter()
-                    .total_cmp(&second.second_parameter())
-            })
-    });
-    let mut deduplicated = Vec::with_capacity(intersections.len());
-    for intersection in intersections.drain(..) {
-        let duplicate = deduplicated
-            .last()
-            .is_some_and(|previous: &SegmentIntersection| {
-                (previous.first_parameter() - intersection.first_parameter()).abs()
-                    <= PARAMETER_TOLERANCE
-                    && (previous.second_parameter() - intersection.second_parameter()).abs()
-                        <= PARAMETER_TOLERANCE
-                    && coincident(previous.point(), intersection.point()).unwrap_or(false)
-            });
-        if !duplicate {
-            deduplicated.push(intersection);
-        }
-    }
-    *intersections = deduplicated;
-    Ok(())
+/// Stably sorts segment contacts and retains the original first equivalent parameter/point witness.
+/// # Errors
+/// Returns cancellation or checked scratch-allocation failure before publication.
+fn sort_and_deduplicate(
+    intersections: &mut Vec<SegmentIntersection>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), CurveError> {
+    stable_sort_cancellable(
+        intersections,
+        |a, b| {
+            a.first_parameter()
+                .total_cmp(&b.first_parameter())
+                .then_with(|| a.second_parameter().total_cmp(&b.second_parameter()))
+        },
+        cancelled,
+    )?;
+    deduplicate_cancellable(
+        intersections,
+        |a, b| {
+            (a.first_parameter() - b.first_parameter()).abs() <= PARAMETER_TOLERANCE
+                && (a.second_parameter() - b.second_parameter()).abs() <= PARAMETER_TOLERANCE
+                && coincident(a.point(), b.point()).unwrap_or(false)
+        },
+        cancelled,
+    )
 }
 
 /// Uses analytical cross products for finite line/line and degenerate point contacts.
+/// # Errors
+/// Returns original numeric/positive-overlap diagnostics or checked contact storage failure.
 fn line_line(
     first: LineSegment,
     second: LineSegment,
@@ -303,12 +461,12 @@ fn line_line(
         tolerance([first.start(), first.end(), second.start(), second.end()])?;
     if first_length <= geometric_tolerance && second_length <= geometric_tolerance {
         return if coincident(first.start(), second.start())? {
-            Ok(vec![SegmentIntersection::new(
+            single_contact(SegmentIntersection::new(
                 0.0,
                 0.0,
                 first.start(),
                 IntersectionKind::Tangent,
-            )?])
+            )?)
         } else {
             Ok(Vec::new())
         };
@@ -356,15 +514,17 @@ fn line_line(
     } else {
         IntersectionKind::Crossing
     };
-    Ok(vec![SegmentIntersection::new(
+    single_contact(SegmentIntersection::new(
         first_parameter,
         second_parameter,
         point,
         kind,
-    )?])
+    )?)
 }
 
 /// Resolves a degenerate point against a nondegenerate line as one tangency when coincident.
+/// # Errors
+/// Returns original coordinate/parameter diagnostics or checked contact storage failure.
 fn point_on_line(
     point: Point2,
     line: LineSegment,
@@ -381,14 +541,16 @@ fn point_on_line(
         return Ok(Vec::new());
     }
     let parameter_value = snap_parameter(parameter_value.clamp(0.0, 1.0));
-    Ok(vec![if point_is_first {
+    single_contact(if point_is_first {
         SegmentIntersection::new(0.0, parameter_value, point, IntersectionKind::Tangent)?
     } else {
         SegmentIntersection::new(parameter_value, 0.0, point, IntersectionKind::Tangent)?
-    }])
+    })
 }
 
 /// Distinguishes positive collinear overlap from one endpoint tangent contact.
+/// # Errors
+/// Returns original coordinate/positive-overlap diagnostics or checked contact storage failure.
 fn collinear_lines(
     first: LineSegment,
     second: LineSegment,
@@ -419,20 +581,22 @@ fn collinear_lines(
         (dot(delta(second.start(), point)?, second_delta) / dot(second_delta, second_delta))
             .clamp(0.0, 1.0),
     );
-    Ok(vec![SegmentIntersection::new(
+    single_contact(SegmentIntersection::new(
         first_parameter,
         second_parameter,
         point,
         IntersectionKind::Tangent,
-    )?])
+    )?)
 }
 
 /// Subdivides parameter boxes in fixed order for every pair involving a cubic.
+/// # Errors
+/// Returns cancellation, explicit shared-work, unchanged numeric/depth or checked storage failure.
 fn subdivision_intersections(
     first: CurveSegment,
     second: CurveSegment,
     maximum_depth: u8,
-    budget: &mut IntersectionBudget,
+    budget: &mut IntersectionBudget<'_>,
 ) -> Result<Vec<SegmentIntersection>, CurveError> {
     if coincident_curve_interval(first, second)? {
         return Err(CurveError::new(
@@ -440,7 +604,10 @@ fn subdivision_intersections(
             "positive-length coincident curve intervals are not discrete intersections",
         ));
     }
-    let mut stack = vec![(first, 0.0, 1.0, second, 0.0, 1.0, 0_u8)];
+    budget.check()?;
+    let mut stack = Vec::new();
+    reserve_curve(&mut stack, 1)?;
+    stack.push((first, 0.0, 1.0, second, 0.0, 1.0, 0_u8));
     let mut output = Vec::new();
     while let Some((
         first_node,
@@ -476,11 +643,13 @@ fn subdivision_intersections(
                 let second_parameter =
                     second_start + (second_end - second_start) * contact.second_parameter();
                 let Some((first_parameter, second_parameter, point)) =
-                    refine_candidate(first, second, first_parameter, second_parameter)?
+                    refine_candidate(first, second, first_parameter, second_parameter, budget)?
                 else {
                     continue;
                 };
                 let kind = classify_contact(first, second, first_parameter, second_parameter)?;
+                budget.check()?;
+                reserve_curve(&mut output, 1)?;
                 output.push(SegmentIntersection::new(
                     first_parameter,
                     second_parameter,
@@ -492,6 +661,8 @@ fn subdivision_intersections(
         }
         let first_size = bounds_size(first_bounds)?;
         let second_size = bounds_size(second_bounds)?;
+        budget.check()?;
+        reserve_curve(&mut stack, 2)?;
         if first_size >= second_size {
             let (left, right) = split_segment(first_node)?;
             let middle = (first_start + first_end) * 0.5;
@@ -540,13 +711,17 @@ fn subdivision_intersections(
 }
 
 /// Refines a chord-derived candidate against both source curves and discards residual misses.
+/// # Errors
+/// Returns cancellation or unchanged numeric/refinement failure without accepting an approximate contact.
 fn refine_candidate(
     first: CurveSegment,
     second: CurveSegment,
     mut first_parameter: f64,
     mut second_parameter: f64,
+    budget: &IntersectionBudget<'_>,
 ) -> Result<Option<(f64, f64, Point2)>, CurveError> {
     for _ in 0..12 {
+        budget.check()?;
         let first_point = first.point_at(first_parameter)?;
         let second_point = second.point_at(second_parameter)?;
         let residual = delta(second_point, first_point)?;
@@ -657,29 +832,35 @@ fn point_on_infinite_line(point: Point2, line: LineSegment) -> Result<bool, Curv
 }
 
 /// Derives one fixed-policy tolerance from complete curve construction plus optional evaluated contacts.
+/// # Errors
+/// Returns the original nonfinite-coordinate or tolerance arithmetic diagnostic.
 fn operation_tolerance(
     first: CurveSegment,
     second: CurveSegment,
     extra: &[Point2],
 ) -> Result<f64, CurveError> {
-    let mut points = Vec::with_capacity(10 + extra.len());
-    append_construction_points(&mut points, first);
-    append_construction_points(&mut points, second);
-    points.extend_from_slice(extra);
-    tolerance(points)
+    tolerance(
+        construction_points(first)
+            .chain(construction_points(second))
+            .chain(extra.iter().copied()),
+    )
 }
 
-/// Appends complete line or cubic construction geometry so tolerance never ignores control extent.
-fn append_construction_points(points: &mut Vec<Point2>, segment: CurveSegment) {
-    match segment {
-        CurveSegment::Line(line) => points.extend([line.start(), line.end()]),
-        CurveSegment::CubicBezier(cubic) => points.extend([
-            cubic.start(),
-            cubic.control_1(),
-            cubic.control_2(),
-            cubic.end(),
-        ]),
-    }
+/// Iterates complete construction points in the original tolerance order without allocation.
+fn construction_points(segment: CurveSegment) -> impl Iterator<Item = Point2> {
+    let (points, count) = match segment {
+        CurveSegment::Line(line) => ([line.start(), line.end(), line.end(), line.end()], 2),
+        CurveSegment::CubicBezier(cubic) => (
+            [
+                cubic.start(),
+                cubic.control_1(),
+                cubic.control_2(),
+                cubic.end(),
+            ],
+            4,
+        ),
+    };
+    points.into_iter().take(count)
 }
 
 /// Classifies a refined contact from the two original analytic derivatives.
@@ -794,25 +975,37 @@ fn cross(first: (f64, f64), second: (f64, f64)) -> f64 {
 }
 
 /// Tracks subdivision work shared by all curve pairs in one public intersection operation.
-struct IntersectionBudget {
+struct IntersectionBudget<'a> {
+    cancelled: &'a dyn Fn() -> bool,
     work_items: usize,
     maximum_work_items: usize,
 }
 
-impl IntersectionBudget {
-    /// Creates a private fixed shared work budget for one deterministic intersection query.
-    const fn new(maximum_work_items: usize) -> Self {
+impl<'a> IntersectionBudget<'a> {
+    /// Creates an explicit shared work/cancellation budget for one deterministic intersection query.
+    const fn new(maximum_work_items: usize, cancelled: &'a dyn Fn() -> bool) -> Self {
         Self {
+            cancelled,
             work_items: 0,
             maximum_work_items,
         }
     }
 
-    /// Charges one parameter-box node and returns the stable atomic subdivision failure on exhaustion.
+    /// Rejects obsolete work before any further kernel or storage operation.
+    /// # Errors
+    /// Returns evaluation.cancelled without exposing staged contacts.
+    fn check(&self) -> Result<(), CurveError> {
+        check_curve_cancelled(self.cancelled)
+    }
+
+    /// Charges one parameter-box node without permitting counter wrap or obsolete work.
+    /// # Errors
+    /// Returns cancellation, count overflow or the explicit shared-work limit diagnostic.
     fn consume(&mut self) -> Result<(), CurveError> {
+        self.check()?;
         self.work_items = self.work_items.checked_add(1).ok_or(CurveError::new(
-            "curve.path.intersections.subdivision_limit",
-            "intersection subdivision work limit exceeded",
+            "curve.path.count_overflow",
+            "intersection subdivision work count exceeds machine representation",
         ))?;
         (self.work_items <= self.maximum_work_items)
             .then_some(())
@@ -829,7 +1022,112 @@ mod tests {
 
     use super::*;
 
+    /// Exercises the actual reserve helper and distinguishes addressability from allocator refusal.
+    /// # Panics
+    /// Panics if production storage masks a report, exposes partial output or cannot recover.
+    #[test]
+    fn production_intersection_reserve_failure_is_atomic_and_distinct() {
+        let first = CurvePath::line(Point2::new(-1.0, 0.0), Point2::new(1.0, 0.0)).unwrap();
+        let second = CurvePath::line(Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)).unwrap();
+        super::super::FAIL_RESERVATION.with(|flag| flag.set(true));
+        assert_eq!(
+            first.intersections(&second).unwrap_err().path(),
+            "curve.path.allocation"
+        );
+        assert_eq!(first.intersections(&second).unwrap().len(), 1);
+        let mut storage = Vec::<PathIntersection>::new();
+        assert_eq!(
+            reserve_curve(&mut storage, usize::MAX).unwrap_err().path(),
+            "curve.path.count_overflow"
+        );
+        assert!(storage.is_empty());
+    }
+
+    /// Preserves stable equal-key winners and cancels actual merge and dedup helper loops.
+    /// # Panics
+    /// Panics on reordered ties, lost cancellation or a nonstable production sort.
+    #[test]
+    fn intersection_stable_sort_and_dedup_keep_first_and_cancel() {
+        use std::cell::Cell;
+        let original: Vec<_> = (0..128).rev().map(|i| (i % 7, i)).collect();
+        let mut expected = original.clone();
+        expected.sort_by_key(|value| value.0);
+        let mut values = original.clone();
+        stable_sort_cancellable(&mut values, |a, b| a.0.cmp(&b.0), &|| false).unwrap();
+        assert_eq!(values, expected);
+        let mut first = values.clone();
+        deduplicate_cancellable(&mut first, |a, b| a.0 == b.0, &|| false).unwrap();
+        let mut expected_first = expected;
+        expected_first.dedup_by_key(|value| value.0);
+        assert_eq!(first, expected_first);
+        let polls = Cell::new(0);
+        let mut values = original;
+        assert_eq!(
+            stable_sort_cancellable(&mut values, |a, b| a.0.cmp(&b.0), &|| {
+                polls.set(polls.get() + 1);
+                polls.get() > 140
+            })
+            .unwrap_err()
+            .path(),
+            "evaluation.cancelled"
+        );
+        let polls = Cell::new(0);
+        assert_eq!(
+            deduplicate_cancellable(&mut values, |a, b| a.0 == b.0, &|| {
+                polls.set(polls.get() + 1);
+                polls.get() > 10
+            })
+            .unwrap_err()
+            .path(),
+            "evaluation.cancelled"
+        );
+    }
+
+    /// Reuses an observed actual subdivision count as an exact explicit finite boundary.
+    /// # Panics
+    /// Panics if the same shared budget succeeds below its consumed work or changes contacts.
+    #[test]
+    fn intersection_shared_subdivision_work_has_exact_boundary() {
+        let first = CurveSegment::CubicBezier(
+            CubicBezierSegment::new(
+                Point2::new(-1.0, 0.0),
+                Point2::new(-1.0, 2.0),
+                Point2::new(1.0, 2.0),
+                Point2::new(1.0, 0.0),
+            )
+            .unwrap(),
+        );
+        let second = CurveSegment::Line(
+            LineSegment::new(Point2::new(-2.0, 0.75), Point2::new(2.0, 0.75)).unwrap(),
+        );
+        let mut budget = IntersectionBudget::new(usize::MAX, &|| false);
+        let expected = segment_intersections_with_budget(first, second, &mut budget).unwrap();
+        let consumed = budget.work_items;
+        assert!(consumed > 1);
+        assert_eq!(
+            segment_intersections_with_budget(
+                first,
+                second,
+                &mut IntersectionBudget::new(consumed, &|| false)
+            )
+            .unwrap(),
+            expected
+        );
+        assert_eq!(
+            segment_intersections_with_budget(
+                first,
+                second,
+                &mut IntersectionBudget::new(consumed - 1, &|| false)
+            )
+            .unwrap_err()
+            .path(),
+            "curve.path.intersections.subdivision_limit"
+        );
+    }
+
     /// Proves private reduced subdivision budgets fail before returning any candidate contact.
+    /// # Panics
+    /// Panics if the explicit shared work bound admits partial contacts.
     #[test]
     fn reduced_intersection_work_budget_is_atomic() {
         let first = CurveSegment::CubicBezier(
@@ -851,9 +1149,14 @@ mod tests {
             .expect("finite cubic"),
         );
         assert_eq!(
-            subdivision_intersections(first, second, 48, &mut IntersectionBudget::new(1))
-                .expect_err("one work item is insufficient")
-                .path(),
+            subdivision_intersections(
+                first,
+                second,
+                48,
+                &mut IntersectionBudget::new(1, &|| false)
+            )
+            .expect_err("one work item is insufficient")
+            .path(),
             "curve.path.intersections.subdivision_limit"
         );
     }

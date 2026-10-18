@@ -20,20 +20,35 @@ impl SourceWorker {
         endpoint: temporal_preview::Endpoint,
         sender: async_channel::Sender<AppEvent>,
         epoch: u64,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, PreviewDiagnostic> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = cancelled.clone();
         let thread = thread::Builder::new()
             .name("toniator-advanced-media".into())
             .spawn(move || {
-                let result = prepare_source(&document, &sources, endpoint, &|| {
-                    flag.load(Ordering::Acquire)
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    prepare_source(&document, &sources, endpoint, &|| {
+                        flag.load(Ordering::Acquire)
+                    })
+                }))
+                .unwrap_or_else(|_| {
+                    Err(PreviewDiagnostic::new(
+                        PreviewOrigin::Source,
+                        "preview.source_worker.panicked",
+                        "Advanced source preparation stopped unexpectedly",
+                    ))
                 });
                 if !flag.load(Ordering::Acquire) {
                     let _ = sender.send_blocking(AppEvent::AdvancedSource { epoch, result });
                 }
             })
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                PreviewDiagnostic::new(
+                    PreviewOrigin::Source,
+                    "preview.source_worker.spawn",
+                    &error.to_string(),
+                )
+            })?;
         Ok(Self {
             cancelled,
             thread: Some(thread),
@@ -60,30 +75,42 @@ pub(super) fn prepare_source(
     sources: &SourceBundle,
     endpoint: temporal_preview::Endpoint,
     cancelled: &dyn Fn() -> bool,
-) -> Result<AdvancedPreviewSource, String> {
+) -> Result<AdvancedPreviewSource, PreviewDiagnostic> {
     let mut provider =
-        toniator_engine::open_source_media(sources, MediaTools::default(), cancelled)
-            .map_err(|error| error.to_string())?;
+        toniator_engine::open_source_media(sources, MediaTools::default(), cancelled).map_err(
+            |error| PreviewDiagnostic::new(PreviewOrigin::Source, error.path(), error.message()),
+        )?;
     let time = document
         .project_timing()
         .source_time_for_frame(endpoint.frame(document))
-        .map_err(|error| error.to_string())?;
-    let frame = provider
-        .frame_at(time, cancelled)
-        .map_err(|error| error.to_string())?;
-    let proxy = toniator_engine::reduced_preview_frame(&frame, 128, cancelled)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            PreviewDiagnostic::new(PreviewOrigin::Source, error.path(), error.message())
+        })?;
+    let frame = provider.frame_at(time, cancelled).map_err(|error| {
+        PreviewDiagnostic::new(PreviewOrigin::Source, error.path(), error.message())
+    })?;
+    let proxy =
+        toniator_engine::reduced_preview_frame(&frame, 128, cancelled).map_err(|error| {
+            PreviewDiagnostic::new(PreviewOrigin::Source, error.path(), error.message())
+        })?;
     let width = proxy.field.identity().width;
     let height = proxy.field.identity().height;
+    let format = proxy.field.identity().format;
     let SourceReference::Assigned(id) = document.source() else {
-        return Err("No source artwork is assigned".into());
+        return Err(PreviewDiagnostic::new(
+            PreviewOrigin::Source,
+            "source.document",
+            "No source artwork is assigned",
+        ));
     };
-    let source =
-        ResolvedSource::from_frame(id.clone(), proxy).map_err(|error| error.to_string())?;
+    let source = ResolvedSource::from_frame(id.clone(), proxy).map_err(|error| {
+        PreviewDiagnostic::new(PreviewOrigin::Source, error.path(), error.message())
+    })?;
     Ok(AdvancedPreviewSource::Ready {
         source,
         width,
         height,
+        format,
     })
 }
 
@@ -91,7 +118,7 @@ pub(super) fn prepare_source(
 pub(super) fn source_ready(
     state: &Rc<RefCell<AppState>>,
     epoch: u64,
-    result: Result<AdvancedPreviewSource, String>,
+    result: Result<AdvancedPreviewSource, PreviewDiagnostic>,
 ) {
     {
         let mut app = state.borrow_mut();
@@ -102,7 +129,21 @@ pub(super) fn source_ready(
         else {
             return;
         };
-        surface.preview_source = result.unwrap_or_else(AdvancedPreviewSource::Unavailable);
+        match result {
+            Ok(source) => {
+                if let AdvancedPreviewSource::Ready { width, height, format, .. } = &source {
+                    surface.preview_details.set_source(serde_json::json!({"format":format!("{format:?}"),"width":width,"height":height,"purpose":"actual private source field; maximum long edge128"}));
+                }
+                surface.preview_source = source;
+            }
+            Err(diagnostic) => {
+                if diagnostic.is_cancelled() {
+                    return;
+                }
+                surface.preview_source = AdvancedPreviewSource::Unavailable(diagnostic.clone());
+                record_advanced_failure(surface, diagnostic);
+            }
+        }
     }
     submit_advanced_preview(state, epoch);
 }
@@ -1164,6 +1205,7 @@ mod tests {
                     source,
                     width,
                     height,
+                    ..
                 } = prepare_source(document, &workspace.sources, endpoint, &|| false).unwrap()
                 else {
                     panic!("ready source");

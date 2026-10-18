@@ -36,7 +36,7 @@ pub use connection_paths::{
     connection_program_contract_id,
 };
 pub use curves::{
-    CubicBezierSegment, CurveError, CurvePath, CurveSegment, CurveWorkLimits, IntersectionKind, LineSegment,
+    CubicBezierSegment, CurveError, CurvePath, CurveSegment, CurveWorkLimits, IntersectionKind, IntersectionWorkLimits, LineSegment,
     PathArcLength, PathClosure, PathIntersection, PathLocation, SegmentIntersection,
     construct_parametric_curve_path_cancellable, construct_parametric_curve_path_with_limits_cancellable,
 };

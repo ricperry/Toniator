@@ -55,7 +55,7 @@ pub use toniator_geometry::{
     ConnectionPathLimits, ConnectionPathSet, CubicBezierSegment, CurveError, CurvePath, CurveWorkLimits,
     CurveSegment, FamilySite, FamilySiteError, FamilySiteId, FamilySiteProvenance, FamilySiteSet,
     GUIDE_FACE_CONTRACT_ID, GuideFaceLimits, GuideFaceRequest, GuideInstanceId,
-    GuideIntersectionProvenance, IntersectionSite, LineSegment, MAZE_WALL_CONTRACT_ID,
+    GuideIntersectionProvenance, IntersectionSite, IntersectionWorkLimits, LineSegment, MAZE_WALL_CONTRACT_ID,
     MazeGuideAxis, MazeLimits, MazeProgramResult, MazeWallPathId, NominalCellBasis,
     PATH_OFFSET_ALGORITHM_CONTRACT_ID, PathClosure, PathLocation, PathOffsetCleanup,
     PathOffsetEndpointPolicy, PathOffsetLimits, PathOffsetRequest, PathOffsetResult, Point2,
@@ -7626,6 +7626,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 &grouped,
                 &selected,
                 request.max_family_candidates,
+                is_cancelled,
             )?;
             let site_progress = |completed, total| {
                 report_family_progress_portion(report_progress, 400, 600, completed, total);
@@ -7769,16 +7770,32 @@ fn preflight_curve_along_work(
     Ok(predicted.max(1))
 }
 
-/// Bounds selected guide pairs, segment products, and merge candidates before curve allocation.
+/// Bounds actual guide/segment pair totals and explicit finite merge estimates before solving.
+/// # Errors
+/// Returns checked count overflow or explicit finite family admission failure; normal policy does
+/// not reject an unmaterialized nine-contact estimate.
 fn preflight_curve_intersection_work(
     grouped: &[Vec<StructuralPathInstance>],
     selected: &[usize],
     limit: usize,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<usize, PatternPipelineError> {
+    let check_cancelled = || {
+        if cancelled() {
+            Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    check_cancelled()?;
     let mut guide_pairs = 0_usize;
     let mut segment_pairs = 0_usize;
     for (offset, &left) in selected.iter().enumerate() {
         for &right in &selected[offset + 1..] {
+            check_cancelled()?;
             guide_pairs = guide_pairs
                 .checked_add(
                     grouped[left]
@@ -7795,6 +7812,7 @@ fn preflight_curve_intersection_work(
                 ))?;
             for first in &grouped[left] {
                 for second in &grouped[right] {
+                    check_cancelled()?;
                     segment_pairs = segment_pairs
                         .checked_add(
                             first
@@ -7821,25 +7839,74 @@ fn preflight_curve_intersection_work(
             "curved-guide pairwise work exceeds the configured family limit",
         ));
     }
-    // Two cubic Béziers have at most nine isolated contacts.  The geometry layer also
-    // defends its own larger diagnostic cap, but this strict mathematical bound lets the
-    // family reject impossible merge work before invoking any intersection routine.
-    let merge_work = segment_pairs
-        .checked_mul(9)
-        .ok_or(PatternPipelineError::new(
-            "coverage.curved_guides.numeric_overflow",
-            "curved-guide coverage arithmetic overflowed",
-        ))?;
+    check_curve_intersection_merge_estimate(segment_pairs, limit)?;
+    check_cancelled()?;
+    Ok(guide_pairs.max(1))
+}
+
+/// Checks the conservative nine-contact estimate only for explicitly constrained family callers.
+/// Normal policy relies on actual checked storage/output rather than an unmaterialized upper estimate.
+/// # Errors
+/// Returns finite merge-policy exhaustion or estimate arithmetic diagnostics without allocation.
+fn check_curve_intersection_merge_estimate(
+    pairs: usize,
+    limit: usize,
+) -> Result<(), PatternPipelineError> {
+    if limit == usize::MAX {
+        return Ok(());
+    }
+    let merge_work = pairs.checked_mul(9).ok_or(PatternPipelineError::new(
+        "coverage.curved_guides.numeric_overflow",
+        "curved-guide coverage arithmetic overflowed",
+    ))?;
     if merge_work > limit {
         return Err(PatternPipelineError::new(
             "coverage.curved_guides.merge_limit",
             "curved-guide merge work exceeds the configured family limit",
         ));
     }
-    Ok(guide_pairs.max(1))
+    Ok(())
 }
 
-/// Builds bounded curve-intersection sites in selected-dimension and guide-instance order.
+#[cfg(test)]
+std::thread_local! { static CURVE_INTERSECTION_PUBLICATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+/// Reserves reached intersection metadata/site storage after proving exact byte addressability.
+/// # Errors
+/// Distinguishes checked count/addressability failure from an actual allocator refusal.
+fn reserve_curve_contacts<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+) -> Result<(), PatternPipelineError> {
+    let count = values
+        .len()
+        .checked_add(additional)
+        .ok_or(PatternPipelineError::new(
+            "coverage.curved_guides.intersections.count_overflow",
+            "intersection contact count exceeds machine representation",
+        ))?;
+    count
+        .checked_mul(std::mem::size_of::<T>())
+        .filter(|bytes| *bytes <= isize::MAX as usize)
+        .ok_or(PatternPipelineError::new(
+            "coverage.curved_guides.intersections.addressability",
+            "intersection contact storage exceeds machine addressability",
+        ))?;
+    reserve_stage20m(
+        values,
+        additional,
+        "coverage.curved_guides.intersections.allocation",
+        "intersection contact allocation failed",
+    )
+}
+
+/// Builds exact curve-intersection sites in selected-dimension and guide-instance order.
+/// Explicit geometry work derives only from the already-keyed family candidate policy.
+/// Existing earliest-site and contributor ordering stay authoritative through cancellable merging.
+/// # Errors
+/// Returns cancellation, explicit finite work, checked addressability, allocation or unchanged numerical diagnostics.
+/// # Panics
+/// The final scope lookup relies on every raw point having passed the same immutable envelope check.
 #[allow(clippy::too_many_arguments)] // Explicit evaluator inputs preserve the bounded headless authority.
 fn curve_intersection_sites(
     grouped: &[Vec<StructuralPathInstance>],
@@ -7855,6 +7922,17 @@ fn curve_intersection_sites(
     guide_pair_total: usize,
     report_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<Vec<FamilySite>, PatternPipelineError> {
+    let intersection_limits = IntersectionWorkLimits::new(limit, limit, limit)?;
+    let check_cancelled = || {
+        if cancelled() {
+            Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ))
+        } else {
+            Ok(())
+        }
+    };
     let mut raw = Vec::<(
         Point2,
         Vec<StructuralPathLocationProvenance>,
@@ -7871,14 +7949,21 @@ fn curve_intersection_sites(
                             "evaluation was cancelled",
                         ));
                     }
-                    let contacts = first.path.intersections(&second.path)?;
+                    let contacts = first.path.intersections_with_limits_cancellable(
+                        &second.path,
+                        intersection_limits,
+                        cancelled,
+                    )?;
                     if cancelled() {
                         return Err(PatternPipelineError::new(
                             "evaluation.cancelled",
                             "evaluation was cancelled",
                         ));
                     }
+                    #[cfg(test)]
+                    CURVE_INTERSECTION_PUBLICATION.with(|flag| flag.set(true));
                     for contact in contacts {
+                        check_cancelled()?;
                         let point = contact.point();
                         if site_scope(point, canvas, generation_domain).is_none() {
                             continue;
@@ -7916,30 +8001,35 @@ fn curve_intersection_sites(
                             second_tangent.scale(first_spacing),
                         )
                         .map_err(family_site_error)?;
-                        raw.push((
-                            point,
-                            vec![
-                                StructuralPathLocationProvenance {
-                                    path: first.id,
-                                    segment_index: contact.first_location().segment_index(),
-                                    parameter_bits: contact.first_location().parameter().to_bits(),
-                                },
-                                StructuralPathLocationProvenance {
-                                    path: second.id,
-                                    segment_index: contact.second_location().segment_index(),
-                                    parameter_bits: contact.second_location().parameter().to_bits(),
-                                },
-                            ],
-                            basis,
-                        ));
-                        if raw.len() > limit {
+                        if raw.len() >= limit {
                             return Err(PatternPipelineError::new(
                                 "coverage.curved_guides.merge_limit",
                                 "curved-guide merge work exceeds the configured family limit",
                             ));
                         }
+                        let mut contributors = Vec::new();
+                        reserve_curve_contacts(&mut contributors, 2)?;
+                        contributors.push(StructuralPathLocationProvenance {
+                            path: first.id,
+                            segment_index: contact.first_location().segment_index(),
+                            parameter_bits: contact.first_location().parameter().to_bits(),
+                        });
+                        contributors.push(StructuralPathLocationProvenance {
+                            path: second.id,
+                            segment_index: contact.second_location().segment_index(),
+                            parameter_bits: contact.second_location().parameter().to_bits(),
+                        });
+                        check_cancelled()?;
+                        reserve_curve_contacts(&mut raw, 1)?;
+                        raw.push((point, contributors, basis));
                     }
-                    completed_guide_pairs = completed_guide_pairs.saturating_add(1);
+                    completed_guide_pairs =
+                        completed_guide_pairs
+                            .checked_add(1)
+                            .ok_or(PatternPipelineError::new(
+                                "coverage.curved_guides.intersections.count_overflow",
+                                "guide pair count exceeds machine representation",
+                            ))?;
                     report_family_progress_portion(
                         report_progress,
                         0,
@@ -7954,16 +8044,33 @@ fn curve_intersection_sites(
     let mut output: Vec<FamilySite> = Vec::new();
     let raw_total = raw.len().max(1);
     for (raw_index, (point, mut contributors, basis)) in raw.into_iter().enumerate() {
-        if let Some(existing) = output
-            .iter_mut()
-            .find(|site| ((site.position.x - point.x).hypot(site.position.y - point.y)) <= epsilon)
-        {
+        check_cancelled()?;
+        let mut matched = None;
+        for (index, site) in output.iter().enumerate() {
+            check_cancelled()?;
+            if ((site.position.x - point.x).hypot(site.position.y - point.y)) <= epsilon {
+                matched = Some(index);
+                break;
+            }
+        }
+        if let Some(index) = matched {
+            let existing = &mut output[index];
             if let FamilySiteProvenance::CurveGuideIntersection {
                 contributors: prior,
             } = &mut existing.provenance
             {
                 for contributor in contributors {
-                    if !prior.contains(&contributor) {
+                    check_cancelled()?;
+                    let mut present = false;
+                    for previous in prior.iter() {
+                        check_cancelled()?;
+                        if previous == &contributor {
+                            present = true;
+                            break;
+                        }
+                    }
+                    if !present {
+                        reserve_curve_contacts(prior, 1)?;
                         prior.push(contributor);
                     }
                 }
@@ -7979,6 +8086,8 @@ fn curve_intersection_sites(
             continue;
         }
         contributors.dedup();
+        check_cancelled()?;
+        reserve_curve_contacts(&mut output, 1)?;
         output.push(FamilySite {
             id: FamilySiteId {
                 mechanism_id: product_id,
@@ -7993,8 +8102,108 @@ fn curve_intersection_sites(
         });
         report_family_progress_portion(report_progress, 500, 500, raw_index + 1, raw_total);
     }
+    check_cancelled()?;
     report_progress(1_000, 1_000);
+    check_cancelled()?;
     Ok(output)
+}
+
+#[cfg(test)]
+mod intersection_policy_tests {
+    use super::*;
+    /// Rejects only explicit conservative merge limits, not an overflowing normal estimate.
+    /// # Panics
+    /// Panics if normal policy rejects an unmaterialized estimate or finite boundaries change.
+    #[test]
+    fn normal_merge_estimate_and_finite_exact_boundary() {
+        check_curve_intersection_merge_estimate(usize::MAX / 9 + 1, usize::MAX).unwrap();
+        check_curve_intersection_merge_estimate(3, 27).unwrap();
+        assert_eq!(
+            check_curve_intersection_merge_estimate(3, 26)
+                .unwrap_err()
+                .path(),
+            "coverage.curved_guides.merge_limit"
+        );
+    }
+    /// Distinguishes an actual reached contact reserve refusal from impossible byte addressability.
+    /// # Panics
+    /// Panics if the unique producer diagnostic, atomic reserve, or recovery changes.
+    #[test]
+    fn contact_producer_reserve_reports_allocation_separately() {
+        let mut points = Vec::<Point2>::new();
+        FAIL_CURVE_RESERVATION.with(|flag| flag.set(true));
+        assert_eq!(
+            reserve_curve_contacts(&mut points, 1).unwrap_err().path(),
+            "coverage.curved_guides.intersections.allocation"
+        );
+        assert!(points.is_empty());
+        reserve_curve_contacts(&mut points, 1).unwrap();
+        assert_eq!(
+            reserve_curve_contacts(&mut points, usize::MAX)
+                .unwrap_err()
+                .path(),
+            "coverage.curved_guides.intersections.addressability"
+        );
+        points.push(Point2::new(0.0, 0.0));
+        assert_eq!(
+            reserve_curve_contacts(&mut points, usize::MAX)
+                .unwrap_err()
+                .path(),
+            "coverage.curved_guides.intersections.count_overflow"
+        );
+    }
+    /// Cancels the reached pattern callback after contact solving but before metadata publication.
+    /// # Panics
+    /// Panics if late producer cancellation publishes sites or prevents subsequent ordinary recovery.
+    #[test]
+    fn solved_contact_publication_observes_cancellation() {
+        let grouped = vec![
+            vec![StructuralPathInstance {
+                id: StructuralPathInstanceId::guide_dimension(GuideDimensionId(1), 0, 0),
+                source_structure_id: None,
+                path: CurvePath::line(Point2::new(-1.0, 0.0), Point2::new(1.0, 0.0)).unwrap(),
+            }],
+            vec![StructuralPathInstance {
+                id: StructuralPathInstanceId::guide_dimension(GuideDimensionId(2), 0, 0),
+                source_structure_id: None,
+                path: CurvePath::line(Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)).unwrap(),
+            }],
+        ];
+        let bounds = Bounds::new(Point2::new(-2.0, -2.0), Point2::new(2.0, 2.0)).unwrap();
+        let canvas = CanvasSpec {
+            width: 4.0,
+            height: 4.0,
+        };
+        let density = ResolvedDensityMetric2D {
+            across_x: 2.0,
+            across_y: 2.0,
+        };
+        let run = |cancelled: &dyn Fn() -> bool| {
+            curve_intersection_sites(
+                &grouped,
+                &[0, 1],
+                1e-9,
+                bounds,
+                bounds,
+                &canvas,
+                &density,
+                PatternMechanismId(1),
+                usize::MAX,
+                cancelled,
+                1,
+                &|_, _| {},
+            )
+        };
+        CURVE_INTERSECTION_PUBLICATION.with(|flag| flag.set(false));
+        assert_eq!(
+            run(&|| CURVE_INTERSECTION_PUBLICATION.with(|flag| flag.get()))
+                .unwrap_err()
+                .path(),
+            "evaluation.cancelled"
+        );
+        CURVE_INTERSECTION_PUBLICATION.with(|flag| flag.set(false));
+        assert_eq!(run(&|| false).unwrap().len(), 1);
+    }
 }
 
 /// Samples selected finite curve paths by bounded arc length and exact tangent-derived directional spacing.

@@ -1,0 +1,1344 @@
+{
+  "version": "0.4.5",
+  "source_commit": "b49470bcbbfed5cd7aa218e21acf1028220eb8dc",
+  "png_scale": 2,
+  "renderer_sha256": "4dd6aa1066bfcb84007d6f35f59cebe3f92687db641e863486fff108e17134a5",
+  "renders": [
+    {
+      "name": "raster-curves",
+      "source": "assets/raster-sample.png",
+      "recipe": "docs/examples/showcase/recipes/raster-curves.toniator",
+      "configuration_origin": "assets/document-presets/skinny-wave-cmyk.toniator-preset",
+      "density": 65,
+      "sha256": "5dec49791617bb41dc53bf58e8c0f3562c833e439fbba86f57f3270f8744121e",
+      "title": "Fine CMYK waves",
+      "output": "docs/examples/showcase/raster-curves.png",
+      "output_dimensions": [
+        2048,
+        2048
+      ],
+      "canvas": [
+        1024.0,
+        1024.0
+      ],
+      "color_model": "cmyk",
+      "background": "white",
+      "source_sha256": "324ac232e319002a13fbcfac46538ca5d7e8ba8a127eea2eaf20e8ddb3ed2ef2",
+      "recipe_sha256": "5dec49791617bb41dc53bf58e8c0f3562c833e439fbba86f57f3270f8744121e",
+      "output_sha256": "5ccd1e088baccfad295a9b8b0ef78a8d5f3c7e0282048859008f2273bae143c5",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "cyan",
+          "layout": {
+            "layout_delta": {
+              "density": {
+                "density_delta": 221.5556680893089,
+                "aspect_delta": 0.0
+              },
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "magenta",
+          "layout": {
+            "layout_delta": {
+              "density": {
+                "density_delta": 221.5556680893089,
+                "aspect_delta": 0.0
+              },
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "yellow",
+          "layout": {
+            "layout_delta": {
+              "density": {
+                "density_delta": 221.5556680893089,
+                "aspect_delta": 0.0
+              },
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "black",
+          "layout": {
+            "layout_delta": {
+              "density": {
+                "density_delta": 221.5556680893089,
+                "aspect_delta": 0.0
+              },
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "raster-voronoi",
+      "source": "assets/raster-sample.png",
+      "recipe": "docs/examples/showcase/recipes/raster-voronoi.toniator",
+      "configuration_origin": "target/validation/performance-20261016/p0/native-png-fixture-source-weighted-dispersion-voronoi/input.toniator",
+      "density": 60,
+      "sha256": "256901219d9daec141ca81b30b2c384507845efa2a55301e7a43aa31456edf8e",
+      "title": "Source-Weighted Voronoi",
+      "output": "docs/examples/showcase/raster-voronoi.png",
+      "output_dimensions": [
+        2048,
+        2048
+      ],
+      "canvas": [
+        1024.0,
+        1024.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "324ac232e319002a13fbcfac46538ca5d7e8ba8a127eea2eaf20e8ddb3ed2ef2",
+      "recipe_sha256": "256901219d9daec141ca81b30b2c384507845efa2a55301e7a43aa31456edf8e",
+      "output_sha256": "105034d9fafdd7b0cf497f3aafad5856c3e11077ce841a723fa0b1550853124d",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "rotation_degrees": 30.0,
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "rotation_degrees": 60.0,
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "rotation_degrees": 0.0,
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "raster-maze",
+      "source": "assets/raster-sample.png",
+      "recipe": "docs/examples/showcase/recipes/raster-maze.toniator",
+      "configuration_origin": "target/validation/performance-20261016/p0/native-png-fixture-two-guide-maze/input.toniator",
+      "density": 65,
+      "sha256": "64aab3b6ec201633f98c4d8e4215e3b7f2e9f8eb4ad286e82ad6d7e6d8010430",
+      "title": "Two-Guide Maze",
+      "output": "docs/examples/showcase/raster-maze.png",
+      "output_dimensions": [
+        2048,
+        2048
+      ],
+      "canvas": [
+        1024.0,
+        1024.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "324ac232e319002a13fbcfac46538ca5d7e8ba8a127eea2eaf20e8ddb3ed2ef2",
+      "recipe_sha256": "64aab3b6ec201633f98c4d8e4215e3b7f2e9f8eb4ad286e82ad6d7e6d8010430",
+      "output_sha256": "34fdbbc26611eadb242bf53cf64e00683646c9429082c7a785aa6f060ac65690",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "rotation_degrees": 30.0,
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "rotation_degrees": 60.0,
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "rotation_degrees": 0.0,
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "raster-scatter",
+      "source": "assets/raster-sample.png",
+      "recipe": "docs/examples/showcase/recipes/raster-scatter.toniator",
+      "configuration_origin": "fixtures/performance/even-random-circles-png-f1.toniator-preset",
+      "density": 60,
+      "sha256": "8db7f71f3ded9e8fe4c531a554c45b15176011c02e644d47800180ca7350713c",
+      "title": "Poisson Disk Marks",
+      "output": "docs/examples/showcase/raster-scatter.png",
+      "output_dimensions": [
+        2048,
+        2048
+      ],
+      "canvas": [
+        1024.0,
+        1024.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "324ac232e319002a13fbcfac46538ca5d7e8ba8a127eea2eaf20e8ddb3ed2ef2",
+      "recipe_sha256": "8db7f71f3ded9e8fe4c531a554c45b15176011c02e644d47800180ca7350713c",
+      "output_sha256": "28008e7e0eb79fd5fef4a8128e9996818eb5decd3140f41fa5357252aeca4f16",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "rotation_degrees": 30.0,
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "rotation_degrees": 60.0,
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "rotation_degrees": 0.0,
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "vector-curves",
+      "source": "assets/vector-sample.svg",
+      "recipe": "docs/examples/showcase/recipes/vector-curves.toniator",
+      "configuration_origin": "assets/document-presets/skinny-curve.toniator-preset",
+      "density": 65,
+      "sha256": "9c30fc04b15c92ed3c021a723c1e48c898026adfa38487a7152fde60d68732fb",
+      "title": "Custom curved guides",
+      "output": "docs/examples/showcase/vector-curves.png",
+      "output_dimensions": [
+        1800,
+        1240
+      ],
+      "canvas": [
+        900.0,
+        620.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "42eb5e23111a5dbad66f2b1802a7cc06391c7ede829b99eb28aeb1ac91596e2e",
+      "recipe_sha256": "9c30fc04b15c92ed3c021a723c1e48c898026adfa38487a7152fde60d68732fb",
+      "output_sha256": "dcb7e733b733a66d27bfe1a20cac3295cd888e808f1633ce5a594af70da10d4a",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            },
+            "output_response_deltas": [
+              {
+                "output_layer_id": 4,
+                "delta": {
+                  "kind": "connected",
+                  "delta": {
+                    "bias_delta": 0.0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            },
+            "output_response_deltas": [
+              {
+                "output_layer_id": 4,
+                "delta": {
+                  "kind": "connected",
+                  "delta": {
+                    "bias_delta": 0.0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            },
+            "output_response_deltas": [
+              {
+                "output_layer_id": 4,
+                "delta": {
+                  "kind": "connected",
+                  "delta": {
+                    "bias_delta": 0.0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "vector-dots",
+      "source": "assets/vector-sample.svg",
+      "recipe": "docs/examples/showcase/recipes/vector-dots.toniator",
+      "configuration_origin": "assets/document-presets/magazine-cmyk.toniator-preset",
+      "density": 65,
+      "sha256": "c762b25722fc89a6c58685e9defabeaf7bed5785d8e6d5df1347abf3549421df",
+      "title": "Magazine CMYK dots",
+      "output": "docs/examples/showcase/vector-dots.png",
+      "output_dimensions": [
+        1800,
+        1240
+      ],
+      "canvas": [
+        900.0,
+        620.0
+      ],
+      "color_model": "cmyk",
+      "background": "white",
+      "source_sha256": "42eb5e23111a5dbad66f2b1802a7cc06391c7ede829b99eb28aeb1ac91596e2e",
+      "recipe_sha256": "c762b25722fc89a6c58685e9defabeaf7bed5785d8e6d5df1347abf3549421df",
+      "output_sha256": "0986b28f76a0ae5fddce58910460c85d04498e7cc738bb2b1e6cc21879e0feda",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "cyan",
+          "layout": {
+            "layout_delta": {
+              "density": {
+                "density_delta": 221.5556680893089,
+                "aspect_delta": 0.0
+              },
+              "rotation_degrees": 37.5,
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "magenta",
+          "layout": {
+            "layout_delta": {
+              "density": {
+                "density_delta": 221.5556680893089,
+                "aspect_delta": 0.0
+              },
+              "rotation_degrees": 60.0,
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "yellow",
+          "layout": {
+            "layout_delta": {
+              "density": {
+                "density_delta": 221.5556680893089,
+                "aspect_delta": 0.0
+              },
+              "rotation_degrees": 82.5,
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "black",
+          "layout": {
+            "layout_delta": {
+              "density": {
+                "density_delta": 221.5556680893089,
+                "aspect_delta": 0.0
+              },
+              "rotation_degrees": 15.0,
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "raster-round-spiral-line",
+      "source": "assets/raster-sample.png",
+      "recipe": "docs/examples/showcase/recipes/raster-round-spiral-line.toniator",
+      "configuration_origin": "current bundled Pattern: round-spiral-line",
+      "density": 65,
+      "sha256": "c7f396c63cd0627e7af32d983a04d35cc9e5fad924e9e93bd2128da5dbe94af2",
+      "title": "Round Spiral Line",
+      "output": "docs/examples/showcase/raster-round-spiral-line.png",
+      "output_dimensions": [
+        2048,
+        2048
+      ],
+      "canvas": [
+        1024.0,
+        1024.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "324ac232e319002a13fbcfac46538ca5d7e8ba8a127eea2eaf20e8ddb3ed2ef2",
+      "recipe_sha256": "c7f396c63cd0627e7af32d983a04d35cc9e5fad924e9e93bd2128da5dbe94af2",
+      "output_sha256": "987e1e0d615ec6e346014294f0da089bffb41e80dab5c5a722388be24f7aca98",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "raster-round-spiral-marks",
+      "source": "assets/raster-sample.png",
+      "recipe": "docs/examples/showcase/recipes/raster-round-spiral-marks.toniator",
+      "configuration_origin": "current bundled Pattern: round-spiral-marks",
+      "density": 60,
+      "sha256": "cf41c2db3dd5d25d3f1560a717ae94c65e43d47942031f1bbe441a1f69fa01d4",
+      "title": "Round Spiral Marks",
+      "output": "docs/examples/showcase/raster-round-spiral-marks.png",
+      "output_dimensions": [
+        2048,
+        2048
+      ],
+      "canvas": [
+        1024.0,
+        1024.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "324ac232e319002a13fbcfac46538ca5d7e8ba8a127eea2eaf20e8ddb3ed2ef2",
+      "recipe_sha256": "cf41c2db3dd5d25d3f1560a717ae94c65e43d47942031f1bbe441a1f69fa01d4",
+      "output_sha256": "29e0144e32bb682e02e0243bde67b54fb2a94fb0b2752abf14515e3f83d068c0",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "raster-square-spiral",
+      "source": "assets/raster-sample.png",
+      "recipe": "docs/examples/showcase/recipes/raster-square-spiral.toniator",
+      "configuration_origin": "GUI Wizard: Round Spiral Line customized to Square spiral, continuous line output",
+      "density": 65,
+      "sha256": "034bba7c11f7617bd3d2f80a532d188dc8bf3d2bfebe5ab11d6329bdaa6af1ae",
+      "title": "Square Spiral",
+      "output": "docs/examples/showcase/raster-square-spiral.png",
+      "output_dimensions": [
+        2048,
+        2048
+      ],
+      "canvas": [
+        1024.0,
+        1024.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "324ac232e319002a13fbcfac46538ca5d7e8ba8a127eea2eaf20e8ddb3ed2ef2",
+      "recipe_sha256": "034bba7c11f7617bd3d2f80a532d188dc8bf3d2bfebe5ab11d6329bdaa6af1ae",
+      "output_sha256": "876204c7db55ea3f2dfff1ae662701724e3168695ef35c51cd0d4bd6d25f6e5f",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "vector-three-guide-cells",
+      "source": "assets/vector-sample.svg",
+      "recipe": "docs/examples/showcase/recipes/vector-three-guide-cells.toniator",
+      "configuration_origin": "current bundled Pattern: three-guide-cells-scale",
+      "density": 55,
+      "sha256": "48287253a5611ba2c41774d3a6188d373c9baa599a673c76a54072d6104d522b",
+      "title": "Three-Guide Cells",
+      "output": "docs/examples/showcase/vector-three-guide-cells.png",
+      "output_dimensions": [
+        1800,
+        1240
+      ],
+      "canvas": [
+        900.0,
+        620.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "42eb5e23111a5dbad66f2b1802a7cc06391c7ede829b99eb28aeb1ac91596e2e",
+      "recipe_sha256": "48287253a5611ba2c41774d3a6188d373c9baa599a673c76a54072d6104d522b",
+      "output_sha256": "e1ecff4ad57199c8c78c55a3ce1514d76ac84e07b7f3c2417d2ab5408c603083",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "vector-diamonds",
+      "source": "assets/vector-sample.svg",
+      "recipe": "docs/examples/showcase/recipes/vector-diamonds.toniator",
+      "configuration_origin": "current bundled Pattern: triagrid-custom-shape-marks",
+      "density": 50,
+      "sha256": "b4aee53ccf03f47f1f147382dc5782e1fe6cf102fb77b37f1133972cd3738114",
+      "title": "Triagrid Diamond Marks",
+      "output": "docs/examples/showcase/vector-diamonds.png",
+      "output_dimensions": [
+        1800,
+        1240
+      ],
+      "canvas": [
+        900.0,
+        620.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "42eb5e23111a5dbad66f2b1802a7cc06391c7ede829b99eb28aeb1ac91596e2e",
+      "recipe_sha256": "b4aee53ccf03f47f1f147382dc5782e1fe6cf102fb77b37f1133972cd3738114",
+      "output_sha256": "1e217396a5b37be8e0bd664181f0c80c8aef37b9bb87d07de1f1ab4df1520ac7",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "vector-spanning-tree",
+      "source": "assets/vector-sample.svg",
+      "recipe": "docs/examples/showcase/recipes/vector-spanning-tree.toniator",
+      "configuration_origin": "current bundled Pattern: triagrid-spanning-tree",
+      "density": 45,
+      "sha256": "65e2e36482bf8176f544e3586903a079b647dd263098793fffb476448f2ec23f",
+      "title": "Triagrid Spanning Tree",
+      "output": "docs/examples/showcase/vector-spanning-tree.png",
+      "output_dimensions": [
+        1800,
+        1240
+      ],
+      "canvas": [
+        900.0,
+        620.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "42eb5e23111a5dbad66f2b1802a7cc06391c7ede829b99eb28aeb1ac91596e2e",
+      "recipe_sha256": "65e2e36482bf8176f544e3586903a079b647dd263098793fffb476448f2ec23f",
+      "output_sha256": "9ec6431443a093a33e1db3b977cec4ac56d8ec7c24b089fd946ca1c2ba19b516",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "vector-two-guide-cells",
+      "source": "assets/vector-sample.svg",
+      "recipe": "docs/examples/showcase/recipes/vector-two-guide-cells.toniator",
+      "configuration_origin": "current bundled Pattern: two-guide-cells-uniform-offset",
+      "density": 55,
+      "sha256": "0e4cb0d6a49470467c6040f29ecba06c5cac3ed760effe80a23b64de83fe55f7",
+      "title": "Two-Guide Cells",
+      "output": "docs/examples/showcase/vector-two-guide-cells.png",
+      "output_dimensions": [
+        1800,
+        1240
+      ],
+      "canvas": [
+        900.0,
+        620.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "42eb5e23111a5dbad66f2b1802a7cc06391c7ede829b99eb28aeb1ac91596e2e",
+      "recipe_sha256": "0e4cb0d6a49470467c6040f29ecba06c5cac3ed760effe80a23b64de83fe55f7",
+      "output_sha256": "097dec53a27ad84f11a7edca2b59c987c30b5eaf9d8f28b09b52feda681efb90",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "portrait-motif",
+      "source": "docs/examples/showcase/source-portrait.png",
+      "recipe": "docs/examples/showcase/recipes/portrait-motif.toniator",
+      "configuration_origin": "current bundled Pattern: curve-motif-rows",
+      "density": 75,
+      "sha256": "5bbd21f596a23f41706bdfcb3fba7e6a07327aee6e92713ddd04739e7668ac91",
+      "title": "Curve Motif",
+      "output": "docs/examples/showcase/portrait-motif.png",
+      "output_dimensions": [
+        2508,
+        2508
+      ],
+      "canvas": [
+        1254.0,
+        1254.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "147016200f50b94dd710f013a384b5b5d26be6877b10a9b39626e38a246cd884",
+      "recipe_sha256": "5bbd21f596a23f41706bdfcb3fba7e6a07327aee6e92713ddd04739e7668ac91",
+      "output_sha256": "bd00a90a63a65d0939726a9a91ea8da2f3bfa0310164ea9c3f0446a3092a358e",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0,
+              "rotation_degrees": 30
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0,
+              "rotation_degrees": 60
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0,
+              "rotation_degrees": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "portrait-clustered-links",
+      "source": "docs/examples/showcase/source-portrait.png",
+      "recipe": "docs/examples/showcase/recipes/portrait-clustered-links.toniator",
+      "configuration_origin": "current bundled Pattern: clustered-dispersion-random-links",
+      "density": 90,
+      "sha256": "ec2a6ae3074bd16ffae6a935a4c45dab0ba6ecd7257acbbc51919e053cc14456",
+      "title": "Clustered Connections",
+      "output": "docs/examples/showcase/portrait-clustered-links.png",
+      "output_dimensions": [
+        2508,
+        2508
+      ],
+      "canvas": [
+        1254.0,
+        1254.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "147016200f50b94dd710f013a384b5b5d26be6877b10a9b39626e38a246cd884",
+      "recipe_sha256": "ec2a6ae3074bd16ffae6a935a4c45dab0ba6ecd7257acbbc51919e053cc14456",
+      "output_sha256": "594b297d3c0d976a573c6ea0f774e77577bde555130c77ee34a95a12f781494f",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0,
+              "rotation_degrees": 30
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0,
+              "rotation_degrees": 60
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0,
+              "rotation_degrees": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "portrait-lines",
+      "source": "docs/examples/showcase/source-portrait.png",
+      "recipe": "docs/examples/showcase/recipes/portrait-lines.toniator",
+      "configuration_origin": "current bundled Pattern: one-guide-lines",
+      "density": 80,
+      "sha256": "8e040bd311ef7eef9478deaa653086ffbd7349a6ae2c139ecd0f16ea09a31243",
+      "title": "One Guide Lines",
+      "output": "docs/examples/showcase/portrait-lines.png",
+      "output_dimensions": [
+        2508,
+        2508
+      ],
+      "canvas": [
+        1254.0,
+        1254.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "147016200f50b94dd710f013a384b5b5d26be6877b10a9b39626e38a246cd884",
+      "recipe_sha256": "8e040bd311ef7eef9478deaa653086ffbd7349a6ae2c139ecd0f16ea09a31243",
+      "output_sha256": "40cd700b5936a3179a9680d43ee6f2f0a59af517f839b89b5d6f6aa14d8c05ec",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0,
+              "rotation_degrees": 30
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0,
+              "rotation_degrees": 60
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0,
+              "rotation_degrees": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "portrait-grid-voronoi",
+      "source": "docs/examples/showcase/source-portrait.png",
+      "recipe": "docs/examples/showcase/recipes/portrait-grid-voronoi.toniator",
+      "configuration_origin": "current bundled Pattern: grid-voronoi-scale",
+      "density": 70,
+      "sha256": "bb9498ef49a05cb2ce0106a8602d18ad26f9599d8679a51643ca76c594ce7254",
+      "title": "Grid Voronoi",
+      "output": "docs/examples/showcase/portrait-grid-voronoi.png",
+      "output_dimensions": [
+        2508,
+        2508
+      ],
+      "canvas": [
+        1254.0,
+        1254.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "147016200f50b94dd710f013a384b5b5d26be6877b10a9b39626e38a246cd884",
+      "recipe_sha256": "bb9498ef49a05cb2ce0106a8602d18ad26f9599d8679a51643ca76c594ce7254",
+      "output_sha256": "e5fd02ed34fb2fdb8a524550d6402f8c1a1e3e1da30d33e3ffafd83b250b5648",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0,
+              "rotation_degrees": 30
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0,
+              "rotation_degrees": 60
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0,
+              "rotation_degrees": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "portrait-three-guide-maze",
+      "source": "docs/examples/showcase/source-portrait.png",
+      "recipe": "docs/examples/showcase/recipes/portrait-three-guide-maze.toniator",
+      "configuration_origin": "current bundled Pattern: three-guide-maze",
+      "density": 75,
+      "sha256": "a2ec55d9b354460da53069b4051e4ed07107f90a32ceefa752b160b8e83b01a0",
+      "title": "Three-Guide Maze",
+      "output": "docs/examples/showcase/portrait-three-guide-maze.png",
+      "output_dimensions": [
+        2508,
+        2508
+      ],
+      "canvas": [
+        1254.0,
+        1254.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "147016200f50b94dd710f013a384b5b5d26be6877b10a9b39626e38a246cd884",
+      "recipe_sha256": "a2ec55d9b354460da53069b4051e4ed07107f90a32ceefa752b160b8e83b01a0",
+      "output_sha256": "2a31b6c9c1a7a1aff8a6cb7971a96293277a0a7fb97ae7bbe973c91df3a9493f",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0,
+              "rotation_degrees": 30
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0,
+              "rotation_degrees": 60
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0,
+              "rotation_degrees": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "portrait-waves",
+      "source": "docs/examples/showcase/source-portrait.png",
+      "recipe": "docs/examples/showcase/recipes/portrait-waves.toniator",
+      "configuration_origin": "assets/document-presets/skinny-wave-cmyk.toniator-preset",
+      "density": 50,
+      "sha256": "9adc552c751a4c8c03a2b96eec2bc1bf327a8346bc5328956735fa1385dab99c",
+      "title": "CMYK custom waves",
+      "output": "docs/examples/showcase/portrait-waves.png",
+      "output_dimensions": [
+        2508,
+        2508
+      ],
+      "canvas": [
+        1254.0,
+        1254.0
+      ],
+      "color_model": "cmyk",
+      "background": "white",
+      "source_sha256": "147016200f50b94dd710f013a384b5b5d26be6877b10a9b39626e38a246cd884",
+      "recipe_sha256": "9adc552c751a4c8c03a2b96eec2bc1bf327a8346bc5328956735fa1385dab99c",
+      "output_sha256": "9a8477242088b05505d6ae1acd3d8b514b1e1c8ef796a9aacf76f680df5bb6cf",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "cyan",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "magenta",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "yellow",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "black",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "portrait-source-color",
+      "source": "docs/examples/showcase/source-portrait.png",
+      "recipe": "docs/examples/showcase/recipes/portrait-source-color.toniator",
+      "configuration_origin": "current bundled Pattern: even-random-circles; Source color + alpha",
+      "density": 90,
+      "title": "Source color Poisson marks",
+      "output": "docs/examples/showcase/portrait-source-color.png",
+      "output_dimensions": [
+        2508,
+        2508
+      ],
+      "canvas": [
+        1254.0,
+        1254.0
+      ],
+      "color_model": "source_color_alpha",
+      "background": "transparent",
+      "source_sha256": "147016200f50b94dd710f013a384b5b5d26be6877b10a9b39626e38a246cd884",
+      "recipe_sha256": "7cc41f17db4d72c7313e163d437b2f2554c721959e6cd748fd4aff32072b07a3",
+      "output_sha256": "6baf77a18c4ce081297312b81b812141b421d294f83220d1e66ca9cb6be31aff",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "source_color",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "screenshots": [
+    {
+      "path": "docs/examples/showcase/screenshots/editor.png",
+      "sha256": "77d7af81ca66b5c3e8756b9c4eafd4a56be10e04121bf8715ae6717fe7dbc969",
+      "dimensions": [
+        1440,
+        1000
+      ],
+      "source": "painted portrait",
+      "capture": "unedited grim screenshot, private Sway, GTK OpenGL",
+      "raw_evidence_path": "target/validation/readme-showcase-20261018/runtime/ui-run-20261018-163719-182943/01-portrait-editor.png"
+    },
+    {
+      "path": "docs/examples/showcase/screenshots/pattern-gallery.png",
+      "sha256": "d1de04c345ddf83a0c6ca578a4ca483dd024fdb3411ec1ab0e27cf7ffaffb5f8",
+      "dimensions": [
+        1440,
+        1000
+      ],
+      "source": "painted portrait and built-in neutral gradient study",
+      "capture": "unedited grim screenshot, private Sway, GTK OpenGL",
+      "raw_evidence_path": "target/validation/readme-showcase-20261018/runtime/ui-run-20261018-163719-182943/02-portrait-gallery.png"
+    },
+    {
+      "path": "docs/examples/showcase/screenshots/distribution-wizard.png",
+      "sha256": "555c51aa4a2bbdbcf4e28f71b11e7cad0a2e3b35f4cd3dfa742bb05e5d1dc0be",
+      "dimensions": [
+        1440,
+        1000
+      ],
+      "source": "painted portrait and built-in neutral gradient study",
+      "capture": "unedited grim screenshot, private Sway, GTK OpenGL",
+      "raw_evidence_path": "target/validation/readme-showcase-20261018/runtime/ui-run-20261018-163719-182943/03-portrait-distribution.png"
+    },
+    {
+      "path": "docs/examples/showcase/screenshots/source-comparison.png",
+      "sha256": "44a7324fe9065258d869426e2f14f021b3f2c0e70bd890f6b2b1a726a755cd7a",
+      "dimensions": [
+        1440,
+        1000
+      ],
+      "source": "immutable SVG sample",
+      "capture": "unedited grim screenshot, private Sway, GTK OpenGL",
+      "raw_evidence_path": "target/validation/readme-showcase-20261018/runtime/ui-run-20261018-162636-172911/02-source.png"
+    },
+    {
+      "path": "docs/examples/showcase/screenshots/png-export.png",
+      "sha256": "1be422ae0fd34e28fe0c74ece1d4dba8d0c74f918391f81dcddcccd597f6ba5a",
+      "dimensions": [
+        1440,
+        1000
+      ],
+      "source": "immutable SVG sample",
+      "capture": "unedited grim screenshot, private Sway, GTK OpenGL",
+      "raw_evidence_path": "target/validation/readme-showcase-20261018/runtime/ui-run-20261018-162636-172911/07-png-2x.png"
+    }
+  ],
+  "historical_renders": [
+    {
+      "name": "raster-square-spiral-marks",
+      "source": "assets/raster-sample.png",
+      "recipe": "docs/examples/showcase/recipes/raster-square-spiral-marks.toniator",
+      "configuration_origin": "current bundled Pattern: square-spiral-marks",
+      "density": 60,
+      "sha256": "2efa52d8156eabd6c0548fba1090f113728592c4773e1abaf59b92c081a95c5c",
+      "title": "Square Spiral Marks",
+      "output": "docs/examples/showcase/raster-square-spiral-marks.png",
+      "output_dimensions": [
+        2048,
+        2048
+      ],
+      "canvas": [
+        1024.0,
+        1024.0
+      ],
+      "color_model": "rgb",
+      "background": "black",
+      "source_sha256": "324ac232e319002a13fbcfac46538ca5d7e8ba8a127eea2eaf20e8ddb3ed2ef2",
+      "recipe_sha256": "2efa52d8156eabd6c0548fba1090f113728592c4773e1abaf59b92c081a95c5c",
+      "output_sha256": "3a82431eaf86a5e3ca00f6b6259dc7f109182a287b68e6d5927f3a14f1cbf4af",
+      "alpha_minimum": 255,
+      "alpha_maximum": 255,
+      "transparent_pixels": 0,
+      "partial_alpha_pixels": 0,
+      "channel_layouts": [
+        {
+          "role": "red",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "green",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        },
+        {
+          "role": "blue",
+          "layout": {
+            "layout_delta": {
+              "translation_x": 0.0,
+              "translation_y": 0.0
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

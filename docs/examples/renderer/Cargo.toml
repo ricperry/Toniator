@@ -1,0 +1,20 @@
+[package]
+name = "toniator-showcase-renderer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "toniator-showcase-renderer"
+path = "main.rs"
+
+[dependencies]
+toniator-domain = { path = "../../../crates/toniator-domain" }
+toniator-engine = { path = "../../../crates/toniator-engine" }
+toniator-io = { path = "../../../crates/toniator-io" }
+
+[patch.crates-io]
+i_overlay = { path = "../../../vendor/i_overlay" }
+i_tree = { path = "../../../vendor/i_tree" }

@@ -12,7 +12,8 @@ pub(crate) enum AppEvent {
         request_id: u64,
         authority: crate::print_preparation::LiveAuthority,
         selection: crate::print_preparation::OutputSelection,
-        result: Box<Result<toniator_engine::RasterSurface, String>>,
+        context: serde_json::Value,
+        result: Box<Result<toniator_engine::RasterSurface, crate::preview_diagnostics::Diagnostic>>,
     },
     /// Completes one optional print-preparation check for main-thread freshness admission.
     PrintPreparation(crate::print_preparation::CheckCompletion),
@@ -40,7 +41,7 @@ pub(crate) enum AppEvent {
     /// Supplies the bounded source for one still-live Advanced Settings endpoint.
     AdvancedSource {
         epoch: u64,
-        result: Result<crate::AdvancedPreviewSource, String>,
+        result: Result<crate::AdvancedPreviewSource, crate::preview_diagnostics::Diagnostic>,
     },
     /// Completes a captured document-Preset read, destination check, or immutable save.
     DocumentPreset(crate::document_presets::Completion),
@@ -67,9 +68,27 @@ pub(crate) enum AppEvent {
         result: Result<(), StillExportError>,
     },
     /// Delivers the scheduler's newest candidate for main-context acceptance.
-    Preview(EvaluationCompletion),
+    Preview {
+        identity: std::sync::Arc<()>,
+        completion: EvaluationCompletion,
+    },
     /// Delivers monotonic progress for the newest main-preview scheduler ticket.
-    PreviewProgress(EvaluationProgress),
+    PreviewProgress {
+        identity: std::sync::Arc<()>,
+        progress: EvaluationProgress,
+    },
+    /// Reports an unexpected main receiver disconnect under the exact retained bridge identity.
+    PreviewWorkerFailed {
+        identity: std::sync::Arc<()>,
+        diagnostic: crate::preview_diagnostics::Diagnostic,
+    },
+    /// Reports private worker failure only to the matching epoch and actual scheduler instance.
+    PrivatePreviewWorkerFailed {
+        surface: PrivateSurface,
+        epoch: u64,
+        scheduler: std::sync::Arc<toniator_engine::EvaluationScheduler>,
+        diagnostic: crate::preview_diagnostics::Diagnostic,
+    },
     /// Delivers a private Pattern Editor scheduler candidate for one editor epoch.
     DraftPreview {
         epoch: u64,
@@ -95,4 +114,12 @@ pub(crate) enum AppEvent {
         epoch: u64,
         progress: EvaluationProgress,
     },
+}
+
+/// Names the captured private preview surface without permitting cross-surface delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrivateSurface {
+    Editor,
+    Wizard,
+    Advanced,
 }

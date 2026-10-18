@@ -195,7 +195,7 @@ impl SourceField {
     /// # Errors
     ///
     /// Returns `source.dimensions` for unsafe dimensions or `source.decode` for a byte-length
-    /// mismatch or an allocation-size overflow.
+    /// mismatch. Checked storage reports source.addressability separately from source.allocation.
     pub fn from_straight_rgba8(
         width: u32,
         height: u32,
@@ -212,10 +212,7 @@ impl SourceField {
             ));
         }
         let decoded_pixel_hash = sha256(&rgba);
-        let mut pixels = Vec::new();
-        pixels
-            .try_reserve_exact(expected / 4)
-            .map_err(|_| SamplingError::new("source.decode", "decoded RGBA allocation failed"))?;
+        let mut pixels = source_storage(expected / 4, false)?;
         pixels.extend(rgba.chunks_exact(4).map(|pixel| SourcePixel {
             red: f64::from(pixel[0]) / 255.0,
             green: f64::from(pixel[1]) / 255.0,
@@ -1581,10 +1578,7 @@ fn bounded_preview_rgba(
         .ok_or_else(|| {
             SamplingError::new("preview.proxy", "preview proxy dimensions are unsafe")
         })?;
-    let mut output = Vec::new();
-    output
-        .try_reserve_exact(output_bytes)
-        .map_err(|_| SamplingError::new("preview.proxy", "preview proxy byte allocation failed"))?;
+    let mut output = source_storage(output_bytes, true)?;
     for destination_y in 0..height {
         let top = f64::from(destination_y) * f64::from(source_height) / f64::from(height);
         let bottom = f64::from(destination_y + 1) * f64::from(source_height) / f64::from(height);
@@ -1644,11 +1638,68 @@ fn normalized_preview_byte(value: f64) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+#[cfg(test)]
+std::thread_local! { static FAIL_SOURCE_RESERVATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+/// Reserves exact source/proxy storage after proving its whole layout is addressable.
+/// # Errors
+/// Distinguishes source/preview.proxy addressability from an actual allocator refusal; no decoder errors are reclassified.
+fn source_storage<T>(count: usize, proxy: bool) -> Result<Vec<T>, SamplingError> {
+    let (addressability, allocation) = if proxy {
+        ("preview.proxy.addressability", "preview.proxy.allocation")
+    } else {
+        ("source.addressability", "source.allocation")
+    };
+    std::alloc::Layout::array::<T>(count).map_err(|_| {
+        SamplingError::new(
+            addressability,
+            "source storage exceeds machine addressability",
+        )
+    })?;
+    #[cfg(test)]
+    if FAIL_SOURCE_RESERVATION.with(|flag| flag.replace(false)) {
+        return Err(SamplingError::new(
+            allocation,
+            "source storage allocation failed",
+        ));
+    }
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| SamplingError::new(allocation, "source storage allocation failed"))?;
+    Ok(values)
+}
+
+/// Creates tiny-skia pixel storage through an audited fallible byte reserve rather than Pixmap::new.
+/// # Errors
+/// Returns invalid dimensions/addressability separately from actual source allocation refusal.
+fn source_pixmap(width: u32, height: u32) -> Result<tiny_skia::Pixmap, SamplingError> {
+    let size = tiny_skia::IntSize::from_wh(width, height).ok_or(SamplingError::new(
+        "source.dimensions",
+        "invalid SVG dimensions",
+    ))?;
+    let count = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or(SamplingError::new(
+            "source.addressability",
+            "SVG pixel count exceeds machine representation",
+        ))?;
+    let mut bytes = source_storage(count, false)?;
+    bytes.resize(count, 0);
+    tiny_skia::Pixmap::from_vec(bytes, size).ok_or(SamplingError::new(
+        "source.addressability",
+        "SVG pixel layout is not representable",
+    ))
+}
+
 /// Decodes one finite still raster through the explicitly selected image codec.
 ///
 /// The hint is authoritative: signature mismatches and malformed content fail rather than being
 /// guessed. Decoded samples remain straight normalized RGBA; OpenEXR values are deterministically
 /// clamped into that finite range without tone mapping or color-management policy.
+/// # Errors
+/// Returns unchanged codec/input diagnostics, checked source addressability or actual storage allocation failure.
 fn decode_raster(
     bytes: &[u8],
     format: ImageFormat,
@@ -1690,15 +1741,13 @@ fn decode_raster(
         .map_err(|_| SamplingError::new("source.decode", "malformed raster source"))?
         .to_rgba8();
     let decoded_pixel_hash = sha256(image.as_raw());
-    let pixels = image
-        .pixels()
-        .map(|pixel| SourcePixel {
-            red: f64::from(pixel[0]) / 255.0,
-            green: f64::from(pixel[1]) / 255.0,
-            blue: f64::from(pixel[2]) / 255.0,
-            alpha: f64::from(pixel[3]) / 255.0,
-        })
-        .collect();
+    let mut pixels = source_storage(width as usize * height as usize, false)?;
+    pixels.extend(image.pixels().map(|pixel| SourcePixel {
+        red: f64::from(pixel[0]) / 255.0,
+        green: f64::from(pixel[1]) / 255.0,
+        blue: f64::from(pixel[2]) / 255.0,
+        alpha: f64::from(pixel[3]) / 255.0,
+    }));
     Ok(SourceField {
         identity: SourceIdentity {
             format: source_format,
@@ -1733,16 +1782,20 @@ fn decode_openexr(bytes: &[u8]) -> Result<SourceField, SamplingError> {
         .decode()
         .map_err(|_| SamplingError::new("source.decode", "malformed OpenEXR source"))?
         .to_rgba32f();
-    let pixels: Vec<_> = image
-        .pixels()
-        .map(|pixel| SourcePixel {
-            red: normalized_exr_channel(pixel[0]),
-            green: normalized_exr_channel(pixel[1]),
-            blue: normalized_exr_channel(pixel[2]),
-            alpha: normalized_exr_channel(pixel[3]),
-        })
-        .collect();
-    let mut canonical = Vec::with_capacity(pixels.len() * 32);
+    let mut pixels = source_storage(width as usize * height as usize, false)?;
+    pixels.extend(image.pixels().map(|pixel| SourcePixel {
+        red: normalized_exr_channel(pixel[0]),
+        green: normalized_exr_channel(pixel[1]),
+        blue: normalized_exr_channel(pixel[2]),
+        alpha: normalized_exr_channel(pixel[3]),
+    }));
+    let mut canonical = source_storage(
+        pixels.len().checked_mul(32).ok_or(SamplingError::new(
+            "source.addressability",
+            "source hash storage exceeds machine representation",
+        ))?,
+        false,
+    )?;
     for pixel in &pixels {
         for channel in [pixel.red, pixel.green, pixel.blue, pixel.alpha] {
             canonical.extend(channel.to_bits().to_le_bytes());
@@ -1946,7 +1999,9 @@ fn tiff_has_multiple_pages(bytes: &[u8]) -> Result<bool, SamplingError> {
     }
 }
 
-/// Decodes PNG with its historical explicit signature check retained for stable diagnostics.
+/// Decodes PNG with its historical explicit signature check and exact straight RGBA channel order.
+/// # Errors
+/// Returns malformed input/codec diagnostics, source.addressability or actual source.allocation.
 fn decode_png(bytes: &[u8]) -> Result<SourceField, SamplingError> {
     const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
     if !bytes.starts_with(PNG_SIGNATURE) {
@@ -1962,15 +2017,13 @@ fn decode_png(bytes: &[u8]) -> Result<SourceField, SamplingError> {
         .map_err(|_| SamplingError::new("source.decode", "malformed PNG source"))?
         .to_rgba8();
     let decoded_pixel_hash = sha256(image.as_raw());
-    let pixels = image
-        .pixels()
-        .map(|pixel| SourcePixel {
-            red: f64::from(pixel[0]) / 255.0,
-            green: f64::from(pixel[1]) / 255.0,
-            blue: f64::from(pixel[2]) / 255.0,
-            alpha: f64::from(pixel[3]) / 255.0,
-        })
-        .collect();
+    let mut pixels = source_storage(width as usize * height as usize, false)?;
+    pixels.extend(image.pixels().map(|pixel| SourcePixel {
+        red: f64::from(pixel[0]) / 255.0,
+        green: f64::from(pixel[1]) / 255.0,
+        blue: f64::from(pixel[2]) / 255.0,
+        alpha: f64::from(pixel[3]) / 255.0,
+    }));
     Ok(SourceField {
         identity: SourceIdentity {
             format: SourceFormat::Png,
@@ -2054,27 +2107,23 @@ fn decode_svg_with_options(
     let width = size.width().round() as u32;
     let height = size.height().round() as u32;
     validate_dimensions(width, height)?;
-    let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or(SamplingError::new(
-        "source.decode",
-        "SVG allocation is unsafe",
-    ))?;
+    let mut pixmap = source_pixmap(width, height)?;
     resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
     let decoded_pixel_hash = sha256(pixmap.data());
-    let pixels = pixmap
-        .data()
-        .chunks_exact(4)
-        .map(|pixel| unpremultiply_rgba(pixel[0], pixel[1], pixel[2], pixel[3]))
-        .collect();
+    let mut pixels = source_storage(width as usize * height as usize, false)?;
+    pixels.extend(
+        pixmap
+            .data()
+            .chunks_exact(4)
+            .map(|pixel| unpremultiply_rgba(pixel[0], pixel[1], pixel[2], pixel[3])),
+    );
     let rendered_glyph_coverage = if has_live_text_node {
         let without_text = strip_text_nodes(text);
         let textless_tree =
             usvg::Tree::from_data(without_text.as_bytes(), options).map_err(|_| {
                 SamplingError::new("source.decode", "could not inspect SVG text coverage")
             })?;
-        let mut textless = tiny_skia::Pixmap::new(width, height).ok_or(SamplingError::new(
-            "source.decode",
-            "SVG allocation is unsafe",
-        ))?;
+        let mut textless = source_pixmap(width, height)?;
         resvg::render(
             &textless_tree,
             tiny_skia::Transform::default(),
@@ -4574,5 +4623,30 @@ mod tests {
             }
         }
         !crc
+    }
+}
+
+#[cfg(test)]
+mod preview_source_diagnostic_tests {
+    use super::*;
+    /// Proves SourcePixel/proxy/Pixmap allocator refusals are separate from unsafe layout admission.
+    /// # Panics
+    /// Panics if a checked layout is reported as OOM or fallible Pixmap construction changes bytes.
+    #[test]
+    fn actual_source_reserve_and_addressability_are_distinct() {
+        assert_eq!(
+            source_storage::<SourcePixel>(isize::MAX as usize, false)
+                .unwrap_err()
+                .path(),
+            "source.addressability"
+        );
+        FAIL_SOURCE_RESERVATION.with(|flag| flag.set(true));
+        assert_eq!(source_pixmap(2, 3).unwrap_err().path(), "source.allocation");
+        assert_eq!(source_pixmap(2, 3).unwrap().data(), &[0; 24]);
+        FAIL_SOURCE_RESERVATION.with(|flag| flag.set(true));
+        assert_eq!(
+            source_storage::<u8>(24, true).unwrap_err().path(),
+            "preview.proxy.allocation"
+        );
     }
 }

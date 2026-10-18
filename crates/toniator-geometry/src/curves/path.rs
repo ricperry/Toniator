@@ -1,7 +1,7 @@
 use crate::{AffineTransform2D, Bounds, Point2, Vector2};
 
 use super::{
-    CubicBezierSegment, CurveError, CurveSegment, CurveWorkLimits, LineSegment, PathIntersection,
+    CubicBezierSegment, CurveError, CurveSegment, CurveWorkLimits, IntersectionWorkLimits, LineSegment, PathIntersection,
     arc_length::PathArcLength, check_curve_cancelled, clipping, curve_storage_count, intersections,
     parameter, reserve_curve,
 };
@@ -288,13 +288,19 @@ impl CurvePath {
         PathArcLength::measure(self)
     }
 
-    /// Intersects two paths in deterministic lexicographic location order.
-    ///
+    /// Intersects paths in original canonical order with normal machine-addressable count policy.
     /// # Errors
-    ///
-    /// Returns pair, subdivision, overlap, result-limit, or numeric failures without partial output.
+    /// Returns checked storage, overlap or unchanged numerical failures without partial output.
     pub fn intersections(&self, other: &Self) -> Result<Vec<PathIntersection>, CurveError> {
-        intersections::path_intersections(self, other)
+        self.intersections_with_limits_cancellable(other, IntersectionWorkLimits::default(), &|| false)
+    }
+
+    /// Intersects paths under explicit finite work/results and cancellation, retaining exact predicates/order.
+    /// Result limits apply after stable canonical deduplication; no partial contacts are published.
+    /// # Errors
+    /// Returns cancellation, explicit policy, addressability, allocation, overlap or numerical diagnostics.
+    pub fn intersections_with_limits_cancellable(&self, other: &Self, limits: IntersectionWorkLimits, cancelled: &dyn Fn() -> bool) -> Result<Vec<PathIntersection>, CurveError> {
+        intersections::path_intersections(self, other, limits, cancelled)
     }
 
     /// Clips the path into ordered open fragments without manufacturing boundary topology.

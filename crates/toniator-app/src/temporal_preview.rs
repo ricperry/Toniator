@@ -1,5 +1,6 @@
 //! Cancellable source-frame preparation; document timing and interpolation remain headless authority.
 
+use crate::preview_diagnostics::{Diagnostic, Origin};
 use std::sync::{
     Arc, Condvar, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -101,6 +102,7 @@ pub(crate) struct SourceDisplay {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) rgba: Vec<u8>,
+    pub(crate) metadata: serde_json::Value,
 }
 
 /// Supplies immutable evaluator input and the matching source comparison image together.
@@ -112,7 +114,7 @@ pub(crate) struct PreparedFrame {
 /// Carries a generation-keyed decode result back to GTK for acceptance before scheduler submission.
 pub(crate) struct Completion {
     pub(crate) key: RequestKey,
-    pub(crate) result: Result<PreparedFrame, String>,
+    pub(crate) result: Result<PreparedFrame, Diagnostic>,
 }
 
 struct Job {
@@ -142,6 +144,7 @@ enum Destination {
 pub(crate) struct Worker {
     pending: Arc<(Mutex<Option<Job>>, Condvar)>,
     shutdown: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
     latest: Option<Arc<AtomicBool>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -150,7 +153,7 @@ impl Worker {
     ///
     /// # Errors
     /// Returns the operating-system thread-spawn diagnostic without creating a live worker.
-    pub(crate) fn new(sender: async_channel::Sender<crate::AppEvent>) -> Result<Self, String> {
+    pub(crate) fn new(sender: async_channel::Sender<crate::AppEvent>) -> Result<Self, Diagnostic> {
         Self::new_with_destination(sender, Destination::Main)
     }
 
@@ -166,7 +169,7 @@ impl Worker {
     pub(crate) fn new_for_pattern_editor(
         sender: async_channel::Sender<crate::AppEvent>,
         epoch: u64,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, Diagnostic> {
         Self::new_with_destination(
             sender,
             Destination::Draft {
@@ -187,7 +190,7 @@ impl Worker {
     pub(crate) fn new_for_structural_pattern_editor(
         sender: async_channel::Sender<crate::AppEvent>,
         epoch: u64,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, Diagnostic> {
         Self::new_with_destination(
             sender,
             Destination::Draft {
@@ -208,11 +211,13 @@ impl Worker {
     fn new_with_destination(
         sender: async_channel::Sender<crate::AppEvent>,
         destination: Destination,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, Diagnostic> {
         let pending = Arc::new((Mutex::new(None::<Job>), Condvar::new()));
         let shutdown = Arc::new(AtomicBool::new(false));
         let jobs = Arc::clone(&pending);
         let stop = Arc::clone(&shutdown);
+        let alive = Arc::new(AtomicBool::new(true));
+        let worker_alive = alive.clone();
         let thread = std::thread::Builder::new()
             .name("toniator-preview-media".into())
             .spawn(move || {
@@ -229,6 +234,16 @@ impl Worker {
                         }
                         slot.take().expect("pending job")
                     };
+                    let mut guard = SourceJobGuard {
+                        sender: sender.clone(),
+                        destination,
+                        key: job.key,
+                        stop: stop.clone(),
+                        cancelled: job.cancelled.clone(),
+                        completed: false,
+                        pending: jobs.clone(),
+                        alive: worker_alive.clone(),
+                    };
                     let cancelled =
                         || stop.load(Ordering::Acquire) || job.cancelled.load(Ordering::Acquire);
                     if cancelled() {
@@ -244,20 +259,30 @@ impl Worker {
                                     MediaTools::default(),
                                     &cancelled,
                                 )
-                                .map_err(|error| error.to_string())?,
+                                .map_err(|error| {
+                                    Diagnostic::new(Origin::Source, error.path(), error.message())
+                                })?,
                             );
                             cached_sources = Some(job.sources.clone());
                         }
-                        let media = provider.as_mut().ok_or("Source provider is unavailable")?;
+                        let media = provider.as_mut().ok_or_else(|| {
+                            Diagnostic::new(
+                                Origin::Source,
+                                "preview.source_worker.unavailable",
+                                "Source provider is unavailable",
+                            )
+                        })?;
                         let time = job
                             .session
                             .document()
                             .project_timing()
                             .source_time_for_frame(job.key.frame)
-                            .map_err(|error| error.to_string())?;
-                        let frame = media
-                            .frame_at(time, &cancelled)
-                            .map_err(|error| error.to_string())?;
+                            .map_err(|error| {
+                                Diagnostic::new(Origin::Source, error.path(), error.message())
+                            })?;
+                        let frame = media.frame_at(time, &cancelled).map_err(|error| {
+                            Diagnostic::new(Origin::Source, error.path(), error.message())
+                        })?;
                         let source = source_display(&frame, &cancelled)?;
                         let request = toniator_engine::frame_evaluation_request(
                             &job.session,
@@ -265,7 +290,9 @@ impl Worker {
                             job.key.frame,
                             &cancelled,
                         )
-                        .map_err(|error| error.to_string())?
+                        .map_err(|error| {
+                            Diagnostic::new(Origin::Source, error.path(), error.message())
+                        })?
                         .for_preview(job.target);
                         let request = match destination {
                             Destination::Draft {
@@ -280,6 +307,7 @@ impl Worker {
                         };
                         Ok(PreparedFrame { request, source })
                     })();
+                    guard.completed = true;
                     if !cancelled() {
                         let completion = Completion {
                             key: job.key,
@@ -295,10 +323,17 @@ impl Worker {
                     }
                 }
             })
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                Diagnostic::new(
+                    Origin::Source,
+                    "preview.source_worker.spawn",
+                    &error.to_string(),
+                )
+            })?;
         Ok(Self {
             pending,
             shutdown,
+            alive,
             latest: None,
             thread: Some(thread),
             // The completion destination is captured by the worker closure. This field is kept
@@ -307,28 +342,54 @@ impl Worker {
     }
 
     /// Replaces pending decode work and cooperatively stops its predecessor without blocking GTK.
+    /// The queue lock serializes worker-death publication and admission of the latest source key.
+    /// # Errors
+    /// Returns a typed unavailable-worker diagnostic instead of stranding a job on a finished thread.
     pub(crate) fn submit(
         &mut self,
         key: RequestKey,
         session: DocumentSession,
         sources: SourceBundle,
         target: PreviewRasterTarget,
-    ) {
-        self.cancel();
+    ) -> Result<(), Diagnostic> {
+        if self
+            .thread
+            .as_ref()
+            .is_none_or(|thread| thread.is_finished())
+        {
+            return Err(Diagnostic::new(
+                Origin::Source,
+                "preview.source_worker.unavailable",
+                "Source preview worker stopped",
+            ));
+        }
         let cancelled = Arc::new(AtomicBool::new(false));
-        self.latest = Some(Arc::clone(&cancelled));
-        *self
+        let mut slot = self
             .pending
             .0
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(Job {
+            .unwrap_or_else(|error| error.into_inner());
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(Diagnostic::new(
+                Origin::Source,
+                "preview.source_worker.unavailable",
+                "Source preview worker stopped",
+            ));
+        }
+        if let Some(previous) = self.latest.take() {
+            previous.store(true, Ordering::Release);
+        }
+        self.latest = Some(cancelled.clone());
+        *slot = Some(Job {
             key,
             session,
             sources,
             target,
             cancelled,
         });
+        drop(slot);
         self.pending.1.notify_one();
+        Ok(())
     }
 
     /// Cancels running/pending source work; the worker keeps only its current reusable provider.
@@ -341,6 +402,65 @@ impl Worker {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take();
+    }
+}
+
+/// Notifies only unexpected in-flight source-worker unwinding, retaining exact destination/key freshness.
+struct SourceJobGuard {
+    sender: async_channel::Sender<crate::AppEvent>,
+    destination: Destination,
+    key: RequestKey,
+    stop: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
+    completed: bool,
+    pending: Arc<(Mutex<Option<Job>>, Condvar)>,
+    alive: Arc<AtomicBool>,
+}
+impl SourceJobGuard {
+    /// Publishes worker death under the queue lock and reports the latest uncancelled captured request.
+    /// Queue-before-death is notified; queue-after-death fails submit, so no pending request can strand.
+    fn report_unexpected_death(&mut self) {
+        let mut slot = self
+            .pending
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.alive.store(false, Ordering::Release);
+        if self.stop.load(Ordering::Acquire) {
+            return;
+        }
+        let key = slot
+            .take()
+            .filter(|job| !job.cancelled.load(Ordering::Acquire))
+            .map(|job| job.key)
+            .or_else(|| (!self.cancelled.load(Ordering::Acquire)).then_some(self.key));
+        drop(slot);
+        let Some(key) = key else {
+            return;
+        };
+        let completion = Completion {
+            key,
+            result: Err(Diagnostic::new(
+                Origin::Source,
+                "preview.source_worker.panicked",
+                "Source preview worker stopped unexpectedly",
+            )),
+        };
+        let event = match self.destination {
+            Destination::Main => crate::AppEvent::MediaPreview(completion),
+            Destination::Draft { epoch, .. } => {
+                crate::AppEvent::DraftMediaPreview { epoch, completion }
+            }
+        };
+        let _ = self.sender.send_blocking(event);
+    }
+}
+impl Drop for SourceJobGuard {
+    /// Reports unexpected unwind only; normal source cancellation/shutdown never becomes a failure.
+    fn drop(&mut self) {
+        if !self.completed && std::thread::panicking() {
+            self.report_unexpected_death();
+        }
     }
 }
 
@@ -362,7 +482,25 @@ pub(crate) fn start_pattern_editor_preview_bridge(
         .name("toniator-pattern-editor-preview-bridge".into())
         .spawn(move || {
             'bridge: while !stop.load(Ordering::Acquire) {
-                while matches!(scheduler.try_receive_latest_progress(), Ok(Some(_))) {}
+                loop {
+                    match scheduler.try_receive_latest_progress() {
+                        Ok(Some(_)) => {}
+                        Ok(None) => break,
+                        Err(error) => {
+                            if !stop.load(Ordering::Acquire) {
+                                let _ = sender.send_blocking(
+                                    crate::AppEvent::PrivatePreviewWorkerFailed {
+                                        surface: crate::app_events::PrivateSurface::Editor,
+                                        epoch,
+                                        scheduler: scheduler.clone(),
+                                        diagnostic: Diagnostic::scheduler(error),
+                                    },
+                                );
+                            }
+                            break 'bridge;
+                        }
+                    }
+                }
                 match scheduler.try_receive_latest() {
                     Ok(Some(completion)) => {
                         if sender
@@ -373,7 +511,18 @@ pub(crate) fn start_pattern_editor_preview_bridge(
                         }
                     }
                     Ok(None) => std::thread::park_timeout(std::time::Duration::from_millis(4)),
-                    Err(_) => break,
+                    Err(error) => {
+                        if !stop.load(Ordering::Acquire) {
+                            let _ =
+                                sender.send_blocking(crate::AppEvent::PrivatePreviewWorkerFailed {
+                                    surface: crate::app_events::PrivateSurface::Editor,
+                                    epoch,
+                                    scheduler: scheduler.clone(),
+                                    diagnostic: Diagnostic::scheduler(error),
+                                });
+                        }
+                        break;
+                    }
                 }
             }
         })
@@ -397,21 +546,51 @@ impl Drop for Worker {
 /// canonical evaluation retain the original decoded field, including hidden RGB and alpha.
 ///
 /// # Errors
-/// Returns cancellation before publishing a partially prepared image.
+/// Returns typed cancellation, checked source-display addressability or actual allocation refusal.
+/// # Panics
+/// Panics only if decoder-owned dimensions and SourceField storage disagree, violating source authority.
 fn source_display(
     frame: &SourceFrame,
     cancelled: &dyn Fn() -> bool,
-) -> Result<SourceDisplay, String> {
+) -> Result<SourceDisplay, Diagnostic> {
     let identity = frame.field.identity();
     let scale = (f64::from(crate::SOURCE_VIEW_MAX_EDGE)
         / f64::from(identity.width.max(identity.height)))
     .min(1.0);
     let width = (f64::from(identity.width) * scale).round().max(1.0) as u32;
     let height = (f64::from(identity.height) * scale).round().max(1.0) as u32;
-    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    let count = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| {
+            Diagnostic::new(
+                Origin::Source,
+                "preview.source_display.addressability",
+                "Source display count exceeds machine representation",
+            )
+        })?;
+    std::alloc::Layout::array::<u8>(count).map_err(|_| {
+        Diagnostic::new(
+            Origin::Source,
+            "preview.source_display.addressability",
+            "Source display exceeds machine addressability",
+        )
+    })?;
+    let mut rgba = Vec::new();
+    rgba.try_reserve_exact(count).map_err(|_| {
+        Diagnostic::new(
+            Origin::Source,
+            "preview.source_display.allocation",
+            "Source display allocation failed",
+        )
+    })?;
     for y in 0..height {
         if cancelled() {
-            return Err("Source preview was cancelled".into());
+            return Err(Diagnostic::new(
+                Origin::Source,
+                "evaluation.cancelled",
+                "Source preview was cancelled",
+            ));
         }
         for x in 0..width {
             let source_x = ((u64::from(x) * u64::from(identity.width)) / u64::from(width)) as u32;
@@ -430,6 +609,7 @@ fn source_display(
         width,
         height,
         rgba,
+        metadata: serde_json::json!({"format":format!("{:?}",identity.format),"width":identity.width,"height":identity.height,"purpose":"actual decoded private source field"}),
     })
 }
 
@@ -605,7 +785,9 @@ mod tests {
             epoch: 1,
             frame: Endpoint::Start.frame(&original),
         };
-        worker.submit(start, session.clone(), workspace.sources.clone(), target);
+        worker
+            .submit(start, session.clone(), workspace.sources.clone(), target)
+            .unwrap();
         let first = receive(&receiver, start);
         assert_eq!((first.source.width, first.source.height), (1080, 1920));
         let end = RequestKey {
@@ -613,7 +795,9 @@ mod tests {
             frame: Endpoint::End.frame(&original),
             ..start
         };
-        worker.submit(end, session.clone(), workspace.sources.clone(), target);
+        worker
+            .submit(end, session.clone(), workspace.sources.clone(), target)
+            .unwrap();
         let last = receive(&receiver, end);
         assert_ne!(first.source.rgba, last.source.rgba);
         assert!(end.is_current(Some(end), 7, session, Endpoint::End));
@@ -622,13 +806,17 @@ mod tests {
         assert!(!end.is_current(Some(end), 7, session, Endpoint::Start));
         assert!(!end.is_current(None, 7, session, Endpoint::End));
         let latest = RequestKey { epoch: 4, ..start };
-        worker.submit(
-            RequestKey { epoch: 3, ..end },
-            session.clone(),
-            workspace.sources.clone(),
-            target,
-        );
-        worker.submit(latest, session.clone(), workspace.sources.clone(), target);
+        worker
+            .submit(
+                RequestKey { epoch: 3, ..end },
+                session.clone(),
+                workspace.sources.clone(),
+                target,
+            )
+            .unwrap();
+        worker
+            .submit(latest, session.clone(), workspace.sources.clone(), target)
+            .unwrap();
         assert_eq!(receive(&receiver, latest).source.rgba, first.source.rgba);
         assert_eq!(session.document(), &original);
         worker.cancel();
@@ -666,7 +854,9 @@ mod tests {
                 epoch: 73,
                 frame: Endpoint::Start.frame(&document),
             };
-            worker.submit(start, session.clone(), workspace.sources.clone(), target);
+            worker
+                .submit(start, session.clone(), workspace.sources.clone(), target)
+                .unwrap();
             let first = receive_draft(&receiver, 73, start);
             assert_eq!((first.source.width, first.source.height), dimensions);
             assert_eq!(
@@ -680,7 +870,9 @@ mod tests {
                 frame: Endpoint::End.frame(&document),
                 ..start
             };
-            worker.submit(end, session.clone(), workspace.sources.clone(), target);
+            worker
+                .submit(end, session.clone(), workspace.sources.clone(), target)
+                .unwrap();
             let last = receive_draft(&receiver, 73, end);
             if filename.ends_with(".mp4") {
                 assert_ne!(first.source.rgba, last.source.rgba);
@@ -701,8 +893,12 @@ mod tests {
                     frame: end.frame,
                     ..end
                 };
-                worker.submit(stale, session.clone(), workspace.sources.clone(), target);
-                worker.submit(latest, session.clone(), workspace.sources.clone(), target);
+                worker
+                    .submit(stale, session.clone(), workspace.sources.clone(), target)
+                    .unwrap();
+                worker
+                    .submit(latest, session.clone(), workspace.sources.clone(), target)
+                    .unwrap();
                 let _ = receive_draft(&receiver, 73, latest);
             }
 
@@ -746,5 +942,106 @@ mod tests {
         stop.store(true, Ordering::Release);
         bridge.join().unwrap();
         scheduler.cancel_and_clear();
+    }
+}
+
+#[cfg(test)]
+mod reliability_worker_tests {
+    use super::*;
+    /// Exercises real queue/death synchronization without provoking a host or decoder panic.
+    /// # Panics
+    /// Panics if queue-before-death strands a newer request, queue-after-death succeeds, or shutdown logs failure.
+    #[test]
+    fn unexpected_death_owns_latest_queue_and_excludes_shutdown() {
+        let session = DocumentSession::new(
+            Document::new_default_document(
+                toniator_domain::CanvasSpec {
+                    width: 8.0,
+                    height: 8.0,
+                },
+                toniator_domain::SourceReference::Unassigned,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let sources = SourceBundle::new([]).unwrap();
+        let target = PreviewRasterTarget::new(8, 8).unwrap();
+        for (queued, shutdown, current_cancelled) in [
+            (false, false, false),
+            (true, false, true),
+            (true, true, true),
+            (false, false, true),
+        ] {
+            let (sender, receiver) = async_channel::unbounded();
+            let stop = Arc::new(AtomicBool::new(false));
+            let alive = Arc::new(AtomicBool::new(true));
+            let pending = Arc::new((Mutex::new(None), Condvar::new()));
+            let flag = stop.clone();
+            let thread = std::thread::spawn(move || {
+                while !flag.load(Ordering::Acquire) {
+                    std::thread::park_timeout(std::time::Duration::from_millis(1));
+                }
+            });
+            let mut worker = Worker {
+                pending: pending.clone(),
+                shutdown: stop.clone(),
+                alive: alive.clone(),
+                latest: None,
+                thread: Some(thread),
+            };
+            let old = RequestKey {
+                workspace: 1,
+                revision: 0,
+                epoch: 1,
+                frame: 0,
+            };
+            let new = RequestKey { epoch: 2, ..old };
+            let cancelled = Arc::new(AtomicBool::new(current_cancelled));
+            let mut guard = SourceJobGuard {
+                sender,
+                destination: Destination::Main,
+                key: old,
+                stop: stop.clone(),
+                cancelled,
+                completed: false,
+                pending,
+                alive,
+            };
+            if queued {
+                worker
+                    .submit(new, session.clone(), sources.clone(), target)
+                    .unwrap();
+            }
+            if shutdown {
+                stop.store(true, Ordering::Release);
+            }
+            guard.report_unexpected_death();
+            if shutdown || (!queued && current_cancelled) {
+                assert!(receiver.try_recv().is_err());
+            } else {
+                let crate::AppEvent::MediaPreview(completion) = receiver.try_recv().unwrap() else {
+                    panic!("main destination")
+                };
+                assert_eq!(completion.key, if queued { new } else { old });
+                assert_eq!(
+                    completion.result.err().unwrap().code,
+                    "preview.source_worker.panicked"
+                );
+                assert_eq!(
+                    worker
+                        .submit(
+                            RequestKey { epoch: 3, ..new },
+                            session.clone(),
+                            sources.clone(),
+                            target
+                        )
+                        .unwrap_err()
+                        .code,
+                    "preview.source_worker.unavailable"
+                );
+            }
+            stop.store(true, Ordering::Release);
+            worker.thread.take().unwrap().join().unwrap();
+        }
     }
 }

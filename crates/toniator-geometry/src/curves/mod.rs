@@ -9,7 +9,7 @@ mod path;
 mod segment;
 
 pub use arc_length::PathArcLength;
-pub use intersections::{IntersectionKind, PathIntersection, SegmentIntersection};
+pub use intersections::{IntersectionKind, IntersectionWorkLimits, PathIntersection, SegmentIntersection};
 pub use parametric::{
     construct_parametric_curve_path_cancellable,
     construct_parametric_curve_path_with_limits_cancellable,
@@ -27,8 +27,6 @@ pub(crate) const PARAMETER_TOLERANCE: f64 = 1.0e-12;
 pub(crate) const MAX_SUBDIVISION_DEPTH: u8 = 48;
 pub(crate) const MAX_WORK_ITEMS: usize = 262_144;
 pub(crate) const MAX_ARC_LENGTH_LEAVES: usize = 65_536;
-pub(crate) const MAX_SEGMENT_PAIRS: usize = 262_144;
-pub(crate) const MAX_INTERSECTIONS: usize = 4_096;
 
 /// Geometry-owned storage/work policy for canonical construction and clipping only.
 /// Numerical depth/tolerances and unrelated intersection/arc-length policies remain unchanged.

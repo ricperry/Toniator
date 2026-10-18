@@ -2845,7 +2845,7 @@ fn background_pixel(background: RasterBackground) -> PremultipliedLinearPixel {
 ///
 /// # Errors
 ///
-/// Returns `raster.allocation` when the dimensions cannot be represented by a
+/// Returns `raster.buffer.addressability` when the dimensions cannot be represented by a
 /// `usize` count on the current target. It imposes no product-size ceiling.
 fn raster_pixel_count(width: u32, height: u32) -> Result<usize, RenderError> {
     usize::try_from(width)
@@ -2856,7 +2856,7 @@ fn raster_pixel_count(width: u32, height: u32) -> Result<usize, RenderError> {
                 .and_then(|height| width.checked_mul(height))
         })
         .ok_or(RenderError::new(
-            "raster.allocation",
+            "raster.buffer.addressability",
             "raster pixel count overflows",
         ))
 }
@@ -2865,33 +2865,59 @@ fn raster_pixel_count(width: u32, height: u32) -> Result<usize, RenderError> {
 ///
 /// # Errors
 ///
-/// Returns `raster.allocation` when the target pixel count or four-byte
+/// Returns `raster.buffer.addressability` when the target pixel count or four-byte
 /// conversion overflows; it never allocates storage itself.
 fn raster_byte_count(width: u32, height: u32) -> Result<usize, RenderError> {
     raster_pixel_count(width, height)?
         .checked_mul(4)
         .ok_or(RenderError::new(
-            "raster.allocation",
+            "raster.buffer.addressability",
             "raster byte count overflows",
         ))
+}
+
+#[cfg(test)]
+std::thread_local! { static FAIL_PREVIEW_BUFFER_RESERVATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+/// Proves exact target byte addressability before classifying a reserve refusal as allocation failure.
+/// # Errors
+/// Returns raster.buffer.addressability for impossible layout, or raster.buffer.allocation only for reserve refusal.
+fn reserve_raster_buffer<T>(count: usize) -> Result<Vec<T>, RenderError> {
+    std::alloc::Layout::array::<T>(count).map_err(|_| {
+        RenderError::new(
+            "raster.buffer.addressability",
+            "raster storage exceeds machine addressability",
+        )
+    })?;
+    #[cfg(test)]
+    if FAIL_PREVIEW_BUFFER_RESERVATION.with(|flag| flag.replace(false)) {
+        return Err(RenderError::new(
+            "raster.buffer.allocation",
+            "raster buffer allocation failed",
+        ));
+    }
+    let mut values = Vec::new();
+    values.try_reserve_exact(count).map_err(|_| {
+        RenderError::new(
+            "raster.buffer.allocation",
+            "raster buffer allocation failed",
+        )
+    })?;
+    Ok(values)
 }
 
 /// Allocates one complete premultiplied linear pixel buffer through fallible reservation.
 ///
 /// # Errors
 ///
-/// Returns `raster.allocation` for a non-representable target or failed
-/// allocation before publishing any partial raster storage.
+/// Returns `raster.buffer.addressability` for a non-representable target and `raster.buffer.allocation` for reported allocator failure before publishing any partial raster storage.
 fn allocate_linear_pixels(
     width: u32,
     height: u32,
     initial: PremultipliedLinearPixel,
 ) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
     let count = raster_pixel_count(width, height)?;
-    let mut pixels = Vec::new();
-    pixels.try_reserve_exact(count).map_err(|_| {
-        RenderError::new("raster.allocation", "raster linear pixel allocation failed")
-    })?;
+    let mut pixels = reserve_raster_buffer(count)?;
     pixels.resize(count, initial);
     Ok(pixels)
 }
@@ -2900,14 +2926,10 @@ fn allocate_linear_pixels(
 ///
 /// # Errors
 ///
-/// Returns `raster.allocation` for a non-representable target or failed byte
-/// allocation before quantization begins.
+/// Returns `raster.buffer.addressability` for a non-representable target and `raster.buffer.allocation` for allocator failure before quantization begins.
 fn allocate_raster_bytes(width: u32, height: u32) -> Result<Vec<u8>, RenderError> {
     let count = raster_byte_count(width, height)?;
-    let mut pixels = Vec::new();
-    pixels
-        .try_reserve_exact(count)
-        .map_err(|_| RenderError::new("raster.allocation", "raster byte allocation failed"))?;
+    let mut pixels = reserve_raster_buffer(count)?;
     pixels.resize(count, 0);
     Ok(pixels)
 }
@@ -6319,7 +6341,7 @@ mod stage20e2_limit_tests {
     /// # Panics
     ///
     /// Panics when a small valid buffer cannot be allocated through the
-    /// fallible path or an overflowing surface bypasses `raster.allocation`.
+    /// fallible path or an overflowing surface bypasses `raster.buffer.addressability`.
     #[test]
     fn raster_allocation_helpers_are_checked_and_fallible() {
         assert_eq!(raster_pixel_count(2, 3).expect("small pixel count"), 6);
@@ -6332,7 +6354,7 @@ mod stage20e2_limit_tests {
         );
         let error = RasterSurface::new(u32::MAX, u32::MAX, Vec::new())
             .expect_err("overflowing dimensions do not attempt allocation");
-        assert_eq!(error.path(), "raster.allocation");
+        assert_eq!(error.path(), "raster.buffer.addressability");
     }
 
     /// Proves cancellation can be isolated inside composition, background, and quantization workers.
@@ -6402,5 +6424,28 @@ mod stage20e2_limit_tests {
         flatten_cubic(a, b, c, d, 0, &mut points, &mut work)
             .expect("tiny control polygon flattens without numeric subdivision");
         assert_eq!(points, vec![a, d]);
+    }
+}
+
+#[cfg(test)]
+mod preview_buffer_diagnostic_tests {
+    use super::*;
+    /// Distinguishes impossible layouts from an injected refusal at the actual buffer reserve boundary.
+    /// # Panics
+    /// Panics if allocator causes alias addressability or successful pixel initialization changes.
+    #[test]
+    fn actual_reserve_and_addressability_are_distinct() {
+        assert_eq!(
+            reserve_raster_buffer::<PremultipliedLinearPixel>(isize::MAX as usize)
+                .unwrap_err()
+                .path(),
+            "raster.buffer.addressability"
+        );
+        FAIL_PREVIEW_BUFFER_RESERVATION.with(|flag| flag.set(true));
+        assert_eq!(
+            allocate_raster_bytes(2, 3).unwrap_err().path(),
+            "raster.buffer.allocation"
+        );
+        assert_eq!(allocate_raster_bytes(2, 3).unwrap(), vec![0; 24]);
     }
 }

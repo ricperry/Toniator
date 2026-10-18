@@ -26,6 +26,8 @@ mod png_export_size;
 mod prepared_paintable;
 mod preview_backdrop;
 mod preview_coordinator;
+mod preview_diagnostics;
+mod preview_diagnostics_view;
 mod print_cleanup;
 mod print_preparation;
 mod print_preparation_view;
@@ -75,6 +77,7 @@ use personal_pattern_management::{
 #[cfg(test)]
 use preview_coordinator::PreviewSubmission;
 use preview_coordinator::{PreviewIntent, accepts_submission};
+use preview_diagnostics::{Diagnostic as PreviewDiagnostic, Origin as PreviewOrigin};
 use toniator_domain::DensityMetric2D;
 use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureAttachment,
@@ -1045,6 +1048,7 @@ struct PatternEditorSurface {
     status: gtk::Label,
     picture: gtk::Picture,
     preview_spinner: gtk::Spinner,
+    preview_details: preview_diagnostics_view::Controls,
     draft: Rc<RefCell<PatternEditorDraft>>,
     /// Captures the selected endpoint for this modal's source-frame preview.
     endpoint: temporal_preview::Endpoint,
@@ -1624,6 +1628,7 @@ struct AdvancedSettingsSurface {
     target: InspectorTarget,
     picture: gtk::Picture,
     status: gtk::Label,
+    preview_details: preview_diagnostics_view::Controls,
     recalibrate: gtk::Button,
     apply: gtk::Button,
     calibration_task: Option<AdvancedCalibrationTask>,
@@ -1677,6 +1682,7 @@ struct PatternWizardSurface {
     preview_description: gtk::Label,
     spinner: gtk::Spinner,
     preview_status: gtk::Label,
+    preview_details: preview_diagnostics_view::Controls,
     status: gtk::Label,
     breadcrumb: gtk::Label,
     page: gtk::Box,
@@ -3604,8 +3610,20 @@ enum AdvancedPreviewSource {
         source: ResolvedSource,
         width: u32,
         height: u32,
+        format: toniator_engine::SourceFormat,
     },
-    Unavailable(String),
+    Unavailable(PreviewDiagnostic),
+}
+
+impl AdvancedPreviewSource {
+    /// Retains the exact failed source preparation across private draft revisions without rerunning it.
+    /// A later edit cannot invent a new cause or imply that the fixed modal input is decoded again.
+    fn unavailable_diagnostic(&self) -> Option<PreviewDiagnostic> {
+        match self {
+            Self::Unavailable(diagnostic) => Some(diagnostic.clone()),
+            Self::Pending | Self::Ready { .. } => None,
+        }
+    }
 }
 
 /// Locates one Advanced Settings descriptor across selected-copy definition-ID replacement.
@@ -3748,6 +3766,7 @@ type MainOutputGroups = BTreeMap<PatternOutputLayerId, MainOutputGroup>;
 /// Holds one explicitly opted-in harness routing fault; ordinary application runs have none.
 /// The existing automation evidence opt-in is mandatory and no document setting is added.
 struct PreviewFailureHook {
+    scope: String,
     boundary: String,
     after_success: bool,
 }
@@ -3758,22 +3777,51 @@ impl PreviewFailureHook {
     fn from_environment() -> Option<Self> {
         std::env::var_os("TONIATOR_AUTOMATION_EVENTS")?;
         let value = std::env::var("TONIATOR_PREVIEW_FAILURE_ONCE").ok()?;
+        let (scope, value) = value
+            .split_once(':')
+            .map_or(("main", value.as_str()), |(scope, value)| (scope, value));
+        if !matches!(scope, "main" | "editor" | "wizard" | "advanced" | "print") {
+            return None;
+        }
         let (boundary, after_success) = value
             .strip_suffix("-after-success")
-            .map_or((value.as_str(), false), |boundary| (boundary, true));
-        matches!(boundary, "prepare" | "decode" | "submit" | "texture").then(|| Self {
+            .map_or((value, false), |boundary| (boundary, true));
+        matches!(
+            boundary,
+            "prepare"
+                | "decode"
+                | "submit"
+                | "texture"
+                | "geometry-oom"
+                | "source-oom"
+                | "pixel-oom"
+                | "worker"
+                | "source-worker"
+                | "scheduler-start"
+                | "source-worker-start"
+                | "bridge-start"
+                | "request-id"
+                | "worker-spawn"
+                | "render"
+                | "worker-panic"
+                | "surface-id"
+                | "controls-start"
+        )
+        .then(|| Self {
+            scope: scope.to_owned(),
             boundary: boundary.to_owned(),
             after_success,
         })
     }
 }
 
-/// Builds a presentation-only error group inside the mapped canvas without measuring it.
-/// Native buttons retain their visible vocabulary, keyboard activation and GTK actions;
-/// wrapping text and responsive actions fit narrow/large-text canvases without changing targets.
+/// Builds an unmeasured error overlay without changing canvas targets or retained pixels.
+/// Wrapping native button labels form one column; a bounded vertical scroller keeps the
+/// heading, status and all actions reachable when large text exceeds the available canvas.
+/// Existing control names, applicability, keyboard activation and GTK actions remain caller-owned.
 fn build_preview_error_overlay(
     viewer: &gtk::Overlay,
-) -> (gtk::Box, gtk::Label, gtk::Button, gtk::Button) {
+) -> (gtk::Box, gtk::Label, gtk::Button, gtk::Button, gtk::Button) {
     let overlay = gtk::Box::new(gtk::Orientation::Vertical, 8);
     overlay.set_halign(gtk::Align::Fill);
     overlay.set_valign(gtk::Align::End);
@@ -3783,57 +3831,138 @@ fn build_preview_error_overlay(
     overlay.set_margin_bottom(12);
     overlay.add_css_class("osd");
     overlay.update_property(&[gtk::accessible::Property::Label("Preview error")]);
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_propagate_natural_height(true);
+    scroll.set_max_content_height(320);
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
     let heading = gtk::Label::new(Some("Preview unavailable"));
     heading.add_css_class("heading");
+    heading.set_wrap(true);
+    heading.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     heading.set_xalign(0.0);
     let message = gtk::Label::new(None);
     message.set_wrap(true);
     message.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     message.set_xalign(0.0);
     message.set_max_width_chars(70);
-    let actions = gtk::FlowBox::new();
-    actions.set_selection_mode(gtk::SelectionMode::None);
-    actions.set_homogeneous(false);
-    actions.set_min_children_per_line(1);
-    actions.set_max_children_per_line(2);
-    actions.set_column_spacing(6);
-    actions.set_row_spacing(6);
+    let actions = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    actions.set_halign(gtk::Align::Start);
     let retry = gtk::Button::with_label("Retry preview");
     let dismiss = gtk::Button::with_label("Dismiss preview error");
-    actions.insert(&retry, -1);
-    actions.insert(&dismiss, -1);
-    overlay.append(&heading);
-    overlay.append(&message);
-    overlay.append(&actions);
+    let details = gtk::Button::with_label("Details…");
+    for button in [&retry, &details, &dismiss] {
+        if let Some(label) = button
+            .child()
+            .and_then(|child| child.downcast::<gtk::Label>().ok())
+        {
+            label.set_wrap(true);
+            label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        }
+        actions.append(button);
+    }
+    body.append(&heading);
+    body.append(&message);
+    body.append(&actions);
+    scroll.set_child(Some(&body));
+    overlay.append(&scroll);
     viewer.add_overlay(&overlay);
     viewer.set_measure_overlay(&overlay, false);
     viewer.set_clip_overlay(&overlay, true);
     overlay.set_visible(false);
-    (overlay, message, retry, dismiss)
+    (overlay, message, retry, details, dismiss)
 }
 
 /// Returns one manufactured typed-error routing witness at its opted-in production boundary.
 /// This tests controller routing, not actual decoder/allocator/texture failure creation.
-fn injected_preview_error(state: &mut AppState, boundary: &str) -> Option<String> {
-    let hook = state.preview_failure_hook.as_ref()?;
-    if hook.boundary != boundary
-        || (hook.after_success && state.preview_coordinator.last_accepted_ticket().is_none())
-    {
+fn injected_preview_error(state: &mut AppState, boundary: &str) -> Option<PreviewDiagnostic> {
+    let diagnostic = take_preview_fault(
+        &state.preview_failure_hook,
+        "main",
+        boundary,
+        state.preview_coordinator.last_accepted_ticket().is_some(),
+    );
+    if diagnostic.is_some() {
+        emit_automation_state(state, "preview_failure_injected", None);
+    }
+    diagnostic
+}
+
+/// Consumes one explicitly automation-gated routing witness only at its captured surface/boundary.
+/// Injected diagnostics retain typed origin/cause and are always marked as manufactured evidence.
+fn take_preview_fault(
+    hooks: &RefCell<Option<PreviewFailureHook>>,
+    scope: &str,
+    boundary: &str,
+    has_success: bool,
+) -> Option<PreviewDiagnostic> {
+    let mut slot = hooks.borrow_mut();
+    let hook = slot.as_ref()?;
+    let actual_boundary = match hook.boundary.as_str() {
+        "geometry-oom" | "pixel-oom" => "texture",
+        "source-oom" | "worker" | "source-worker" => "prepare",
+        other => other,
+    };
+    if hook.scope != scope || actual_boundary != boundary || (hook.after_success && !has_success) {
         return None;
     }
-    let path = match boundary {
-        "prepare" => "preview.test.preparation",
-        "decode" => "preview.test.decode",
-        "submit" => "preview.test.submission",
-        "texture" => "preview.test.texture",
-        _ => return None,
+    let mut diagnostic = match hook.boundary.as_str() {
+        "worker" => {
+            PreviewDiagnostic::scheduler(toniator_engine::SchedulerError::WorkerUnavailable)
+        }
+        "source-worker" => PreviewDiagnostic::new(
+            PreviewOrigin::Source,
+            "preview.source_worker.unavailable",
+            "Source worker unavailable",
+        ),
+        "scheduler-start" => {
+            PreviewDiagnostic::scheduler(toniator_engine::SchedulerError::WorkerSpawn)
+        }
+        "bridge-start" => PreviewDiagnostic::new(
+            PreviewOrigin::Scheduler,
+            "preview.bridge.spawn",
+            "One-shot preview bridge creation routing witness",
+        ),
+        "source-worker-start" => PreviewDiagnostic::new(
+            PreviewOrigin::Source,
+            "preview.source_worker.spawn",
+            "One-shot source worker creation routing witness",
+        ),
+        value => PreviewDiagnostic::new(
+            PreviewOrigin::Preparation,
+            match value {
+                "geometry-oom" => "curve.path.allocation",
+                "source-oom" => "preview.source_display.allocation",
+                "pixel-oom" => "preview.texture.allocation",
+                "prepare" => "preview.test.preparation",
+                "decode" => "preview.test.decode",
+                "submit" => "preview.test.submission",
+                "texture" => "preview.test.texture",
+                "request-id" => "preview.print.request_id_exhausted",
+                "worker-spawn" => "preview.print.worker.spawn",
+                "render" => "preview.print.render",
+                "worker-panic" => "preview.print.worker.panicked",
+                "surface-id" => "preview.print.surface_id_exhausted",
+                "controls-start" => "preview.print.controls.start",
+                _ => return None,
+            },
+            "One-shot private harness routing witness",
+        ),
     };
-    state.preview_failure_hook = None;
-    emit_automation_state(state, "preview_failure_injected", None);
-    Some(
-        toniator_engine::EvaluationError::new(path, "One-shot private harness routing witness")
-            .to_string(),
-    )
+    diagnostic.injected = true;
+    slot.take();
+    Some(diagnostic)
+}
+
+/// Preserves real private evaluator/texture errors before consuming any explicitly opted-in routing fault.
+/// # Errors
+/// Returns the real texture diagnostic first, or a marked injected witness after successful preparation.
+fn private_preview_texture(hooks:&RefCell<Option<PreviewFailureHook>>,scope:&str,picture:&gtk::Picture,raster:&RasterSurface)->Result<gtk::gdk::Texture,PreviewDiagnostic>{
+    let texture=texture_from_surface(raster)?;
+    if let Some(diagnostic)=take_preview_fault(hooks,scope,"texture",picture.paintable().is_some()){
+        eprintln!("toniator-app: {scope} routing witness after accepted evaluation and texture preparation");return Err(diagnostic);
+    }
+    Ok(texture)
 }
 
 /// Captures current frame and exact target before invalidation or source-job side effects.
@@ -3841,7 +3970,11 @@ fn injected_preview_error(state: &mut AppState, boundary: &str) -> Option<String
 fn main_preview_intent(state: &AppState) -> Option<PreviewIntent> {
     Some(PreviewIntent {
         frame: main_preview_frame_identity(state)?,
-        target: main_viewport_target(state).or(state.preview_target)?,
+        target: match main_viewport_resolution(state) {
+            viewport_request::Resolution::Ready(target) => target,
+            viewport_request::Resolution::Unallocated => state.preview_target?,
+            viewport_request::Resolution::Rejected { .. } => return None,
+        },
     })
 }
 
@@ -3855,6 +3988,58 @@ fn retry_main_preview(state: &Rc<RefCell<AppState>>) {
         if !state.preview_coordinator.retry(intent) {
             return;
         }
+        if state.preview_worker_unavailable {
+            state.preview_bridge_stop.store(true, Ordering::Release);
+            state.preview_bridge.take();
+            state.preview_bridge_stop = Arc::new(AtomicBool::new(false));
+            state.preview_bridge_identity = Arc::new(());
+            match EvaluationScheduler::new() {
+                Ok(scheduler) => {
+                    state.scheduler = Arc::new(scheduler);
+                    state.preview_worker_unavailable = false;
+                    match start_preview_event_bridge(
+                        state.scheduler.clone(),
+                        state.event_sender.clone(),
+                        state.preview_bridge_stop.clone(),
+                        state.preview_bridge_identity.clone(),
+                    ) {
+                        Ok(bridge) => {
+                            state.preview_bridge = Some(bridge);
+                            state.preview_bridge_startup_failure = None;
+                        }
+                        Err(error) => {
+                            state.preview_worker_unavailable = true;
+                            state.preview_bridge_startup_failure = Some(error.clone());
+                            state.preview_coordinator.prepare(intent);
+                            show_preview_error(&mut state, error);
+                            return;
+                        }
+                    }
+                }
+                Err(error) => {
+                    let diagnostic = PreviewDiagnostic::scheduler(error);
+                    state.preview_bridge_startup_failure = Some(diagnostic.clone());
+                    state.preview_coordinator.prepare(intent);
+                    show_preview_error(&mut state, diagnostic);
+                    return;
+                }
+            }
+        }
+        if state.preview_source_worker_unavailable.is_some() {
+            state.media_worker.take();
+            match temporal_preview::Worker::new(state.event_sender.clone()) {
+                Ok(worker) => {
+                    state.media_worker = Some(worker);
+                    state.preview_source_worker_unavailable = None;
+                }
+                Err(error) => {
+                    state.preview_coordinator.prepare(intent);
+                    show_preview_error(&mut state, error);
+                    return;
+                }
+            }
+        }
+        state.preview_details.clear();
         emit_automation_state(&mut state, "preview_retry", None);
         set_preview_pending(&mut state);
     }
@@ -3900,9 +4085,10 @@ struct AppState {
     preview_progress: gtk::Box,
     preview_error: gtk::Box,
     preview_error_label: gtk::Label,
+    preview_details: preview_diagnostics_view::Controls,
     retry_preview: gtk::Button,
     dismiss_preview_error: gtk::Button,
-    preview_failure_hook: Option<PreviewFailureHook>,
+    preview_failure_hook: Rc<RefCell<Option<PreviewFailureHook>>>,
     preview_overall_progress_label: gtk::Label,
     preview_progress_label: gtk::Label,
     preview_progress_bar: gtk::ProgressBar,
@@ -3965,6 +4151,7 @@ struct AppState {
     preview_full: Option<gtk::gdk::Texture>,
     preview_full_identity: Option<(u64, u64, u64)>,
     viewport_observed_target: Option<toniator_engine::PreviewRasterTarget>,
+    rejected_viewport: Option<((u64, u64, u64), viewport_request::Attempt)>,
     preview_debounce: Option<glib::SourceId>,
     presets: PresetRegistry,
     catalog: LayeredPresetCatalog,
@@ -3978,6 +4165,11 @@ struct AppState {
     automation: Option<AutomationSink>,
     event_sender: async_channel::Sender<AppEvent>,
     preview_bridge_stop: Arc<AtomicBool>,
+    preview_bridge_identity: Arc<()>,
+    preview_bridge: Option<thread::JoinHandle<()>>,
+    preview_worker_unavailable: bool,
+    preview_bridge_startup_failure: Option<PreviewDiagnostic>,
+    preview_source_worker_unavailable: Option<PreviewDiagnostic>,
     _theme_bridge: SystemThemeBridge,
 }
 
@@ -4358,7 +4550,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     let error = shell.error();
     let picture = shell.picture();
     let viewer = shell.viewer();
-    let (preview_error, preview_error_label, retry_preview, dismiss_preview_error) =
+    let (preview_error, preview_error_label, retry_preview, preview_details, dismiss_preview_error) =
         build_preview_error_overlay(&viewer);
     let viewport_scroll = shell.viewport_scroll();
     let zoom_out = shell.zoom_out();
@@ -4504,9 +4696,10 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         preview_progress,
         preview_error,
         preview_error_label,
+        preview_details: preview_diagnostics_view::Controls::for_button(&window, &preview_details),
         retry_preview,
         dismiss_preview_error,
-        preview_failure_hook: PreviewFailureHook::from_environment(),
+        preview_failure_hook: Rc::new(RefCell::new(PreviewFailureHook::from_environment())),
         preview_overall_progress_label,
         preview_progress_label,
         preview_progress_bar,
@@ -4564,6 +4757,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         preview_full: None,
         preview_full_identity: None,
         viewport_observed_target: None,
+        rejected_viewport: None,
         preview_debounce: None,
         presets,
         catalog: catalog_state.catalog,
@@ -4579,6 +4773,11 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         automation: AutomationSink::from_environment(),
         event_sender,
         preview_bridge_stop: Arc::new(AtomicBool::new(false)),
+        preview_bridge_identity: Arc::new(()),
+        preview_bridge: None,
+        preview_worker_unavailable: false,
+        preview_bridge_startup_failure: None,
+        preview_source_worker_unavailable: None,
         _theme_bridge: theme_bridge,
     }));
     let cancel_state = Rc::clone(&state);
@@ -4629,15 +4828,36 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         }
     });
     let media_sender = state.borrow().event_sender.clone();
-    state.borrow_mut().media_worker = Some(
-        temporal_preview::Worker::new(media_sender).expect("failed to start source preview worker"),
-    );
+    match temporal_preview::Worker::new(media_sender) {
+        Ok(worker) => state.borrow_mut().media_worker = Some(worker),
+        Err(error) => state.borrow_mut().preview_source_worker_unavailable = Some(error),
+    }
     connect_endpoint_controls(&state);
-    start_preview_event_bridge(
-        Arc::clone(&state.borrow().scheduler),
-        state.borrow().event_sender.clone(),
-        Arc::clone(&state.borrow().preview_bridge_stop),
+    let bridge = take_preview_fault(
+        &state.borrow().preview_failure_hook,
+        "main",
+        "bridge-start",
+        false,
+    )
+    .map_or_else(
+        || {
+            start_preview_event_bridge(
+                Arc::clone(&state.borrow().scheduler),
+                state.borrow().event_sender.clone(),
+                Arc::clone(&state.borrow().preview_bridge_stop),
+                Arc::clone(&state.borrow().preview_bridge_identity),
+            )
+        },
+        Err,
     );
+    match bridge {
+        Ok(bridge) => state.borrow_mut().preview_bridge = Some(bridge),
+        Err(error) => {
+            let mut app = state.borrow_mut();
+            app.preview_worker_unavailable = true;
+            app.preview_bridge_startup_failure = Some(error);
+        }
+    }
     connect_actions(&state);
     connect_startup(&state);
     connect_startup_dismissal(&state);
@@ -5002,38 +5222,340 @@ fn dispatch_ui_intent(state: &Rc<RefCell<AppState>>, intent: UiIntent) {
 /// drains ordered progress before completion and stops when the app coordinator
 /// requests shutdown; ticket validation remains in the main-context progress
 /// and completion handlers.
+///
+/// # Errors
+/// Returns a typed operating-system spawn failure without leaving an unobserved receiver.
 fn start_preview_event_bridge(
     scheduler: Arc<EvaluationScheduler>,
     sender: async_channel::Sender<AppEvent>,
     stop: Arc<AtomicBool>,
-) {
-    thread::spawn(move || {
-        'bridge: while !stop.load(Ordering::Acquire) {
-            loop {
-                match scheduler.try_receive_latest_progress() {
-                    Ok(Some(progress)) => {
-                        if sender
-                            .send_blocking(AppEvent::PreviewProgress(progress))
-                            .is_err()
-                        {
+    identity: Arc<()>,
+) -> Result<thread::JoinHandle<()>, PreviewDiagnostic> {
+    thread::Builder::new()
+        .name("toniator-main-preview-bridge".into())
+        .spawn(move || {
+            'bridge: while !stop.load(Ordering::Acquire) {
+                loop {
+                    match scheduler.try_receive_latest_progress() {
+                        Ok(Some(progress)) => {
+                            if sender
+                                .send_blocking(AppEvent::PreviewProgress {
+                                    identity: identity.clone(),
+                                    progress,
+                                })
+                                .is_err()
+                            {
+                                break 'bridge;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            if !stop.load(Ordering::Acquire) {
+                                let _ = sender.send_blocking(AppEvent::PreviewWorkerFailed {
+                                    identity: identity.clone(),
+                                    diagnostic: PreviewDiagnostic::scheduler(error),
+                                });
+                            }
                             break 'bridge;
                         }
                     }
-                    Ok(None) => break,
-                    Err(_) => break 'bridge,
                 }
-            }
-            match scheduler.try_receive_latest() {
-                Ok(Some(completion)) => {
-                    if sender.send_blocking(AppEvent::Preview(completion)).is_err() {
+                match scheduler.try_receive_latest() {
+                    Ok(Some(completion)) => {
+                        if sender
+                            .send_blocking(AppEvent::Preview {
+                                identity: identity.clone(),
+                                completion,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(None) => thread::park_timeout(Duration::from_millis(4)),
+                    Err(error) => {
+                        if !stop.load(Ordering::Acquire) {
+                            let _ = sender.send_blocking(AppEvent::PreviewWorkerFailed {
+                                identity: identity.clone(),
+                                diagnostic: PreviewDiagnostic::scheduler(error),
+                            });
+                        }
                         break;
                     }
                 }
-                Ok(None) => thread::park_timeout(Duration::from_millis(4)),
-                Err(_) => break,
+            }
+        })
+        .map_err(|error| {
+            PreviewDiagnostic::new(
+                PreviewOrigin::Scheduler,
+                "preview.bridge.spawn",
+                &error.to_string(),
+            )
+        })
+}
+
+/// Records one failed requested preview constructor before its surface can be installed.
+/// The caller captures private authority; all causes are logged without changing the result.
+/// # Errors
+/// Returns the original constructor failure after one best-effort record.
+fn record_preview_startup_result<T>(
+    result: Result<T, PreviewDiagnostic>,
+    context: serde_json::Value,
+    record: impl FnOnce(PreviewDiagnostic, serde_json::Value),
+) -> Result<T, PreviewDiagnostic> {
+    result.inspect_err(|diagnostic| record(diagnostic.clone(), context))
+}
+
+/// Admits a current print preview result using owned cancellation, never diagnostic-message parsing.
+/// Stale/closed/dirty-cancelled completions remain silent; each other failed attempt records once.
+fn admit_print_preview_result<T>(
+    result: Result<T, PreviewDiagnostic>,
+    current: bool,
+    cancelled: bool,
+    context: serde_json::Value,
+    record: impl FnOnce(PreviewDiagnostic, serde_json::Value),
+) -> Option<Result<T, PreviewDiagnostic>> {
+    if !current || cancelled {
+        return None;
+    }
+    Some(record_preview_startup_result(result, context, record))
+}
+
+/// Names one concrete private intent without treating attempt tickets as creative changes.
+fn private_preview_intent(epoch: u64, revision: u64, frame: u64) -> String {
+    format!("{epoch}:{revision}:{frame}")
+}
+
+/// Records a Pattern Editor failure against its actual private draft, captured source and endpoint.
+fn record_editor_failure(
+    surface: &PatternEditorSurface,
+    draft: &PatternEditorDraft,
+    diagnostic: PreviewDiagnostic,
+) {
+    record_editor_failure_session(surface, draft, draft.preview_session.as_ref(), diagnostic);
+}
+
+/// Captures the actual retained evaluation projection; early failures explicitly identify authored origin.
+fn record_editor_failure_session(
+    surface: &PatternEditorSurface,
+    draft: &PatternEditorDraft,
+    session: Option<&DocumentSession>,
+    diagnostic: PreviewDiagnostic,
+) {
+    let frame = surface.endpoint.frame(draft.history.document());
+    let key = private_preview_intent(draft.epoch, draft.history.revision().0, frame);
+    let document = session.map_or_else(|| draft.history.document(), DocumentSession::document);
+    let mut context = preview_diagnostics::context(
+        "Pattern Editor",
+        document,
+        None,
+        draft.history.revision().0,
+        frame,
+        toniator_engine::PreviewRasterTarget::new(512, 512)
+            .ok()
+            .map(|t| {
+                t.with_background(pattern_editor_preview_background(
+                    matches!(surface.parent, PatternEditorParent::Wizard { .. }),
+                    document,
+                ))
+            }),
+        surface.picture.paintable().is_some(),
+    );
+    context["scope_epoch"] = draft.epoch.into();
+    context["document_purpose"] = if session.is_some() {
+        "actual private evaluation projection"
+    } else {
+        "authored private origin before evaluation projection"
+    }
+    .into();
+    surface
+        .preview_details
+        .fail(&key, diagnostic, context, &surface.status);
+}
+
+/// Records a Wizard failure against the actual evaluation projection and private draft revision.
+fn record_wizard_failure(
+    surface: &PatternWizardSurface,
+    document: &Document,
+    diagnostic: PreviewDiagnostic,
+) {
+    record_wizard_failure_context(
+        surface,
+        document,
+        "actual private evaluation projection",
+        diagnostic,
+    );
+}
+
+/// Identifies early Wizard failures before a disposable evaluation projection exists.
+fn record_wizard_origin_failure(surface: &PatternWizardSurface, diagnostic: PreviewDiagnostic) {
+    record_wizard_failure_context(
+        surface,
+        surface.draft.borrow().document(),
+        "authored private origin before evaluation projection",
+        diagnostic,
+    );
+}
+
+/// Keeps the actual projection metadata separate from the originating Wizard intent/revision key.
+fn record_wizard_failure_context(
+    surface: &PatternWizardSurface,
+    document: &Document,
+    purpose: &str,
+    diagnostic: PreviewDiagnostic,
+) {
+    let draft = surface.draft.borrow();
+    let revision = draft.revision().0;
+    let origin_frame = draft.document().project_timing().frame_range().start();
+    let key = format!(
+        "{}:{:?}",
+        private_preview_intent(surface.epoch, revision, origin_frame),
+        (surface.gallery_panel.is_visible(), &surface.candidate)
+    );
+    let mut context = preview_diagnostics::context(
+        "Pattern Wizard",
+        document,
+        None,
+        revision,
+        document.project_timing().frame_range().start(),
+        toniator_engine::PreviewRasterTarget::new(
+            WIZARD_PREVIEW_TARGET_PX,
+            WIZARD_PREVIEW_TARGET_PX,
+        )
+        .ok(),
+        surface.picture.paintable().is_some(),
+    );
+    context["scope_epoch"] = surface.epoch.into();
+    context["document_purpose"] = purpose.into();
+    context["origin_frame"] = origin_frame.into();
+    context["gallery_projection"] = surface.gallery_panel.is_visible().into();
+    if matches!(surface.preview_source, WizardPreviewSource::Ready { .. }) {
+        surface.preview_details.set_source(serde_json::json!({"format":"Svg","width":100,"height":100,"purpose":"actual bundled neutral structural-preview SVG"}));
+    }
+    surface
+        .preview_details
+        .fail(&key, diagnostic, context, &surface.preview_status);
+}
+
+/// Records an Advanced failure against the actual private draft/proxy and selected frame.
+fn record_advanced_failure(surface: &AdvancedSettingsSurface, diagnostic: PreviewDiagnostic) {
+    let draft = surface.draft.borrow();
+    let frame = surface.endpoint.frame(draft.document());
+    let key = private_preview_intent(surface.epoch, draft.revision().0, frame);
+    let mut context = preview_diagnostics::context(
+        "Advanced Settings",
+        draft.document(),
+        None,
+        draft.revision().0,
+        frame,
+        toniator_engine::PreviewRasterTarget::new(420, 240)
+            .ok()
+            .map(|t| {
+                t.with_background(preview_backdrop::raster_background_for_document(
+                    draft.document(),
+                ))
+            }),
+        surface.picture.paintable().is_some(),
+    );
+    context["scope_epoch"] = surface.epoch.into();
+    if surface.preview_source.unavailable_diagnostic().is_some() {
+        context["source_preparation"] = "Retained failed preparation for this modal input; edits do not rerun source preparation".into();
+        context["source_preparation_retry"] = "Close and reopen Advanced Settings".into();
+    }
+    surface
+        .preview_details
+        .fail(&key, diagnostic, context, &surface.status);
+}
+
+/// Admits only the live private epoch and actual scheduler instance, clearing pending/spinner once.
+/// Failed Wizard cache instances are revoked so reopening obtains a fresh worker; no automatic restart occurs.
+fn handle_private_worker_failure(
+    state: &Rc<RefCell<AppState>>,
+    kind: app_events::PrivateSurface,
+    epoch: u64,
+    scheduler: &Arc<EvaluationScheduler>,
+    diagnostic: PreviewDiagnostic,
+) {
+    let mut state = state.borrow_mut();
+    if kind == app_events::PrivateSurface::Wizard
+        && state
+            .wizard_preview_scheduler
+            .as_ref()
+            .is_some_and(|cached| Arc::ptr_eq(cached, scheduler))
+    {
+        state.wizard_preview_scheduler = None;
+    }
+    match kind {
+        app_events::PrivateSurface::Editor => {
+            if let Some(surface) = state.pattern_editor.as_mut().filter(|s| {
+                s.draft.borrow().epoch == epoch
+                    && Arc::ptr_eq(&s.draft.borrow().scheduler, scheduler)
+            }) {
+                let mut draft = surface.draft.borrow_mut();
+                let session = draft.preview_session.take();
+                draft.preview_submission = None;
+                draft.media_preview_key = None;
+                draft.preview_origin = None;
+                surface.preview_spinner.stop();
+                surface.preview_spinner.set_visible(false);
+                record_editor_failure_session(surface, &draft, session.as_ref(), diagnostic);
             }
         }
-    });
+        app_events::PrivateSurface::Advanced => {
+            if let Some(surface) = state
+                .advanced_settings
+                .as_mut()
+                .filter(|s| s.epoch == epoch && Arc::ptr_eq(&s.scheduler, scheduler))
+            {
+                surface.preview_submission = None;
+                record_advanced_failure(surface, diagnostic);
+            }
+        }
+        app_events::PrivateSurface::Wizard => {
+            let mut matched = false;
+            if let Some(surface) = state
+                .pattern_wizard
+                .as_mut()
+                .filter(|s| s.epoch == epoch && Arc::ptr_eq(&s.scheduler, scheduler))
+            {
+                surface.preview_submission = None;
+                let session = surface.preview_session.take();
+                surface.spinner.stop();
+                surface.spinner.set_visible(false);
+                if let Some(session) = session {
+                    record_wizard_failure(surface, session.document(), diagnostic);
+                } else {
+                    record_wizard_origin_failure(surface, diagnostic);
+                }
+                matched = true;
+            }
+            if matched
+                && state
+                    .wizard_preview_scheduler
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, scheduler))
+            {
+                state.wizard_preview_scheduler = None;
+            }
+        }
+    }
+}
+
+/// Marks a fresh receiver disconnect unavailable even after an accepted idle preview.
+/// Pixels/history remain retained; only explicit Retry replaces the affected worker.
+fn handle_main_worker_failure(state: &Rc<RefCell<AppState>>, diagnostic: PreviewDiagnostic) {
+    let mut state = state.borrow_mut();
+    state.preview_worker_unavailable = true;
+    state.media_preview_key = None;
+    if let Some(worker) = state.media_worker.as_mut() {
+        worker.cancel();
+    }
+    if state.preview_coordinator.intent().is_none()
+        && let Some(intent) = main_preview_intent(&state)
+    {
+        state.preview_coordinator.prepare(intent);
+    }
+    show_preview_error(&mut state, diagnostic);
 }
 
 /// Moves the authoritative main history cursor and schedules one fresh preview.
@@ -8109,19 +8631,100 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
     let layout = shell.layout();
     let gallery = shell.gallery();
     reflow_wizard_layout_while_visible(&window, &layout, &gallery, &shell.preview_viewport());
-    let scheduler = {
-        let mut app_state = state.borrow_mut();
-        Arc::clone(app_state.wizard_preview_scheduler.get_or_insert_with(|| {
-            Arc::new(EvaluationScheduler::new().expect("Pattern Wizard private scheduler starts"))
-        }))
-    };
-    let preview_bridge_stop = Arc::new(AtomicBool::new(false));
-    let preview_bridge = start_wizard_preview_event_bridge(
-        Arc::clone(&scheduler),
-        state.borrow().event_sender.clone(),
-        Arc::clone(&preview_bridge_stop),
-        epoch,
+    let mut startup_context = preview_diagnostics::context(
+        "Pattern Wizard",
+        draft.borrow().document(),
+        None,
+        draft.borrow().revision().0,
+        draft
+            .borrow()
+            .document()
+            .project_timing()
+            .frame_range()
+            .start(),
+        toniator_engine::PreviewRasterTarget::new(
+            WIZARD_PREVIEW_TARGET_PX,
+            WIZARD_PREVIEW_TARGET_PX,
+        )
+        .ok()
+        .map(|target| target.with_background(RasterBackground::OpaqueWhite)),
+        false,
     );
+    startup_context["scope_epoch"] = epoch.into();
+    startup_context["document_purpose"] =
+        "authored private origin before Wizard evaluation projection".into();
+    startup_context["phase"] = "requested preview startup".into();
+    if matches!(preview_source, WizardPreviewSource::Ready { .. }) {
+        startup_context["source"] = serde_json::json!({"format":"Svg","width":100,"height":100,"purpose":"actual bundled neutral structural-preview SVG"});
+    }
+    let scheduler_result = {
+        let app = state.borrow();
+        if let Some(error) = take_preview_fault(
+            &app.preview_failure_hook,
+            "wizard",
+            "scheduler-start",
+            false,
+        ) {
+            Err(error)
+        } else if let Some(scheduler) = &app.wizard_preview_scheduler {
+            Ok(scheduler.clone())
+        } else {
+            EvaluationScheduler::new()
+                .map(Arc::new)
+                .map_err(PreviewDiagnostic::scheduler)
+        }
+    };
+    let scheduler = match record_preview_startup_result(
+        scheduler_result,
+        startup_context.clone(),
+        |diagnostic, context| {
+            preview_diagnostics::Snapshot::record(diagnostic, context);
+        },
+    ) {
+        Ok(scheduler) => scheduler,
+        Err(error) => {
+            set_inspector_status(
+                &mut state.borrow_mut(),
+                format!("Couldn’t start the Pattern Wizard preview: {error}"),
+            );
+            return;
+        }
+    };
+    state.borrow_mut().wizard_preview_scheduler = Some(scheduler.clone());
+    let preview_bridge_stop = Arc::new(AtomicBool::new(false));
+    let bridge_result = take_preview_fault(
+        &state.borrow().preview_failure_hook,
+        "wizard",
+        "bridge-start",
+        false,
+    )
+    .map_or_else(
+        || {
+            start_wizard_preview_event_bridge(
+                Arc::clone(&scheduler),
+                state.borrow().event_sender.clone(),
+                Arc::clone(&preview_bridge_stop),
+                epoch,
+            )
+        },
+        Err,
+    );
+    let preview_bridge = match record_preview_startup_result(
+        bridge_result,
+        startup_context,
+        |diagnostic, context| {
+            preview_diagnostics::Snapshot::record(diagnostic, context);
+        },
+    ) {
+        Ok(bridge) => bridge,
+        Err(error) => {
+            set_inspector_status(
+                &mut state.borrow_mut(),
+                format!("Couldn’t start the Pattern Wizard preview bridge: {error}"),
+            );
+            return;
+        }
+    };
     let scatter_memory = state.borrow().scatter_memory.clone();
     state.borrow_mut().pattern_wizard = Some(PatternWizardSurface {
         guide_overlay,
@@ -8148,6 +8751,7 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
         picture,
         preview_description,
         spinner,
+        preview_details: preview_diagnostics_view::Controls::new(&window, &shell.preview_status()),
         preview_status: shell.preview_status(),
         status,
         breadcrumb,
@@ -15552,6 +16156,7 @@ fn submit_wizard_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
     let catalog = state.borrow().catalog.clone();
     {
         let mut app_state = state.borrow_mut();
+        let fault_hook = app_state.preview_failure_hook.clone();
         let Some(surface) = app_state
             .pattern_wizard
             .as_mut()
@@ -15559,6 +16164,31 @@ fn submit_wizard_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
         else {
             return;
         };
+        let document = surface.draft.borrow();
+        let intent = format!(
+            "{}:{:?}",
+            private_preview_intent(
+                surface.epoch,
+                document.revision().0,
+                document.document().project_timing().frame_range().start()
+            ),
+            (surface.gallery_panel.is_visible(), &surface.candidate)
+        );
+        drop(document);
+        if !surface.preview_details.admit(&intent) {
+            return;
+        }
+        if let Some(diagnostic) = take_preview_fault(
+            &fault_hook,
+            "wizard",
+            "prepare",
+            surface.picture.paintable().is_some(),
+        ) {
+            record_wizard_origin_failure(surface, diagnostic);
+            return;
+        }
+        surface.scheduler.cancel_pending();
+        surface.preview_submission = None;
         surface.validation.invalidate(
             surface.draft.borrow().document(),
             surface.draft.borrow().revision().0,
@@ -15568,9 +16198,10 @@ fn submit_wizard_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
             let WizardPreviewSource::Unavailable(error) = &surface.preview_source else {
                 unreachable!("wizard preview source has two explicit states")
             };
-            surface
-                .preview_status
-                .set_label(&format!("Pattern preview unavailable: {error}"));
+            record_wizard_origin_failure(
+                surface,
+                PreviewDiagnostic::new(PreviewOrigin::Preparation, "preview.wizard.source", error),
+            );
             return;
         };
         surface.preview_session = None;
@@ -15591,9 +16222,14 @@ fn submit_wizard_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
         let session = match session {
             Ok(session) => session,
             Err(error) => {
-                surface
-                    .preview_status
-                    .set_label(&format!("Pattern preview unavailable: {error}"));
+                record_wizard_origin_failure(
+                    surface,
+                    PreviewDiagnostic::new(
+                        PreviewOrigin::Preparation,
+                        "preview.wizard.preparation",
+                        &error,
+                    ),
+                );
                 return;
             }
         };
@@ -15617,9 +16253,11 @@ fn submit_wizard_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
                     .set_label("Updating pattern preview…");
             }
             Err(error) => {
-                surface
-                    .preview_status
-                    .set_label(&format!("Pattern preview unavailable: {error}"));
+                record_wizard_failure(
+                    surface,
+                    session.document(),
+                    PreviewDiagnostic::scheduler(error),
+                );
             }
         }
     };
@@ -16364,6 +17002,7 @@ fn handle_wizard_preview_completion(
     completion: toniator_engine::EvaluationCompletion,
 ) {
     let mut app_state = state.borrow_mut();
+    let fault_hook = app_state.preview_failure_hook.clone();
     let Some(surface) = app_state.pattern_wizard.as_mut() else {
         return;
     };
@@ -16386,11 +17025,25 @@ fn handle_wizard_preview_completion(
         .scheduler
         .accept_completion(&completion, &preview_session)
     {
-        Ok(true) => match completion
-            .result()
-            .and_then(|result| texture_from_surface(result.raster()).ok())
-        {
-            Some(texture) => {
+        Ok(true) => match completion.result().map_or_else(
+            || {
+                Err(completion.error().map_or_else(
+                    || {
+                        PreviewDiagnostic::new(
+                            PreviewOrigin::Evaluation,
+                            "preview.evaluation.empty",
+                            "Evaluation did not produce a result",
+                        )
+                    },
+                    PreviewDiagnostic::evaluation,
+                ))
+            },
+            |result| {
+                private_preview_texture(&fault_hook,"wizard",&surface.picture,result.raster())
+            },
+        ) {
+            Ok(texture) => {
+                surface.preview_details.clear();
                 update_wizard_preview_backdrop(&surface.picture, preview_session.document());
                 surface.picture.set_paintable(Some(&texture));
                 if let Some(result) = completion.result() {
@@ -16409,24 +17062,16 @@ fn handle_wizard_preview_completion(
                 }
                 surface.preview_status.set_label("");
             }
-            None => {
-                let reason = completion
-                    .error()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "The preview did not finish.".to_owned());
-                eprintln!("toniator-app: wizard preview: {reason}");
-                surface.preview_status.set_label(
-                    "Preview unavailable for these settings. Your last preview is still shown.",
-                );
+            Err(diagnostic) => {
+                record_wizard_failure(surface, preview_session.document(), diagnostic)
             }
         },
         Ok(false) => {}
-        Err(error) => {
-            eprintln!("toniator-app: wizard preview: {error}");
-            surface.preview_status.set_label(
-                "Preview unavailable for these settings. Your last preview is still shown.",
-            );
-        }
+        Err(error) => record_wizard_failure(
+            surface,
+            preview_session.document(),
+            PreviewDiagnostic::scheduler(error),
+        ),
     }
 }
 
@@ -17152,13 +17797,13 @@ fn prepare_advanced_preview_source(
     presentation: Option<&SourcePresentation>,
 ) -> AdvancedPreviewSource {
     let Some(presentation) = presentation else {
-        return AdvancedPreviewSource::Unavailable("no source is available".to_owned());
+        return AdvancedPreviewSource::Unavailable(PreviewDiagnostic::new(PreviewOrigin::Source, "source.document", "No source is available"));
     };
     let Some(source) = sources.get(&presentation.id) else {
-        return AdvancedPreviewSource::Unavailable("the source bundle is incomplete".to_owned());
+        return AdvancedPreviewSource::Unavailable(PreviewDiagnostic::new(PreviewOrigin::Source, "source.bundle", "The source bundle is incomplete"));
     };
     let proxy = reduced_preview_png(source.bytes(), presentation.format, 128)
-        .map_err(|error| error.to_string())
+        .map_err(|error| PreviewDiagnostic::new(PreviewOrigin::Source, error.path(), error.message()))
         .and_then(|proxy| {
             ResolvedSource::new(
                 presentation.id.clone(),
@@ -17166,13 +17811,14 @@ fn prepare_advanced_preview_source(
                 SourceFormatHint::Png,
             )
             .map(|source| (source, proxy.width, proxy.height))
-            .map_err(|error| error.to_string())
+            .map_err(|error| PreviewDiagnostic::new(PreviewOrigin::Source, error.path(), error.message()))
         });
     match proxy {
         Ok((source, width, height)) => AdvancedPreviewSource::Ready {
             source,
             width,
             height,
+            format: toniator_engine::SourceFormat::Png,
         },
         Err(error) => AdvancedPreviewSource::Unavailable(error),
     }
@@ -17556,15 +18202,84 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
     });
     window.set_child(Some(&shell));
     status.set_label("Preparing preview…");
-    let scheduler =
-        Arc::new(EvaluationScheduler::new().expect("Advanced Settings private scheduler starts"));
-    let preview_bridge_stop = Arc::new(AtomicBool::new(false));
-    start_advanced_preview_event_bridge(
-        Arc::clone(&scheduler),
-        state.borrow().event_sender.clone(),
-        Arc::clone(&preview_bridge_stop),
-        epoch,
+    let mut startup_context = preview_diagnostics::context(
+        "Advanced Settings",
+        draft.borrow().document(),
+        presentation.as_ref().map(|source| &source.identity),
+        draft.borrow().revision().0,
+        endpoint.frame(draft.borrow().document()),
+        toniator_engine::PreviewRasterTarget::new(420, 240)
+            .ok()
+            .map(|target| {
+                target.with_background(preview_backdrop::raster_background_for_document(
+                    draft.borrow().document(),
+                ))
+            }),
+        false,
     );
+    startup_context["scope_epoch"] = epoch.into();
+    startup_context["document_purpose"] =
+        "authored private input before bounded source preparation".into();
+    startup_context["phase"] = "requested preview startup".into();
+    let scheduler_result = take_preview_fault(
+        &state.borrow().preview_failure_hook,
+        "advanced",
+        "scheduler-start",
+        false,
+    )
+    .map_or_else(
+        || {
+            EvaluationScheduler::new()
+                .map(Arc::new)
+                .map_err(PreviewDiagnostic::scheduler)
+        },
+        Err,
+    );
+    let scheduler = match record_preview_startup_result(
+        scheduler_result,
+        startup_context.clone(),
+        |diagnostic, context| {
+            preview_diagnostics::Snapshot::record(diagnostic, context);
+        },
+    ) {
+        Ok(scheduler) => scheduler,
+        Err(error) => {
+            set_inspector_status(
+                &mut state.borrow_mut(),
+                format!("Couldn’t start the Advanced Settings preview: {error}"),
+            );
+            return;
+        }
+    };
+    let preview_bridge_stop = Arc::new(AtomicBool::new(false));
+    let bridge_result = take_preview_fault(
+        &state.borrow().preview_failure_hook,
+        "advanced",
+        "bridge-start",
+        false,
+    )
+    .map_or_else(
+        || {
+            start_advanced_preview_event_bridge(
+                Arc::clone(&scheduler),
+                state.borrow().event_sender.clone(),
+                Arc::clone(&preview_bridge_stop),
+                epoch,
+            )
+        },
+        Err,
+    );
+    if let Err(error) =
+        record_preview_startup_result(bridge_result, startup_context, |diagnostic, context| {
+            preview_diagnostics::Snapshot::record(diagnostic, context);
+        })
+    {
+        set_inspector_status(
+            &mut state.borrow_mut(),
+            format!("Couldn’t start the Advanced Settings preview bridge: {error}"),
+        );
+        return;
+    }
     let source_document = draft.borrow().document().clone();
     state.borrow_mut().advanced_settings = Some(AdvancedSettingsSurface {
         epoch,
@@ -17584,6 +18299,7 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
         refreshing: Rc::new(Cell::new(false)),
         target,
         picture,
+        preview_details: preview_diagnostics_view::Controls::new(&window, &status),
         status,
         recalibrate,
         apply: apply.clone(),
@@ -17602,7 +18318,10 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
     if let Some(surface) = state.borrow_mut().advanced_settings.as_mut() {
         match worker {
             Ok(worker) => surface._source_worker = Some(worker),
-            Err(error) => surface.preview_source = AdvancedPreviewSource::Unavailable(error),
+            Err(error) => {
+                surface.preview_source = AdvancedPreviewSource::Unavailable(error.clone());
+                record_advanced_failure(surface, error);
+            }
         }
     }
     let state_for_close = Rc::clone(state);
@@ -18088,6 +18807,7 @@ fn start_advanced_recalibration(state: &Rc<RefCell<AppState>>, epoch: u64) {
 /// supersedes prior work; source, document, and GTK failures remain local to this modal.
 fn submit_advanced_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
     let mut app_state = state.borrow_mut();
+    let fault_hook = app_state.preview_failure_hook.clone();
     let Some(surface) = app_state
         .advanced_settings
         .as_mut()
@@ -18095,15 +18815,35 @@ fn submit_advanced_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
     else {
         return;
     };
+    let draft = surface.draft.borrow();
+    let intent = private_preview_intent(
+        epoch,
+        draft.revision().0,
+        surface.endpoint.frame(draft.document()),
+    );
+    drop(draft);
+    if !surface.preview_details.admit(&intent) {
+        return;
+    }
+    if let Some(diagnostic) = take_preview_fault(
+        &fault_hook,
+        "advanced",
+        "prepare",
+        surface.picture.paintable().is_some(),
+    ) {
+        record_advanced_failure(surface, diagnostic);
+        return;
+    }
     update_preview_picture_backdrop(&surface.picture, surface.draft.borrow().document());
+    if let AdvancedPreviewSource::Ready { width, height, format, .. } = &surface.preview_source {
+        surface.preview_details.set_source(serde_json::json!({"format":format!("{format:?}"),"width":width,"height":height,"purpose":"actual private source field; maximum long edge128"}));
+    }
+    if let Some(diagnostic) = surface.preview_source.unavailable_diagnostic() {
+        record_advanced_failure(surface, diagnostic);
+        return;
+    }
     let AdvancedPreviewSource::Ready { source, .. } = &surface.preview_source else {
-        surface.status.set_label(&match &surface.preview_source {
-            AdvancedPreviewSource::Pending => "Preparing source frame…".to_owned(),
-            AdvancedPreviewSource::Unavailable(error) => {
-                format!("Settings preview unavailable: {error}")
-            }
-            AdvancedPreviewSource::Ready { .. } => unreachable!(),
-        });
+        surface.status.set_label("Preparing source frame…");
         return;
     };
     let target = match toniator_engine::PreviewRasterTarget::new(420, 240) {
@@ -18111,7 +18851,10 @@ fn submit_advanced_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
             surface.draft.borrow().document(),
         )),
         Err(error) => {
-            surface.status.set_label(&error.to_string());
+            record_advanced_failure(
+                surface,
+                PreviewDiagnostic::new(PreviewOrigin::Preparation, error.path(), error.message()),
+            );
             return;
         }
     };
@@ -18124,7 +18867,10 @@ fn submit_advanced_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
     {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            surface.status.set_label(&error.to_string());
+            record_advanced_failure(
+                surface,
+                PreviewDiagnostic::new(PreviewOrigin::Preparation, error.path(), error.message()),
+            );
             return;
         }
     };
@@ -18135,9 +18881,7 @@ fn submit_advanced_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
             surface.status.set_label("Updating preview… · 0%");
             surface.picture.set_tooltip_text(Some("Updating preview…"));
         }
-        Err(error) => surface
-            .status
-            .set_label(&format!("Settings preview unavailable: {error}")),
+        Err(error) => record_advanced_failure(surface, PreviewDiagnostic::scheduler(error)),
     }
 }
 
@@ -18145,84 +18889,153 @@ fn submit_advanced_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
 ///
 /// The worker owns no GTK handles or mutable history. Main-context handlers reject stale epochs
 /// and tickets before installing progress or a texture.
+///
+/// # Errors
+/// Returns a typed operating-system spawn failure without leaving an unobserved receiver.
 fn start_advanced_preview_event_bridge(
     scheduler: Arc<EvaluationScheduler>,
     sender: async_channel::Sender<AppEvent>,
     stop: Arc<AtomicBool>,
     epoch: u64,
-) {
-    thread::spawn(move || {
-        'bridge: while !stop.load(Ordering::Acquire) {
-            loop {
-                match scheduler.try_receive_latest_progress() {
-                    Ok(Some(progress)) => {
-                        if sender
-                            .send_blocking(AppEvent::AdvancedPreviewProgress { epoch, progress })
-                            .is_err()
-                        {
+) -> Result<thread::JoinHandle<()>, PreviewDiagnostic> {
+    thread::Builder::new()
+        .name("toniator-advanced-preview-bridge".into())
+        .spawn(move || {
+            'bridge: while !stop.load(Ordering::Acquire) {
+                loop {
+                    match scheduler.try_receive_latest_progress() {
+                        Ok(Some(progress)) => {
+                            if sender
+                                .send_blocking(AppEvent::AdvancedPreviewProgress {
+                                    epoch,
+                                    progress,
+                                })
+                                .is_err()
+                            {
+                                break 'bridge;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            if !stop.load(Ordering::Acquire) {
+                                let _ =
+                                    sender.send_blocking(AppEvent::PrivatePreviewWorkerFailed {
+                                        surface: app_events::PrivateSurface::Advanced,
+                                        epoch,
+                                        scheduler: scheduler.clone(),
+                                        diagnostic: PreviewDiagnostic::scheduler(error),
+                                    });
+                            }
                             break 'bridge;
                         }
                     }
-                    Ok(None) => break,
-                    Err(_) => break 'bridge,
                 }
-            }
-            match scheduler.try_receive_latest() {
-                Ok(Some(completion)) => {
-                    if sender
-                        .send_blocking(AppEvent::AdvancedPreview { epoch, completion })
-                        .is_err()
-                    {
+                match scheduler.try_receive_latest() {
+                    Ok(Some(completion)) => {
+                        if sender
+                            .send_blocking(AppEvent::AdvancedPreview { epoch, completion })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(None) => thread::park_timeout(Duration::from_millis(4)),
+                    Err(error) => {
+                        if !stop.load(Ordering::Acquire) {
+                            let _ = sender.send_blocking(AppEvent::PrivatePreviewWorkerFailed {
+                                surface: app_events::PrivateSurface::Advanced,
+                                epoch,
+                                scheduler: scheduler.clone(),
+                                diagnostic: PreviewDiagnostic::scheduler(error),
+                            });
+                        }
                         break;
                     }
                 }
-                Ok(None) => thread::park_timeout(Duration::from_millis(4)),
-                Err(_) => break,
             }
-        }
-    });
+        })
+        .map_err(|error| {
+            PreviewDiagnostic::new(
+                PreviewOrigin::Scheduler,
+                "preview.bridge.spawn",
+                &error.to_string(),
+            )
+        })
 }
 
 /// Bridges one Pattern Wizard scheduler into GTK events until its captured modal epoch closes.
 ///
 /// The worker owns no GTK or document authority. Main-context handlers reject stale epoch/ticket
 /// pairs before they can replace the wizard’s retained last-successful texture.
+///
+/// # Errors
+/// Returns a typed operating-system spawn failure without leaving an unobserved receiver.
 fn start_wizard_preview_event_bridge(
     scheduler: Arc<EvaluationScheduler>,
     sender: async_channel::Sender<AppEvent>,
     stop: Arc<AtomicBool>,
     epoch: u64,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        'bridge: while !stop.load(Ordering::Acquire) {
-            loop {
-                match scheduler.try_receive_latest_progress() {
-                    Ok(Some(progress)) => {
-                        if sender
-                            .send_blocking(AppEvent::WizardPreviewProgress { epoch, progress })
-                            .is_err()
-                        {
+) -> Result<thread::JoinHandle<()>, PreviewDiagnostic> {
+    thread::Builder::new()
+        .name("toniator-wizard-preview-bridge".into())
+        .spawn(move || {
+            'bridge: while !stop.load(Ordering::Acquire) {
+                loop {
+                    match scheduler.try_receive_latest_progress() {
+                        Ok(Some(progress)) => {
+                            if sender
+                                .send_blocking(AppEvent::WizardPreviewProgress { epoch, progress })
+                                .is_err()
+                            {
+                                break 'bridge;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            if !stop.load(Ordering::Acquire) {
+                                let _ =
+                                    sender.send_blocking(AppEvent::PrivatePreviewWorkerFailed {
+                                        surface: app_events::PrivateSurface::Wizard,
+                                        epoch,
+                                        scheduler: scheduler.clone(),
+                                        diagnostic: PreviewDiagnostic::scheduler(error),
+                                    });
+                            }
                             break 'bridge;
                         }
                     }
-                    Ok(None) => break,
-                    Err(_) => break 'bridge,
                 }
-            }
-            match scheduler.try_receive_latest() {
-                Ok(Some(completion)) => {
-                    if sender
-                        .send_blocking(AppEvent::WizardPreview { epoch, completion })
-                        .is_err()
-                    {
+                match scheduler.try_receive_latest() {
+                    Ok(Some(completion)) => {
+                        if sender
+                            .send_blocking(AppEvent::WizardPreview { epoch, completion })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(None) => thread::park_timeout(Duration::from_millis(4)),
+                    Err(error) => {
+                        if !stop.load(Ordering::Acquire) {
+                            let _ = sender.send_blocking(AppEvent::PrivatePreviewWorkerFailed {
+                                surface: app_events::PrivateSurface::Wizard,
+                                epoch,
+                                scheduler: scheduler.clone(),
+                                diagnostic: PreviewDiagnostic::scheduler(error),
+                            });
+                        }
                         break;
                     }
                 }
-                Ok(None) => thread::park_timeout(Duration::from_millis(4)),
-                Err(_) => break,
             }
-        }
-    })
+        })
+        .map_err(|error| {
+            PreviewDiagnostic::new(
+                PreviewOrigin::Scheduler,
+                "preview.bridge.spawn",
+                &error.to_string(),
+            )
+        })
 }
 
 /// Opens a deliberate shared-replacement disclosure that never combines with copy-on-edit.
@@ -18645,7 +19458,8 @@ fn open_wizard_new_guide_editor(
 /// use white behind neutral Wizard studies or the document model backdrop for Workspace previews.
 ///
 /// # Panics
-/// Panics if the private evaluator cannot start or fixed preview invariants are invalid.
+/// Panics if compiled editor controls or fixed preview invariants are invalid.
+/// Requested scheduler/source/bridge startup failures are logged and presented without installing a surface.
 fn open_pattern_editor_with_launch(
     state: &Rc<RefCell<AppState>>,
     purpose: PatternEditorPurpose,
@@ -18676,7 +19490,15 @@ fn open_pattern_editor_with_launch(
         window.present();
         return;
     }
-    let (parent, draft, endpoint, epoch, initial_workspace_generation, initial_workspace_revision) = {
+    let (
+        parent,
+        draft,
+        endpoint,
+        epoch,
+        initial_workspace_generation,
+        initial_workspace_revision,
+        startup_context,
+    ) = {
         let mut app_state = state.borrow_mut();
         // The nested editor previews real artwork even when the Wizard's own preview is neutral.
         let endpoint = app_state.endpoint;
@@ -18753,6 +19575,58 @@ fn open_pattern_editor_with_launch(
         };
         app_state.draft_epoch = app_state.draft_epoch.saturating_add(1);
         let epoch = app_state.draft_epoch;
+        let source_identity = app_state
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.source_presentation.as_ref())
+            .map(|source| &source.identity);
+        let mut startup_context = preview_diagnostics::context(
+            "Pattern Editor",
+            history.document(),
+            source_identity,
+            history.revision().0,
+            endpoint.frame(history.document()),
+            toniator_engine::PreviewRasterTarget::new(512, 512)
+                .ok()
+                .map(|target| {
+                    target.with_background(pattern_editor_preview_background(
+                        matches!(launch.parent, PatternEditorParent::Wizard { .. }),
+                        history.document(),
+                    ))
+                }),
+            false,
+        );
+        startup_context["scope_epoch"] = epoch.into();
+        startup_context["workspace_generation"] = initial_workspace_generation.into();
+        startup_context["document_purpose"] =
+            "authored private origin before surface/evaluation projection".into();
+        startup_context["phase"] = "requested preview startup".into();
+        let scheduler_result = take_preview_fault(
+            &app_state.preview_failure_hook,
+            "editor",
+            "scheduler-start",
+            false,
+        )
+        .map_or_else(
+            || EvaluationScheduler::new().map_err(PreviewDiagnostic::scheduler),
+            Err,
+        );
+        let scheduler = match record_preview_startup_result(
+            scheduler_result,
+            startup_context.clone(),
+            |diagnostic, context| {
+                preview_diagnostics::Snapshot::record(diagnostic, context);
+            },
+        ) {
+            Ok(scheduler) => Arc::new(scheduler),
+            Err(error) => {
+                set_inspector_status(
+                    &mut app_state,
+                    format!("Couldn’t start the Pattern Editor preview: {error}"),
+                );
+                return;
+            }
+        };
         let mut geometry_editor = stage20f_editor::Stage20fEditorState::default();
         geometry_editor.configure_mode(
             purpose.editor_mode(),
@@ -18769,9 +19643,7 @@ fn open_pattern_editor_with_launch(
                 initial_document: document,
                 discard_confirmed: false,
                 sources,
-                scheduler: Arc::new(
-                    EvaluationScheduler::new().expect("private draft scheduler starts"),
-                ),
+                scheduler,
                 preview_submission: None,
                 preview_session: None,
                 preview_origin: None,
@@ -18786,12 +19658,26 @@ fn open_pattern_editor_with_launch(
             epoch,
             initial_workspace_generation,
             initial_workspace_revision,
+            startup_context,
         )
     };
     let event_sender = state.borrow().event_sender.clone();
-    let source_worker = match temporal_preview::Worker::new_for_structural_pattern_editor(
-        event_sender.clone(),
-        epoch,
+    let source_result = take_preview_fault(
+        &state.borrow().preview_failure_hook,
+        "editor",
+        "source-worker-start",
+        false,
+    )
+    .map_or_else(
+        || temporal_preview::Worker::new_for_structural_pattern_editor(event_sender.clone(), epoch),
+        Err,
+    );
+    let source_worker = match record_preview_startup_result(
+        source_result,
+        startup_context.clone(),
+        |diagnostic, context| {
+            preview_diagnostics::Snapshot::record(diagnostic, context);
+        },
     ) {
         Ok(worker) => worker,
         Err(error) => {
@@ -18803,11 +19689,36 @@ fn open_pattern_editor_with_launch(
         }
     };
     let preview_bridge_stop = Arc::new(AtomicBool::new(false));
-    let preview_bridge = match temporal_preview::start_pattern_editor_preview_bridge(
-        Arc::clone(&draft.borrow().scheduler),
-        event_sender,
-        Arc::clone(&preview_bridge_stop),
-        epoch,
+    let bridge_result = take_preview_fault(
+        &state.borrow().preview_failure_hook,
+        "editor",
+        "bridge-start",
+        false,
+    )
+    .map_or_else(
+        || {
+            temporal_preview::start_pattern_editor_preview_bridge(
+                Arc::clone(&draft.borrow().scheduler),
+                event_sender,
+                Arc::clone(&preview_bridge_stop),
+                epoch,
+            )
+            .map_err(|error| {
+                PreviewDiagnostic::new(
+                    PreviewOrigin::Scheduler,
+                    "preview.editor.bridge.spawn",
+                    &error,
+                )
+            })
+        },
+        Err,
+    );
+    let preview_bridge = match record_preview_startup_result(
+        bridge_result,
+        startup_context,
+        |diagnostic, context| {
+            preview_diagnostics::Snapshot::record(diagnostic, context);
+        },
     ) {
         Ok(bridge) => bridge,
         Err(error) => {
@@ -19405,6 +20316,7 @@ fn open_pattern_editor_with_launch(
         initial_workspace_revision,
         calibration_task: None,
         window: window.clone(),
+        preview_details: preview_diagnostics_view::Controls::new(&window, &status),
         status,
         picture,
         preview_spinner,
@@ -21911,6 +22823,23 @@ fn submit_draft_preview(state: &Rc<RefCell<AppState>>) {
             return;
         };
         let draft = surface.draft.borrow();
+        let intent = private_preview_intent(
+            draft.epoch,
+            draft.history.revision().0,
+            surface.endpoint.frame(draft.history.document()),
+        );
+        if !surface.preview_details.admit(&intent) {
+            return;
+        }
+        if let Some(diagnostic) = take_preview_fault(
+            &app_state.preview_failure_hook,
+            "editor",
+            "prepare",
+            surface.picture.paintable().is_some(),
+        ) {
+            record_editor_failure(surface, &draft, diagnostic);
+            return;
+        }
         let parent = surface.parent.clone();
         let document = draft.history.document().clone();
         let preview_session = match &parent {
@@ -21963,9 +22892,15 @@ fn submit_draft_preview(state: &Rc<RefCell<AppState>>) {
                 draft.media_preview_key = None;
                 surface.preview_spinner.stop();
                 surface.preview_spinner.set_visible(false);
-                surface
-                    .status
-                    .set_label(&format!("Pattern preview unavailable: {error}"));
+                record_editor_failure(
+                    surface,
+                    &draft,
+                    PreviewDiagnostic::new(
+                        PreviewOrigin::Preparation,
+                        "preview.editor.preparation",
+                        &error,
+                    ),
+                );
             }
             return;
         }
@@ -21999,7 +22934,16 @@ fn submit_draft_preview(state: &Rc<RefCell<AppState>>) {
         draft.preview_session = Some(preview_session.clone());
         draft.preview_origin = Some(key);
         draft.media_preview_key = Some(key);
-        source_worker.submit(key, preview_session, sources, target);
+        if let Err(diagnostic) = source_worker.submit(key, preview_session, sources, target) {
+            draft.preview_submission = None;
+            draft.preview_session = None;
+            draft.preview_origin = None;
+            draft.media_preview_key = None;
+            surface.preview_spinner.stop();
+            surface.preview_spinner.set_visible(false);
+            record_editor_failure(surface, &draft, diagnostic);
+            return;
+        }
         (surface.status.clone(), surface.preview_spinner.clone())
     };
     status.set_label("Preparing preview source…");
@@ -23068,14 +24012,32 @@ fn sync_main_preview_pending(state: &AppState) {
         } else {
             "No preview yet."
         };
-        state.preview_error_label.set_label(retained);
-        state.preview_error_label.set_tooltip_text(Some(&failure.diagnostic));
-        state.preview_error_label.update_property(&[
-            gtk::accessible::Property::Description(&failure.diagnostic),
-        ]);
+        let cause = state
+            .preview_details
+            .snapshot()
+            .map_or("A software rendering error occurred.", |snapshot| {
+                snapshot.diagnostic.summary()
+            });
+        state
+            .preview_error_label
+            .set_label(&format!("{retained} {cause}"));
+        state
+            .preview_error_label
+            .set_tooltip_text(Some(&failure.diagnostic));
+        state
+            .preview_error_label
+            .update_property(&[gtk::accessible::Property::Description(&failure.diagnostic)]);
     }
+    state
+        .preview_details
+        .button
+        .set_visible(failure.is_some_and(|failure| failure.visible));
+    state
+        .preview_details
+        .button
+        .set_sensitive(failure.is_some());
     state.picture.set_tooltip_text(Some(if failure.is_some() {
-        "Preview unavailable. Retry preview or change the artwork or settings."
+        "Preview unavailable. Retry preview or open Details for the diagnostic."
     } else {
         preview_tooltip(pending, state.preview.is_some())
     }));
@@ -23103,6 +24065,7 @@ const fn preview_progress_stage_label(
 }
 
 /// Preserves the stable evaluator diagnostic behind the main preview's artist-facing failure.
+#[cfg(test)]
 fn main_preview_failure_message(error: Option<&toniator_engine::EvaluationError>) -> String {
     error.map_or_else(
         || "Evaluation did not produce a result.".to_owned(),
@@ -23159,6 +24122,14 @@ fn schedule_main_preview_submission(state: &Rc<RefCell<AppState>>) {
             app_state.preview_debounce = None;
             return glib::ControlFlow::Break;
         }
+        if matches!(
+            main_viewport_resolution(&app_state),
+            viewport_request::Resolution::Rejected { .. }
+        ) {
+            requested_main_viewport_target(&mut app_state);
+            app_state.preview_debounce = None;
+            return glib::ControlFlow::Break;
+        }
         let target = main_viewport_target(&app_state);
         if target.is_none() || target != previous_target {
             previous_target = target;
@@ -23202,14 +24173,15 @@ fn refresh_main_viewport_if_changed(state: &Rc<RefCell<AppState>>) {
         {
             return;
         }
-        let Some(target) = main_viewport_target(&app_state) else {
+        let Some(target) = requested_main_viewport_target(&mut app_state) else {
             return;
         };
-        if app_state.viewport_observed_target == Some(target) {
-            return;
-        }
-        app_state.viewport_observed_target = Some(target);
-        if app_state.preview_target == Some(target) {
+        let submitted = app_state.preview_target;
+        if !viewport_change_requires_submission(
+            &mut app_state.viewport_observed_target,
+            submitted,
+            target,
+        ) {
             return;
         }
     }
@@ -25616,35 +26588,103 @@ fn open_print_preparation_surface(
         detach_print_preparation_surface(state, epoch, true);
     }
 
-    let (canvas, model, settings, workspace_generation, parent) = {
+    let (canvas, model, settings, workspace_generation, parent, mut startup_context) = {
         let app = state.borrow();
         let Some(workspace) = app.workspace.as_ref() else {
             return;
         };
+        let mut context = preview_diagnostics::context(
+            "Print/PNG preview",
+            workspace.document(),
+            workspace
+                .source_presentation
+                .as_ref()
+                .map(|source| &source.identity),
+            workspace.history.revision().0,
+            app.endpoint.frame(workspace.document()),
+            None,
+            false,
+        );
+        context["workspace_generation"] = app.workspace_generation.into();
+        context["scope_epoch"] = app.print_preparation_surface_epoch.into();
+        context["phase"] =
+            "requested options/preview startup before output target materialization".into();
         (
             workspace.document().canvas().clone(),
             workspace.document().channel_model(),
             workspace.document().print_preparation().clone(),
             app.workspace_generation,
             app.window.clone().upcast::<gtk::Window>(),
+            context,
         )
     };
-    let Some(epoch) = state
-        .borrow()
-        .print_preparation_surface_epoch
-        .checked_add(1)
-    else {
-        show_error(
-            &mut state.borrow_mut(),
-            "Print review window identity is exhausted.".into(),
-        );
-        return;
+    let epoch_fault = take_preview_fault(
+        &state.borrow().preview_failure_hook,
+        "print",
+        "surface-id",
+        false,
+    );
+    let epoch_result = epoch_fault.map_or_else(
+        || {
+            state
+                .borrow()
+                .print_preparation_surface_epoch
+                .checked_add(1)
+                .ok_or_else(|| {
+                    PreviewDiagnostic::new(
+                        PreviewOrigin::Preparation,
+                        "preview.print.surface_id_exhausted",
+                        "Print review window identity is exhausted",
+                    )
+                })
+        },
+        Err,
+    );
+    let epoch = match record_preview_startup_result(
+        epoch_result,
+        startup_context.clone(),
+        |diagnostic, context| {
+            preview_diagnostics::Snapshot::record(diagnostic, context);
+        },
+    ) {
+        Ok(epoch) => epoch,
+        Err(error) => {
+            show_error(&mut state.borrow_mut(), error.to_string());
+            return;
+        }
     };
     state.borrow_mut().print_preparation_surface_epoch = epoch;
-    let controls = match print_preparation_view::Controls::new(&parent, &canvas, model, &settings) {
+    startup_context["scope_epoch"] = epoch.into();
+    let controls_result = take_preview_fault(
+        &state.borrow().preview_failure_hook,
+        "print",
+        "controls-start",
+        false,
+    )
+    .map_or_else(
+        || {
+            print_preparation_view::Controls::new(&parent, &canvas, model, &settings).map_err(
+                |error| {
+                    PreviewDiagnostic::new(
+                        PreviewOrigin::Preparation,
+                        "preview.print.controls.start",
+                        &error,
+                    )
+                },
+            )
+        },
+        Err,
+    );
+    let controls = match record_preview_startup_result(
+        controls_result,
+        startup_context,
+        |diagnostic, context| {
+            preview_diagnostics::Snapshot::record(diagnostic, context);
+        },
+    ) {
         Ok(controls) => controls,
         Err(error) => {
-            show_error(&mut state.borrow_mut(), error);
+            show_error(&mut state.borrow_mut(), error.to_string());
             return;
         }
     };
@@ -27058,15 +28098,122 @@ fn queue_ready_print_png_preview(state: &mut AppState) {
     });
 }
 
-/// Admits only the existing full-size preview budget while preserving exact PNG intent.
-fn png_preview_target(selection: print_preparation::OutputSelection) -> Option<OutputRasterTarget> {
+/// Admits the existing full-size preview budget without changing retained PNG/export intent.
+/// # Errors
+/// Returns a capacity/addressability or exact target diagnostic; these are not allocator failures.
+fn print_png_preview_admission(
+    selection: print_preparation::OutputSelection,
+) -> Result<OutputRasterTarget, PreviewDiagnostic> {
     let bytes = print_preparation_view::display_bytes((
         selection.target.width(),
         selection.target.height(),
-    ))?;
-    (bytes <= print_preparation_view::MAX_PREPARED_PREVIEW_BYTES)
-        .then(|| selection.raster_target().ok())
-        .flatten()
+    ))
+    .ok_or_else(|| {
+        PreviewDiagnostic::new(
+            PreviewOrigin::Preparation,
+            "preview.print.addressability",
+            "Full-size preview byte count is not representable",
+        )
+    })?;
+    if bytes > print_preparation_view::MAX_PREPARED_PREVIEW_BYTES {
+        return Err(PreviewDiagnostic::new(
+            PreviewOrigin::Preparation,
+            "preview.print.capacity",
+            "Requested full-size preview exceeds the existing retained preview byte budget; PNG export intent is unchanged",
+        ));
+    }
+    OutputRasterTarget::new(selection.target.width(), selection.target.height()).map_err(|error| {
+        PreviewDiagnostic::new(PreviewOrigin::Preparation, error.path(), error.message())
+    })
+}
+
+/// Projects admission for status-only consumers without logging or starting raster work.
+fn png_preview_target(selection: print_preparation::OutputSelection) -> Option<OutputRasterTarget> {
+    print_png_preview_admission(selection).ok()
+}
+
+/// Allocates the next print attempt identity without wrapping; a harness fault remains marked.
+/// # Errors
+/// Returns exact identity exhaustion or the explicitly supplied one-shot routing diagnostic.
+fn next_print_preview_id(
+    current: u64,
+    fault: Option<PreviewDiagnostic>,
+) -> Result<u64, PreviewDiagnostic> {
+    if let Some(fault) = fault {
+        return Err(fault);
+    }
+    current.checked_add(1).ok_or_else(|| {
+        PreviewDiagnostic::new(
+            PreviewOrigin::Preparation,
+            "preview.print.request_id_exhausted",
+            "Print/PNG preview request identity exhausted",
+        )
+    })
+}
+
+/// Captures the requested print raster and source metadata without serializing source bytes or recipe.
+/// Existing PNG selection remains the authority; the log distinguishes output size from viewport Fit.
+fn print_png_preview_context(
+    capture: &print_preparation::ExportCapture,
+    selection: print_preparation::OutputSelection,
+    source: Option<&toniator_engine::SourceIdentity>,
+    epoch: u64,
+) -> serde_json::Value {
+    let mut context = preview_diagnostics::context(
+        "Print/PNG preview",
+        capture.session.document(),
+        source,
+        capture.session.revision().0,
+        capture.frame,
+        None,
+        false,
+    );
+    context["scope_epoch"] = epoch.into();
+    context["workspace_generation"] = capture.workspace_generation.into();
+    context["lifecycle_generation"] = capture.lifecycle_generation.into();
+    context["document_purpose"] = "actual captured full-output PNG preview".into();
+    context["output_target"] =
+        serde_json::json!([selection.target.width(), selection.target.height()]);
+    context["antialiasing"] = format!("{:?}", selection.antialiasing).into();
+    context["background"] = format!("{:?}", selection.background_for(&capture.session)).into();
+    context["prepare_for_print"] = selection.prepare_for_print.into();
+    context["pixels_per_metre"] = serde_json::json!(selection.pixels_per_metre);
+    context["cleanup"] = serde_json::json!({"remove_below_px":selection.cleanup.remove_below_px,"minimum_feature_px":selection.cleanup.minimum_feature_px,"minimum_gap_px":selection.cleanup.minimum_gap_px,"gap_treatment":format!("{:?}",selection.cleanup.gap_treatment)});
+    context
+}
+
+/// Runs only the owned print render under an unwind boundary and preserves unparsed render messages.
+/// Dirty cancellation is decided by the owned flag on completion; current unexpected errors are logged.
+/// Manufacturing render/panic routing requires a successful real render first and stays explicitly marked.
+/// # Errors
+/// Returns the unparsed render diagnostic or a typed owned-worker unwind; never infers OOM/cancellation.
+fn run_print_png_preview_worker(
+    render: impl FnOnce() -> Result<RasterSurface, String>,
+    fault: Option<PreviewDiagnostic>,
+) -> Result<RasterSurface, PreviewDiagnostic> {
+    let manufactured_panic = Cell::new(false);
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let raster = render().map_err(|error| {
+            PreviewDiagnostic::new(PreviewOrigin::Evaluation, "preview.print.render", &error)
+        })?;
+        if let Some(diagnostic) = fault {
+            if diagnostic.code == "preview.print.worker.panicked" {
+                manufactured_panic.set(true);
+                panic!("explicit print preview panic routing witness after successful render");
+            }
+            return Err(diagnostic);
+        }
+        Ok(raster)
+    }))
+    .unwrap_or_else(|_| {
+        let mut diagnostic = PreviewDiagnostic::new(
+            PreviewOrigin::Preparation,
+            "preview.print.worker.panicked",
+            "Print/PNG preview worker stopped unexpectedly",
+        );
+        diagnostic.injected = manufactured_panic.get();
+        Err(diagnostic)
+    })
 }
 
 /// Starts a fresh final-raster preview without depending on advisory detector completion.
@@ -27075,7 +28222,7 @@ fn png_preview_target(selection: print_preparation::OutputSelection) -> Option<O
 /// travel together to the worker. A later edit or option change cancels and
 /// retires its result before GTK can display obsolete pixels.
 fn request_print_png_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
-    let (capture, selection, authority) = {
+    let (capture, selection, authority, mut context) = {
         let app = state.borrow();
         if app.pending_file_chooser || app.pending_export {
             return;
@@ -27103,15 +28250,21 @@ fn request_print_png_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
         let Some(authority) = print_preparation_live_authority(&app) else {
             return;
         };
-        (capture, surface.controls.selection.get(), authority)
+        let selection = surface.controls.selection.get();
+        let context = print_png_preview_context(
+            &capture,
+            selection,
+            workspace
+                .source_presentation
+                .as_ref()
+                .map(|source| &source.identity),
+            epoch,
+        );
+        (capture, selection, authority, context)
     };
-    let bytes = print_preparation_view::display_bytes((
-        selection.target.width(),
-        selection.target.height(),
-    ))
-    .unwrap_or(u64::MAX);
     let (request_id, cancelled) = {
         let mut app = state.borrow_mut();
+        let fault_hook = app.preview_failure_hook.clone();
         if app.print_png_preview_worker.is_some() {
             return;
         }
@@ -27123,18 +28276,24 @@ fn request_print_png_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
             return;
         };
         surface.invalidate_preview();
-        if bytes > print_preparation_view::MAX_PREPARED_PREVIEW_BYTES
-            || png_preview_target(selection).is_none()
-        {
+        if let Err(diagnostic) = print_png_preview_admission(selection) {
             surface.preview_status = print_preparation_view::PreviewStatus::NotRendered;
+            context["phase"] =
+                "requested preview capacity admission; no renderer job started".into();
+            preview_diagnostics::Snapshot::record(diagnostic, context);
             sync_ui(&mut app);
             return;
         }
-        let Some(id) = surface.preview_request_id.checked_add(1) else {
-            surface.preview_status = print_preparation_view::PreviewStatus::Failed;
-            eprintln!("print preparation: preview request identity exhausted");
-            sync_ui(&mut app);
-            return;
+        let request_fault = take_preview_fault(&fault_hook, "print", "request-id", false);
+        let id = match next_print_preview_id(surface.preview_request_id, request_fault) {
+            Ok(id) => id,
+            Err(diagnostic) => {
+                surface.preview_status = print_preparation_view::PreviewStatus::Failed;
+                context["request_id"] = surface.preview_request_id.into();
+                preview_diagnostics::Snapshot::record(diagnostic, context);
+                sync_ui(&mut app);
+                return;
+            }
         };
         surface.preview_request_id = id;
         surface.preview_authority = Some(authority);
@@ -27146,36 +28305,96 @@ fn request_print_png_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
         (id, cancelled)
     };
     sync_ui(&mut state.borrow_mut());
+    context["request_id"] = request_id.into();
     let sender = state.borrow().event_sender.clone();
-    thread::spawn(move || {
-        let settings = ExportSettings {
-            format: ExportFormat::Png,
-            background: selection.background_for(&capture.session),
-            antialiasing: selection.antialiasing,
-            output_target: Some(selection.target),
-            prepare_for_print: selection.prepare_for_print,
-            pixels_per_metre: selection.pixels_per_metre,
-            cleanup: selection.cleanup,
-        };
-        let result = render_captured_png_surface(&capture, settings, &cancelled);
-        let _ = sender.send_blocking(AppEvent::PrintPngPreview {
+    let spawn_fault = take_preview_fault(
+        &state.borrow().preview_failure_hook,
+        "print",
+        "worker-spawn",
+        false,
+    );
+    if let Some(diagnostic) = spawn_fault {
+        complete_print_png_preview(
+            state,
             epoch,
             request_id,
             authority,
             selection,
-            result: Box::new(result),
-        });
+            context,
+            Err(diagnostic),
+        );
+        return;
+    }
+    let fault = take_preview_fault(
+        &state.borrow().preview_failure_hook,
+        "print",
+        "render",
+        false,
+    )
+    .or_else(|| {
+        take_preview_fault(
+            &state.borrow().preview_failure_hook,
+            "print",
+            "worker-panic",
+            false,
+        )
     });
+    let worker_context = context.clone();
+    let spawned = thread::Builder::new()
+        .name("toniator-print-png-preview".into())
+        .spawn(move || {
+            let result = run_print_png_preview_worker(
+                || {
+                    let settings = ExportSettings {
+                        format: ExportFormat::Png,
+                        background: selection.background_for(&capture.session),
+                        antialiasing: selection.antialiasing,
+                        output_target: Some(selection.target),
+                        prepare_for_print: selection.prepare_for_print,
+                        pixels_per_metre: selection.pixels_per_metre,
+                        cleanup: selection.cleanup,
+                    };
+                    render_captured_png_surface(&capture, settings, &cancelled)
+                },
+                fault,
+            );
+            let _ = sender.send_blocking(AppEvent::PrintPngPreview {
+                epoch,
+                request_id,
+                authority,
+                selection,
+                context: worker_context,
+                result: Box::new(result),
+            });
+        });
+    if let Err(error) = spawned {
+        complete_print_png_preview(
+            state,
+            epoch,
+            request_id,
+            authority,
+            selection,
+            context,
+            Err(PreviewDiagnostic::new(
+                PreviewOrigin::Preparation,
+                "preview.print.worker.spawn",
+                &error.to_string(),
+            )),
+        );
+    }
 }
 
-/// Publishes one latest captured preview texture after exact live-authority checks.
+/// Publishes one latest captured texture or automatically records its typed terminal failure.
+/// Exact epoch/id/live-selection checks and the owned dirty-cancellation flag exclude stale work.
+/// Logging is best effort and never changes the selected PNG output or independent export identity.
 fn complete_print_png_preview(
     state: &Rc<RefCell<AppState>>,
     epoch: u64,
     request_id: u64,
     authority: print_preparation::LiveAuthority,
     selection: print_preparation::OutputSelection,
-    result: Result<RasterSurface, String>,
+    context: serde_json::Value,
+    result: Result<RasterSurface, PreviewDiagnostic>,
 ) {
     let mut app = state.borrow_mut();
     if !app
@@ -27187,7 +28406,11 @@ fn complete_print_png_preview(
     {
         return;
     }
-    app.print_png_preview_worker = None;
+    let cancelled = app
+        .print_png_preview_worker
+        .take()
+        .is_some_and(|(_, _, flag)| flag.load(Ordering::Acquire));
+    let fault_hook = app.preview_failure_hook.clone();
     let live = print_preparation_live_authority(&app);
     if let Some(surface) = app
         .print_preparation_surface
@@ -27200,15 +28423,40 @@ fn complete_print_png_preview(
         && surface.controls.selection.get() == selection
     {
         surface.preview_cancel = None;
-        match result.and_then(|raster| texture_from_surface(&raster)) {
-            Ok(texture) => {
-                surface.raster_texture = Some(texture.clone());
-                surface.preview_status = print_preparation_view::PreviewStatus::Current;
-                project_print_png_preview_zoom(surface);
+        // Gate cancellation before texture work; admission logs any current error regardless of cause.
+        if cancelled {
+            sync_ui(&mut app);
+            drop(app);
+            start_pending_print_png_preview(state);
+            return;
+        }
+        let result = result.and_then(|raster| {
+            let texture = texture_from_surface(&raster)?;
+            if let Some(diagnostic) = take_preview_fault(
+                &fault_hook,
+                "print",
+                "texture",
+                surface.raster_texture.is_some(),
+            ) {
+                return Err(diagnostic);
             }
-            Err(error) => {
-                eprintln!("print preparation preview: {error}");
-                surface.preview_status = print_preparation_view::PreviewStatus::Failed;
+            Ok(texture)
+        });
+        if let Some(result) =
+            admit_print_preview_result(result, true, cancelled, context, |diagnostic, context| {
+                preview_diagnostics::Snapshot::record(diagnostic, context);
+            })
+        {
+            match result {
+                Ok(texture) => {
+                    surface.raster_texture = Some(texture.clone());
+                    surface.preview_status = print_preparation_view::PreviewStatus::Current;
+                    project_print_png_preview_zoom(surface);
+                }
+                Err(error) => {
+                    eprintln!("print preparation preview: {error}");
+                    surface.preview_status = print_preparation_view::PreviewStatus::Failed;
+                }
             }
         }
     }
@@ -28686,8 +29934,11 @@ fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
             request_id,
             authority,
             selection,
+            context,
             result,
-        } => complete_print_png_preview(state, epoch, request_id, authority, selection, *result),
+        } => complete_print_png_preview(
+            state, epoch, request_id, authority, selection, context, *result,
+        ),
         AppEvent::PrintPreparation(completion) => {
             complete_print_preparation_check(state, completion)
         }
@@ -28826,8 +30077,36 @@ fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
         AppEvent::AdvancedSource { epoch, result } => {
             advanced_temporal::source_ready(state, epoch, result)
         }
-        AppEvent::Preview(completion) => handle_preview_completion(state, completion),
-        AppEvent::PreviewProgress(progress) => handle_preview_progress(state, progress),
+        AppEvent::Preview {
+            identity,
+            completion,
+        } => {
+            if preview_diagnostics::same_bridge(&state.borrow().preview_bridge_identity, &identity)
+            {
+                handle_preview_completion(state, completion);
+            }
+        }
+        AppEvent::PreviewProgress { identity, progress } => {
+            if preview_diagnostics::same_bridge(&state.borrow().preview_bridge_identity, &identity)
+            {
+                handle_preview_progress(state, progress);
+            }
+        }
+        AppEvent::PreviewWorkerFailed {
+            identity,
+            diagnostic,
+        } => {
+            if preview_diagnostics::same_bridge(&state.borrow().preview_bridge_identity, &identity)
+            {
+                handle_main_worker_failure(state, diagnostic);
+            }
+        }
+        AppEvent::PrivatePreviewWorkerFailed {
+            surface,
+            epoch,
+            scheduler,
+            diagnostic,
+        } => handle_private_worker_failure(state, surface, epoch, &scheduler, diagnostic),
         AppEvent::DraftMediaPreview { epoch, completion } => {
             handle_draft_media_preview_completion(state, epoch, completion)
         }
@@ -29795,6 +31074,7 @@ fn handle_preview_completion(
                     app_state
                         .preview_coordinator
                         .accept(workspace_generation, ticket);
+                    app_state.preview_details.clear();
                     app_state.preview = Some(texture);
                     sync_main_preview_pending(&app_state);
                     app_state.accepted_preview_target = app_state.preview_target;
@@ -29819,7 +31099,16 @@ fn handle_preview_completion(
                 }
             },
             None => {
-                let message = main_preview_failure_message(completion.error());
+                let message = completion.error().map_or_else(
+                    || {
+                        PreviewDiagnostic::new(
+                            PreviewOrigin::Evaluation,
+                            "preview.evaluation.empty",
+                            "Evaluation did not produce a result",
+                        )
+                    },
+                    PreviewDiagnostic::evaluation,
+                );
                 if completion
                     .error()
                     .is_some_and(|error| error.path() == "evaluation.cancelled")
@@ -29840,7 +31129,7 @@ fn handle_preview_completion(
             sync_main_preview_pending(&app_state);
         }
         Err(error) => {
-            show_preview_error(&mut app_state, error.to_string());
+            show_preview_error(&mut app_state, PreviewDiagnostic::scheduler(error));
         }
     }
 }
@@ -29879,33 +31168,32 @@ fn handle_draft_media_preview_completion(
     }
     draft.media_preview_key = None;
     match completion.result {
-        Ok(prepared) => match draft.scheduler.submit(prepared.request) {
-            Ok(ticket) => {
-                draft.preview_submission = Some(ticket.value());
-                surface.status.set_label("Updating structure preview…");
-                surface.preview_spinner.set_visible(true);
-                surface.preview_spinner.start();
+        Ok(prepared) => {
+            surface.preview_details.set_source(prepared.source.metadata);
+            match draft.scheduler.submit(prepared.request) {
+                Ok(ticket) => {
+                    draft.preview_submission = Some(ticket.value());
+                    surface.status.set_label("Updating structure preview…");
+                    surface.preview_spinner.set_visible(true);
+                    surface.preview_spinner.start();
+                }
+                Err(error) => {
+                    record_editor_failure(surface, &draft, PreviewDiagnostic::scheduler(error));
+                    draft.preview_submission = None;
+                    draft.preview_session = None;
+                    draft.preview_origin = None;
+                    surface.preview_spinner.stop();
+                    surface.preview_spinner.set_visible(false);
+                }
             }
-            Err(error) => {
-                draft.preview_submission = None;
-                draft.preview_session = None;
-                draft.preview_origin = None;
-                surface.preview_spinner.stop();
-                surface.preview_spinner.set_visible(false);
-                surface.status.set_label(&format!(
-                    "Couldn’t render this pattern. Your last preview is still shown. {error}"
-                ));
-            }
-        },
+        }
         Err(error) => {
+            record_editor_failure(surface, &draft, error);
             draft.preview_submission = None;
             draft.preview_session = None;
             draft.preview_origin = None;
             surface.preview_spinner.stop();
             surface.preview_spinner.set_visible(false);
-            surface.status.set_label(&format!(
-                "Couldn’t render this pattern. Your last preview is still shown. {error}"
-            ));
         }
     }
 }
@@ -29921,6 +31209,7 @@ fn handle_draft_preview_completion(
     completion: toniator_engine::EvaluationCompletion,
 ) {
     let app_state = state.borrow();
+    let fault_hook = app_state.preview_failure_hook.clone();
     let Some(surface) = app_state.pattern_editor.as_ref() else {
         return;
     };
@@ -29951,8 +31240,10 @@ fn handle_draft_preview_completion(
         .accept_completion(&completion, &preview_session)
     {
         Ok(true) => match completion.result() {
-            Some(result) => match texture_from_surface(result.raster()) {
+            Some(result) => match private_preview_texture(&fault_hook,"editor",&surface.picture,result.raster())
+            {
                 Ok(texture) => {
+                    surface.preview_details.clear();
                     update_pattern_editor_preview_backdrop(
                         &surface.picture,
                         draft.history.document(),
@@ -29970,26 +31261,31 @@ fn handle_draft_preview_completion(
                         Some(completion.ticket().value()),
                     );
                 }
-                Err(_) => surface
-                    .status
-                    .set_label("Couldn’t render this pattern. Your last preview is still shown."),
+                Err(diagnostic) => record_editor_failure_session(
+                    surface,
+                    &draft,
+                    Some(&preview_session),
+                    diagnostic,
+                ),
             },
             None => {
                 if let Some(error) = completion.error() {
-                    eprintln!("toniator-app: Pattern Editor preview: {error}");
+                    record_editor_failure_session(
+                        surface,
+                        &draft,
+                        Some(&preview_session),
+                        PreviewDiagnostic::evaluation(error),
+                    );
                 }
-                surface
-                    .status
-                    .set_label("Couldn’t render this pattern. Your last preview is still shown.");
             }
         },
         Ok(false) => {}
-        Err(error) => {
-            eprintln!("toniator-app: Pattern Editor preview: {error}");
-            surface
-                .status
-                .set_label("Couldn’t render this pattern. Your last preview is still shown.");
-        }
+        Err(error) => record_editor_failure_session(
+            surface,
+            &draft,
+            Some(&preview_session),
+            PreviewDiagnostic::scheduler(error),
+        ),
     }
 }
 
@@ -30083,6 +31379,7 @@ fn handle_advanced_preview_completion(
     completion: toniator_engine::EvaluationCompletion,
 ) {
     let mut app_state = state.borrow_mut();
+    let fault_hook = app_state.preview_failure_hook.clone();
     let Some(surface) = app_state.advanced_settings.as_mut() else {
         return;
     };
@@ -30100,8 +31397,10 @@ fn handle_advanced_preview_completion(
         .accept_completion(&completion, surface.draft.borrow().session());
     match accepted {
         Ok(true) => match completion.result() {
-            Some(result) => match texture_from_surface(result.raster()) {
+            Some(result) => match private_preview_texture(&fault_hook,"advanced",&surface.picture,result.raster())
+            {
                 Ok(texture) => {
+                    surface.preview_details.clear();
                     update_preview_picture_backdrop(
                         &surface.picture,
                         surface.draft.borrow().document(),
@@ -30122,22 +31421,16 @@ fn handle_advanced_preview_completion(
                         "Preview updated from a quick {width} × {height} source. Apply makes one undoable change."
                     ));
                 }
-                Err(error) => surface
-                    .status
-                    .set_label(&format!("Settings preview unavailable: {error}")),
+                Err(diagnostic) => record_advanced_failure(surface, diagnostic),
             },
-            None => surface.status.set_label(&format!(
-                "Settings preview unavailable: {}",
-                completion.error().map_or_else(
-                    || "evaluation did not produce a result".to_owned(),
-                    ToString::to_string
-                )
-            )),
+            None => {
+                if let Some(error) = completion.error() {
+                    record_advanced_failure(surface, PreviewDiagnostic::evaluation(error));
+                }
+            }
         },
         Ok(false) => {}
-        Err(error) => surface
-            .status
-            .set_label(&format!("Settings preview unavailable: {error}")),
+        Err(error) => record_advanced_failure(surface, PreviewDiagnostic::scheduler(error)),
     }
 }
 
@@ -30441,7 +31734,7 @@ fn replace_model_topology(
 
 /// Transfers queued preview work to the scheduler once a concrete viewport target exists.
 fn submit_if_viewport_ready(state: &mut AppState) {
-    let Some(target) = main_viewport_target(state) else {
+    let Some(target) = requested_main_viewport_target(state) else {
         return;
     };
     let Some(frame) = main_preview_frame_identity(state) else {
@@ -30469,11 +31762,14 @@ fn submit_if_viewport_ready(state: &mut AppState) {
 fn submit_current_source(
     state: &mut AppState,
     target: toniator_engine::PreviewRasterTarget,
-) -> Result<(), String> {
-    let workspace = state
-        .workspace
-        .as_ref()
-        .ok_or_else(|| "No document is open.".to_owned())?;
+) -> Result<(), PreviewDiagnostic> {
+    let workspace = state.workspace.as_ref().ok_or_else(|| {
+        PreviewDiagnostic::new(
+            PreviewOrigin::Preparation,
+            "preview.document",
+            "No document is open",
+        )
+    })?;
     let key = temporal_preview::RequestKey {
         workspace: state.workspace_generation,
         revision: workspace.history.session().revision().0,
@@ -30491,17 +31787,37 @@ fn submit_current_source(
     if let Some(error) = injected_preview_error(state, "prepare") {
         return Err(error);
     }
+    if let Some(error) = state.preview_bridge_startup_failure.as_ref() {
+        return Err(error.clone());
+    }
+    if state.preview_worker_unavailable {
+        return Err(PreviewDiagnostic::new(
+            PreviewOrigin::Scheduler,
+            "preview.worker.unavailable",
+            "Preview worker requires explicit Retry",
+        ));
+    }
     let workspace = state
         .workspace
         .as_ref()
         .expect("captured workspace remains current");
     let session = workspace.history.session().clone();
     let sources = workspace.sources.clone();
+    let unavailable = state
+        .preview_source_worker_unavailable
+        .clone()
+        .unwrap_or_else(|| {
+            PreviewDiagnostic::new(
+                PreviewOrigin::Source,
+                "preview.source_worker.unavailable",
+                "Source preview worker is unavailable",
+            )
+        });
     state
         .media_worker
         .as_mut()
-        .ok_or("Source preview worker is unavailable")?
-        .submit(key, session, sources, target);
+        .ok_or(unavailable)?
+        .submit(key, session, sources, target)?;
     state.media_preview_key = Some(key);
     emit_automation_state(state, "preview_source_preparation_started", None);
     sync_main_preview_pending(state);
@@ -30555,7 +31871,13 @@ fn handle_media_preview_completion(
             .unwrap_or(PreviewModel::Rgb);
         let display = prepared.source;
         let mut rgba = display.rgba;
-        preview_backdrop::composite_rgba_in_place(&mut rgba, model)?;
+        preview_backdrop::composite_rgba_in_place(&mut rgba, model).map_err(|message| {
+            PreviewDiagnostic::new(
+                PreviewOrigin::Texture,
+                "preview.source_display.layout",
+                &message,
+            )
+        })?;
         let texture = gtk::gdk::MemoryTexture::new(
             display.width as i32,
             display.height as i32,
@@ -30574,7 +31896,7 @@ fn handle_media_preview_completion(
         let ticket = state
             .scheduler
             .submit(prepared.request)
-            .map_err(|error| error.to_string())?;
+            .map_err(PreviewDiagnostic::scheduler)?;
         state.source_texture = Some(texture.upcast());
         state.source_texture_generation = Some(state.workspace_generation);
         let generation = state.workspace_generation;
@@ -30687,22 +32009,35 @@ fn emit_draft_automation_state(state: &mut AppState, event: &str, ticket: Option
     }
 }
 
-/// Resolves the visible scrolled page and GTK's actual Picture origin into checked raster intent.
-/// Scroll translation and contain centering are presentation facts, never document authority.
+/// Resolves the mapped viewport without logging from read-only view-model projections.
 fn main_viewport_target(state: &AppState) -> Option<toniator_engine::PreviewRasterTarget> {
-    let document=state.workspace.as_ref()?.document();
-    let canvas = document.canvas();
+    match main_viewport_resolution(state) {
+        viewport_request::Resolution::Ready(target) => Some(target),
+        viewport_request::Resolution::Unallocated
+        | viewport_request::Resolution::Rejected { .. } => None,
+    }
+}
+
+/// Resolves actual GTK allocation into typed Ready/Unallocated/Rejected authority without side effects.
+/// Scroll translation and contain centering remain presentation facts, never document authority.
+fn main_viewport_resolution(state: &AppState) -> viewport_request::Resolution {
+    let Some(workspace) = state.workspace.as_ref() else {
+        return viewport_request::Resolution::Unallocated;
+    };
+    let document = workspace.document();
     let scroll = &state.viewport_scroll;
-    let page = (
-        scroll.hadjustment().page_size(),
-        scroll.vadjustment().page_size(),
-    );
-    let origin = state
+    let Some(origin) = state
         .picture
-        .compute_point(scroll, &gtk::graphene::Point::new(0.0, 0.0))?;
-    viewport_request::target(
-        canvas,
-        page,
+        .compute_point(scroll, &gtk::graphene::Point::new(0.0, 0.0))
+    else {
+        return viewport_request::Resolution::Unallocated;
+    };
+    match viewport_request::resolve(
+        document.canvas(),
+        (
+            scroll.hadjustment().page_size(),
+            scroll.vadjustment().page_size(),
+        ),
         (
             f64::from(state.picture.width()),
             f64::from(state.picture.height()),
@@ -30710,10 +32045,114 @@ fn main_viewport_target(state: &AppState) -> Option<toniator_engine::PreviewRast
         (f64::from(origin.x()), f64::from(origin.y())),
         scroll.scale_factor(),
         state.view_state.is_fit(),
-    )
-    .map(|target| {
-        target.with_background(preview_backdrop::raster_background_for_document(document))
-    })
+    ) {
+        viewport_request::Resolution::Ready(target) => viewport_request::Resolution::Ready(
+            target.with_background(preview_backdrop::raster_background_for_document(document)),
+        ),
+        other => other,
+    }
+}
+
+/// Records one positive rejected allocation per actual frame and exact attempted viewport.
+/// No invalid raster target is invented for the ordinary failed-intent coordinator.
+fn record_rejected_viewport(
+    latch: &mut Option<((u64, u64, u64), viewport_request::Attempt)>,
+    key: ((u64, u64, u64), viewport_request::Attempt),
+    diagnostic: PreviewDiagnostic,
+    context: serde_json::Value,
+    record: impl FnOnce(PreviewDiagnostic, serde_json::Value),
+) -> bool {
+    if *latch == Some(key) {
+        return false;
+    }
+    *latch = Some(key);
+    record(diagnostic, context);
+    true
+}
+
+/// Retires rejected viewport ownership so returning to the same prior valid allocation resubmits.
+/// The ordinary genuine-failure latch and all accepted pixels/cache identities remain intact.
+fn retire_rejected_viewport(
+    observed: &mut Option<toniator_engine::PreviewRasterTarget>,
+    submitted: &mut Option<toniator_engine::PreviewRasterTarget>,
+    coordinator: &mut preview_coordinator::PreviewCoordinator,
+) {
+    *observed = None;
+    *submitted = None;
+    coordinator.clear_submission();
+}
+
+/// Observes a concrete changed target once, without resubmitting an already owned current target.
+fn viewport_change_requires_submission(
+    observed: &mut Option<toniator_engine::PreviewRasterTarget>,
+    submitted: Option<toniator_engine::PreviewRasterTarget>,
+    target: toniator_engine::PreviewRasterTarget,
+) -> bool {
+    if *observed == Some(target) {
+        return false;
+    }
+    *observed = Some(target);
+    submitted != Some(target)
+}
+
+/// Admits/logs only requested viewport work and retires impossible allocation waiting atomically.
+/// Rejection preserves accepted pixels/history, cancels obsolete jobs and never repeats logs on timers.
+fn requested_main_viewport_target(
+    state: &mut AppState,
+) -> Option<toniator_engine::PreviewRasterTarget> {
+    match main_viewport_resolution(state) {
+        viewport_request::Resolution::Unallocated => None,
+        viewport_request::Resolution::Ready(target) => {
+            state.rejected_viewport = None;
+            Some(target)
+        }
+        viewport_request::Resolution::Rejected { error, attempt } => {
+            let frame = main_preview_frame_identity(state)?;
+            let workspace = state.workspace.as_ref()?;
+            let mut context = preview_diagnostics::context(
+                "Main",
+                workspace.document(),
+                workspace
+                    .source_presentation
+                    .as_ref()
+                    .map(|source| &source.identity),
+                frame.1,
+                frame.2,
+                None,
+                state.preview.is_some(),
+            );
+            context["workspace_generation"] = frame.0.into();
+            context["frame_identity"] = serde_json::json!(frame);
+            context["attempted_viewport"] = serde_json::json!({"canvas":attempt.canvas.map(f64::from_bits),"page":attempt.page.map(f64::from_bits),"picture":attempt.picture.map(f64::from_bits),"origin":attempt.origin.map(f64::from_bits),"device_scale":attempt.device_scale,"fit":attempt.fit});
+            let changed = record_rejected_viewport(
+                &mut state.rejected_viewport,
+                (frame, attempt),
+                PreviewDiagnostic::new(PreviewOrigin::Preparation, error.path(), error.message()),
+                context,
+                |diagnostic, context| {
+                    preview_diagnostics::Snapshot::record(diagnostic, context);
+                },
+            );
+            state.scheduler.cancel_pending();
+            if let Some(worker) = state.media_worker.as_mut() {
+                worker.cancel();
+            }
+            state.media_preview_key = None;
+            retire_rejected_viewport(
+                &mut state.viewport_observed_target,
+                &mut state.preview_target,
+                &mut state.application_model.preview_coordinator,
+            );
+            sync_main_preview_pending(state);
+            if changed {
+                set_inspector_status(
+                    state,
+                    "Preview target unavailable. The failure was recorded in the local preview log.",
+                );
+            }
+            None
+        }
+    }
 }
 
 /// Keys last-full fallback pixels by workspace, document revision, and exact temporal frame.
@@ -30750,9 +32189,31 @@ fn preview_target_from_allocation(
     toniator_engine::PreviewRasterTarget::new(width, height).ok()
 }
 
-fn texture_from_surface(surface: &RasterSurface) -> Result<gtk::gdk::Texture, String> {
-    let layout = raw_texture_layout(surface)?;
-    let bytes = glib::Bytes::from_owned(surface.pixels().to_vec());
+/// Copies exact canonical RGBA through audited fallible storage before constructing a GTK texture.
+/// # Errors
+/// Returns layout/addressability separately from an actual preview.texture.allocation reserve refusal.
+fn texture_from_surface(surface: &RasterSurface) -> Result<gtk::gdk::Texture, PreviewDiagnostic> {
+    let layout = raw_texture_layout(surface).map_err(|message| {
+        PreviewDiagnostic::new(PreviewOrigin::Texture, "preview.texture.layout", &message)
+    })?;
+    let count = surface.pixels().len();
+    std::alloc::Layout::array::<u8>(count).map_err(|_| {
+        PreviewDiagnostic::new(
+            PreviewOrigin::Texture,
+            "preview.texture.addressability",
+            "Texture bytes exceed machine addressability",
+        )
+    })?;
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(count).map_err(|_| {
+        PreviewDiagnostic::new(
+            PreviewOrigin::Texture,
+            "preview.texture.allocation",
+            "Texture byte copy allocation failed",
+        )
+    })?;
+    copy.extend_from_slice(surface.pixels());
+    let bytes = glib::Bytes::from_owned(copy);
     Ok(gtk::gdk::MemoryTexture::new(
         layout.width,
         layout.height,
@@ -30775,6 +32236,9 @@ struct TextureLayout {
     stride: usize,
 }
 
+/// Validates the complete native GTK dimensions/stride/byte layout without allocating storage.
+/// # Errors
+/// Returns an explicit layout diagnostic for unrepresentable or mismatched canonical raster bytes.
 fn raw_texture_layout(surface: &RasterSurface) -> Result<TextureLayout, String> {
     let width = i32::try_from(surface.width())
         .map_err(|_| "Preview width exceeds GTK limits.".to_owned())?;
@@ -30784,11 +32248,13 @@ fn raw_texture_layout(surface: &RasterSurface) -> Result<TextureLayout, String> 
         .map_err(|_| "Preview width exceeds addressable memory.".to_owned())?
         .checked_mul(4)
         .ok_or_else(|| "Preview stride overflowed.".to_owned())?;
-    if surface.pixels().len()
-        != stride
-            * usize::try_from(surface.height())
-                .map_err(|_| "Preview height exceeds addressable memory.".to_owned())?
-    {
+    let expected = stride
+        .checked_mul(
+            usize::try_from(surface.height())
+                .map_err(|_| "Preview height exceeds addressable memory.".to_owned())?,
+        )
+        .ok_or_else(|| "Preview byte count exceeds addressable memory.".to_owned())?;
+    if surface.pixels().len() != expected {
         return Err("Preview raster bytes do not match dimensions.".to_owned());
     }
     Ok(TextureLayout {
@@ -30807,6 +32273,7 @@ fn clear_preview(state: &mut AppState) {
     state.preview_full = None;
     state.preview_full_identity = None;
     state.viewport_observed_target = None;
+    state.rejected_viewport = None;
     state.source_texture = None;
     state.source_texture_generation = None;
     state.view_state.set_mode(MainViewMode::Preview);
@@ -30886,24 +32353,64 @@ fn show_error(state: &mut AppState, message: String) {
 
 /// Latches a matching queued/preparing/submitted failure in the unmeasured canvas overlay.
 /// Operation/save identities, banners, document/history and last-good pixels remain independent.
-fn show_preview_error(state: &mut AppState, message: String) {
+fn show_preview_error(state: &mut AppState, diagnostic: PreviewDiagnostic) {
+    if diagnostic.is_cancelled() {
+        state.preview_coordinator.clear_submission();
+        sync_main_preview_pending(state);
+        return;
+    }
+    if diagnostic.source_worker_failed() {
+        state.preview_source_worker_unavailable = Some(diagnostic.clone());
+    }
+    if diagnostic.origin == PreviewOrigin::Scheduler {
+        state.preview_worker_unavailable = true;
+    }
+    // Capture queued/preparing authority before failure clears coordinator ownership.
+    let captured_intent = state.preview_coordinator.intent();
+    let mut context = state.workspace.as_ref().map_or_else(
+        || serde_json::json!({"surface":"Main"}),
+        |workspace| {
+            preview_diagnostics::context(
+                "Main",
+                workspace.document(),
+                workspace.source_presentation.as_ref().map(|s| &s.identity),
+                captured_intent.map_or(workspace.history.revision().0, |intent| intent.frame.1),
+                captured_intent.map_or_else(
+                    || state.endpoint.frame(workspace.document()),
+                    |intent| intent.frame.2,
+                ),
+                captured_intent.map(|intent| intent.target).or(state.preview_target),
+                state.preview.is_some(),
+            )
+        },
+    );
+    context["workspace_generation"] = serde_json::json!(
+        captured_intent.map_or(state.workspace_generation, |intent| intent.frame.0)
+    );
+    context["frame_identity"] = serde_json::json!(captured_intent.map(|intent| intent.frame));
     let changed = if let Some(submission) = state.preview_coordinator.submission() {
+        state.preview_coordinator.fail(
+            submission.workspace_generation,
+            submission.ticket,
+            diagnostic.to_string(),
+        )
+    } else if let Some(intent) = state.preview_coordinator.intent() {
         state
             .preview_coordinator
-            .fail(submission.workspace_generation, submission.ticket, message)
-    } else if let Some(intent) = state.preview_coordinator.intent() {
-        state.preview_coordinator.fail_preparation(intent, message)
+            .fail_preparation(intent, diagnostic.to_string())
     } else {
         false
     };
     if !changed {
         return;
     }
+    let snapshot = preview_diagnostics::Snapshot::record(diagnostic, context);
+    state.preview_details.install(snapshot);
     sync_main_preview_pending(state);
     set_page(state, Page::Success);
     set_inspector_status(
         state,
-        "Preview unavailable. Retry preview or change the artwork or settings.",
+        "Preview unavailable. Details contains the diagnostic.",
     );
     emit_automation_state(state, "preview_failed", None);
 }
@@ -35033,6 +36540,7 @@ mod tests {
                 source,
                 width,
                 height,
+                ..
             } = proxy
             else {
                 panic!("{name} builds a private preview proxy")
@@ -41043,5 +42551,483 @@ mod tests {
             .apply_to_document_base(&mut draft, "curve-motif-rows")
             .unwrap();
         assert!(wizard_apply_enabled(draft.document(), workspace.document()));
+    }
+}
+
+#[cfg(test)]
+mod preview_reliability_diagnostics_tests {
+    use super::*;
+    /// Preserves an Advanced preparation cause through later revision intent without another decode.
+    /// # Panics
+    /// Panics if retained source failure loses its producer code, message, origin or memory classification.
+    #[test]
+    fn advanced_retained_preparation_keeps_typed_cause_across_revision() {
+        let source = AdvancedPreviewSource::Unavailable(PreviewDiagnostic::new(
+            PreviewOrigin::Source, "preview.proxy.allocation", "Actual reserve failure",
+        ));
+        let first = private_preview_intent(7, 1, 0);
+        let later = private_preview_intent(7, 2, 0);
+        assert_ne!(first, later);
+        for _intent in [first, later] {
+            let diagnostic = source.unavailable_diagnostic().unwrap();
+            assert_eq!(diagnostic.origin, PreviewOrigin::Source);
+            assert_eq!(diagnostic.code, "preview.proxy.allocation");
+            assert_eq!(diagnostic.message, "Actual reserve failure");
+            assert_eq!(diagnostic.cause(), preview_diagnostics::Cause::SourceMemory);
+        }
+    }
+    /// Keeps one-shot worker routing typed, surface-specific and gated by actual retained success.
+    /// # Panics
+    /// Panics if a manufactured worker witness bypasses production recovery or consumes a wrong attempt.
+    #[test]
+    fn injected_worker_keeps_scheduler_origin_and_one_attempt() {
+        let hook = RefCell::new(Some(PreviewFailureHook {
+            scope: "main".into(),
+            boundary: "worker".into(),
+            after_success: true,
+        }));
+        assert!(take_preview_fault(&hook, "wizard", "prepare", true).is_none());
+        assert!(take_preview_fault(&hook, "main", "prepare", false).is_none());
+        let diagnostic = take_preview_fault(&hook, "main", "prepare", true).unwrap();
+        assert_eq!(diagnostic.origin, PreviewOrigin::Scheduler);
+        assert_eq!(diagnostic.code, "preview.worker.unavailable");
+        assert!(diagnostic.injected);
+        assert!(take_preview_fault(&hook, "main", "prepare", true).is_none());
+        for error in [
+            toniator_engine::SchedulerError::WorkerSpawn,
+            toniator_engine::SchedulerError::WorkerUnavailable,
+            toniator_engine::SchedulerError::WorkerPanicked,
+            toniator_engine::SchedulerError::TicketExhausted,
+        ] {
+            assert_eq!(
+                PreviewDiagnostic::scheduler(error).origin,
+                PreviewOrigin::Scheduler
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod preview_failure_logging_tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Creates a unique task-owned log location without changing process-global user directories.
+    /// # Panics
+    /// Panics if the task evidence directory cannot be created or the clock precedes the epoch.
+    fn log_path(name: &str) -> PathBuf {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/validation/preview-failure-logging-20261018")
+            .join(format!(
+                "test-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        fs::create_dir_all(&path).unwrap();
+        path.join("preview-failures.log")
+    }
+    /// Reads complete records through the actual shared NDJSON writer, treating an untouched path as zero.
+    /// # Panics
+    /// Panics if a recorded entry is not valid JSON or task-owned IO fails.
+    fn records(path: &std::path::Path) -> Vec<serde_json::Value> {
+        if !path.exists() {
+            return Vec::new();
+        }
+        fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+    /// Builds a tiny complete raster for control-flow tests, not a production evaluator witness.
+    /// # Panics
+    /// Panics if this literal validated RGBA surface is rejected.
+    fn raster() -> RasterSurface {
+        RasterSurface::new(1, 1, vec![17, 23, 31, 255]).unwrap()
+    }
+    /// Builds the actual selected PNG intent independently of GTK form widgets.
+    /// # Panics
+    /// Panics if these bounded streaming target dimensions are rejected.
+    fn selection(width: u32, height: u32) -> print_preparation::OutputSelection {
+        print_preparation::OutputSelection {
+            target: toniator_engine::StreamingRasterTarget::new(width, height).unwrap(),
+            antialiasing: RasterAntialiasing::On,
+            background: print_preparation::BackgroundChoice::Explicit(
+                RasterBackground::Transparent,
+            ),
+            prepare_for_print: false,
+            pixels_per_metre: None,
+            cleanup: print_cleanup::Settings::default(),
+        }
+    }
+    /// Exercises requested constructor refusal before surface installation while history remains unchanged.
+    /// All scheduler/source/bridge failures append once through the production snapshot writer.
+    /// # Panics
+    /// Panics if failed construction installs a value, mutates history or loses captured authority.
+    #[test]
+    fn editor_constructor_failures_log_once_without_install_or_history_edits() {
+        let path = log_path("editor-startup");
+        let document = Document::new_default_document(
+            CanvasSpec {
+                width: 120.0,
+                height: 80.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .unwrap();
+        let history = DocumentHistory::new(DocumentSession::new(document.clone()).unwrap());
+        let before_revision = history.revision();
+        let context = preview_diagnostics::context(
+            "Pattern Editor",
+            history.document(),
+            None,
+            before_revision.0,
+            0,
+            None,
+            false,
+        );
+        for diagnostic in [
+            PreviewDiagnostic::scheduler(toniator_engine::SchedulerError::WorkerSpawn),
+            PreviewDiagnostic::new(
+                PreviewOrigin::Source,
+                "preview.source_worker.spawn",
+                "source constructor error",
+            ),
+            PreviewDiagnostic::new(
+                PreviewOrigin::Scheduler,
+                "preview.editor.bridge.spawn",
+                "bridge constructor error",
+            ),
+        ] {
+            let result: Result<(), _> =
+                record_preview_startup_result(Err(diagnostic), context.clone(), |d, c| {
+                    preview_diagnostics::Snapshot::record_at(d, c, &path);
+                });
+            assert!(result.ok().is_none());
+        }
+        let successful =
+            record_preview_startup_result(Ok::<_, PreviewDiagnostic>(7), context, |d, c| {
+                preview_diagnostics::Snapshot::record_at(d, c, &path);
+            });
+        assert_eq!(successful.unwrap(), 7);
+        let rows = records(&path);
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows.iter()
+                .all(|row| row["context"]["surface"] == "Pattern Editor"
+                    && row["context"]["canvas"] == serde_json::json!([120.0, 80.0]))
+        );
+        assert_eq!(history.document(), &document);
+        assert_eq!(history.revision(), before_revision);
+    }
+    /// Logs current render/texture/spawn/panic/count and audited OOM diagnoses independently of cause.
+    /// Current String cancellation-looking text remains a software error unless owned cancellation is set.
+    /// # Panics
+    /// Panics if any current terminal failure is skipped or a raw String is inferred to mean OOM/cancel.
+    #[test]
+    fn print_current_failure_classes_all_append_one_record() {
+        let path = log_path("print-causes");
+        let render = run_print_png_preview_worker(
+            || Err("Export cancelled. allocation failed".into()),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(render.code, "preview.print.render");
+        assert_eq!(render.cause(), preview_diagnostics::Cause::Unexpected);
+        let panic = run_print_png_preview_worker(|| panic!("controlled unit worker unwind"), None)
+            .unwrap_err();
+        assert!(!panic.injected);
+        let failures = [
+            render,
+            panic,
+            next_print_preview_id(u64::MAX, None).unwrap_err(),
+            PreviewDiagnostic::new(
+                PreviewOrigin::Preparation,
+                "preview.print.worker.spawn",
+                "actual OS spawn result route",
+            ),
+            PreviewDiagnostic::new(
+                PreviewOrigin::Texture,
+                "preview.texture.allocation",
+                "audited producer-code routing control",
+            ),
+            PreviewDiagnostic::new(
+                PreviewOrigin::Texture,
+                "preview.texture.addressability",
+                "unrepresentable layout control",
+            ),
+        ];
+        for diagnostic in failures {
+            let result = admit_print_preview_result(
+                Err::<(), _>(diagnostic),
+                true,
+                false,
+                serde_json::json!({"surface":"Print/PNG preview"}),
+                |d, c| {
+                    preview_diagnostics::Snapshot::record_at(d, c, &path);
+                },
+            );
+            assert!(result.unwrap().is_err());
+        }
+        assert_eq!(records(&path).len(), 6);
+    }
+    /// Sends stale and dirty-cancelled error results through the real recorder gate, then accepts latest success.
+    /// # Panics
+    /// Panics if excluded work appends a record or latest valid restart loses its complete pixels.
+    #[test]
+    fn print_stale_dirty_cancellation_and_latest_success_are_silent() {
+        let path = log_path("print-freshness");
+        let context = serde_json::json!({"surface":"Print/PNG preview"});
+        for (current, cancelled) in [(false, false), (true, true), (false, true)] {
+            let result = admit_print_preview_result(
+                Err::<RasterSurface, _>(PreviewDiagnostic::new(
+                    PreviewOrigin::Evaluation,
+                    "preview.print.render",
+                    "superseded result",
+                )),
+                current,
+                cancelled,
+                context.clone(),
+                |d, c| {
+                    preview_diagnostics::Snapshot::record_at(d, c, &path);
+                },
+            );
+            assert!(result.is_none());
+        }
+        let mut intent = PrintPreviewIntent::<u8>::default();
+        let old = intent.reconcile(Some(1)).unwrap();
+        assert!(intent.timer_elapsed(old));
+        assert_eq!(intent.take_ready(false), Some(1));
+        let newest = intent.reconcile(Some(2)).unwrap();
+        assert!(intent.timer_elapsed(newest));
+        assert_eq!(intent.take_ready(true), None);
+        assert_eq!(intent.take_ready(false), Some(2));
+        let success = admit_print_preview_result(
+            run_print_png_preview_worker(|| Ok(raster()), None),
+            true,
+            false,
+            context,
+            |d, c| {
+                preview_diagnostics::Snapshot::record_at(d, c, &path);
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(success.pixels(), [17, 23, 31, 255]);
+        assert!(records(&path).is_empty());
+    }
+    /// Proves pending manufactured render/panic hooks cannot replace a real error or mislabel its cause.
+    /// # Panics
+    /// Panics if routing is consumed before successful work or a manufactured panic loses its marker.
+    #[test]
+    fn print_postsuccess_routing_keeps_real_failure_and_marks_panic() {
+        let mut fault = PreviewDiagnostic::new(
+            PreviewOrigin::Preparation,
+            "preview.print.worker.panicked",
+            "routing witness",
+        );
+        fault.injected = true;
+        let actual =
+            run_print_png_preview_worker(|| Err("real producer error".into()), Some(fault.clone()))
+                .unwrap_err();
+        assert_eq!(actual.code, "preview.print.render");
+        assert!(!actual.injected);
+        let injected = run_print_png_preview_worker(|| Ok(raster()), Some(fault)).unwrap_err();
+        assert_eq!(injected.code, "preview.print.worker.panicked");
+        assert!(injected.injected);
+    }
+    /// Logs valid positive capacity refusal once per consumed intent, while invalid/no-form intent stays quiet.
+    /// # Panics
+    /// Panics if unchanged form refresh resubmits/logs or existing preview capacity is relaxed/classified OOM.
+    #[test]
+    fn print_capacity_rejection_is_once_and_invalid_form_quiet() {
+        let path = log_path("print-capacity");
+        let selected = selection(8193, 8192);
+        let mut intent = PrintPreviewIntent::default();
+        let ticket = intent.reconcile(Some(selected)).unwrap();
+        assert!(intent.timer_elapsed(ticket));
+        let attempted = intent.take_ready(false).unwrap();
+        let error = print_png_preview_admission(attempted).unwrap_err();
+        assert_eq!(error.code, "preview.print.capacity");
+        assert_eq!(error.cause(), preview_diagnostics::Cause::Unexpected);
+        let _ = record_preview_startup_result(
+            Err::<(), _>(error),
+            serde_json::json!({"surface":"Print/PNG preview","output_target":[8193,8192]}),
+            |d, c| {
+                preview_diagnostics::Snapshot::record_at(d, c, &path);
+            },
+        );
+        assert_eq!(intent.reconcile(Some(selected)), None);
+        assert!(intent.take_ready(false).is_none());
+        intent.reconcile(None);
+        assert!(intent.take_ready(false).is_none());
+        assert_eq!(records(&path).len(), 1);
+        assert!(print_png_preview_admission(selection(64, 64)).is_ok());
+    }
+    /// Restores the same prior valid allocation once after rejection without clearing a genuine error latch.
+    /// # Panics
+    /// Panics if rejected pending work leaves the observed target stuck or triggers automatic failed retry.
+    #[test]
+    fn rejected_pending_viewport_restores_prior_valid_target_once() {
+        let target = toniator_engine::PreviewRasterTarget::new(24, 16).unwrap();
+        let intent = PreviewIntent {
+            frame: (1, 2, 3),
+            target,
+        };
+        let mut coordinator = preview_coordinator::PreviewCoordinator::default();
+        assert!(coordinator.prepare(intent));
+        let mut observed = Some(target);
+        let mut submitted = Some(target);
+        retire_rejected_viewport(&mut observed, &mut submitted, &mut coordinator);
+        assert!(!coordinator.is_pending());
+        assert!(viewport_change_requires_submission(
+            &mut observed,
+            submitted,
+            target
+        ));
+        assert!(!viewport_change_requires_submission(
+            &mut observed,
+            submitted,
+            target
+        ));
+        assert!(coordinator.prepare(intent));
+        assert!(coordinator.fail_preparation(intent, "actual prior software error".into()));
+        retire_rejected_viewport(&mut observed, &mut submitted, &mut coordinator);
+        assert!(coordinator.is_failed(intent));
+        assert!(!coordinator.prepare(intent));
+    }
+    /// Exercises real main/Advanced/Wizard bridges across an idle interval and later scheduler completion.
+    /// This is headless event-dispatch evidence, not GTK or full output acceptance.
+    /// # Panics
+    /// Panics if idle ends a bridge, events lose identity/epoch/ticket, or owned workers fail to stop.
+    #[test]
+    fn actual_bridges_survive_idle_and_dispatch_later_completion() {
+        let workspace = Workspace::from_direct(
+            Arc::from(
+                fs::read(
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/raster-sample.png"),
+                )
+                .unwrap(),
+            ),
+            SourceFormatHint::Png,
+            "unit source".into(),
+        )
+        .unwrap();
+        let presentation = workspace.source_presentation.as_ref().unwrap();
+        let input = workspace.sources.get(&presentation.id).unwrap();
+        let source = ResolvedSource::new(
+            presentation.id.clone(),
+            Arc::<[u8]>::from(input.bytes()),
+            presentation.format,
+        )
+        .unwrap();
+        for kind in 0..3 {
+            let scheduler = Arc::new(EvaluationScheduler::new().unwrap());
+            let (sender, receiver) = async_channel::unbounded();
+            let stop = Arc::new(AtomicBool::new(false));
+            let identity = Arc::new(());
+            let bridge = match kind {
+                0 => start_preview_event_bridge(
+                    scheduler.clone(),
+                    sender,
+                    stop.clone(),
+                    identity.clone(),
+                ),
+                1 => {
+                    start_advanced_preview_event_bridge(scheduler.clone(), sender, stop.clone(), 77)
+                }
+                _ => start_wizard_preview_event_bridge(scheduler.clone(), sender, stop.clone(), 77),
+            }
+            .unwrap();
+            thread::sleep(Duration::from_millis(20));
+            let remained_idle = !bridge.is_finished();
+            let ticket = scheduler
+                .submit(
+                    EvaluationRequest::with_preview_target(
+                        workspace.history.session().document_evaluation_snapshot(),
+                        source.clone(),
+                        toniator_engine::PreviewRasterTarget::new(8, 8).unwrap(),
+                    )
+                    .for_structural_preview(),
+                )
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut found = false;
+            while Instant::now() < deadline {
+                match receiver.try_recv() {
+                    Ok(AppEvent::Preview {
+                        identity: received,
+                        completion,
+                    }) if kind == 0 => {
+                        found = Arc::ptr_eq(&received, &identity) && completion.ticket() == ticket;
+                        break;
+                    }
+                    Ok(AppEvent::AdvancedPreview { epoch, completion }) if kind == 1 => {
+                        found = epoch == 77 && completion.ticket() == ticket;
+                        break;
+                    }
+                    Ok(AppEvent::WizardPreview { epoch, completion }) if kind == 2 => {
+                        found = epoch == 77 && completion.ticket() == ticket;
+                        break;
+                    }
+                    Ok(_) | Err(async_channel::TryRecvError::Empty) => {
+                        thread::sleep(Duration::from_millis(1))
+                    }
+                    Err(async_channel::TryRecvError::Closed) => break,
+                }
+            }
+            stop.store(true, Ordering::Release);
+            bridge.join().unwrap();
+            assert!(
+                remained_idle,
+                "bridge{kind} must survive no-completion polls"
+            );
+            assert!(found, "bridge{kind} must dispatch its later completion");
+        }
+    }
+    /// Distinguishes positive checked target refusal from unallocated GTK and deduplicates actual frame/viewport.
+    /// # Panics
+    /// Panics if repeated polls log again, a changed revision is hidden, or zero allocation is rejected.
+    #[test]
+    fn positive_viewport_rejection_is_typed_deduplicated_and_zero_quiet() {
+        let path = log_path("viewport");
+        let canvas = CanvasSpec {
+            width: 900.0,
+            height: 620.0,
+        };
+        assert!(matches!(
+            viewport_request::resolve(&canvas, (0.0, 480.0), (900.0, 620.0), (0.0, 0.0), 1, true),
+            viewport_request::Resolution::Unallocated
+        ));
+        let viewport_request::Resolution::Rejected { error, attempt } = viewport_request::resolve(
+            &canvas,
+            (8193.0, 8192.0),
+            (900.0, 620.0),
+            (0.0, 0.0),
+            1,
+            true,
+        ) else {
+            panic!("existing64Mpixel producer must refuse this positive target");
+        };
+        assert_eq!(error.path(), "preview.target");
+        let diagnostic =
+            PreviewDiagnostic::new(PreviewOrigin::Preparation, error.path(), error.message());
+        assert_eq!(diagnostic.cause(), preview_diagnostics::Cause::Unexpected);
+        let mut latch = None;
+        for revision in [1, 1, 2, 2] {
+            record_rejected_viewport(
+                &mut latch,
+                ((7, revision, 0), attempt),
+                diagnostic.clone(),
+                serde_json::json!({"surface":"Main","revision":revision}),
+                |d, c| {
+                    preview_diagnostics::Snapshot::record_at(d, c, &path);
+                },
+            );
+        }
+        assert_eq!(records(&path).len(), 2);
     }
 }
