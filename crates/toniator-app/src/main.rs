@@ -6049,6 +6049,8 @@ fn sync_endpoint_controls(state: &AppState) {
 ///
 /// Switching modes reuses the same scroll adjustments. It never changes the
 /// document, history cursor, accepted preview, or evaluation scheduler.
+/// Pan instructions remain in the viewport's accessible description without
+/// adding canvas hover hints.
 fn apply_main_view_presentation(state: &mut AppState) {
     let paintable = match state.view_state.mode() {
         MainViewMode::Preview => state.preview.as_ref(),
@@ -6198,9 +6200,7 @@ fn apply_main_view_presentation(state: &mut AppState) {
         MainViewMode::Preview => "Pattern preview",
         MainViewMode::Source => "Source artwork",
     };
-    state.viewport_scroll.set_tooltip_text(Some(&format!(
-        "{mode_name}; scroll or left-drag to pan when the artwork is larger than the viewport."
-    )));
+    state.viewport_scroll.set_tooltip_text(None);
     state.viewport_scroll.update_property(&[
         gtk::accessible::Property::Label("Canvas viewport"),
         gtk::accessible::Property::Description(
