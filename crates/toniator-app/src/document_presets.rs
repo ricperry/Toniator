@@ -222,8 +222,7 @@ impl LoadIdentity {
                 .ok_or_else(|| DocumentPresetError::Kind {
                     context: "unknown built-in Document Preset".into(),
                 })?
-                .load(destination)
-                .map(StagedDocumentPreset::Current),
+                .load_staged(destination),
             Self::File(path) => load_document_preset_staged(path, destination),
         }
     }
@@ -544,7 +543,8 @@ fn start_read(
             .map_err(file_error_message)
             .and_then(|staged| {
                 let configuration = match staged {
-                    StagedDocumentPreset::Current(configuration) => configuration,
+                    StagedDocumentPreset::Current(configuration)
+                    | StagedDocumentPreset::PendingCalibration(configuration) => configuration,
                     StagedDocumentPreset::PendingRaw(pending) => {
                         toniator_engine::prepare_pending_raw_preset(
                             pending,
@@ -1434,3 +1434,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "artistic_preset_tests.rs"]
+mod artistic_preset_tests;

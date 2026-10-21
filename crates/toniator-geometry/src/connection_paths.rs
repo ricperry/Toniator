@@ -1,8 +1,11 @@
 //! Deterministic positive open paths selected from a Stage 20L adjacency graph.
 
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet};
 
-use toniator_domain::{ConnectionProgram, PatternOutputLayerId};
+use toniator_domain::{ConnectionProgram, ConnectionSelectionIntent, PatternOutputLayerId};
+
+#[path = "connection_selection.rs"]
+mod selection;
 
 use super::{
     CurvePath, CurveSegment, FamilySiteId, LineSegment, PathClosure, SiteAdjacencyEdge,
@@ -10,7 +13,7 @@ use super::{
 };
 
 /// Stable identity for the connection-program selection and trail contract.
-pub const CONNECTION_PATH_CONTRACT_ID: &str = "toniator-stage-20m-connection-paths-v1";
+pub const CONNECTION_PATH_CONTRACT_ID: &str = "toniator-artistic-connections-v2";
 /// Stable identity for deterministic mutual-nearest selection without a seeded algorithm.
 pub const CONNECTION_NEAREST_SELECTION_CONTRACT_ID: &str = "toniator-stage-20m-nearest-links-v1";
 /// Stable identity for the seeded FNV random-links selection algorithm.
@@ -61,13 +64,28 @@ pub struct ConnectionPathDiagnostics {
 /// Complete derived result; operational limits and diagnostics are intentionally outside its fingerprint.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConnectionPathSet {
+    /// Retains the authored final policy that produced this frozen topology.
+    pub selection: ConnectionSelectionIntent,
     pub selected_edges: Vec<SiteAdjacencyEdge>,
+    /// Retains source-independent surviving singleton facts before the graph is released.
+    pub isolated_points: Vec<super::SiteAdjacencyNode>,
     pub paths: Vec<ConnectionPath>,
     pub diagnostics: ConnectionPathDiagnostics,
     fingerprint: String,
 }
 
 impl ConnectionPathSet {
+    /// Collects structural endpoint and surviving singleton usage without consulting source width.
+    /// The caller canonicalizes duplicate endpoint IDs through its existing site-usage authority.
+    /// # Errors
+    /// Returns count/addressability, allocator refusal or cancellation before publishing partial IDs.
+    pub fn used_site_ids_cancellable(&self, is_cancelled: &dyn Fn() -> bool) -> Result<Vec<FamilySiteId>, ConnectionPathError> {
+        let count=self.selected_edges.len().checked_mul(2).and_then(|value|value.checked_add(self.isolated_points.len())).ok_or(ConnectionPathError::new("connection.selection.count", "site usage count overflows"))?;
+        let mut ids=Vec::new();selection::reserve(&mut ids,count)?;
+        for edge in &self.selected_edges {cancelled(is_cancelled)?;ids.extend([edge.first,edge.second]);}
+        for point in &self.isolated_points {cancelled(is_cancelled)?;ids.push(point.id);}
+        Ok(ids)
+    }
     /// Returns the stable derived identity without exposing mutable work policy.
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
@@ -176,6 +194,28 @@ pub fn build_connection_paths_cancellable(
     limits: ConnectionPathLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<ConnectionPathSet, ConnectionPathError> {
+    build_connection_paths_with_selection_cancellable(
+        output_layer_id,
+        graph,
+        program,
+        ConnectionSelectionIntent::default(),
+        limits,
+        is_cancelled,
+    )
+}
+
+/// Selects final graph topology and automatic rescue before component filtering and path emission.
+/// Source pixels never participate; surviving isolated points retain their original site authority.
+/// # Errors
+/// Returns validation, work, numerical, addressability, allocation or cancellation diagnostics atomically.
+pub fn build_connection_paths_with_selection_cancellable(
+    output_layer_id: PatternOutputLayerId,
+    graph: &SiteAdjacencyGraph,
+    program: &ConnectionProgram,
+    selection: ConnectionSelectionIntent,
+    limits: ConnectionPathLimits,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<ConnectionPathSet, ConnectionPathError> {
     program
         .validate()
         .map_err(|error| ConnectionPathError::new(error.path(), error.message()))?;
@@ -198,18 +238,43 @@ pub fn build_connection_paths_cancellable(
         ));
     }
     let mut work = Work::new(limits.maximum_inspections, is_cancelled);
-    let (selected_edges, diagnostics) = select_edges(graph, program, limits, &mut work)?;
+    let (selected_edges, singleton_indices, diagnostics) =
+        selection::select(graph, program, selection, limits, &mut work)?;
+    let mut isolated_points = Vec::new();
+    reserve_connection(&mut isolated_points, singleton_indices.len())?;
+    for index in singleton_indices {
+        work.tick()?;
+        let node = &graph.nodes()[index];
+        isolated_points.push(super::SiteAdjacencyNode {
+            id: node.id,
+            position: node.position,
+            scope: node.scope,
+            nominal_cell_basis: node.nominal_cell_basis,
+            provenance: super::site_adjacency::clone_provenance(&node.provenance).map_err(
+                |_| {
+                    ConnectionPathError::new(
+                        "connection.selection.allocation",
+                        "singleton provenance allocation failed",
+                    )
+                },
+            )?,
+        });
+    }
     let paths = decompose(graph, output_layer_id, &selected_edges, limits, &mut work)?;
     let fingerprint = fingerprint(
         output_layer_id,
         graph,
         program,
+        selection,
+        &isolated_points,
         &selected_edges,
         &paths,
         &mut work,
     )?;
     Ok(ConnectionPathSet {
+        selection,
         selected_edges,
+        isolated_points,
         paths,
         diagnostics,
         fingerprint,
@@ -256,207 +321,6 @@ impl<'a> Work<'a> {
             ))?;
         Ok(())
     }
-}
-
-/// Returns program-selected edges in canonical endpoint order and non-fatal degree diagnostics.
-fn select_edges(
-    graph: &SiteAdjacencyGraph,
-    program: &ConnectionProgram,
-    limits: ConnectionPathLimits,
-    work: &mut Work<'_>,
-) -> Result<(Vec<SiteAdjacencyEdge>, ConnectionPathDiagnostics), ConnectionPathError> {
-    let mut diagnostics = ConnectionPathDiagnostics::default();
-    let mut incident = BTreeMap::<FamilySiteId, Vec<SiteAdjacencyEdge>>::new();
-    for node in graph.nodes() {
-        work.tick()?;
-        incident.entry(node.id).or_default();
-    }
-    for edge in graph.edges() {
-        work.tick()?;
-        incident.entry(edge.first).or_default().push(*edge);
-        incident.entry(edge.second).or_default().push(*edge);
-    }
-    for edges in incident.values_mut() {
-        edges.sort();
-    }
-    let mut selected = BTreeSet::new();
-    match program {
-        ConnectionProgram::NearestLinks { .. } => {
-            for edge in graph.edges() {
-                work.tick()?;
-                selected.insert(*edge);
-            }
-        }
-        ConnectionProgram::RandomLinks {
-            adjacency,
-            minimum_degree,
-            seed,
-        } => select_random(
-            &incident,
-            *minimum_degree as usize,
-            adjacency.maximum_degree as usize,
-            *seed,
-            &mut selected,
-            work,
-        )?,
-        ConnectionProgram::GridSpanningTree { seed, .. } => {
-            select_prim(graph, &incident, *seed, &mut selected, work)?
-        }
-    }
-    if selected.len() > limits.maximum_selected_edges {
-        return Err(ConnectionPathError::new(
-            "connection.limits.selected_edges",
-            "selected connection edges exceed the configured limit",
-        ));
-    }
-    let mut selected_degrees = BTreeMap::<FamilySiteId, usize>::new();
-    for edge in &selected {
-        work.tick()?;
-        *selected_degrees.entry(edge.first).or_default() += 1;
-        *selected_degrees.entry(edge.second).or_default() += 1;
-    }
-    for (node, edges) in &incident {
-        work.tick()?;
-        if edges.is_empty() {
-            diagnostics.isolated_nodes.push(*node);
-        }
-        if let ConnectionProgram::RandomLinks { minimum_degree, .. } = program {
-            let degree = selected_degrees.get(node).copied().unwrap_or(0);
-            if degree < *minimum_degree as usize {
-                diagnostics.under_connected_nodes.push(*node);
-            }
-        }
-    }
-    let mut selected_edges = Vec::new();
-    reserve_connection(&mut selected_edges, selected.len())?;
-    for edge in selected {
-        work.tick()?;
-        selected_edges.push(edge);
-    }
-    Ok((selected_edges, diagnostics))
-}
-
-/// Selects a bounded best-effort random degree program without exceeding authored maxima.
-fn select_random(
-    incident: &BTreeMap<FamilySiteId, Vec<SiteAdjacencyEdge>>,
-    minimum: usize,
-    maximum: usize,
-    seed: u32,
-    selected: &mut BTreeSet<SiteAdjacencyEdge>,
-    work: &mut Work<'_>,
-) -> Result<(), ConnectionPathError> {
-    let mut targets = BTreeMap::new();
-    for node in incident.keys() {
-        work.tick()?;
-        let range = maximum - minimum + 1;
-        targets.insert(
-            *node,
-            minimum + priority_bucket(priority(seed, *node, *node), range),
-        );
-    }
-    let mut unique = BTreeSet::new();
-    for edges in incident.values() {
-        for edge in edges {
-            work.tick()?;
-            unique.insert(*edge);
-        }
-    }
-    let mut ranked = Vec::new();
-    reserve_connection(&mut ranked, unique.len())?;
-    for edge in unique {
-        work.tick()?;
-        ranked.push((priority(seed, edge.first, edge.second), edge));
-    }
-    ranked.sort_unstable();
-    let mut degree = BTreeMap::<FamilySiteId, usize>::new();
-    for (_, edge) in &ranked {
-        work.tick()?;
-        let first = *degree.get(&edge.first).unwrap_or(&0);
-        let second = *degree.get(&edge.second).unwrap_or(&0);
-        if !selected.contains(edge)
-            && (first < minimum || second < minimum)
-            && first < maximum
-            && second < maximum
-        {
-            selected.insert(*edge);
-            *degree.entry(edge.first).or_default() += 1;
-            *degree.entry(edge.second).or_default() += 1;
-        }
-    }
-    for (_, edge) in &ranked {
-        work.tick()?;
-        let first = *degree.get(&edge.first).unwrap_or(&0);
-        let second = *degree.get(&edge.second).unwrap_or(&0);
-        if !selected.contains(edge)
-            && (first < *targets.get(&edge.first).unwrap_or(&0)
-                || second < *targets.get(&edge.second).unwrap_or(&0))
-            && first < maximum
-            && second < maximum
-        {
-            selected.insert(*edge);
-            *degree.entry(edge.first).or_default() += 1;
-            *degree.entry(edge.second).or_default() += 1;
-        }
-    }
-    Ok(())
-}
-
-/// Selects independent deterministic-priority Prim trees for every nonisolated graph component.
-fn select_prim(
-    graph: &SiteAdjacencyGraph,
-    incident: &BTreeMap<FamilySiteId, Vec<SiteAdjacencyEdge>>,
-    seed: u32,
-    selected: &mut BTreeSet<SiteAdjacencyEdge>,
-    work: &mut Work<'_>,
-) -> Result<(), ConnectionPathError> {
-    for component in graph.components() {
-        let Some(&root) = component.members.first() else {
-            continue;
-        };
-        if incident.get(&root).is_none_or(Vec::is_empty) {
-            continue;
-        }
-        let mut visited = BTreeSet::from([root]);
-        let mut queue = BinaryHeap::<std::cmp::Reverse<(u64, SiteAdjacencyEdge)>>::new();
-        queue.try_reserve(incident[&root].len()).map_err(|_| {
-            ConnectionPathError::new(
-                "connection.allocation",
-                "connection priority allocation failed",
-            )
-        })?;
-        for edge in &incident[&root] {
-            work.tick()?;
-            queue.push(std::cmp::Reverse((
-                priority(seed, edge.first, edge.second),
-                *edge,
-            )));
-        }
-        while let Some(std::cmp::Reverse((_, edge))) = queue.pop() {
-            work.tick()?;
-            let first_seen = visited.contains(&edge.first);
-            let second_seen = visited.contains(&edge.second);
-            if first_seen == second_seen {
-                continue;
-            }
-            let next = if first_seen { edge.second } else { edge.first };
-            visited.insert(next);
-            selected.insert(edge);
-            queue.try_reserve(incident[&next].len()).map_err(|_| {
-                ConnectionPathError::new(
-                    "connection.allocation",
-                    "connection priority allocation failed",
-                )
-            })?;
-            for candidate in &incident[&next] {
-                work.tick()?;
-                queue.push(std::cmp::Reverse((
-                    priority(seed, candidate.first, candidate.second),
-                    *candidate,
-                )));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Decomposes every selected edge exactly once into deterministic open line paths.
@@ -882,11 +746,16 @@ fn priority_bucket(priority: u64, range: usize) -> usize {
     ((u128::from(priority) * range as u128) >> u64::BITS) as usize
 }
 
-/// Builds the stable content identity while explicitly excluding diagnostics and operational limits.
+/// Builds complete selected-edge/path/singleton identity while excluding diagnostics and work policy.
+/// # Errors
+/// Returns cancellation, finite inspection exhaustion or fingerprint storage failure atomically.
+#[allow(clippy::too_many_arguments)] // Hashes the complete explicit output topology without hiding policy inputs.
 fn fingerprint(
     output: PatternOutputLayerId,
     graph: &SiteAdjacencyGraph,
     program: &ConnectionProgram,
+    selection: ConnectionSelectionIntent,
+    isolated_points: &[super::SiteAdjacencyNode],
     edges: &[SiteAdjacencyEdge],
     paths: &[ConnectionPath],
     work: &mut Work<'_>,
@@ -897,6 +766,11 @@ fn fingerprint(
     hasher.bytes(&output.0.to_le_bytes());
     hasher.text(graph.fingerprint());
     append_program(&mut hasher, program);
+    hasher.bytes(&selection.maximum_final_degree.unwrap_or(0).to_le_bytes());
+    hasher.byte(u8::from(selection.cycles == toniator_domain::ConnectionCyclePolicy::Forbid));
+    hasher.bytes(&selection.minimum_component_points.to_le_bytes());
+    hasher.bytes(&(isolated_points.len() as u64).to_le_bytes());
+    for node in isolated_points { work.tick()?; hasher.site_id(node.id); }
     for edge in edges {
         work.tick()?;
         hasher.site_id(edge.first);

@@ -2,6 +2,8 @@
 
 //! The shared mutable-document boundary for headless Toniator frontends.
 
+pub mod preview_cache;
+
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 #[cfg(test)]
@@ -69,7 +71,7 @@ use toniator_patterns::{
     REGION_TREATMENT_CONTRACT_ID, RegionReference, RegionTreatmentLimits,
     SITE_ADJACENCY_CONTRACT_ID, SiteUsageSet, TypedFamilyOutput, TypedRealization,
     VORONOI_REGION_CONTRACT_ID, VoronoiRegionDiagnostics, VoronoiRegionLimits,
-    VoronoiRegionRequest, build_connection_paths_cancellable, build_guide_faces_cancellable,
+    VoronoiRegionRequest, build_connection_paths_with_selection_cancellable, build_guide_faces_cancellable,
     build_typed_site_adjacency_cancellable, build_voronoi_regions_cancellable,
     connection_program_contract_id, evaluate_straight_grid,
     evaluate_typed_connection_paths_with_source_cancellable,
@@ -401,6 +403,7 @@ impl Default for CompositeOutputLimits {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvaluationLimits {
     max_family_candidates: usize,
+    construction_mode: toniator_patterns::ConstructionMode,
     curve_work: CurveWorkLimits,
     max_flattened_raster_edges: usize,
     max_transformed_curve_segment_instances: usize,
@@ -419,6 +422,11 @@ pub struct EvaluationLimits {
 impl Eq for EvaluationLimits {}
 
 impl EvaluationLimits {
+    /// Selects exact construction policy; this does not change authored intent or calibration.
+    pub fn with_construction_mode(mut self, mode: toniator_patterns::ConstructionMode) -> Self {
+        self.construction_mode = mode;
+        self
+    }
     /// Represents the absence of an application-authored creative-work ceiling.
     ///
     /// Checked arithmetic, allocation failure, cancellation, and machine
@@ -458,6 +466,7 @@ impl EvaluationLimits {
         let default_offsets = PathOffsetLimits::default();
         Self {
             max_family_candidates,
+            construction_mode: toniator_patterns::ConstructionMode::Canvas,
             curve_work: CurveWorkLimits::default(),
             max_flattened_raster_edges: unlimited,
             max_transformed_curve_segment_instances: unlimited,
@@ -3701,6 +3710,10 @@ impl EvaluationResult {
     pub fn scene(&self) -> &RenderScene {
         self.scene.as_ref()
     }
+    /// Shares the immutable evaluated scene without copying canonical geometry or source bytes.
+    pub fn shared_scene(&self) -> Arc<RenderScene> {
+        self.scene.clone()
+    }
     pub fn raster(&self) -> &RasterSurface {
         self.raster.as_ref()
     }
@@ -4134,8 +4147,16 @@ fn evaluate_cached_document_impl(
         return Err(EvaluationRunError::Cancelled);
     }
     let document = request.snapshot.document();
+    let mut construction_context = toniator_patterns::ConstructionContext::current();
+    construction_context.mode = limits.construction_mode;
+    construction_context.canvas = toniator_patterns::Bounds::new(
+        toniator_patterns::Point2::new(0.0, 0.0),
+        toniator_patterns::Point2::new(document.canvas().width, document.canvas().height),
+    );
+    let _construction_guard = construction_context.enter();
     let structural_preview = request.structural_preview;
-    request.snapshot
+    request
+        .snapshot
         .validate()
         .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
     let model = document.channel_model().ok_or(EvaluationError::new(
@@ -4188,15 +4209,16 @@ fn evaluate_cached_document_impl(
                 channel.weighting,
             )
             .map_err(EvaluationError::from_pipeline)?;
-            let uniform_marks = !structural_preview && plan
-                .ordered_outputs
-                .iter()
-                .filter(|output| output.marks().is_some())
-                .map(|output| document.effective_mark_density(channel.id, output.layer_id))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(EvaluationError::from_domain)?
-                .iter()
-                .any(|density| density.mode == toniator_domain::MarkDensityMode::Uniform);
+            let uniform_marks = !structural_preview
+                && plan
+                    .ordered_outputs
+                    .iter()
+                    .filter(|output| output.marks().is_some())
+                    .map(|output| document.effective_mark_density(channel.id, output.layer_id))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(EvaluationError::from_domain)?
+                    .iter()
+                    .any(|density| density.mode == toniator_domain::MarkDensityMode::Uniform);
             if uniform_marks && let Some(random) = &mut plan.family.random {
                 random.full_population_for_uniform_marks = true;
                 // Ordinary weighting is consumed only by later thinning. Keep the
@@ -4541,7 +4563,9 @@ fn evaluate_cached_document_impl(
                     density.mode == toniator_domain::MarkDensityMode::Uniform
                 });
             let uniform_fit = if uniform_marks {
-                let saved = request.snapshot.saved_calibration_for(channel.id)
+                let saved = request
+                    .snapshot
+                    .saved_calibration_for(channel.id)
                     .map_err(EvaluationError::from_domain)?
                     .ok_or(EvaluationError::new(
                         "calibration.missing",
@@ -4549,7 +4573,8 @@ fn evaluate_cached_document_impl(
                     ))?;
                 realization_key.uniform_calibration = Some(saved.clone());
                 let uniform = saved.uniform().ok_or(EvaluationError::new(
-                    "calibration.uniform.missing", "Uniform marks need a saved population calibration; Recalibrate",
+                    "calibration.uniform.missing",
+                    "Uniform marks need a saved population calibration; Recalibrate",
                 ))?;
                 let fit_key = DocumentUniformFitCacheKey {
                     family_content: key.content.clone(),
@@ -4626,7 +4651,9 @@ fn evaluate_cached_document_impl(
             };
             let mut prepared_coverage = None;
             let calibrated_curve = if calibrate {
-                let saved = request.snapshot.saved_calibration_for(channel.id)
+                let saved = request
+                    .snapshot
+                    .saved_calibration_for(channel.id)
                     .map_err(EvaluationError::from_domain)?
                     .ok_or(EvaluationError::new(
                         "calibration.missing",
@@ -4700,7 +4727,8 @@ fn evaluate_cached_document_impl(
                     let response_input = calibrated_curve
                         .as_deref()
                         .map(|fit| {
-                            let (minimum, maximum) = fit.target_range
+                            let (minimum, maximum) = fit
+                                .target_range
                                 .expect("persisted coverage transfer retains desired endpoints");
                             toniator_patterns::GeometryResponseInput::AbsoluteCoverage {
                                 curve: &fit.curve,
@@ -5396,19 +5424,39 @@ fn cache_source_color_realization(
 /// Moves one generalized canonical-mark output into shared cache/scene payloads.
 fn cache_canonical_mark_realization(
     value: toniator_patterns::TypedRealization<CanonicalMarkRealization>,
-) -> DocumentRealization {
+) -> (DocumentRealization, SiteUsageSet) {
     let output = value.output;
-    DocumentRealization::Canonical {
-        geometry: Arc::new(GeometryOutput::CanonicalMarks(output.marks)),
-        paints: shared_sampled_paints(output.paints),
-        fingerprint: output.realization_fingerprint,
-    }
+    let usage = output.usage;
+    (
+        DocumentRealization::Canonical {
+            geometry: Arc::new(GeometryOutput::CanonicalMarks(output.marks)),
+            paints: shared_sampled_paints(output.paints),
+            fingerprint: output.realization_fingerprint,
+        },
+        usage,
+    )
 }
 
 /// Moves one canonical-stroke output into the sole cache/scene geometry allocation.
 fn cache_stroke_realization(value: CanonicalStrokeRealization) -> DocumentRealization {
     DocumentRealization::Strokes {
         geometry: Arc::new(GeometryOutput::CanonicalStrokes(value.strokes)),
+        fingerprint: value.realization_fingerprint,
+    }
+}
+
+/// Moves a connected-points result into its mixed payload without manufacturing zero-length strokes.
+/// Frozen selection supplies both centerline strokes and source-responsive singleton circles.
+fn cache_connection_realization(
+    value: toniator_patterns::CanonicalConnectionRealization,
+) -> DocumentRealization {
+    DocumentRealization::Strokes {
+        geometry: Arc::new(GeometryOutput::CanonicalConnections(
+            toniator_patterns::CanonicalConnections {
+                strokes: value.strokes,
+                isolated_points: value.isolated_points,
+            },
+        )),
         fingerprint: value.realization_fingerprint,
     }
 }
@@ -5815,8 +5863,7 @@ fn realize_uniform_mark_output(
         is_cancelled,
     )
     .map_err(EvaluationError::from_pipeline)?;
-    let realization = cache_canonical_mark_realization(output.realization);
-    let usage = mark_site_usage(&selected, &realization)?;
+    let (realization, usage) = cache_canonical_mark_realization(output.realization);
     Ok(DocumentOutputRealization {
         output_layer_id: capability.layer_id,
         capability: capability.clone(),
@@ -5956,7 +6003,12 @@ fn filtered_family_for_output<'a>(
 fn transformed_curve_segment_instances(
     value: &DocumentRealization,
 ) -> Result<usize, EvaluationError> {
-    if let GeometryOutput::CanonicalStrokes(strokes) = value.geometry().as_ref() {
+    if let GeometryOutput::CanonicalStrokes(strokes)
+    | GeometryOutput::CanonicalConnections(toniator_patterns::CanonicalConnections {
+        strokes,
+        ..
+    }) = value.geometry().as_ref()
+    {
         return strokes.iter().try_fold(0_usize, |total, stroke| {
             total
                 .checked_add(stroke.path.segments().len())
@@ -5979,6 +6031,7 @@ fn transformed_curve_segment_instances(
         let count = match mark {
             CanonicalMark::Circle { .. } => 0,
             CanonicalMark::ClosedPath(path) => path.path.segments().len(),
+            CanonicalMark::DeferredPath(mark) => mark.prototype.path().segments().len(),
         };
         total.checked_add(count).ok_or(EvaluationError::new(
             "realization.mark.segment_limit",
@@ -5996,7 +6049,12 @@ fn transformed_curve_segment_instances(
 ///
 /// Returns a stable stroke-limit diagnostic if a completed collection overflows `usize`.
 fn stroke_work(value: &DocumentRealization) -> Result<(usize, usize), EvaluationError> {
-    let GeometryOutput::CanonicalStrokes(strokes) = value.geometry().as_ref() else {
+    let (GeometryOutput::CanonicalStrokes(strokes)
+    | GeometryOutput::CanonicalConnections(toniator_patterns::CanonicalConnections {
+        strokes,
+        ..
+    })) = value.geometry().as_ref()
+    else {
         return Ok((0, 0));
     };
     canonical_stroke_work(strokes)
@@ -6020,19 +6078,10 @@ fn canonical_stroke_work(
                         "realization.stroke.profile_limit",
                         "canonical stroke profile sample count overflows",
                     ))?;
-            let stroke_outline_segments =
-                stroke
-                    .outline
-                    .contours
-                    .iter()
-                    .try_fold(0_usize, |total, contour| {
-                        total
-                            .checked_add(contour.segments.len())
-                            .ok_or(EvaluationError::new(
-                                "realization.stroke.outline_limit",
-                                "canonical stroke outline segment count overflows",
-                            ))
-                    })?;
+            let stroke_outline_segments = stroke
+                .outline
+                .logical_segment_count()
+                .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
             let outline_segments = outline_segments
                 .checked_add(stroke_outline_segments)
                 .ok_or(EvaluationError::new(
@@ -6067,6 +6116,27 @@ fn realization_workloads(
             kind: EvaluationWorkloadKind::Marks,
             count: marks.len(),
         }]),
+        GeometryOutput::CanonicalConnections(value) => {
+            let (profile_samples, outline_segments) = canonical_stroke_work(&value.strokes)?;
+            Ok(vec![
+                EvaluationWorkloadMetric {
+                    kind: EvaluationWorkloadKind::Strokes,
+                    count: value.strokes.len(),
+                },
+                EvaluationWorkloadMetric {
+                    kind: EvaluationWorkloadKind::Marks,
+                    count: value.isolated_points.len(),
+                },
+                EvaluationWorkloadMetric {
+                    kind: EvaluationWorkloadKind::StrokeProfileSamples,
+                    count: profile_samples,
+                },
+                EvaluationWorkloadMetric {
+                    kind: EvaluationWorkloadKind::StrokeOutlineSegments,
+                    count: outline_segments,
+                },
+            ])
+        }
         GeometryOutput::CanonicalStrokes(strokes) => {
             let (profile_samples, outline_segments) = canonical_stroke_work(strokes)?;
             Ok(vec![
@@ -6412,7 +6482,7 @@ fn evaluate_document_channel(
                 guide_mechanism_id,
                 dimensions,
             } => {
-                if definition.coverage.guard_steps == 0 {
+                if definition.coverage.guard_steps == 0 && family.family().generic_guides.is_some() {
                     return Err(EvaluationError::new(
                         "region.guide_faces.coverage.guard_steps",
                         "guide-face regions require at least one configured guard step",
@@ -6528,12 +6598,12 @@ fn evaluate_document_channel(
                 definition.coverage.guard_steps,
                 &plan.ordered_outputs,
             )?,
-            support_radius: required_support_radius_for_outputs(
+            support_radius: required_support_radius_for_output(
                 document.canvas(),
                 effective,
                 definition,
                 &plan.family,
-                &plan.ordered_outputs,
+                output_capability,
             )?,
             max_family_candidates,
         };
@@ -6546,21 +6616,8 @@ fn evaluate_document_channel(
             is_cancelled,
         )
         .map_err(EvaluationError::from_pipeline)?;
-        let members_by_vertex = maze
-            .source_sites
-            .iter()
-            .map(|site| (site.id, site.source.id))
-            .collect::<BTreeMap<_, _>>();
-        let usage = SiteUsageSet::new(
-            family.site_set().product_mechanism_id(),
-            maze.retained_walls
-                .iter()
-                .flat_map(|wall| [wall.id.first, wall.id.second])
-                .filter_map(|vertex| members_by_vertex.get(&vertex).copied())
-                .collect(),
-        )
-        .map_err(EvaluationError::from_pipeline)?;
-        drop(members_by_vertex);
+        let usage = toniator_patterns::maze_site_usage_for_family_cancellable(family, &maze, is_cancelled)
+            .map_err(EvaluationError::from_pipeline)?;
         return Ok((
             cache_stroke_realization(
                 toniator_patterns::realize_maze_canonical_strokes_with_response_cancellable(
@@ -6630,10 +6687,11 @@ fn evaluate_document_channel(
             is_cancelled,
         )
         .map_err(EvaluationError::from_pipeline)?;
-        let paths = build_connection_paths_cancellable(
+        let paths = build_connection_paths_with_selection_cancellable(
             output_capability.layer_id,
             &graph,
             &resolved_program,
+            output_capability.connection_selection().expect("connection capability owns selection"),
             connection_limits,
             is_cancelled,
         )
@@ -6641,15 +6699,11 @@ fn evaluate_document_channel(
         drop(graph);
         let usage = SiteUsageSet::new(
             family.site_set().product_mechanism_id(),
-            paths
-                .selected_edges
-                .iter()
-                .flat_map(|edge| [edge.first, edge.second])
-                .collect(),
+            paths.used_site_ids_cancellable(is_cancelled).map_err(|error| EvaluationError::new(error.path(), error.message()))?,
         )
         .map_err(EvaluationError::from_pipeline)?;
         return Ok((
-            cache_stroke_realization(
+            cache_connection_realization(
                 toniator_patterns::realize_connection_canonical_strokes_with_response_cancellable(
                     &paths,
                     source,
@@ -6714,11 +6768,14 @@ fn evaluate_document_channel(
                 "Curve Motif output requires a valid document-owned open path",
             )
         })?;
+        let tone_rows=toniator_patterns::prepare_curve_motif_tone_rows_cancellable(family,&motif,mirror_alternate_rows,alternate_row_phase,is_cancelled,progress).map_err(EvaluationError::from_pipeline)?;
+        let interval=family.tone_sample_interval(output_capability.tone_sample_spacing().ok_or(EvaluationError::new("realization.tone.applicability","motif requires tone spacing"))?).map_err(EvaluationError::from_pipeline)?;
         let realization =
-            toniator_patterns::realize_curve_motif_canonical_strokes_with_response_cancellable(
+            toniator_patterns::realize_prepared_curve_motif_tone_strokes_with_response_cancellable(
                 family.family_fingerprint(),
-                family.site_set(),
-                &motif,
+                &tone_rows,
+                interval,
+                motif.segments().len(),
                 structure_id,
                 style,
                 mirror_alternate_rows,
@@ -6735,7 +6792,6 @@ fn evaluate_document_channel(
                 max_stroke_outline_segments,
                 response_input,
                 is_cancelled,
-                progress,
             )
             .map_err(EvaluationError::from_pipeline)?;
         return Ok((
@@ -6787,7 +6843,7 @@ fn evaluate_document_channel(
             None,
         ));
     }
-    let realization = if matches!(
+    let (realization, usage) = if matches!(
         authored_output.realization,
         PatternOutputRealization::MarkPrototype { .. }
     ) {
@@ -6811,7 +6867,7 @@ fn evaluate_document_channel(
             .realization,
         )
     } else {
-        match channel.paint {
+        let realization = match channel.paint {
             ChannelPaint::Solid(_) => cache_mapped_realization(
                 toniator_patterns::realize_typed_mapped_output_with_response_cancellable(
                     family,
@@ -6843,9 +6899,10 @@ fn evaluate_document_channel(
                 .map_err(EvaluationError::from_pipeline)?
                 .realization,
             ),
-        }
+        };
+        let usage = mark_site_usage(family, &realization)?;
+        (realization, usage)
     };
-    let usage = mark_site_usage(family, &realization)?;
     Ok((realization, usage, None))
 }
 
@@ -6921,7 +6978,23 @@ fn mark_site_usage(
                     CanonicalMark::ClosedPath(path) => {
                         members.insert(path.source_site_id);
                     }
+                    CanonicalMark::DeferredPath(path) => {
+                        members.insert(path.source_site_id);
+                    }
                     CanonicalMark::Circle { .. } => {}
+                }
+            }
+        }
+        GeometryOutput::CanonicalConnections(value) => {
+            for mark in &value.isolated_points {
+                if let CanonicalMark::Circle {
+                    source_site_id,
+                    radius,
+                    ..
+                } = mark
+                    && *radius > 0.0
+                {
+                    members.insert(*source_site_id);
                 }
             }
         }
@@ -7017,11 +7090,15 @@ struct DocumentFamilyContentKey {
 #[derive(Clone, Debug, PartialEq)]
 struct DocumentFamilyCacheKey {
     content: DocumentFamilyContentKey,
+    /// Positive-epsilon topology consumers require the exact requested finite merge population.
+    exact_support: bool,
     candidate_limit: usize,
     curve_work: CurveWorkLimits,
 }
 
-/// Reports whether a document-family cache entry has identical content and a sufficiently broad envelope.
+/// Reuses matching finite family content with sufficient support, requiring exact support for
+/// positive-epsilon Maze/Voronoi populations whose greedy merge phase depends on exterior input.
+/// This is upstream population admission; exact-key reuse and unrelated broader reuse remain.
 fn document_family_key_supports(
     candidate: &DocumentFamilyCacheKey,
     requested: &DocumentFamilyCacheKey,
@@ -7030,7 +7107,13 @@ fn document_family_key_supports(
     let requested_support = f64::from_bits(requested.content.required_support_radius);
     let mut comparable = candidate.clone();
     comparable.content.required_support_radius = requested.content.required_support_radius;
-    comparable == *requested && candidate_support >= requested_support
+    comparable.exact_support = requested.exact_support;
+    comparable == *requested
+        && if requested.exact_support {
+            candidate_support == requested_support
+        } else {
+            candidate_support >= requested_support
+        }
 }
 
 /// Adds one longitudinal guard interval when phase-shifted Curve Motif rows need padded coverage.
@@ -7077,6 +7160,7 @@ fn curve_motif_phase_guard_steps_adds_one_interval_and_rejects_overflow() {
         source_filter: toniator_domain::SiteUseFilter::All,
         consumes: toniator_patterns::StructuralProductCapability::AlongGuideSites,
         payload: toniator_patterns::OutputCapabilityPayload::CurveMotifPaths {
+            tone_sample_spacing: Default::default(),
             site_mechanism_id: toniator_domain::PatternMechanismId(2),
             structure_id: toniator_domain::AuthoredStructureId(3),
             style: toniator_domain::PathStrokeStyle::default(),
@@ -7128,7 +7212,20 @@ fn document_family_cache_key(
 ) -> Result<DocumentFamilyCacheKey, EvaluationError> {
     let mut definition_key = family_definition_key(definition);
     definition_key.resolved_source_weighting = resolved_source_weighting(family);
+    let exact_support = family.product
+        == toniator_patterns::StructuralProductCapability::GuideIntersections
+        && family.generic_guides.is_none()
+        && family.parametric_curve.is_none()
+        && family.merge_epsilon.is_some_and(|epsilon| epsilon > 0.0)
+        && outputs.iter().any(|output| {
+            output.maze_walls().is_some()
+                || matches!(
+                    output.regions(),
+                    Some(toniator_domain::RegionSourceIntent::VoronoiSites { .. })
+                )
+        });
     Ok(DocumentFamilyCacheKey {
+        exact_support,
         content: DocumentFamilyContentKey {
             canvas: (canvas.width.to_bits(), canvas.height.to_bits()),
             density: (
@@ -7207,11 +7304,10 @@ fn required_support_radius_for_outputs(
 
 /// Derives one output's conservative family support request from its explicit capability.
 ///
-/// Ordinary straight/grid Voronoi producers already expand their guard candidates inside the
-/// family evaluator, so their base support retains only authored additional margin. Finite
-/// parametric and random-site producers require the explicit guard envelope here because their
-/// fixed curve or stochastic site source cannot synthesize it from the output alone. Every Region
-/// response then adds only its positive normalized-fill outward extent.
+/// Straight Maze/Guide Faces reserve reciprocal complete-cell reach; straight-intersection
+/// Voronoi reserves finite defining-neighbor reach including the direct-merge allowance.
+/// Finite parametric, arbitrary authored and random sources retain their separate existing
+/// support contracts. Every Region response then adds its unchanged positive outward extent.
 ///
 /// # Errors
 ///
@@ -7236,7 +7332,20 @@ fn required_support_radius_for_output(
                     * resolved_program.adjacency().maximum_distance,
         );
     }
-    if output.maze_walls().is_some() || output.guide_paths().is_some() {
+    if output.maze_walls().is_some() {
+        let pitch = maximum_emitted_guide_spacing(family, canvas, &effective.resolved_density)
+            .map_err(EvaluationError::from_pipeline)?;
+        let reach = toniator_patterns::straight_topology_cell_reach(
+            family,
+            canvas,
+            &effective.resolved_density,
+            effective.pattern_rotation_degrees,
+            &family.site_selection,
+        )
+        .map_err(EvaluationError::from_pipeline)?;
+        return checked_region_support_add(definition.coverage.additional_margin, pitch.max(reach));
+    }
+    if output.guide_paths().is_some() {
         return Ok(
             maximum_emitted_guide_spacing(family, canvas, &effective.resolved_density)
                 .map_err(EvaluationError::from_pipeline)?
@@ -7244,7 +7353,12 @@ fn required_support_radius_for_output(
         );
     }
     if let Some(region_source) = output.regions() {
-        if definition.coverage.guard_steps == 0 {
+        if definition.coverage.guard_steps == 0
+            && !matches!(
+                region_source,
+                toniator_domain::RegionSourceIntent::GuideFaces { .. }
+            )
+        {
             return Err(EvaluationError::new(
                 "region.voronoi.coverage.guard_steps",
                 "ordinary Voronoi regions require at least one configured guard step",
@@ -7262,8 +7376,25 @@ fn required_support_radius_for_output(
             }
         };
         let base_support = match region_source {
-            toniator_domain::RegionSourceIntent::GuideFaces { .. } => {
-                checked_region_support_add(definition.coverage.additional_margin, nominal_extent)?
+            toniator_domain::RegionSourceIntent::GuideFaces { dimensions, .. } => {
+                let reach = if family.generic_guides.is_none() {
+                    toniator_patterns::straight_topology_cell_reach(
+                        family,
+                        canvas,
+                        &effective.resolved_density,
+                        effective.pattern_rotation_degrees,
+                        dimensions,
+                    )
+                    .map_err(EvaluationError::from_pipeline)?
+                } else {
+                    // Authored curved arrangements retain their existing generation contract;
+                    // reciprocal straight-lattice diameter cannot certify their arbitrary cells.
+                    nominal_extent
+                };
+                checked_region_support_add(
+                    definition.coverage.additional_margin,
+                    nominal_extent.max(reach),
+                )?
             }
             toniator_domain::RegionSourceIntent::VoronoiSites { .. } => {
                 let parametric_guard = matches!(
@@ -7273,7 +7404,24 @@ fn required_support_radius_for_output(
                 let producer_guard = parametric_guard
                     || family.product
                         == toniator_patterns::StructuralProductCapability::RandomSites;
-                if producer_guard {
+                if family.product
+                    == toniator_patterns::StructuralProductCapability::GuideIntersections
+                    && family.generic_guides.is_none()
+                    && family.parametric_curve.is_none()
+                {
+                    let diameter = toniator_patterns::straight_topology_cell_reach(
+                        family,
+                        canvas,
+                        &effective.resolved_density,
+                        effective.pattern_rotation_degrees,
+                        &family.site_selection,
+                    )
+                    .map_err(EvaluationError::from_pipeline)?;
+                    // Every raw lattice point lies within epsilon of its unchanged merge
+                    // representative: rho=D/2+epsilon supplies the finite local 3*rho guard.
+                    let reach = 1.5 * diameter + 3.0 * family.merge_epsilon.unwrap_or(0.0);
+                    checked_region_support_add(definition.coverage.additional_margin, reach)?
+                } else if producer_guard {
                     checked_region_support_add(
                         definition.coverage.additional_margin,
                         f64::from(definition.coverage.guard_steps) * nominal_extent,
@@ -7517,6 +7665,7 @@ fn required_support_radius_from_fill(
 
 #[derive(Clone, Debug, PartialEq)]
 struct DocumentRealizationCacheKey {
+    construction_mode: toniator_patterns::ConstructionMode,
     family_content: DocumentFamilyContentKey,
     output_layer_id: toniator_domain::PatternOutputLayerId,
     contract: RealizationContractKey,
@@ -7638,6 +7787,7 @@ fn document_realization_cache_key(
     )
     .then(|| limits.region_treatment_limits());
     Ok(DocumentRealizationCacheKey {
+        construction_mode: limits.construction_mode,
         family_content: family_key.content.clone(),
         output_layer_id: output_setting.output_layer_id,
         contract: realization_contract_key_for_output(definition, output_setting.output_layer_id)?,
@@ -8808,6 +8958,7 @@ pub(crate) mod test_support {
         definition.output_layers = vec![PatternOutputLayer::all(
             PatternOutputLayerId(73),
             PatternOutputRealization::GuidePaths {
+                tone_sample_spacing: Default::default(),
                 guide_mechanism_id: guide,
                 style: toniator_domain::PathStrokeStyle::default(),
             },
@@ -8916,6 +9067,7 @@ pub(crate) mod test_support {
         definition.output_layers = vec![PatternOutputLayer::all(
             output_layer_id,
             PatternOutputRealization::ConnectionPaths {
+                selection: Default::default(),
                 site_mechanism_id,
                 program,
                 style: PathStrokeStyle::default(),
@@ -9871,6 +10023,7 @@ pub(crate) mod test_support {
         definition.output_layers = vec![PatternOutputLayer::all(
             PatternOutputLayerId(94),
             PatternOutputRealization::GuidePaths {
+                tone_sample_spacing: Default::default(),
                 guide_mechanism_id,
                 style: toniator_domain::PathStrokeStyle::default(),
             },
@@ -10888,7 +11041,9 @@ pub(crate) mod test_support {
     /// Builds one small typed-parametric-site Voronoi document at an intrinsic evidence canvas.
     ///
     /// The definition deliberately exposes only `AlongParametricCurveSites` to a Region layer;
-    /// raw `ParametricPaths` are not substituted as a Region producer.
+    /// raw `ParametricPaths` are not substituted as a Region producer; finite extent stays Fixed.
+    /// # Panics
+    /// Panics if the bounded valid fixture cannot construct its source, topology or region output.
     fn stage20q_parametric_voronoi_document(
         source_id: SourceReferenceId,
         response: RegionGeometryResponse,
@@ -10922,6 +11077,7 @@ pub(crate) mod test_support {
                         phase_degrees: 0.0,
                         winding: CurveWinding::CounterClockwise,
                     }),
+                    spiral_coverage: toniator_domain::SpiralCoveragePolicy::Fixed,
                     repetition: CurveRepetition::Single,
                 },
                 toniator_domain::PatternMechanism::AlongParametricCurveSites {
@@ -11552,6 +11708,7 @@ pub(crate) mod test_support {
             raw_parametric_paths.output_layers = vec![PatternOutputLayer::all(
                 PatternOutputLayerId(20_705),
                 PatternOutputRealization::ParametricPaths {
+                    tone_sample_spacing: Default::default(),
                     curve_mechanism_id: PatternMechanismId(20_702),
                     style: PathStrokeStyle::default(),
                 },
@@ -15072,11 +15229,13 @@ mod cache_key_tests {
             structural_source: broad.structural_source.clone(),
         };
         let loose = DocumentFamilyCacheKey {
+            exact_support: false,
             content: content.clone(),
             candidate_limit: usize::MAX,
             curve_work: broad.curve_work,
         };
         let strict = DocumentFamilyCacheKey {
+            exact_support: false,
             content: content.clone(),
             candidate_limit: usize::MAX,
             curve_work: finite.curve_work,
@@ -15166,6 +15325,7 @@ mod cache_key_tests {
         connection.output_layers.push(PatternOutputLayer::all(
             toniator_domain::PatternOutputLayerId(12),
             PatternOutputRealization::ConnectionPaths {
+                selection: Default::default(),
                 site_mechanism_id: toniator_domain::PatternMechanismId(10),
                 program: toniator_domain::ConnectionProgram::RandomLinks {
                     adjacency: toniator_domain::ConnectionAdjacencyIntent {
@@ -16184,3 +16344,6 @@ mod cache_key_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod artistic_connection_tests;

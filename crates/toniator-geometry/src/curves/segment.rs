@@ -335,24 +335,47 @@ impl CurveSegment {
         maximum_work_items: usize,
         maximum_leaves: usize,
     ) -> Result<ArcLengthProfile, CurveError> {
+        self.arc_length_profile_with_counts_cancellable(maximum_depth, maximum_work_items, maximum_leaves, &|| false)
+    }
+
+    /// Measures one segment with unchanged quadrature/depth accuracy and explicit caller work/storage policy.
+    /// # Errors
+    /// Returns cancellation, finite arithmetic, policy or actual fallible-allocation diagnostics atomically.
+    pub(crate) fn arc_length_profile_with_counts_cancellable(
+        &self,
+        maximum_depth: u8,
+        maximum_work_items: usize,
+        maximum_leaves: usize,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<ArcLengthProfile, CurveError> {
+        super::check_curve_cancelled(cancelled)?;
         if let Self::Line(line) = self {
+            let mut leaves = Vec::new();
+            super::reserve_curve(&mut leaves, 1)?;
+            leaves.push(ArcLengthLeaf {
+                start: 0.0,
+                end: 1.0,
+                length: distance(line.start, line.end)?,
+            });
             return Ok(ArcLengthProfile {
-                leaves: vec![ArcLengthLeaf {
-                    start: 0.0,
-                    end: 1.0,
-                    length: distance(line.start, line.end)?,
-                }],
+                leaves,
                 work_items: 1,
             });
         }
         let Self::CubicBezier(cubic) = self else {
             unreachable!("line segments returned before cubic subdivision")
         };
-        let mut stack = vec![(*cubic, 0.0, 1.0, 0_u8)];
+        let mut stack = Vec::new();
+        super::reserve_curve(&mut stack, 1)?;
+        stack.push((*cubic, 0.0, 1.0, 0_u8));
         let mut work_items = 0_usize;
         let mut leaves = Vec::new();
         while let Some((node, start, end, depth)) = stack.pop() {
-            work_items += 1;
+            super::check_curve_cancelled(cancelled)?;
+            work_items = work_items.checked_add(1).ok_or(CurveError::new(
+                "curve.path.arc_length.count_overflow",
+                "arc-length work exceeds machine representation",
+            ))?;
             if work_items > maximum_work_items {
                 return Err(CurveError::new(
                     "curve.path.arc_length.subdivision_limit",
@@ -377,6 +400,7 @@ impl CurveSegment {
                         "arc-length leaf limit exceeded",
                     ));
                 }
+                super::reserve_curve(&mut leaves, 1)?;
                 leaves.push(ArcLengthLeaf {
                     start,
                     end,
@@ -389,6 +413,7 @@ impl CurveSegment {
                 ));
             } else {
                 let middle = (start + end) * 0.5;
+                super::reserve_curve(&mut stack, 2)?;
                 stack.push((right, middle, end, depth + 1));
                 stack.push((left, start, middle, depth + 1));
             }
@@ -578,7 +603,10 @@ pub(crate) fn split_cubic(
     ))
 }
 
-/// Returns an exact sub-cubic preserving source direction over the supplied parameter interval.
+/// Returns an exact sub-cubic retaining included source endpoints and source direction.
+/// Endpoint intervals bypass redundant zero/one interpolation, preserving solved-node identity.
+/// # Errors
+/// Returns the existing parameter, finite-coordinate or subdivision arithmetic diagnostic.
 pub(crate) fn cubic_range(
     cubic: CubicBezierSegment,
     start: f64,
@@ -586,6 +614,12 @@ pub(crate) fn cubic_range(
 ) -> Result<CubicBezierSegment, CurveError> {
     if start == 0.0 && end == 1.0 {
         return Ok(cubic);
+    }
+    if start == 0.0 {
+        return Ok(split_cubic(cubic, end)?.0);
+    }
+    if end == 1.0 {
+        return Ok(split_cubic(cubic, start)?.1);
     }
     let (left, _) = split_cubic(cubic, end)?;
     let ratio = if end == 0.0 { 0.0 } else { start / end };

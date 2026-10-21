@@ -12,7 +12,28 @@ mod candidate_order_tests;
 #[cfg(feature = "test-evidence")]
 pub mod random_spatial_index_evidence;
 
+/// Opt-in witnesses reach the same provenance/origin routines used by production offset families.
+#[cfg(feature = "test-evidence")]
+pub mod artistic_tone_evidence {
+    pub use crate::curve_tone::{compose_source_location,offset_group_tone_domains};
+
+    /// Exercises exact final-world offset canonicalization without exposing another production geometry authority.
+    /// # Errors
+    /// Returns the same cancellation, trace, complete-collapse and checked path diagnostics as the producer.
+    pub fn canonicalize_world_offset_component_for_evidence(
+        component: &mut toniator_geometry::OffsetPathComponent,
+        limits: toniator_geometry::CurveWorkLimits,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), crate::PatternPipelineError> {
+        crate::remove_exact_zero_world_offset_lines(component, limits, cancelled)
+    }
+
+}
+
 mod coverage_response;
+mod curve_tone;
+pub use curve_tone::{ToneKnot, TonePathDomain, TonePathContinuation, ToneProfile, prepare_tone_profile_cancellable, prepare_tone_group_profiles_cancellable, prepare_curve_motif_tone_rows_cancellable};
+use curve_tone::{reserve_tone, motif_tone_continuation, tone_reference_interval, identity_source_intervals, compose_source_location, offset_group_tone_domains, straight_logical_tone_paths};
 mod builtin_calibrations;
 pub use coverage_response::{CoverageCurve, CoverageKnot, GeometryResponseInput};
 
@@ -21,13 +42,14 @@ use std::{
     error::Error,
     fmt,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
 use rayon::prelude::*;
+pub use toniator_geometry::{ConstructionContext, ConstructionCounter, ConstructionMode, ConstructionMetrics};
 use serde::Serialize;
 use spade::{
     DelaunayTriangulation, HasPosition, HierarchyHintGenerator, Point2 as SpadePoint, Triangulation,
@@ -49,7 +71,7 @@ use toniator_domain::{
 };
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID,
-    CanonicalCircleMark, CanonicalFillRule, CanonicalMark, CanonicalPathMark,
+    CanonicalCircleMark, CanonicalConnections, CanonicalFillRule, CanonicalMark, CanonicalPathMark,
     CanonicalRegionLimits, CanonicalRegionProposal, CanonicalRegionSet, CanonicalRegionSourceGroup,
     CanonicalRegionSourceId, CanonicalStroke, CanonicalStrokeSourceId, ConnectionPathId,
     ConnectionPathLimits, ConnectionPathSet, CubicBezierSegment, CurveError, CurvePath, CurveWorkLimits,
@@ -68,7 +90,7 @@ pub use toniator_geometry::{
     VORONOI_REGION_CONTRACT_ID, VariableWidthOutlineLimits, VariableWidthPathSample, Vector2,
     VoronoiRegionDiagnostics, VoronoiRegionLimits, VoronoiRegionRequest,
     advance_planar_constant_gap_frontier_cancellable, build_canonical_regions_cancellable,
-    build_connection_paths_cancellable, build_guide_faces_cancellable,
+    build_connection_paths_cancellable, build_connection_paths_with_selection_cancellable, build_guide_faces_cancellable,
     build_maze_walls_from_sites_cancellable, build_site_adjacency_cancellable,
     build_variable_width_outline_cancellable, build_voronoi_regions_cancellable,
     connection_program_contract_id, insert_solved_crossing_nodes_cancellable,
@@ -961,7 +983,7 @@ impl PresetRegistry {
                         "Connections",
                         "Clusters of marks joined by short, repeatable random connections.",
                     ),
-                    recipe: path_recipe(PatternStructureRecipe::ConnectionPaths {
+                    recipe: path_recipe(PatternStructureRecipe::ConnectionPaths { selection: Default::default(),
                         definition: Box::new(random(
                             "Clustered connections",
                             RandomSiteCharacter::Clustered {
@@ -993,7 +1015,7 @@ impl PresetRegistry {
                     recipe: PatternDefinitionRecipe::connected(
                         PatternStructureRecipe::AuthoredResources {
                             resources: vec![curve_motif_shape()],
-                            definition: Box::new(PatternStructureRecipe::CurveMotifPaths {
+                            definition: Box::new(PatternStructureRecipe::CurveMotifPaths { tone_sample_spacing: Default::default(),
                             definition: Box::new(
                                 PatternStructureRecipe::GeneralizedStraightGuides {
                                     name: "Curve motif rows".into(),
@@ -1066,7 +1088,7 @@ impl PresetRegistry {
                     recipe: path_recipe(PatternStructureRecipe::OrderedOutputs {
                         definition: Box::new(grid("One guide lines", &[0.0], true)),
                         outputs: vec![
-                            toniator_domain::PatternOutputRealizationRecipe::StructuralPaths {
+                            toniator_domain::PatternOutputRealizationRecipe::StructuralPaths { tone_sample_spacing: Default::default(),
                                 style: Default::default(),
                             },
                         ],
@@ -1250,7 +1272,7 @@ impl PresetRegistry {
                         "Connections",
                         "A branching tree of connections built on a triangular guide grid.",
                     ),
-                    recipe: path_recipe(PatternStructureRecipe::ConnectionPaths {
+                    recipe: path_recipe(PatternStructureRecipe::ConnectionPaths { selection: Default::default(),
                         definition: Box::new(grid(
                             "Triagrid spanning tree",
                             &[0.0, 60.0, 120.0],
@@ -1304,14 +1326,8 @@ impl PresetRegistry {
         )
         .expect("bundled preset literals satisfy registry validation");
         for preset in &mut registry.entries {
-            preset.saved_calibration = Some(
-                builtin_calibrations::calibration_for_recipe(
-                    &preset.metadata.id,
-                    &preset.recipe,
-                )
-                .expect("bundled saved calibration satisfies the current typed profile")
-                .expect("every bundled recipe has one checked-in saved calibration"),
-            );
+            preset.saved_calibration = builtin_calibrations::calibration_for_recipe(&preset.metadata.id, &preset.recipe)
+                .expect("available bundled calibration satisfies the current typed profile");
         }
         let requirement_document = Document::new_default_document(
             CanvasSpec {
@@ -1602,11 +1618,12 @@ pub struct FamilyCapability {
     pub parametric_curve: Option<ParametricCurveCapability>,
 }
 
-/// Resolved finite parametric source intent; it never stores generated geometry or sites.
+/// Resolved authored parametric source and extent intent, without generated geometry or sites.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParametricCurveCapability {
     pub source_id: toniator_geometry::StructuralPathSourceId,
     pub curve: ParametricCurve,
+    pub spiral_coverage: toniator_domain::SpiralCoveragePolicy,
     pub repetition: GuideRepetition,
     pub site_interval: Option<f64>,
     pub site_phase: Option<f64>,
@@ -1697,11 +1714,13 @@ pub enum OutputCapabilityPayload {
         orientation: MarkOrientation,
     },
     GuidePaths {
+        tone_sample_spacing: toniator_domain::ToneSampleSpacing,
         guide_mechanism_id: PatternMechanismId,
         style: toniator_domain::PathStrokeStyle,
     },
     /// Curve Motif carries only document-authoritative recipe fields until row paths are derived.
     CurveMotifPaths {
+        tone_sample_spacing: toniator_domain::ToneSampleSpacing,
         site_mechanism_id: PatternMechanismId,
         structure_id: AuthoredStructureId,
         style: toniator_domain::PathStrokeStyle,
@@ -1710,6 +1729,7 @@ pub enum OutputCapabilityPayload {
     },
     /// Connection selection remains authored while graph/path products are derived at evaluation time.
     ConnectionPaths {
+        selection: toniator_domain::ConnectionSelectionIntent,
         site_mechanism_id: PatternMechanismId,
         program: ConnectionProgram,
         style: toniator_domain::PathStrokeStyle,
@@ -1727,6 +1747,29 @@ pub enum OutputCapabilityPayload {
 impl Eq for OutputCapabilityPayload {}
 
 impl OutputCapability {
+    /// Reads artistic tone intent only for structural curve and motif outputs.
+    pub fn tone_sample_spacing(&self) -> Option<toniator_domain::ToneSampleSpacing> {
+        match self.payload {
+            OutputCapabilityPayload::GuidePaths {
+                tone_sample_spacing,
+                ..
+            }
+            | OutputCapabilityPayload::CurveMotifPaths {
+                tone_sample_spacing,
+                ..
+            } => Some(tone_sample_spacing),
+            _ => None,
+        }
+    }
+
+    /// Reads final graph policy without changing the existing candidate-program projection.
+    pub fn connection_selection(&self) -> Option<toniator_domain::ConnectionSelectionIntent> {
+        match self.payload {
+            OutputCapabilityPayload::ConnectionPaths { selection, .. } => Some(selection),
+            _ => None,
+        }
+    }
+
     /// Returns mark authority only when this output is a mark layer.
     pub fn marks(&self) -> Option<(&MarkPrototype, &MarkOrientation)> {
         match &self.payload {
@@ -1749,6 +1792,7 @@ impl OutputCapability {
             OutputCapabilityPayload::GuidePaths {
                 guide_mechanism_id,
                 style,
+                ..
             } => Some((guide_mechanism_id, style)),
             OutputCapabilityPayload::CurveMotifPaths { .. } => None,
             OutputCapabilityPayload::ConnectionPaths { .. } => None,
@@ -1770,6 +1814,7 @@ impl OutputCapability {
                 site_mechanism_id,
                 program,
                 style,
+                ..
             } => Some((*site_mechanism_id, program, *style)),
             _ => None,
         }
@@ -1832,6 +1877,15 @@ pub fn chain_curve_motif_rows_cancellable(
         is_cancelled,
         &|_, _| {},
     )
+}
+
+/// Full motif row plus stable authored/group tone origin and exact endpoint-copy continuation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CurveMotifToneRow {
+    pub path: CurvePath,
+    pub domain: TonePathDomain,
+    pub motif_segment_count: usize,
+    pub source_guide: Option<GuideInstanceId>,
 }
 
 /// Chains motif rows while reporting completed stable guide rows in output order.
@@ -2161,7 +2215,7 @@ pub fn realize_curve_motif_canonical_strokes_cancellable(
     )
 }
 
-/// Realizes the original frozen motif rows with a transient geometry response at every width sample.
+/// Realizes explicitly supplied frozen motif placement with completed response at artistic knots.
 ///
 /// # Errors
 /// Returns probe validation, chaining, sampling, outline, or cancellation diagnostics atomically.
@@ -2212,13 +2266,10 @@ pub fn realize_curve_motif_canonical_strokes_with_response_cancellable(
     )
 }
 
-/// Samples one already-chained Curve Motif row set without regenerating its placement.
-///
-/// The caller preserves the original row order and motif segment count from the same frozen
-/// family and document-owned prototype. Only canonical output/profile geometry is rebuilt per q.
-///
+/// Realizes explicitly supplied finite motif rows at Feature-one default tone spacing.
+/// Production callers with family authority use the prepared logical-row entry point instead.
 /// # Errors
-/// Returns probe, sampling, profile, outline, or cancellation diagnostics atomically.
+/// Returns the same profile/source/outline/cancellation diagnostics as the prepared entry point.
 #[allow(clippy::too_many_arguments)]
 pub fn realize_prechained_curve_motif_strokes_with_response_cancellable(
     family_fingerprint: &str,
@@ -2237,18 +2288,82 @@ pub fn realize_prechained_curve_motif_strokes_with_response_cancellable(
     response_input: GeometryResponseInput<'_>,
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+    let mut prepared = Vec::new();
+    for path in rows {
+        reserve_tone(
+            &mut prepared,
+            1,
+            "realization.tone.allocation",
+            "finite motif row allocation failed",
+        )?;
+        prepared.push(CurveMotifToneRow {
+            path: path.cloned_with_limits_cancellable(CurveWorkLimits::default(), is_cancelled)?,
+            domain: TonePathDomain::finite(),
+            motif_segment_count,
+            source_guide: None,
+        });
+    }
+    realize_prepared_curve_motif_tone_strokes_with_response_cancellable(
+        family_fingerprint,
+        &prepared,
+        canvas.width.max(canvas.height) / 100.0,
+        motif_segment_count,
+        structure_id,
+        style,
+        mirror_alternate_rows,
+        alternate_row_phase,
+        source,
+        canvas,
+        mapping,
+        response,
+        max_profile_samples,
+        max_outline_segments,
+        response_input,
+        is_cancelled,
+    )
+}
+
+/// Samples one complete logical Curve Motif row group without regenerating its placement.
+///
+/// The caller preserves the original row order and motif segment count from the same frozen
+/// family and document-owned prototype. Shared anchored source knots precede independent geometric
+/// refinement; completed uniform probes traverse the same full profile preparation.
+///
+/// # Errors
+/// Returns probe, sampling, profile, outline, or cancellation diagnostics atomically.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_prepared_curve_motif_tone_strokes_with_response_cancellable(
+    family_fingerprint: &str,
+    rows: &[CurveMotifToneRow],
+    tone_interval: f64,
+    motif_segment_count: usize,
+    structure_id: AuthoredStructureId,
+    style: toniator_domain::PathStrokeStyle,
+    mirror_alternate_rows: bool,
+    alternate_row_phase: Option<f64>,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    response_input: GeometryResponseInput<'_>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
     response_input.validate()?;
     let mut strokes = Vec::new();
-    reserve_stage20m(
+    reserve_tone(
         &mut strokes,
         rows.len(),
-        "curve_motif.allocation",
+        "realization.tone.allocation",
         "Curve Motif stroke allocation failed",
     )?;
     let mut profile_samples = 0_usize;
     let mut outline_segments = 0_usize;
     let mut identity = Fnv1a64State::new();
     identity.write(family_fingerprint.bytes());
+    identity.write("anchored-tone-v1".bytes());
+    identity.write(tone_interval.to_bits().to_le_bytes());
     identity.write(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.bytes());
     identity.write(structure_id.0.to_le_bytes());
     identity.write(u8::from(mirror_alternate_rows).to_le_bytes());
@@ -2256,7 +2371,82 @@ pub fn realize_prechained_curve_motif_strokes_with_response_cancellable(
     identity.write(response.minimum_thickness.to_bits().to_le_bytes());
     identity.write(response.maximum_thickness.to_bits().to_le_bytes());
     identity.write(response.bias.to_bits().to_le_bytes());
-    for (row_ordinal, path) in rows.iter().cloned().enumerate() {
+    let mut tones = Vec::new();
+    let mut group_start = 0;
+    let mut prepared_samples = 0_usize;
+    while group_start < rows.len() {
+        let first = &rows[group_start];
+        let key = first
+            .source_guide
+            .map(|guide| (guide.dimension_id, guide.index));
+        let count = if key.is_some() {
+            rows[group_start..]
+                .iter()
+                .take_while(|row| {
+                    row.source_guide
+                        .map(|guide| (guide.dimension_id, guide.index))
+                        == key
+                })
+                .count()
+        } else {
+            1
+        };
+        let last = &rows[group_start + count - 1];
+        let before =
+            motif_tone_continuation(&first.path, motif_segment_count, first.domain, is_cancelled)?;
+        let after =
+            motif_tone_continuation(&last.path, motif_segment_count, last.domain, is_cancelled)?;
+        let continuation = |distance| {
+            if distance < first.domain.start_distance {
+                before(distance)
+            } else {
+                after(distance)
+            }
+        };
+        let mut inputs = Vec::new();
+        reserve_tone(
+            &mut inputs,
+            count,
+            "realization.tone.allocation",
+            "motif tone group allocation failed",
+        )?;
+        inputs.extend(
+            rows[group_start..group_start + count]
+                .iter()
+                .map(|row| (&row.path, row.domain)),
+        );
+        let group = curve_tone::prepare_tone_group_profiles_with_continuation_cancellable(
+            &inputs,
+            tone_interval,
+            1.0,
+            max_profile_samples.saturating_sub(prepared_samples),
+            &|point| {
+                completed_stroke_thickness(point, source, canvas, mapping, response, response_input)
+            },
+            Some(&continuation),
+            is_cancelled,
+        )?;
+        for tone in group {
+            prepared_samples = prepared_samples.checked_add(tone.samples.len()).ok_or(
+                PatternPipelineError::new(
+                    "curve_motif.profile_limit",
+                    "motif tone profile count overflows",
+                ),
+            )?;
+            reserve_tone(
+                &mut tones,
+                1,
+                "realization.tone.allocation",
+                "motif tone profile allocation failed",
+            )?;
+            tones.push(tone);
+        }
+        group_start += count;
+    }
+    for ((row_ordinal, row), tone) in rows.iter().enumerate().zip(tones) {
+        let path = row
+            .path
+            .cloned_with_limits_cancellable(CurveWorkLimits::default(), is_cancelled)?;
         if is_cancelled() {
             return Err(PatternPipelineError::new(
                 "evaluation.cancelled",
@@ -2289,75 +2479,31 @@ pub fn realize_prechained_curve_motif_strokes_with_response_cancellable(
             })?,
             0,
         );
-        let pixel_footprint = (canvas.width / f64::from(source.identity().width))
-            .min(canvas.height / f64::from(source.identity().height));
-        let profile_sample_interval = nominal_basis.max(pixel_footprint);
-        let mut profile = Vec::new();
-        for (segment_index, segment) in path.segments().iter().enumerate() {
-            let start_sample = stroke_sample(
-                segment,
-                segment_index,
-                0.0,
-                source,
-                canvas,
-                mapping,
-                response,
-                response_input,
-                nominal_basis,
-            )?;
-            let end_sample = stroke_sample(
-                segment,
-                segment_index,
-                1.0,
-                source,
-                canvas,
-                mapping,
-                response,
-                response_input,
-                nominal_basis,
-            )?;
-            if profile.last().is_none_or(|previous: &StrokeProfileSample| {
-                previous.location != start_sample.location
-            }) {
-                if profile_samples >= max_profile_samples {
-                    return Err(PatternPipelineError::new(
-                        "curve_motif.profile_limit",
-                        "Curve Motif profile exceeds the sample limit",
-                    ));
-                }
-                profile.push(start_sample);
-                profile_samples += 1;
-            }
-            append_adaptive_stroke_interval(
-                segment,
-                segment_index,
-                0.0,
-                start_sample,
-                1.0,
-                end_sample,
-                0,
-                profile_sample_interval,
-                source,
-                canvas,
-                mapping,
-                response,
-                response_input,
-                nominal_basis,
-                &mut profile,
-                &mut profile_samples,
-                max_profile_samples,
-                is_cancelled,
-            )?;
+        let mut profile = tone.samples;
+        for sample in &mut profile {
+            sample.width = sample.normalized_thickness * nominal_basis;
         }
+        profile_samples =
+            profile_samples
+                .checked_add(profile.len())
+                .ok_or(PatternPipelineError::new(
+                    "curve_motif.profile_limit",
+                    "motif profile count overflows",
+                ))?;
+        let mut widths = Vec::new();
+        reserve_tone(
+            &mut widths,
+            profile.len(),
+            "realization.tone.allocation",
+            "motif outline width allocation failed",
+        )?;
+        widths.extend(profile.iter().map(|sample| VariableWidthPathSample {
+            location: sample.location,
+            width: sample.width,
+        }));
         let outline = build_variable_width_outline_cancellable(
             &path,
-            &profile
-                .iter()
-                .map(|sample| VariableWidthPathSample {
-                    location: sample.location,
-                    width: sample.width,
-                })
-                .collect::<Vec<_>>(),
+            &widths,
             style,
             response.bias,
             1.0 / 8.0,
@@ -2374,13 +2520,7 @@ pub fn realize_prechained_curve_motif_strokes_with_response_cancellable(
         )
         .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
         outline_segments = outline_segments
-            .checked_add(
-                outline
-                    .contours
-                    .iter()
-                    .map(|contour| contour.segments.len())
-                    .sum::<usize>(),
-            )
+            .checked_add(outline.logical_segment_count().map_err(|error|PatternPipelineError::new(error.path(),error.message()))?)
             .ok_or(PatternPipelineError::new(
                 "curve_motif.outline_limit",
                 "Curve Motif outline exceeds the segment limit",
@@ -2391,6 +2531,12 @@ pub fn realize_prechained_curve_motif_strokes_with_response_cancellable(
                 "Curve Motif outline exceeds the segment limit",
             ));
         }
+        identity.write(row.domain.start_distance.to_bits().to_le_bytes());
+        identity.write([
+            u8::from(row.domain.genuine_start),
+            u8::from(row.domain.genuine_end),
+            row.domain.continuation as u8,
+        ]);
         for sample in &profile {
             identity.write(sample.center.x.to_bits().to_le_bytes());
             identity.write(sample.center.y.to_bits().to_le_bytes());
@@ -2545,6 +2691,14 @@ pub struct ConnectionPathEvaluation {
     pub paths: ConnectionPathSet,
 }
 
+/// One full immutable centerline and its authored/group arc origin, before presentation clipping.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LogicalTonePath {
+    pub instance: StructuralPathInstance,
+    pub domain: TonePathDomain,
+    pub nominal_basis: f64,
+}
+
 /// Truthful non-site metadata retained for the current circle compatibility adapter.
 #[derive(Clone, Debug, PartialEq)]
 struct TypedFamilyStructure {
@@ -2555,6 +2709,9 @@ struct TypedFamilyStructure {
     antialias_margin: f64,
     generation_domain: Bounds,
     structural_path_set: Option<StructuralPathSet>,
+    logical_tone_paths: Arc<Vec<LogicalTonePath>>,
+    tone_reference_interval: f64,
+    logical_motif_sites: Option<Arc<FamilySiteSet>>,
     /// Per-guide nominal spacing retained with family output so realization never uses a global axis proxy.
     guide_nominal_bases: BTreeMap<StructuralPathInstanceId, f64>,
 }
@@ -2584,6 +2741,30 @@ impl TypedFamilyOutput {
     pub fn structural_path_set(&self) -> Option<&StructuralPathSet> {
         self.structure.structural_path_set.as_ref()
     }
+
+    /// Returns full shared tone centerlines, independent of presentation clipping.
+    pub fn logical_tone_paths(&self) -> &[LogicalTonePath] { &self.structure.logical_tone_paths }
+
+    /// Resolves the requested interval using the family's actual Feature metric, never a chord/pixel proxy.
+    /// # Errors
+    /// Returns finite-positive tone validation or resolved-distance diagnostics.
+    pub fn tone_sample_interval(
+        &self,
+        spacing: toniator_domain::ToneSampleSpacing,
+    ) -> Result<f64, PatternPipelineError> {
+        spacing
+            .validate()
+            .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+        scale_feature_length(
+            spacing.multiplier,
+            self.structure.tone_reference_interval,
+            "realization.tone.interval",
+            "tone interval must remain finite and positive",
+        )
+    }
+
+    /// Returns complete along-guide placement for motif chaining, before presentation filtering.
+    pub fn logical_motif_site_set(&self) -> &FamilySiteSet { self.structure.logical_motif_sites.as_deref().unwrap_or(&self.sites) }
 
     /// Returns the family-resolved nominal basis for one emitted guide path.
     pub fn guide_nominal_basis(&self, path_id: StructuralPathInstanceId) -> Option<f64> {
@@ -4376,6 +4557,7 @@ fn resolve_pattern_pipeline_with_weighting(
                 },
             }),
             PatternOutputRealization::GuidePaths {
+                tone_sample_spacing,
                 guide_mechanism_id: source_id,
                 style,
             } if *source_id == guide_mechanism_id => ordered_outputs.push(OutputCapability {
@@ -4383,11 +4565,13 @@ fn resolve_pattern_pipeline_with_weighting(
                 source_filter: output.source_filter,
                 consumes: product,
                 payload: OutputCapabilityPayload::GuidePaths {
+                    tone_sample_spacing: *tone_sample_spacing,
                     guide_mechanism_id: *source_id,
                     style: *style,
                 },
             }),
             PatternOutputRealization::CurveMotifPaths {
+                tone_sample_spacing,
                 site_mechanism_id: source_id,
                 structure_id,
                 style,
@@ -4401,6 +4585,7 @@ fn resolve_pattern_pipeline_with_weighting(
                     source_filter: output.source_filter,
                     consumes: product,
                     payload: OutputCapabilityPayload::CurveMotifPaths {
+                        tone_sample_spacing: *tone_sample_spacing,
                         site_mechanism_id: *source_id,
                         structure_id: *structure_id,
                         style: *style,
@@ -4410,6 +4595,7 @@ fn resolve_pattern_pipeline_with_weighting(
                 })
             }
             PatternOutputRealization::ConnectionPaths {
+                selection,
                 site_mechanism_id: source_id,
                 program,
                 style,
@@ -4418,6 +4604,7 @@ fn resolve_pattern_pipeline_with_weighting(
                 source_filter: output.source_filter,
                 consumes: product,
                 payload: OutputCapabilityPayload::ConnectionPaths {
+                    selection: *selection,
                     site_mechanism_id: *source_id,
                     program: program.clone(),
                     style: *style,
@@ -4526,19 +4713,21 @@ fn resolve_parametric_curve_pipeline(
     else {
         unreachable!("parametric resolver receives only a parametric family");
     };
-    let (curve, repetition, interval, phase, product, mechanism_ids) =
+    let (curve, spiral_coverage, repetition, interval, phase, product, mechanism_ids) =
         match (definition.mechanisms.as_slice(), declared_site_mechanism_id) {
             (
                 [
                     PatternMechanism::ParametricCurveSource {
                         id,
                         curve,
+                        spiral_coverage,
                         repetition,
                     },
                 ],
                 None,
             ) if *id == curve_mechanism_id => (
                 curve.clone(),
+                *spiral_coverage,
                 repetition.clone(),
                 None,
                 None,
@@ -4550,6 +4739,7 @@ fn resolve_parametric_curve_pipeline(
                     PatternMechanism::ParametricCurveSource {
                         id,
                         curve,
+                        spiral_coverage,
                         repetition,
                     },
                     PatternMechanism::AlongParametricCurveSites {
@@ -4566,6 +4756,7 @@ fn resolve_parametric_curve_pipeline(
             {
                 (
                     curve.clone(),
+                    *spiral_coverage,
                     repetition.clone(),
                     Some(*interval),
                     Some(*phase),
@@ -4584,7 +4775,7 @@ fn resolve_parametric_curve_pipeline(
         .output_layers
         .iter()
         .map(|output| match &output.realization {
-            PatternOutputRealization::ParametricPaths {
+            PatternOutputRealization::ParametricPaths { tone_sample_spacing,
                 curve_mechanism_id: source,
                 style,
             } if product == StructuralProductCapability::ParametricPaths
@@ -4594,7 +4785,7 @@ fn resolve_parametric_curve_pipeline(
                 layer_id: output.id,
                 source_filter: output.source_filter,
                 consumes: product,
-                payload: OutputCapabilityPayload::GuidePaths {
+                payload: OutputCapabilityPayload::GuidePaths { tone_sample_spacing: *tone_sample_spacing,
                     guide_mechanism_id: *source,
                     style: *style,
                 },
@@ -4623,7 +4814,7 @@ fn resolve_parametric_curve_pipeline(
                 orientation: MarkOrientation::Fixed,
             },
         }),
-        PatternOutputRealization::ConnectionPaths {
+        PatternOutputRealization::ConnectionPaths { selection,
                 site_mechanism_id,
                 program,
                 style,
@@ -4631,7 +4822,7 @@ fn resolve_parametric_curve_pipeline(
             layer_id: output.id,
             source_filter: output.source_filter,
             consumes: product,
-            payload: OutputCapabilityPayload::ConnectionPaths {
+            payload: OutputCapabilityPayload::ConnectionPaths { selection: *selection,
                 site_mechanism_id: *site_mechanism_id,
                 program: program.clone(),
                 style: *style,
@@ -4678,6 +4869,7 @@ fn resolve_parametric_curve_pipeline(
                     curve_mechanism_id,
                 ),
                 curve,
+                spiral_coverage,
                 repetition,
                 site_interval: interval,
                 site_phase: phase,
@@ -4914,6 +5106,7 @@ fn resolve_random_site_pipeline(
                 },
             }),
             PatternOutputRealization::ConnectionPaths {
+                selection,
                 site_mechanism_id,
                 program,
                 style,
@@ -4922,6 +5115,7 @@ fn resolve_random_site_pipeline(
                 source_filter: output.source_filter,
                 consumes: StructuralProductCapability::RandomSites,
                 payload: OutputCapabilityPayload::ConnectionPaths {
+                    selection: *selection,
                     site_mechanism_id: *site_mechanism_id,
                     program: program.clone(),
                     style: *style,
@@ -5142,6 +5336,9 @@ pub fn evaluate_typed_family_product_with_curve_limits_progress_cancellable(
                 antialias_margin: ANTIALIAS_MARGIN,
                 generation_domain: output.generation_domain,
                 structural_path_set: None,
+                logical_tone_paths: Arc::new(Vec::new()),
+                tone_reference_interval: tone_reference_interval(&request.canvas, &request.density)?,
+                logical_motif_sites: None,
                 guide_nominal_bases: BTreeMap::new(),
             },
         });
@@ -5230,6 +5427,7 @@ pub fn evaluate_typed_family_product_with_curve_limits_progress_cancellable(
                     })
             })
             .collect::<BTreeMap<_, _>>();
+        let logical_tone_paths = straight_logical_tone_paths(&guide_paths, &output.guides, &guide_nominal_bases)?;
         let structural_path_set = (!guide_paths.is_empty()).then(|| {
             StructuralPathSet::new(
                 output.family_fingerprint.clone(),
@@ -5250,6 +5448,9 @@ pub fn evaluate_typed_family_product_with_curve_limits_progress_cancellable(
                 antialias_margin: ANTIALIAS_MARGIN,
                 generation_domain,
                 structural_path_set,
+                logical_tone_paths: Arc::new(logical_tone_paths),
+                tone_reference_interval: tone_reference_interval(&request.canvas, &request.density)?,
+                logical_motif_sites: None,
                 guide_nominal_bases,
             },
         });
@@ -5261,7 +5462,7 @@ pub fn evaluate_typed_family_product_with_curve_limits_progress_cancellable(
         family: family.clone(),
         sites: site_set,
         diagnostics: None,
-        structure: TypedFamilyStructure::from_grid(&output, family.provenance.mechanism_ids[0]),
+        structure: TypedFamilyStructure::from_grid(&output, family.provenance.mechanism_ids[0], &request.canvas, &request.density)?,
     })
 }
 
@@ -5439,9 +5640,8 @@ pub fn resolve_connection_program_for_feature_size(
 
 /// Evaluates one typed straight-guide intersection family into conventional retained maze walls.
 ///
-/// The family envelope includes one complete outer cell ring for coverage, while geometry retains
-/// only actual sites inside or on the document canvas before deriving walls and cells. The canvas
-/// never manufactures arrangement edges or faces.
+/// The caller supplies complete-cell support; construction retains the exact requested guard
+/// domain before deriving walls and cells. The canvas never manufactures arrangement edges or faces.
 ///
 /// # Errors
 ///
@@ -5455,12 +5655,6 @@ pub fn evaluate_typed_maze_walls_cancellable(
     limits: MazeLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<MazeProgramResult, PatternPipelineError> {
-    if request.guard_steps == 0 {
-        return Err(PatternPipelineError::new(
-            "maze.coverage.guard_steps",
-            "wall mazes require at least one request coverage guard step",
-        ));
-    }
     if family.product != StructuralProductCapability::GuideIntersections
         || family.generic_guides.is_some()
         || family.dimensions.len() < 2
@@ -5494,7 +5688,7 @@ pub fn evaluate_typed_maze_walls_cancellable(
     )
 }
 
-/// Builds a maze from an accepted family after retaining only its inclusive document-canvas sites.
+/// Builds complete finite Maze topology from exact requested guard sites, independent of broader cache reuse.
 ///
 /// # Errors
 ///
@@ -5513,16 +5707,10 @@ pub fn evaluate_typed_maze_walls_from_family_cancellable(
             "evaluation was cancelled",
         ));
     }
-    if request.guard_steps == 0 {
-        return Err(PatternPipelineError::new(
-            "maze.coverage.guard_steps",
-            "wall mazes require at least one request coverage guard step",
-        ));
-    }
-    if family.guard_steps() == 0 || family.guard_steps() != request.guard_steps {
+    if family.guard_steps() != request.guard_steps {
         return Err(PatternPipelineError::new(
             "maze.coverage.family_guard_steps",
-            "accepted maze family guard policy must exactly match the requested nonzero guard",
+            "accepted maze family guard policy must exactly match the requested guard",
         ));
     }
     if family.family.product != StructuralProductCapability::GuideIntersections
@@ -5541,6 +5729,21 @@ pub fn evaluate_typed_maze_walls_from_family_cancellable(
             "accepted family envelope does not cover the requested maze support",
         ));
     }
+    // Generalized intersection merging can choose a different exact representative when a
+    // broader envelope changes enumeration. Maze seeding and finite topology therefore reuse
+    // only an exact support envelope; other products retain their broader-support cache policy.
+    if family.planned_support_radius() != exact_support {
+        let exact_family =
+            evaluate_typed_family_product_cancellable(&family.family, request, is_cancelled)?;
+        return evaluate_typed_maze_walls_from_family_cancellable(
+            &exact_family,
+            request,
+            output_layer_id,
+            program,
+            limits,
+            is_cancelled,
+        );
+    }
     let canvas = Bounds::new(
         Point2::new(0.0, 0.0),
         Point2::new(request.canvas.width, request.canvas.height),
@@ -5549,6 +5752,7 @@ pub fn evaluate_typed_maze_walls_from_family_cancellable(
         "maze.coverage.support",
         "maze canvas must remain finite",
     ))?;
+    let margin = straight_requested_generation_margin(&family.family, request)?;
     let mut site_count = 0_usize;
     for site in family.site_set().iter() {
         if is_cancelled() {
@@ -5557,7 +5761,7 @@ pub fn evaluate_typed_maze_walls_from_family_cancellable(
                 "evaluation was cancelled",
             ));
         }
-        if canvas.contains(site.position) {
+        if distance_to_canvas(site.position, canvas) <= margin {
             site_count = site_count.checked_add(1).ok_or(PatternPipelineError::new(
                 "maze.allocation",
                 "exact maze site selection overflows its allocation size",
@@ -5578,7 +5782,7 @@ pub fn evaluate_typed_maze_walls_from_family_cancellable(
                 "evaluation was cancelled",
             ));
         }
-        if canvas.contains(site.position) {
+        if distance_to_canvas(site.position, canvas) <= margin {
             sites.push(site.clone());
         }
     }
@@ -5631,6 +5835,111 @@ pub fn evaluate_typed_maze_walls_from_family_cancellable(
         is_cancelled,
     )
     .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
+}
+
+/// Maps retained Maze endpoints to accepted family membership by exact absolute contributor sets.
+/// Regenerated exact envelopes retain their own geometry and IDs; this read-only mapping supplies
+/// only dependent-output membership in the accepted shared family. Coordinates and raw ordinals
+/// never establish equivalence. Storage is fallibly reserved and bounded by existing sites/walls.
+/// # Errors
+/// Returns specific missing/ambiguous provenance, allocation or cancellation errors atomically.
+pub fn maze_site_usage_for_family_cancellable(
+    family: &TypedFamilyOutput,
+    maze: &MazeProgramResult,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<SiteUsageSet, PatternPipelineError> {
+    let cancelled =
+        || PatternPipelineError::new("evaluation.cancelled", "evaluation was cancelled");
+    if is_cancelled() {
+        return Err(cancelled());
+    }
+    let mut accepted = Vec::new();
+    reserve_stage20m(
+        &mut accepted,
+        family.site_set().len(),
+        "maze.site_usage.allocation",
+        "Maze membership allocation failed",
+    )?;
+    for site in family.site_set().iter() {
+        if is_cancelled() {
+            return Err(cancelled());
+        }
+        let FamilySiteProvenance::GuideIntersection { contributors } = &site.provenance else {
+            return Err(PatternPipelineError::new(
+                "maze.site_usage.identity.missing",
+                "Maze membership requires exact guide-intersection contributors",
+            ));
+        };
+        accepted.push((contributors.as_slice(), site.id));
+    }
+    accepted.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    if accepted.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(PatternPipelineError::new(
+            "maze.site_usage.identity.ambiguous",
+            "accepted family repeats one Maze contributor identity",
+        ));
+    }
+    let count = maze
+        .retained_walls
+        .len()
+        .checked_mul(2)
+        .ok_or(PatternPipelineError::new(
+            "maze.site_usage.allocation",
+            "Maze endpoint membership size overflows",
+        ))?;
+    let mut vertices = Vec::new();
+    reserve_stage20m(
+        &mut vertices,
+        count,
+        "maze.site_usage.allocation",
+        "Maze endpoint membership allocation failed",
+    )?;
+    for wall in &maze.retained_walls {
+        if is_cancelled() {
+            return Err(cancelled());
+        }
+        vertices.extend([wall.id.first, wall.id.second]);
+    }
+    vertices.sort_unstable();
+    vertices.dedup();
+    let mut members = Vec::new();
+    reserve_stage20m(
+        &mut members,
+        vertices.len(),
+        "maze.site_usage.allocation",
+        "Maze accepted membership allocation failed",
+    )?;
+    for site in &maze.source_sites {
+        if is_cancelled() {
+            return Err(cancelled());
+        }
+        if vertices.binary_search(&site.id).is_err() {
+            continue;
+        }
+        let FamilySiteProvenance::GuideIntersection { contributors } = &site.source.provenance
+        else {
+            return Err(PatternPipelineError::new(
+                "maze.site_usage.identity.missing",
+                "Maze endpoint loses its exact contributor identity",
+            ));
+        };
+        let index = accepted
+            .binary_search_by(|entry| entry.0.cmp(contributors.as_slice()))
+            .map_err(|_| {
+                PatternPipelineError::new(
+                    "maze.site_usage.identity.missing",
+                    "accepted family lacks one exact Maze endpoint contributor identity",
+                )
+            })?;
+        members.push(accepted[index].1);
+    }
+    if members.len() != vertices.len() {
+        return Err(PatternPipelineError::new(
+            "maze.site_usage.identity.missing",
+            "Maze wall endpoint is absent from the requested source sites",
+        ));
+    }
+    SiteUsageSet::new(family.site_set().product_mechanism_id(), members)
 }
 
 #[cfg(test)]
@@ -5774,7 +6083,8 @@ fn evaluate_parametric_curve_with_progress_cancellable(
         .as_ref()
         .expect("parametric branch is present");
     let pattern_size_scale = resolved_pattern_size_scale(&request.canvas, &request.density)?;
-    let effective_curve = scaled_parametric_curve(&parametric.curve, pattern_size_scale)?;
+    let authored_curve = scaled_parametric_curve(&parametric.curve, pattern_size_scale)?;
+    let effective_curve = cover_parametric_curve(family, request, authored_curve.clone(), is_cancelled)?;
     let effective_site_interval = parametric
         .site_interval
         .map(|interval| {
@@ -5786,8 +6096,10 @@ fn evaluate_parametric_curve_with_progress_cancellable(
             )
         })
         .transpose()?;
-    let local_path = toniator_geometry::construct_parametric_curve_path_with_limits_cancellable(
-        &effective_curve,
+    let ParametricCurve::Spiral(effective_spiral) = &effective_curve;
+    let local_path = toniator_geometry::extend_parametric_curve_path_with_limits_cancellable(
+        &authored_curve,
+        effective_spiral.turns,
         Point2::new(0.0, 0.0),
         curve_limits,
         is_cancelled,
@@ -5954,6 +6266,79 @@ fn normal_offset_components_bracket_domain(
     Ok(inspected_normal)
 }
 
+/// Removes only exact zero world-space lines created by transforming a derived authored offset.
+/// Corresponding source intervals disappear together; component identity, fixed nodes and authored zero stay unchanged.
+/// Positive short lines and every cubic remain canonical authority, including legitimate cusps.
+/// # Errors
+/// Returns cancellation, trace cardinality, all-zero component, bounded storage or path validation diagnostics atomically.
+fn remove_exact_zero_world_offset_lines(
+    component: &mut toniator_geometry::OffsetPathComponent,
+    limits: CurveWorkLimits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), PatternPipelineError> {
+    if component.path.segments().len() != component.source_intervals.len() {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.source_trace",
+            "every final offset segment requires its source correspondence",
+        ));
+    }
+    if !component
+        .path
+        .segments()
+        .iter()
+        .any(|segment| matches!(segment, CurveSegment::Line(line) if line.start()==line.end()))
+    {
+        return Ok(());
+    }
+    let mut segments = Vec::new();
+    let mut intervals = Vec::new();
+    reserve_stage20m(
+        &mut segments,
+        component.path.segments().len(),
+        "coverage.curved_guides.allocation",
+        "world offset segment allocation failed",
+    )?;
+    reserve_stage20m(
+        &mut intervals,
+        component.source_intervals.len(),
+        "coverage.curved_guides.allocation",
+        "world offset trace allocation failed",
+    )?;
+    for (&segment, &interval) in component
+        .path
+        .segments()
+        .iter()
+        .zip(&component.source_intervals)
+    {
+        if cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        if matches!(segment, CurveSegment::Line(line) if line.start()==line.end()) {
+            continue;
+        }
+        segments.push(segment);
+        intervals.push(interval);
+    }
+    if segments.is_empty() {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.world_collapse",
+            "the complete derived offset component collapses under its final transform",
+        ));
+    }
+    let path = CurvePath::new_with_limits_cancellable(
+        segments,
+        component.path.closure(),
+        limits,
+        cancelled,
+    )?;
+    component.path = path;
+    component.source_intervals = intervals;
+    Ok(())
+}
+
 /// Reports whether every open Constant-gap endpoint inside the generation domain is a shared node.
 ///
 /// Exact crossing authority copies one solved coordinate into every incident segment, so bitwise
@@ -6053,6 +6438,7 @@ fn authored_guide_transverse_axis(path: &CurvePath) -> Result<Vector2, PatternPi
 /// Returns stable spacing, endpoint, transform, bounds, or integer-overflow diagnostics.
 fn authored_normal_offset_rank_bounds(
     source: &CurvePath,
+    authored_frame: &CurvePath,
     domain: Bounds,
     canvas_center_to_corner: f64,
     spacing: f64,
@@ -6068,7 +6454,7 @@ fn authored_normal_offset_rank_bounds(
             "normal-offset spacing and canvas extent must remain finite and positive",
         ));
     }
-    let axis = authored_guide_transverse_axis(source)?;
+    let axis = authored_guide_transverse_axis(authored_frame)?;
     let (source_minimum, source_maximum) = curve_projection_range(source, axis)?;
     let (domain_minimum, domain_maximum) = domain
         .corners()
@@ -6210,7 +6596,7 @@ fn authored_normal_offset_frontier_projection(
 /// # Errors
 ///
 /// Returns cancellation, geometry, component-limit, or integer-conversion diagnostics without
-/// exposing a partially advanced rank.
+/// exposing a partially advanced rank. Original-source intervals compose through every rank.
 fn advance_constant_gap_frontier(
     previous: &[toniator_geometry::OffsetPathComponent],
     signed_spacing: f64,
@@ -6236,11 +6622,16 @@ fn advance_constant_gap_frontier(
             is_cancelled,
         )?;
         if let PathOffsetResult::Paths(children) = result {
-            next.extend(
-                children
-                    .into_iter()
-                    .filter(|child| child.path.closure() == PathClosure::Open),
-            );
+            for mut child in children.into_iter().filter(|child| child.path.closure() == PathClosure::Open) {
+                child.source_start = compose_source_location(child.source_start, &component.source_intervals)?;
+                child.source_end = compose_source_location(child.source_end, &component.source_intervals)?;
+                for (start, end) in &mut child.source_intervals {
+                    *start = compose_source_location(*start, &component.source_intervals)?;
+                    *end = compose_source_location(*end, &component.source_intervals)?;
+                }
+                reserve_stage20m(&mut next, 1, "coverage.curved_guides.allocation", "offset frontier trace allocation failed")?;
+                next.push(child);
+            }
         }
         if next.len() > limits.maximum_components {
             return Err(PatternPipelineError::new(
@@ -6387,8 +6778,9 @@ fn scale_authored_guide_to_generation_span(
 /// Extends only an authored guide's terminal rays to its padded generation span.
 ///
 /// Every stable scaled source segment remains exact. Tangent continuation preserves first-order
-/// continuity when it reaches the required longitudinal bound within one domain diagonal;
-/// otherwise a bounded longitudinal ray covers the exterior without moving the authored core.
+/// continuity when it reaches the required longitudinal bound within the endpoint-to-domain
+/// corner travel bound; otherwise a bounded longitudinal ray covers the exterior without moving
+/// the authored core. Whole-pattern placement cannot enlarge or reshape the stable source.
 /// Repetition pitch and final clipping remain separate authorities.
 ///
 /// # Errors
@@ -6416,8 +6808,7 @@ fn extend_authored_guide_to_generation_span(
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), value| {
             (lo.min(value), hi.max(value))
         });
-    let maximum_extension = (domain.max.x - domain.min.x).hypot(domain.max.y - domain.min.y);
-    if !minimum.is_finite() || !maximum.is_finite() || !maximum_extension.is_finite() {
+    if !minimum.is_finite() || !maximum.is_finite() {
         return Err(PatternPipelineError::new(
             "coverage.curved_guides.numeric_overflow",
             "authored guide extension domain must remain finite",
@@ -6428,6 +6819,17 @@ fn extend_authored_guide_to_generation_span(
                     required: f64,
                     sign: f64|
      -> Result<Point2, PatternPipelineError> {
+        let maximum_extension = domain
+            .corners()
+            .into_iter()
+            .map(|corner| (corner.x - point.x).hypot(corner.y - point.y))
+            .fold(0.0_f64, f64::max);
+        if !maximum_extension.is_finite() {
+            return Err(PatternPipelineError::new(
+                "coverage.curved_guides.numeric_overflow",
+                "authored guide endpoint-to-domain travel must remain finite",
+            ));
+        }
         let projection = tangent.dot(axis);
         let tangent_distance = required / projection;
         let direction = if projection > 0.0
@@ -6467,7 +6869,21 @@ fn extend_authored_guide_to_generation_span(
         (maximum - path.end().dot(axis)).max(0.0),
         1.0,
     )?;
-    let mut segments = Vec::with_capacity(path.segments().len() + 2);
+    let count = path
+        .segments()
+        .len()
+        .checked_add(2)
+        .ok_or(PatternPipelineError::new(
+            "coverage.curved_guides.numeric_overflow",
+            "authored guide continuation segment count overflows",
+        ))?;
+    let mut segments = Vec::new();
+    reserve_stage20m(
+        &mut segments,
+        count,
+        "coverage.curved_guides.allocation",
+        "authored guide continuation allocation failed",
+    )?;
     if start != path.start() {
         segments.push(CurveSegment::Line(LineSegment::new(start, path.start())?));
     }
@@ -6476,149 +6892,6 @@ fn extend_authored_guide_to_generation_span(
         segments.push(CurveSegment::Line(LineSegment::new(path.end(), end)?));
     }
     CurvePath::new(segments, path.closure()).map_err(Into::into)
-}
-
-/// Translates one authored segment for a tiled guide while forcing exact path continuity.
-///
-/// The first anchor supplied by the caller is the previous derived segment's exact endpoint; all
-/// remaining construction points receive the same finite tile translation. This avoids a
-/// floating-point seam without smoothing, reshaping, or changing line/cubic construction kind.
-///
-/// # Errors
-///
-/// Returns canonical finite-coordinate diagnostics when the translated construction overflows.
-fn translated_tiled_segment(
-    segment: CurveSegment,
-    start: Point2,
-    translation: Vector2,
-) -> Result<CurveSegment, PatternPipelineError> {
-    let translate = |point: Point2| {
-        let translated = Point2::new(point.x + translation.x, point.y + translation.y);
-        translated
-            .is_finite()
-            .then_some(translated)
-            .ok_or(PatternPipelineError::new(
-                "coverage.curved_guides.numeric_overflow",
-                "curved-guide tiling arithmetic overflowed",
-            ))
-    };
-    match segment {
-        CurveSegment::Line(line) => Ok(CurveSegment::Line(LineSegment::new(
-            start,
-            translate(line.end())?,
-        )?)),
-        CurveSegment::CubicBezier(cubic) => Ok(CurveSegment::CubicBezier(CubicBezierSegment::new(
-            start,
-            translate(cubic.control_1())?,
-            translate(cubic.control_2())?,
-            translate(cubic.end())?,
-        )?)),
-    }
-}
-
-/// Tiles one authored open guide end-to-end beyond every planned normal-offset endpoint.
-///
-/// Constant-gap copies remain independent guide instances. The authored curve is repeated only
-/// along its start-to-end vector. Repeated cubic seams retain the next tile's handle length while
-/// aligning its outgoing direction with the preceding tile's incoming tangent, preventing a finite
-/// tile boundary from becoming a false Constant-gap cusp. Adjacent offsets are never wrapped into a
-/// fingerprint-style serpentine path. The caller has already applied the one-time uniform coverage
-/// scale, so tiling cannot change repetition pitch.
-///
-/// # Errors
-///
-/// Returns stable finite-coverage, segment-limit, or canonical path diagnostics before exposing a
-/// partial tiled centerline.
-fn tile_authored_guide_end_to_end(
-    path: &CurvePath,
-    domain: Bounds,
-    longitudinal_margin: f64,
-) -> Result<CurvePath, PatternPipelineError> {
-    let terminal_delta = Vector2::new(path.end().x - path.start().x, path.end().y - path.start().y);
-    let terminal_span = terminal_delta.x.hypot(terminal_delta.y);
-    if !terminal_span.is_finite()
-        || terminal_span <= 1.0e-12
-        || !longitudinal_margin.is_finite()
-        || longitudinal_margin < 0.0
-    {
-        return Ok(path.clone());
-    }
-    let tangent = terminal_delta.scale(terminal_span.recip());
-    let start_projection = path.start().dot(tangent);
-    let end_projection = path.end().dot(tangent);
-    let (domain_minimum, domain_maximum) = domain
-        .corners()
-        .into_iter()
-        .map(|point| point.dot(tangent))
-        .fold(
-            (f64::INFINITY, f64::NEG_INFINITY),
-            |(minimum, maximum), projection| (minimum.min(projection), maximum.max(projection)),
-        );
-    let first_raw =
-        ((domain_minimum - longitudinal_margin - start_projection) / terminal_span).floor();
-    let last_raw = ((domain_maximum + longitudinal_margin - end_projection) / terminal_span).ceil();
-    if !first_raw.is_finite()
-        || !last_raw.is_finite()
-        || first_raw < i64::MIN as f64
-        || last_raw > i64::MAX as f64
-    {
-        return Err(PatternPipelineError::new(
-            "coverage.curved_guides.numeric_overflow",
-            "curved-guide tiling arithmetic overflowed",
-        ));
-    }
-    let first = (first_raw as i64).min(0);
-    let last = (last_raw as i64).max(0);
-    let tile_count = last
-        .checked_sub(first)
-        .and_then(|count| count.checked_add(1))
-        .ok_or(PatternPipelineError::new(
-            "coverage.curved_guides.numeric_overflow",
-            "curved-guide tiling arithmetic overflowed",
-        ))?;
-    let segment_count = usize::try_from(tile_count)
-        .ok()
-        .and_then(|count| count.checked_mul(path.segments().len()))
-        .filter(|count| *count <= 4_096)
-        .ok_or(PatternPipelineError::new(
-            "coverage.curved_guides.instance_limit",
-            "tiled curved-guide segment count exceeds the configured path limit",
-        ))?;
-    let mut segments = Vec::<CurveSegment>::with_capacity(segment_count);
-    for tile_index in first..=last {
-        let amount = tile_index as f64;
-        let translation = terminal_delta.scale(amount);
-        for (segment_index, segment) in path.segments().iter().enumerate() {
-            let start = segments.last().map_or_else(
-                || {
-                    let point = segment.start();
-                    Point2::new(point.x + translation.x, point.y + translation.y)
-                },
-                CurveSegment::end,
-            );
-            let mut tiled = translated_tiled_segment(*segment, start, translation)?;
-            if segment_index == 0
-                && let (Some(previous), CurveSegment::CubicBezier(cubic)) =
-                    (segments.last().copied(), tiled)
-            {
-                let incoming = previous.limiting_unit_tangent_at(1.0)?;
-                let handle_length = (cubic.control_1().x - cubic.start().x)
-                    .hypot(cubic.control_1().y - cubic.start().y);
-                let control_1 = Point2::new(
-                    cubic.start().x + incoming.x * handle_length,
-                    cubic.start().y + incoming.y * handle_length,
-                );
-                tiled = CurveSegment::CubicBezier(CubicBezierSegment::new(
-                    cubic.start(),
-                    control_1,
-                    cubic.control_2(),
-                    cubic.end(),
-                )?);
-            }
-            segments.push(tiled);
-        }
-    }
-    CurvePath::new(segments, PathClosure::Open).map_err(Into::into)
 }
 
 /// Resolves the artist-facing uniform Pattern size from canonical density authority.
@@ -6649,6 +6922,153 @@ fn resolved_pattern_size_scale(
             "pattern.family.guide_spacing",
             "pattern size must resolve to a finite positive curve scale",
         ))
+}
+
+/// Resolves the shared curved-family guard envelope from authored spacing and actual Feature.
+/// Existing generic and Fixed finite families retain their prior envelope exactly. Explicit
+/// CoverCanvas additionally guards radial and absolute along-site cadence before extent planning.
+/// # Errors
+/// Returns stable numeric/coverage diagnostics before any curve construction or family allocation.
+fn curved_generation_margin(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+) -> Result<f64, PatternPipelineError> {
+    let maximum_directional_spacing = (request.canvas.width / request.density.across_x)
+        .max(request.canvas.height / request.density.across_y);
+    if !maximum_directional_spacing.is_finite() || maximum_directional_spacing <= 0.0 {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.proof",
+            "curved-guide coverage could not prove a complete generation envelope",
+        ));
+    }
+    let pattern_size_scale = resolved_pattern_size_scale(&request.canvas, &request.density)?;
+    let mut maximum_spacing = family
+        .along_interval_multiplier
+        .map(|value| value * maximum_directional_spacing)
+        .unwrap_or(0.0);
+    let mut include_repetition =
+        |baseline: f64, repetition: &GuideRepetition| -> Result<(), PatternPipelineError> {
+            match repetition {
+                GuideRepetition::TransformStack {
+                    direction_degrees,
+                    spacing_multiplier,
+                } => {
+                    let angle = (baseline + direction_degrees).to_radians();
+                    let unit = Vector2::new(angle.cos(), angle.sin());
+                    let spacing = directional_spacing(&request.canvas, &request.density, unit)?
+                        * spacing_multiplier;
+                    maximum_spacing = maximum_spacing.max(spacing);
+                }
+                GuideRepetition::NormalOffset { spacing, .. } => {
+                    maximum_spacing = maximum_spacing.max(spacing * pattern_size_scale);
+                }
+                GuideRepetition::Single => {}
+            }
+            Ok(())
+        };
+    if let Some(parametric) = &family.parametric_curve {
+        include_repetition(0.0, &parametric.repetition)?;
+        if parametric.spiral_coverage == toniator_domain::SpiralCoveragePolicy::CoverCanvas {
+            let ParametricCurve::Spiral(spiral) = &parametric.curve;
+            maximum_spacing = maximum_spacing
+                .max(spiral.radial_spacing * pattern_size_scale)
+                .max(parametric.site_interval.unwrap_or(0.0) * pattern_size_scale);
+        }
+    } else if let Some(generic) = &family.generic_guides {
+        for dimension in &generic.dimensions {
+            include_repetition(dimension.baseline_angle_degrees, &dimension.repetition)?;
+        }
+    }
+    let margin = request.support_radius
+        + ANTIALIAS_MARGIN
+        + f64::from(request.guard_steps) * maximum_spacing;
+    if !margin.is_finite() || margin < 0.0 {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.proof",
+            "curved-guide coverage could not prove a complete generation envelope",
+        ));
+    }
+    Ok(margin)
+}
+
+/// Extends only explicit CoverCanvas derived intent through actual inverse-transformed padded corners.
+/// Authored minimum, Feature spacing, phase, winding and calibration metadata remain immutable.
+/// Round uses Euclidean radius; square removes its authored phase and uses the square max norm.
+/// # Errors
+/// Returns cancellation or finite/count coverage diagnostics before geometry is allocated.
+fn cover_parametric_curve(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+    authored: ParametricCurve,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<ParametricCurve, PatternPipelineError> {
+    if is_cancelled() {
+        return Err(PatternPipelineError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    let parametric = family
+        .parametric_curve
+        .as_ref()
+        .expect("parametric dispatch owns a source");
+    if parametric.spiral_coverage == toniator_domain::SpiralCoveragePolicy::Fixed {
+        return Ok(authored);
+    }
+    let ParametricCurve::Spiral(mut spiral) = authored;
+    let numeric = || {
+        PatternPipelineError::new(
+            "coverage.parametric.numeric_overflow",
+            "parametric coverage requires finite representable extent",
+        )
+    };
+    let canvas = Bounds::new(
+        Point2::new(0.0, 0.0),
+        Point2::new(request.canvas.width, request.canvas.height),
+    )
+    .ok_or_else(numeric)?;
+    let padded = canvas
+        .expanded(curved_generation_margin(family, request)?)
+        .ok_or_else(numeric)?;
+    let phase = if spiral.shape == SpiralShape::Square {
+        spiral.phase_degrees
+    } else {
+        0.0
+    };
+    let transform = AffineTransform2D::rotate_about_then_translate(
+        Point2::new(0.0, 0.0),
+        request.rotation_degrees + phase,
+        Vector2::new(
+            request.canvas.width * 0.5 + request.translation_x,
+            request.canvas.height * 0.5 + request.translation_y,
+        ),
+    )
+    .ok_or_else(numeric)?;
+    let mut extent = 0.0_f64;
+    for corner in padded.corners() {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let point = transform.inverse_point(corner);
+        let distance = match spiral.shape {
+            SpiralShape::Round => point.x.hypot(point.y),
+            SpiralShape::Square => point.x.abs().max(point.y.abs()),
+        };
+        if !point.is_finite() || !distance.is_finite() {
+            return Err(numeric());
+        }
+        extent = extent.max(distance);
+    }
+    let revolutions = (extent / spiral.radial_spacing).ceil();
+    let required = revolutions + 1.0;
+    if !required.is_finite() || required <= revolutions {
+        return Err(numeric());
+    }
+    spiral.turns = spiral.turns.max(required);
+    Ok(ParametricCurve::Spiral(spiral))
 }
 
 /// Scales one authored positive length by the current artist-facing Feature size.
@@ -6845,38 +7265,8 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
         "coverage.curved_guides.proof",
         "curved-guide coverage could not prove a complete generation envelope",
     ))?;
-    let maximum_directional_spacing = (request.canvas.width / request.density.across_x)
-        .max(request.canvas.height / request.density.across_y);
-    if !maximum_directional_spacing.is_finite() || maximum_directional_spacing <= 0.0 {
-        return Err(PatternPipelineError::new(
-            "coverage.curved_guides.proof",
-            "curved-guide coverage could not prove a complete generation envelope",
-        ));
-    }
-    let along_bound = family
-        .along_interval_multiplier
-        .map(|value| value * maximum_directional_spacing)
-        .unwrap_or(0.0);
     let pattern_size_scale = resolved_pattern_size_scale(&request.canvas, &request.density)?;
-    let mut maximum_spacing = along_bound;
-    for dimension in &generic.dimensions {
-        if let GuideRepetition::TransformStack {
-            direction_degrees,
-            spacing_multiplier,
-        } = dimension.repetition
-        {
-            let angle = (dimension.baseline_angle_degrees + direction_degrees).to_radians();
-            let unit = Vector2::new(angle.cos(), angle.sin());
-            let spacing =
-                directional_spacing(&request.canvas, &request.density, unit)? * spacing_multiplier;
-            maximum_spacing = maximum_spacing.max(spacing);
-        }
-        if let GuideRepetition::NormalOffset { spacing, .. } = dimension.repetition {
-            maximum_spacing = maximum_spacing.max(spacing * pattern_size_scale);
-        }
-    }
-    let margin =
-        request.support_radius + ANTIALIAS_MARGIN + request.guard_steps as f64 * maximum_spacing;
+    let margin = curved_generation_margin(published_family.unwrap_or(family), request)?;
     let document_domain = canvas.expanded(margin).ok_or(PatternPipelineError::new(
         "coverage.curved_guides.proof",
         "curved-guide coverage could not prove a complete generation envelope",
@@ -6907,16 +7297,19 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 "coverage.curved_guides.proof",
                 "curved-guide coverage could not prove a complete generation envelope",
             ))?;
-    let stable_authored_domain =
-        channel_transform
-            .inverse_bounds(canvas)
-            .ok_or(PatternPipelineError::new(
-                "coverage.curved_guides.proof",
-                "authored guide canvas frame must remain finite",
-            ))?;
+    // The authored core belongs to a placement-independent centered canvas frame. Only
+    // endpoint/rank continuation consumes the actual inverse-transformed generation domain.
+    let stable_authored_domain = Bounds::new(
+        Point2::new(-request.canvas.width * 0.5, -request.canvas.height * 0.5),
+        Point2::new(request.canvas.width * 0.5, request.canvas.height * 0.5),
+    ).ok_or(PatternPipelineError::new(
+        "coverage.curved_guides.proof",
+        "authored guide canvas frame must remain finite",
+    ))?;
     let mut guides = Vec::new();
     let mut guide_nominal_bases = BTreeMap::new();
     let mut grouped = Vec::<Vec<StructuralPathInstance>>::new();
+    let mut logical_domains = Vec::new();
     let mut requires_solved_crossing_nodes = false;
     let dimension_total = generic.dimensions.len().max(1);
     for (dimension_index, (dimension, (source_structure_id, prototype))) in generic
@@ -6942,12 +7335,16 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
         ))?;
         let unscaled_base =
             prototype.transformed_with_limits_cancellable(baseline, curve_limits, is_cancelled)?;
-        let base = if matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { .. }) {
+        let authored = matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { .. });
+        let (base, base_anchor_index, authored_frame) = if authored {
             let stable = scale_authored_guide_to_generation_span(&unscaled_base, stable_authored_domain)?;
-            extend_authored_guide_to_generation_span(&stable, local_domain)?
+            let extended = extend_authored_guide_to_generation_span(&stable, local_domain)?;
+            let prefix = usize::from(extended.start() != stable.start());
+            (extended, prefix, Some(stable))
         } else {
-            unscaled_base
+            (unscaled_base, 0, None)
         };
+        let authored_frame = authored_frame.as_ref().unwrap_or(&base);
         let (unit, spacing, indices, normal_offset_coverage) = match dimension.repetition {
             GuideRepetition::Single => {
                 let angle = dimension.baseline_angle_degrees.to_radians();
@@ -7088,6 +7485,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                     if matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { .. }) {
                         authored_normal_offset_rank_bounds(
                             &base,
+                            authored_frame,
                             local_domain,
                             0.5 * request.canvas.width.hypot(request.canvas.height),
                             spacing,
@@ -7151,7 +7549,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 )
             }
         };
-        let uses_tiled_authored_normal_offset = normal_offset_coverage.is_some()
+        let uses_authored_normal_offset_rays = normal_offset_coverage.is_some()
             && matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { .. });
         // Iterated authored Constant-gap ranks already solve and relink their crossings before the
         // next frontier is constructed. Re-running an all-rank arrangement here would discard that
@@ -7159,21 +7557,27 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
         // quadratic cleanup budget. Direct one-shot offset families still require the collection
         // arrangement below.
         requires_solved_crossing_nodes |=
-            normal_offset_coverage.is_some() && !uses_tiled_authored_normal_offset;
-        let evaluation_base = if uses_tiled_authored_normal_offset {
-            let coverage = normal_offset_coverage.expect("tiled normal offset owns coverage");
+            normal_offset_coverage.is_some() && !uses_authored_normal_offset_rays;
+        let (evaluation_base, evaluation_anchor_index) = if uses_authored_normal_offset_rays {
+            let coverage = normal_offset_coverage.expect("authored normal offset owns coverage");
             let maximum_offset_rank = coverage
                 .first_probe_limit
                 .saturating_abs()
                 .max(coverage.last_probe_limit.saturating_abs());
             let maximum_offset_travel = maximum_offset_rank as f64 * spacing;
-            let longitudinal_margin = (local_domain.max.x - local_domain.min.x)
-                .hypot(local_domain.max.y - local_domain.min.y)
-                + maximum_offset_travel;
-            tile_authored_guide_end_to_end(&base, local_domain, longitudinal_margin)?
+            let runway_domain = local_domain.expanded(maximum_offset_travel).ok_or(PatternPipelineError::new(
+                "coverage.curved_guides.numeric_overflow",
+                "authored terminal-ray runway must remain finite",
+            ))?;
+            // One fixed authored core owns NormalOffset. The maximum signed offset travel
+            // expands only its two outer terminal rays, never an implicit longitudinal period.
+            let runway = extend_authored_guide_to_generation_span(authored_frame, runway_domain)?;
+            let anchor = usize::from(runway.start() != authored_frame.start());
+            (runway, anchor)
         } else {
-            base.cloned_with_limits_cancellable(curve_limits, is_cancelled)?
+            (base.cloned_with_limits_cancellable(curve_limits, is_cancelled)?, base_anchor_index)
         };
+        let source_zero = PathLocation::new(evaluation_anchor_index, 0.0)?;
         let evaluate_index = |index: i64,
                               crossing_barriers: &[&CurvePath]|
          -> Result<
@@ -7195,7 +7599,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                         PathOffsetRequest {
                             path: &evaluation_base,
                             signed_distance: index as f64 * spacing,
-                            endpoint_policy: if uses_tiled_authored_normal_offset {
+                            endpoint_policy: if uses_authored_normal_offset_rays {
                                 PathOffsetEndpointPolicy::Preserve
                             } else {
                                 PathOffsetEndpointPolicy::TangentialExtension {
@@ -7239,6 +7643,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                         component_ordinal: 0,
                         source_start: PathLocation::new(0, 0.0)?,
                         source_end: PathLocation::new(evaluation_base.segments().len() - 1, 1.0)?,
+                        source_intervals: identity_source_intervals(&path)?,
                         path,
                         planar_switch_nodes: Vec::new(),
                     });
@@ -7250,7 +7655,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
         let mut paths_by_index =
             BTreeMap::<i64, Vec<toniator_geometry::OffsetPathComponent>>::new();
         let mut evaluation_indices = indices;
-        if normal_offset_coverage.is_some() && !uses_tiled_authored_normal_offset {
+        if normal_offset_coverage.is_some() && !uses_authored_normal_offset_rays {
             evaluation_indices.sort_by(|left, right| {
                 left.unsigned_abs()
                     .cmp(&right.unsigned_abs())
@@ -7269,8 +7674,8 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 planned_attempts,
             );
         };
-        if uses_tiled_authored_normal_offset {
-            let coverage = normal_offset_coverage.expect("tiled normal offset owns coverage");
+        if uses_authored_normal_offset_rays {
+            let coverage = normal_offset_coverage.expect("authored normal offset owns coverage");
             let frontier_tolerance = PathOffsetLimits::default().tolerance;
             let frontier_retracted =
                 |previous: Option<f64>, advanced: Option<f64>, signed_side: f64| match (
@@ -7289,6 +7694,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                     component_ordinal: 0,
                     source_start: PathLocation::new(0, 0.0)?,
                     source_end: PathLocation::new(evaluation_base.segments().len() - 1, 1.0)?,
+                    source_intervals: identity_source_intervals(&evaluation_base)?,
                     path: evaluation_base.clone(),
                     planar_switch_nodes: Vec::new(),
                 }],
@@ -7306,13 +7712,13 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                             "constant-gap frontier lost its preceding positive rank",
                         ))?;
                 let previous_frontier =
-                    authored_normal_offset_frontier_projection(previous, &evaluation_base, 1.0)?;
+                    authored_normal_offset_frontier_projection(previous, authored_frame, 1.0)?;
                 let mut paths = advance_constant_gap_frontier(previous, spacing, is_cancelled)?;
                 let advanced_frontier =
-                    authored_normal_offset_frontier_projection(&paths, &evaluation_base, 1.0)?;
+                    authored_normal_offset_frontier_projection(&paths, authored_frame, 1.0)?;
                 if frontier_retracted(previous_frontier, advanced_frontier, 1.0) {
                     // A cusp can turn the relinked exterior back toward the source. Restart this
-                    // rank from the original tiled runway at its absolute distance so coverage
+                    // rank from the original ray runway at its absolute distance so coverage
                     // continues on the same signed side without scaling or re-spacing the stack.
                     paths = evaluate_index(index, &[])?
                         .into_iter()
@@ -7322,7 +7728,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 let reaches_edge = !paths.is_empty()
                     && authored_normal_offset_components_bracket_domain(
                         &paths,
-                        &evaluation_base,
+                        authored_frame,
                         local_domain,
                         1.0,
                     )?;
@@ -7352,10 +7758,10 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                             "constant-gap frontier lost its preceding negative rank",
                         ))?;
                 let previous_frontier =
-                    authored_normal_offset_frontier_projection(previous, &evaluation_base, -1.0)?;
+                    authored_normal_offset_frontier_projection(previous, authored_frame, -1.0)?;
                 let mut paths = advance_constant_gap_frontier(previous, -spacing, is_cancelled)?;
                 let advanced_frontier =
-                    authored_normal_offset_frontier_projection(&paths, &evaluation_base, -1.0)?;
+                    authored_normal_offset_frontier_projection(&paths, authored_frame, -1.0)?;
                 if frontier_retracted(previous_frontier, advanced_frontier, -1.0) {
                     // See the positive-side reset above. Absolute source distance restores the
                     // signed frontier after a cusp instead of advancing a folded-back remnant.
@@ -7367,7 +7773,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 let reaches_edge = !paths.is_empty()
                     && authored_normal_offset_components_bracket_domain(
                         &paths,
-                        &evaluation_base,
+                        authored_frame,
                         local_domain,
                         -1.0,
                     )?;
@@ -7394,6 +7800,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                         component_ordinal: 0,
                         source_start: PathLocation::new(0, 0.0)?,
                         source_end: PathLocation::new(evaluation_base.segments().len() - 1, 1.0)?,
+                        source_intervals: identity_source_intervals(&evaluation_base)?,
                         path: evaluation_base.clone(),
                         planar_switch_nodes: Vec::new(),
                     }]
@@ -7411,7 +7818,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                     "normal-offset source guide collapsed before coverage could be proved",
                 ));
             }
-            if !uses_tiled_authored_normal_offset && coverage.last_required > 0 {
+            if !uses_authored_normal_offset_rays && coverage.last_required > 0 {
                 let mut probe = coverage.last_required;
                 while paths_by_index
                     .get(&probe)
@@ -7439,7 +7846,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                     paths_by_index.insert(probe, paths);
                 }
             }
-            if !uses_tiled_authored_normal_offset && coverage.first_required < 0 {
+            if !uses_authored_normal_offset_rays && coverage.first_required < 0 {
                 let mut probe = coverage.first_required;
                 while paths_by_index
                     .get(&probe)
@@ -7470,7 +7877,20 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
         }
         let mut this_dimension = Vec::new();
         let published_dimension_start = guides.len();
-        for (index, paths) in paths_by_index {
+        for (index, mut paths) in paths_by_index {
+            for component in &mut paths {
+                component.path = component.path.transformed_with_limits_cancellable(
+                    channel_transform,
+                    curve_limits,
+                    is_cancelled,
+                )?;
+            }
+            if uses_authored_normal_offset_rays {
+                for component in &mut paths {
+                    remove_exact_zero_world_offset_lines(component, curve_limits, is_cancelled)?;
+                }
+            }
+            let domains = offset_group_tone_domains(&paths, source_zero, !authored, is_cancelled)?;
             let basis = if spacing > 0.0 {
                 spacing
             } else {
@@ -7480,7 +7900,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 )
             };
             let mut published_component_ordinal = 0_u32;
-            for component in paths {
+            for (component, domain) in paths.into_iter().zip(domains) {
                 let instance = StructuralPathInstance {
                     id: match generic.structural_source {
                         Some(source) => StructuralPathInstanceId {
@@ -7495,11 +7915,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                         ),
                     },
                     source_structure_id: *source_structure_id,
-                    path: component.path.transformed_with_limits_cancellable(
-                        channel_transform,
-                        curve_limits,
-                        is_cancelled,
-                    )?,
+                    path: component.path,
                 };
                 guide_nominal_bases.insert(instance.id, basis);
                 reserve_stage20m(
@@ -7508,13 +7924,8 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                     "coverage.curved_guides.allocation",
                     "guide instance allocation failed",
                 )?;
-                this_dimension.push(StructuralPathInstance {
-                    id: instance.id,
-                    source_structure_id: instance.source_structure_id,
-                    path: instance
-                        .path
-                        .cloned_with_limits_cancellable(curve_limits, is_cancelled)?,
-                });
+                reserve_tone(&mut logical_domains,1,"realization.tone.allocation","logical domain allocation failed")?;
+                logical_domains.push((domain,basis));
                 for fragment in instance.path.clip_to_bounds_with_limits_cancellable(
                     document_domain,
                     curve_limits,
@@ -7525,7 +7936,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                     if is_cancelled() {
                         return Err(PatternPipelineError::new("evaluation.cancelled", "evaluation was cancelled"));
                     }
-                    let fragment = if uses_tiled_authored_normal_offset {
+                    let fragment = if uses_authored_normal_offset_rays {
                         stabilize_planar_constant_gap_path(&fragment, PathOffsetLimits::default())?
                     } else {
                         fragment
@@ -7558,9 +7969,10 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                         ));
                     }
                 }
+                this_dimension.push(instance);
             }
         }
-        if uses_tiled_authored_normal_offset
+        if uses_authored_normal_offset_rays
             && !constant_gap_interior_endpoints_are_paired(
                 &guides[published_dimension_start..],
                 document_domain,
@@ -7620,6 +8032,7 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 ))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let mut logical_motif_sites = Vec::new();
     let sites = match family.product {
         StructuralProductCapability::GuideIntersections => {
             let guide_pairs = preflight_curve_intersection_work(
@@ -7677,11 +8090,17 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 is_cancelled,
                 predicted_sites,
                 &site_progress,
+                Some(&mut logical_motif_sites),
             )?
         }
         StructuralProductCapability::ParametricPaths => Vec::new(),
         StructuralProductCapability::RandomSites => unreachable!(),
     };
+    let mut logical_tone_paths = Vec::new();
+    for (instance,(domain,nominal_basis)) in grouped.into_iter().flatten().zip(logical_domains) {
+        reserve_tone(&mut logical_tone_paths, 1, "realization.tone.allocation", "logical tone path allocation failed")?;
+        logical_tone_paths.push(LogicalTonePath { instance, domain, nominal_basis });
+    }
     let site_set = FamilySiteSet::new(
         family_site_fingerprint(&fingerprint, &sites),
         *family
@@ -7709,6 +8128,9 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
             antialias_margin: ANTIALIAS_MARGIN,
             generation_domain: document_domain,
             structural_path_set: Some(path_set),
+            logical_tone_paths: Arc::new(logical_tone_paths),
+            tone_reference_interval: tone_reference_interval(&request.canvas, &request.density)?,
+            logical_motif_sites: if logical_motif_sites.is_empty() {None} else {Some(Arc::new(FamilySiteSet::new(fingerprint.clone(), family.provenance.mechanism_ids.last().copied().ok_or(PatternPipelineError::new("curve_motif.identity","motif placement requires its family product identity"))?, logical_motif_sites).map_err(family_site_error)?))},
             guide_nominal_bases,
         },
     })
@@ -8206,7 +8628,11 @@ mod intersection_policy_tests {
     }
 }
 
-/// Samples selected finite curve paths by bounded arc length and exact tangent-derived directional spacing.
+/// Samples selected full curves with the existing point cadence and tangent-derived spacing.
+/// Optionally retains complete motif placement before presentation scope filtering; ordinary family
+/// sites, ordinals and point-spacing behavior remain unchanged.
+/// # Errors
+/// Returns existing finite/cadence/count/convergence errors, source-trace allocation failure or cancellation.
 #[allow(clippy::too_many_arguments)] // Explicit evaluator inputs preserve the bounded headless authority.
 fn curve_along_sites(
     grouped: &[Vec<StructuralPathInstance>],
@@ -8224,6 +8650,7 @@ fn curve_along_sites(
     cancelled: &dyn Fn() -> bool,
     predicted_sites: usize,
     report_progress: &(dyn Fn(usize, usize) + Sync),
+    mut full_sites: Option<&mut Vec<FamilySite>>,
 ) -> Result<Vec<FamilySite>, PatternPipelineError> {
     let mut output = Vec::new();
     let mut completed_samples = 0_usize;
@@ -8305,15 +8732,10 @@ fn curve_along_sites(
                     ));
                 }
                 let point = guide.path.point_at(location)?;
-                let scope = match site_scope(point, canvas, generation_domain) {
-                    Some(scope) => scope,
-                    None => {
-                        next_position += spacing;
-                        sequence += 1;
-                        continue;
-                    }
-                };
-                output.push(FamilySite {
+                let visible_scope = site_scope(point, canvas, generation_domain);
+                let scope = visible_scope.unwrap_or(SiteScope::Guard);
+                let site = FamilySite {
+
                     id: FamilySiteId {
                         mechanism_id: product_id,
                         ordinal: output.len(),
@@ -8358,7 +8780,14 @@ fn curve_along_sites(
                             }
                         }
                     },
-                });
+                };
+                if let Some(full) = &mut full_sites {
+                    reserve_tone(full,1,"realization.tone.allocation","full motif placement allocation failed")?;
+                    let mut full_site = site.clone();
+                    full_site.id.ordinal = full.len();
+                    full.push(full_site);
+                }
+                if visible_scope.is_some() { output.push(site); }
                 if output.len() > limit {
                     return Err(PatternPipelineError::new(
                         "coverage.curved_guides.along_guide_limit",
@@ -8446,6 +8875,7 @@ mod parametric_component_sampling_tests {
             &|| false,
             32,
             &|_, _| {},
+            None,
         )
         .expect("component sampler succeeds");
         let samples = sites
@@ -8723,11 +9153,113 @@ pub fn maximum_nominal_cell_diameter(
         })
 }
 
-/// Returns the largest nominal spacing among every emitted guide dimension, independent of site selection.
-///
+/// Bounds complete cells for selected straight dimensions using their actual reciprocal lattice.
+/// The minimum independent-pair diameter bounds cells further subdivided by additional guides.
+/// Translation and phase do not affect reach; nominal mark normalization remains unchanged.
 /// # Errors
-///
-/// Rejects nonfinite density or repetition values before a connected-path family envelope is allocated.
+/// Returns stable unsupported, degenerate-pair or nonfinite topology diagnostics before generation.
+pub fn straight_topology_cell_reach(
+    family: &FamilyCapability,
+    canvas: &CanvasSpec,
+    density: &ResolvedDensityMetric2D,
+    rotation_degrees: f64,
+    selected: &[GuideDimensionId],
+) -> Result<f64, PatternPipelineError> {
+    let invalid = || {
+        PatternPipelineError::new(
+            "coverage.straight_topology.cell_reach",
+            "straight topology requires a finite independent guide-pair cell reach",
+        )
+    };
+    if family.generic_guides.is_some()
+        || family.parametric_curve.is_some()
+        || family.dimensions.len() < 2
+    {
+        return Err(invalid());
+    }
+    let (local_density, sx, sy) = aspect_normalized_straight_layout(canvas, *density)
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+    let transform = AffineTransform2D::scale_then_rotate_about_then_translate(
+        Point2::new(0.0, 0.0),
+        sx,
+        sy,
+        rotation_degrees,
+        Vector2::new(0.0, 0.0),
+    )
+    .ok_or_else(invalid)?;
+    let mut metrics = [(Vector2::new(0.0, 0.0), 0.0); 4];
+    let mut metric_count = 0;
+    for dimension in &family.dimensions {
+        if !selected.is_empty() && !selected.contains(&dimension.id) {
+            continue;
+        }
+        let radians = dimension.baseline_angle_degrees.to_radians();
+        let normal = Vector2::new(radians.cos(), radians.sin());
+        let spacing = directional_spacing(canvas, &local_density, normal)?
+            * dimension.repetition.spacing_multiplier;
+        let metric = DimensionPlan::new(dimension.id, normal, spacing, dimension.phase)
+            .document_metric(transform)
+            .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+        if metric_count == metrics.len() {
+            return Err(invalid());
+        }
+        metrics[metric_count] = metric;
+        metric_count += 1;
+    }
+    let metrics = &metrics[..metric_count];
+    if !(2..=4).contains(&metrics.len())
+        || (!selected.is_empty() && metrics.len() != selected.len())
+    {
+        return Err(invalid());
+    }
+    let mut reach = f64::INFINITY;
+    for (index, (n1, p1)) in metrics.iter().copied().enumerate() {
+        for (n2, p2) in metrics.iter().copied().skip(index + 1) {
+            let cross = n1.x.mul_add(n2.y, -n1.y * n2.x);
+            if cross.abs() <= 1e-10 {
+                continue;
+            }
+            let u = Vector2::new(n2.y, -n2.x).scale(p1 / cross);
+            let v = Vector2::new(-n1.y, n1.x).scale(p2 / cross);
+            let diameter = (u.x + v.x)
+                .hypot(u.y + v.y)
+                .max((u.x - v.x).hypot(u.y - v.y));
+            if !diameter.is_finite() || diameter <= 0.0 {
+                return Err(invalid());
+            }
+            reach = reach.min(diameter);
+        }
+    }
+    if !reach.is_finite() {
+        return Err(invalid());
+    }
+    Ok(reach)
+}
+
+/// Reconstructs exactly the straight planner's Euclidean requested-site envelope from caller intent.
+/// A broader accepted family never supplies this margin, so seeded topology remains cache-independent.
+/// # Errors
+/// Returns finite support, pitch or extent diagnostics without admitting a partial topology.
+fn straight_requested_generation_margin(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+) -> Result<f64, PatternPipelineError> {
+    let maximum = maximum_emitted_guide_spacing(family, &request.canvas, &request.density)?;
+    let margin =
+        request.support_radius + ANTIALIAS_MARGIN + f64::from(request.guard_steps) * maximum;
+    if !margin.is_finite() || margin < 0.0 {
+        return Err(PatternPipelineError::new(
+            "maze.coverage.support",
+            "requested maze guard envelope must remain finite",
+        ));
+    }
+    Ok(margin)
+}
+
+
+/// Returns the largest nominal spacing among emitted guide dimensions, independent of site selection.
+/// # Errors
+/// Rejects nonfinite density or repetition before a connected-path family envelope is allocated.
 pub fn maximum_emitted_guide_spacing(
     family: &FamilyCapability,
     canvas: &CanvasSpec,
@@ -8839,9 +9371,9 @@ fn generic_curve_fingerprint(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<String, PatternPipelineError> {
     let prefix = if generic.structural_source.is_some() {
-        b"toniator-stage-20d-guide-family-v1|arc-policy-fixed-90-degree-cubic-v1".as_slice()
+        b"toniator-stage-20d-guide-family-v1|arc-policy-fixed-90-degree-cubic-v1|logical-tone-origin-v1".as_slice()
     } else {
-        b"toniator-stage-20d-guide-family-v2-centered-local-origin|arc-policy-fixed-90-degree-cubic-v1"
+        b"toniator-stage-20d-guide-family-v2-centered-local-origin|arc-policy-fixed-90-degree-cubic-v1|logical-tone-origin-v1"
             .as_slice()
     };
     let mut bytes = Vec::new();
@@ -9567,12 +10099,14 @@ fn family_sites_from_generalized(
 }
 
 impl TypedFamilyStructure {
-    /// Captures straight-grid metadata as ordered raw line paths for connected realization.
+    /// Captures straight-grid paths with full shared tone domains from stable anchors.
+    /// # Errors
+    /// Returns density/Feature resolution or fallible logical-metadata allocation diagnostics.
     ///
     /// # Panics
     ///
     /// Panics only if a previously validated grid guide cannot rebuild its own finite line path.
-    fn from_grid(output: &GridFamilyOutput, guide_mechanism_id: PatternMechanismId) -> Self {
+    fn from_grid(output: &GridFamilyOutput, guide_mechanism_id: PatternMechanismId, canvas: &CanvasSpec, density: &ResolvedDensityMetric2D) -> Result<Self, PatternPipelineError> {
         let paths = output
             .guides
             .iter()
@@ -9587,10 +10121,6 @@ impl TypedFamilyStructure {
                     .expect("validated straight guide endpoints build a path"),
             })
             .collect::<Vec<_>>();
-        let structural_path_set = (!paths.is_empty()).then(|| {
-            StructuralPathSet::new(output.family_fingerprint.clone(), guide_mechanism_id, paths)
-                .expect("validated ordered straight guides build a path set")
-        });
         let guide_nominal_bases = output
             .guides
             .iter()
@@ -9610,8 +10140,13 @@ impl TypedFamilyStructure {
                         )
                     })
             })
-            .collect();
-        Self {
+            .collect::<BTreeMap<_, _>>();
+        let logical_tone_paths = straight_logical_tone_paths(&paths, &output.guides, &guide_nominal_bases)?;
+        let structural_path_set = (!paths.is_empty()).then(|| {
+            StructuralPathSet::new(output.family_fingerprint.clone(), guide_mechanism_id, paths)
+                .expect("validated ordered straight guides build a path set")
+        });
+        Ok(Self {
             coverage: output.coverage.clone(),
             guides: output.guides.clone(),
             support_radius: output.support_radius,
@@ -9619,8 +10154,11 @@ impl TypedFamilyStructure {
             antialias_margin: output.antialias_margin,
             generation_domain: output.generation_domain,
             structural_path_set,
+            logical_tone_paths: Arc::new(logical_tone_paths),
+            tone_reference_interval: tone_reference_interval(canvas, density)?,
+            logical_motif_sites: None,
             guide_nominal_bases,
-        }
+        })
     }
 }
 
@@ -11869,7 +12407,9 @@ pub fn realize_typed_canonical_marks_with_response_cancellable(
     if request.sampled_paint
         && matches!(
             response_input,
-            GeometryResponseInput::ConstantProbe(_) | GeometryResponseInput::RawProbe(_) | GeometryResponseInput::UniformRadiusProbe(_)
+            GeometryResponseInput::ConstantProbe(_)
+                | GeometryResponseInput::RawProbe(_)
+                | GeometryResponseInput::UniformRadiusProbe(_)
         )
     {
         return Err(PatternPipelineError::new(
@@ -11931,11 +12471,21 @@ pub fn realize_typed_canonical_marks_with_response_cancellable(
             request.max_transformed_curve_segment_instances,
         )?;
     }
-    let parallel_results = family
+    let construction_context = ConstructionContext::current();
+    let mut parallel_results = Vec::new();
+    reserve_stage20m(
+        &mut parallel_results,
+        family.site_set().len(),
+        "realization.mark.allocation",
+        "mark decision allocation failed",
+    )?;
+    family
         .site_set()
         .sites()
         .par_iter()
-        .map(|site| {
+        .enumerate()
+        .map(|(site_index, site)| {
+            let _construction_guard = construction_context.enter();
             if is_cancelled() {
                 return Err(PatternPipelineError::new(
                     "evaluation.cancelled",
@@ -12024,59 +12574,244 @@ pub fn realize_typed_canonical_marks_with_response_cancellable(
                     "realized mark radius exceeds the planned family support",
                 ));
             }
-            let mark = match &prototype_path {
-                None => CanonicalMark::Circle {
-                    source_site_id: site.id,
-                    center: site.position,
-                    radius,
-                    scope: site.scope,
-                    provenance: site.provenance.clone(),
-                    fill_rule: CanonicalFillRule::EvenOdd,
-                },
-                Some((path, anchor, reference_radius, _)) => {
-                    let scale = radius / reference_radius;
-                    let transformed = transform_closed_shape(
-                        path,
-                        *anchor,
-                        scale,
-                        orientation,
-                        site.position,
-                        is_cancelled,
-                    )?;
-                    CanonicalMark::ClosedPath(
-                        CanonicalPathMark::new(
-                            site.id,
-                            transformed,
-                            site.scope,
-                            site.provenance.clone(),
-                            CanonicalFillRule::EvenOdd,
-                        )
-                        .map_err(|_| {
-                            PatternPipelineError::new(
-                                "realization.mark",
-                                "transformed authored closed shape must remain finite and closed",
-                            )
-                        })?,
-                    )
-                }
-            };
-            Ok(Some((mark, sampled_paint.map(|(paint, _)| paint))))
+            let semantic_used = prototype_path.is_some() || radius > 0.0;
+            Ok(Some((
+                site_index,
+                radius,
+                orientation,
+                sampled_paint.map(|(paint, _)| paint),
+                semantic_used,
+            )))
         })
-        .collect::<Vec<_>>();
-    let completed = parallel_results
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut marks = Vec::with_capacity(completed.len());
-    let mut paints = request
-        .sampled_paint
-        .then(|| Vec::with_capacity(completed.len()));
-    for (mark, paint) in completed.into_iter().flatten() {
-        marks.push(mark);
+        .collect_into_vec(&mut parallel_results);
+    construction_context.count_storage(
+        toniator_geometry::ConstructionCounter::DecisionScratchBytes,
+        &parallel_results,
+    );
+    let mut decisions = Vec::new();
+    reserve_stage20m(
+        &mut decisions,
+        parallel_results.len(),
+        "realization.mark.allocation",
+        "resolved mark allocation failed",
+    )?;
+    for result in parallel_results {
+        if let Some(decision) = result? {
+            decisions.push(decision);
+        }
+    }
+    construction_context.count_storage(
+        toniator_geometry::ConstructionCounter::DecisionScratchBytes,
+        &decisions,
+    );
+    // Full semantic membership is resolved before any geometric omission or transform construction.
+    let mut usage_members = Vec::new();
+    reserve_stage20m(
+        &mut usage_members,
+        decisions.len(),
+        "realization.mark.allocation",
+        "mark usage allocation failed",
+    )?;
+    for &(site_index, _, _, _, used) in &decisions {
+        if used {
+            usage_members.push(family.site_set().sites()[site_index].id);
+        }
+    }
+    let usage = SiteUsageSet::new(family.site_set().product_mechanism_id(), usage_members)?;
+    // Sampled paint normalizes each original primitive independently; retained paths keep their own frame.
+    let coverage = construction_context.coverage();
+    let prototype = if !matches!(
+        coverage,
+        toniator_geometry::MaterializationCoverage::Complete
+    ) {
+        match prototype_path.as_ref() {
+            Some((path, anchor, _, _)) => Some(Arc::new(
+                toniator_geometry::PreparedMarkPrototype::new_cancellable(
+                    path.try_clone_cancellable(is_cancelled)
+                        .map_err(|e| PatternPipelineError::new(e.path(), e.message()))?,
+                    *anchor,
+                    is_cancelled,
+                )
+                .map_err(|e| PatternPipelineError::new(e.path(), e.message()))?,
+            )),
+            None => None,
+        }
+    } else {
+        None
+    };
+    let mut hulls = Vec::new();
+    let mut endpoint_extrema: Option<Bounds> = None;
+    if let Some((path, anchor, reference_radius, _)) = &prototype_path
+        && !matches!(
+            coverage,
+            toniator_geometry::MaterializationCoverage::Complete
+        )
+    {
+        reserve_stage20m(
+            &mut hulls,
+            decisions.len(),
+            "realization.mark.allocation",
+            "mark support certificate allocation failed",
+        )?;
+        let mut certificate_results = Vec::new();
+        reserve_stage20m(
+            &mut certificate_results,
+            decisions.len(),
+            "realization.mark.allocation",
+            "mark certificate result allocation failed",
+        )?;
+        decisions
+            .par_iter()
+            .map(|&(site_index, radius, orientation, _, _)| {
+                let _construction_guard = construction_context.enter();
+                toniator_geometry::prepared_mark_hulls(
+                    path,
+                    *anchor,
+                    radius / reference_radius,
+                    orientation,
+                    family.site_set().sites()[site_index].position,
+                    is_cancelled,
+                )
+                .map_err(|e| PatternPipelineError::new(e.path(), e.message()))
+            })
+            .collect_into_vec(&mut certificate_results);
+        construction_context.count_storage(
+            toniator_geometry::ConstructionCounter::CertificateScratchBytes,
+            &certificate_results,
+        );
+        for result in certificate_results {
+            let (hull, ends) = result?;
+            endpoint_extrema = Some(match endpoint_extrema {
+                None => ends,
+                Some(b) => Bounds {
+                    min: Point2::new(b.min.x.min(ends.min.x), b.min.y.min(ends.min.y)),
+                    max: Point2::new(b.max.x.max(ends.max.x), b.max.y.max(ends.max.y)),
+                },
+            });
+            hulls.push(hull);
+        }
+    }
+    construction_context.count_storage(
+        toniator_geometry::ConstructionCounter::CertificateScratchBytes,
+        &hulls,
+    );
+    let mut marks = Vec::new();
+    reserve_stage20m(
+        &mut marks,
+        decisions.len(),
+        "realization.mark.allocation",
+        "mark output allocation failed",
+    )?;
+    construction_context.count_storage(
+        toniator_geometry::ConstructionCounter::MarkSlotBytes,
+        &marks,
+    );
+    let mut paints = if request.sampled_paint {
+        let mut v = Vec::new();
+        reserve_stage20m(
+            &mut v,
+            decisions.len(),
+            "realization.mark.allocation",
+            "mark paint allocation failed",
+        )?;
+        Some(v)
+    } else {
+        None
+    };
+    let mut materialized = Vec::new();
+    reserve_stage20m(
+        &mut materialized,
+        decisions.len(),
+        "realization.mark.allocation",
+        "materialized mark result allocation failed",
+    )?;
+    decisions
+        .par_iter()
+        .enumerate()
+        .map(
+            |(decision_index, &(site_index, radius, orientation, _, _))| {
+                let _construction_guard = construction_context.enter();
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "realization was cancelled",
+                    ));
+                }
+                let site = &family.site_set().sites()[site_index];
+                let mark = match &prototype_path {
+                    None => CanonicalMark::Circle {
+                        source_site_id: site.id,
+                        center: site.position,
+                        radius,
+                        scope: site.scope,
+                        provenance: site.provenance.clone(),
+                        fill_rule: CanonicalFillRule::EvenOdd,
+                    },
+                    Some((path, anchor, reference_radius, _)) => {
+                        let scale = radius / reference_radius;
+                        let omitted = hulls.get(decision_index).is_some_and(|bounds| {
+                            endpoint_extrema.is_some_and(|e| {
+                                bounds.min.x > e.min.x
+                                    && bounds.min.y > e.min.y
+                                    && bounds.max.x < e.max.x
+                                    && bounds.max.y < e.max.y
+                            }) && coverage.exterior(*bounds) != 0
+                        });
+                        if omitted {
+                            construction_context.count(
+                                toniator_geometry::ConstructionCounter::DeferredDecisionBytes,
+                                std::mem::size_of::<toniator_geometry::DeferredPathMark>()
+                                    + 2 * std::mem::size_of::<usize>(),
+                            );
+                            CanonicalMark::DeferredPath(Arc::new(
+                                toniator_geometry::DeferredPathMark {
+                                    prototype: Arc::clone(
+                                        prototype.as_ref().expect("authored prototype"),
+                                    ),
+                                    scale,
+                                    orientation_degrees: orientation,
+                                    destination: site.position,
+                                    source_site_id: site.id,
+                                    scope: site.scope,
+                                    provenance: site.provenance.clone(),
+                                    fill_rule: CanonicalFillRule::EvenOdd,
+                                    bounds: hulls[decision_index],
+                                    coverage,
+                                },
+                            ))
+                        } else {
+                            CanonicalMark::ClosedPath(
+                                CanonicalPathMark::new(
+                                    site.id,
+                                    transform_closed_shape(
+                                        path,
+                                        *anchor,
+                                        scale,
+                                        orientation,
+                                        site.position,
+                                        is_cancelled,
+                                    )?,
+                                    site.scope,
+                                    site.provenance.clone(),
+                                    CanonicalFillRule::EvenOdd,
+                                )
+                                .map_err(|e| PatternPipelineError::new(e.path(), e.message()))?,
+                            )
+                        }
+                    }
+                };
+                Ok(mark)
+            },
+        )
+        .collect_into_vec(&mut materialized);
+    construction_context.count_storage(
+        toniator_geometry::ConstructionCounter::DecisionScratchBytes,
+        &materialized,
+    );
+    for (result, (_, _, _, paint, _)) in materialized.into_iter().zip(decisions) {
+        marks.push(result?);
         if let Some(paint) = paint {
-            paints
-                .as_mut()
-                .expect("sampled paint mode initialized paint storage")
-                .push(paint);
+            paints.as_mut().expect("sampled paint storage").push(paint);
         }
     }
     let mut bytes = family.family_fingerprint().as_bytes().to_vec();
@@ -12108,6 +12843,10 @@ pub fn realize_typed_canonical_marks_with_response_cancellable(
     for mark in &marks {
         append_canonical_mark_identity(&mut bytes, mark);
     }
+    construction_context.count_storage(
+        toniator_geometry::ConstructionCounter::FingerprintBufferBytes,
+        &bytes,
+    );
     let realization = CanonicalMarkRealization {
         family_fingerprint: family.family_fingerprint().to_owned(),
         realization_fingerprint: fnv1a64(bytes),
@@ -12115,6 +12854,7 @@ pub fn realize_typed_canonical_marks_with_response_cancellable(
         response: request.response,
         marks,
         paints,
+        usage,
     };
     Ok(TypedRealization {
         provenance,
@@ -12305,61 +13045,15 @@ fn transform_closed_shape(
     destination: Point2,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CurvePath, PatternPipelineError> {
-    if !scale.is_finite()
-        || scale < 0.0
-        || !orientation_degrees.is_finite()
-        || !destination.is_finite()
-    {
-        return Err(PatternPipelineError::new(
-            "realization.mark.transform",
-            "closed-shape scale and destination must be finite",
-        ));
-    }
-    let radians = orientation_degrees.to_radians();
-    let (sin, cos) = radians.sin_cos();
-    let map = |point: Point2| {
-        let x = (point.x - anchor.x) * scale;
-        let y = (point.y - anchor.y) * scale;
-        Point2::new(
-            destination.x + cos * x - sin * y,
-            destination.y + sin * x + cos * y,
-        )
-    };
-    let mut segments = Vec::with_capacity(path.segments().len());
-    for segment in path.segments() {
-        if is_cancelled() {
-            return Err(PatternPipelineError::new(
-                "evaluation.cancelled",
-                "realization was cancelled",
-            ));
-        }
-        let transformed = match segment {
-            CurveSegment::Line(line) => {
-                toniator_geometry::LineSegment::new(map(line.start()), map(line.end()))
-                    .map(CurveSegment::Line)
-            }
-            CurveSegment::CubicBezier(cubic) => toniator_geometry::CubicBezierSegment::new(
-                map(cubic.start()),
-                map(cubic.control_1()),
-                map(cubic.control_2()),
-                map(cubic.end()),
-            )
-            .map(CurveSegment::CubicBezier),
-        }
-        .map_err(|_| {
-            PatternPipelineError::new(
-                "realization.mark.transform",
-                "transformed closed-shape coordinates must remain finite",
-            )
-        })?;
-        segments.push(transformed);
-    }
-    CurvePath::new(segments, PathClosure::Closed).map_err(|_| {
-        PatternPipelineError::new(
-            "realization.mark.transform",
-            "transformed closed-shape path must retain exact closure",
-        )
-    })
+    toniator_geometry::transform_prepared_mark(
+        path,
+        anchor,
+        scale,
+        orientation_degrees,
+        destination,
+        is_cancelled,
+    )
+    .map_err(|e| PatternPipelineError::new(e.path(), e.message()))
 }
 
 /// Resolves a requested fixed/tangent/normal orientation from the exact site contributor.
@@ -13628,6 +14322,8 @@ pub struct CanonicalMarkRealization {
     pub response: MarkResponse,
     pub marks: Vec<CanonicalMark>,
     pub paints: Option<Vec<SampledSourcePaint>>,
+    /// Complete pre-clip semantic survival, independent from constructed material.
+    pub usage: SiteUsageSet,
 }
 
 /// Effective normalized width response consumed only by guide-path realization.
@@ -13648,6 +14344,93 @@ pub struct CanonicalStrokeRealization {
     pub strokes: Vec<CanonicalStroke>,
 }
 
+/// One frozen connection topology realized as strokes plus ordinary singleton circles.
+/// Both collections share connected response, paint, output identity and calibration authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalConnectionRealization {
+    pub family_fingerprint: String,
+    pub source_identity: toniator_sampling::SourceIdentity,
+    pub response: StrokeResponse,
+    pub realization_fingerprint: String,
+    pub strokes: Vec<CanonicalStroke>,
+    pub isolated_points: Vec<CanonicalMark>,
+}
+
+/// Adds surviving structural singletons using exactly the completed connected width transfer.
+/// Bias has no direction for circles; source cutoff changes radius but never membership.
+/// # Errors
+/// Returns cancellation, source response, nonfinite width or fallible storage diagnostics atomically.
+#[allow(clippy::too_many_arguments)]
+fn finish_connection_realization(
+    value: CanonicalStrokeRealization,
+    points: &[toniator_geometry::SiteAdjacencyNode],
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    response_input: GeometryResponseInput<'_>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CanonicalConnectionRealization, PatternPipelineError> {
+    let mut circles = Vec::new();
+    reserve_tone(
+        &mut circles,
+        points.len(),
+        "connection.singleton.allocation",
+        "singleton circle allocation failed",
+    )?;
+    let mut hash = Fnv1a64State::new();
+    hash.write(value.realization_fingerprint.bytes());
+    hash.write(b"ordinary-connection-singletons-v1".iter().copied());
+    for node in points {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "singleton realization cancelled",
+            ));
+        }
+        let thickness = completed_stroke_thickness(
+            node.position,
+            source,
+            canvas,
+            mapping,
+            response,
+            response_input,
+        )?;
+        let radius = thickness * node.nominal_cell_basis.diameter() / 2.0;
+        if !radius.is_finite() || radius < 0.0 {
+            return Err(PatternPipelineError::new(
+                "connection.singleton.width",
+                "singleton radius must remain finite and nonnegative",
+            ));
+        }
+        let facts = node.try_cloned().map_err(|_| {
+            PatternPipelineError::new(
+                "connection.singleton.allocation",
+                "singleton provenance allocation failed",
+            )
+        })?;
+        hash.write(node.id.mechanism_id.0.to_le_bytes());
+        hash.write((node.id.ordinal as u64).to_le_bytes());
+        hash.write(radius.to_bits().to_le_bytes());
+        circles.push(CanonicalMark::Circle {
+            source_site_id: facts.id,
+            center: facts.position,
+            radius,
+            scope: facts.scope,
+            provenance: facts.provenance,
+            fill_rule: CanonicalFillRule::NonZero,
+        });
+    }
+    Ok(CanonicalConnectionRealization {
+        family_fingerprint: value.family_fingerprint,
+        source_identity: value.source_identity,
+        response: value.response,
+        realization_fingerprint: hash.finish(),
+        strokes: value.strokes,
+        isolated_points: circles,
+    })
+}
+
 /// Stable canonical sweep contract included in all stroke realization identity.
 pub const CANONICAL_STROKE_OUTLINE_CONTRACT_ID: &str = "toniator-stage-21a-filled-outline-v5";
 /// Bounds adaptive samples per evaluation request before profile allocation.
@@ -13657,11 +14440,8 @@ pub const MAX_STROKE_OUTLINE_SEGMENTS: usize = 524_288;
 /// Caps adaptive centerline/width subdivision deterministically.
 pub const MAX_STROKE_SUBDIVISION_DEPTH: u8 = 48;
 const STROKE_CENTERLINE_TOLERANCE: f64 = 1.0 / 64.0;
-/// Bounds the permitted normalized source-response interpolation error for one profile interval.
-///
-/// This is an internal canonical-outline sampling tolerance, not artist-facing motif sizing or
-/// a renderer setting. It prevents a sharp source transition from becoming a long, thin tapered
-/// outline wedge between two otherwise widely spaced cadence samples.
+/// Bounds numeric reconstruction error when arc-linear completed thickness is expressed in segment parameter.
+/// This fixed tolerance is independent of artistic tone spacing and never adds source knots.
 const STROKE_RESPONSE_TOLERANCE: f64 = 1.0 / 64.0;
 
 /// Realizes ordered guide paths into reusable finite filled outlines.
@@ -13698,7 +14478,8 @@ pub fn realize_typed_canonical_strokes_cancellable(
     )
 }
 
-/// Realizes guide/parametric path widths from one transient completed-scalar transfer.
+/// Realizes complete guide/parametric paths from one anchored lattice of completed thickness.
+/// Full group origins survive clipped presentation; geometric refinement never queries artwork.
 ///
 /// # Errors
 /// Returns probe validation, source, profile, outline, or cancellation diagnostics atomically.
@@ -13730,95 +14511,42 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
             "canonical stroke realization requires a guide-path output",
         ));
     }
-    let paths = family
-        .structural_path_set()
-        .ok_or(PatternPipelineError::new(
-            "pattern.output_layers.guide_paths",
-            "guide-path output requires derived guide paths",
-        ))?;
+    let interval = family.tone_sample_interval(output.tone_sample_spacing().ok_or(PatternPipelineError::new("realization.tone.applicability", "tone spacing requires guide/parametric output"))?)?;
     let mut strokes = Vec::new();
     let mut profile_samples = 0_usize;
     let mut outline_segments = 0_usize;
-    for guide in paths.paths() {
+    let logical_paths = family.logical_tone_paths();
+    let mut tones = Vec::new();
+    let mut group_start = 0;
+    let mut prepared_samples = 0_usize;
+    while group_start < logical_paths.len() {
+        let first = &logical_paths[group_start];
+        let key = (first.instance.id.source, first.instance.id.repetition_index);
+        let group_end = group_start + logical_paths[group_start..].iter().take_while(|path| (path.instance.id.source,path.instance.id.repetition_index)==key).count();
+        let mut inputs = Vec::new();
+        reserve_tone(&mut inputs,group_end-group_start,"realization.tone.allocation","tone group allocation failed")?;
+        inputs.extend(logical_paths[group_start..group_end].iter().map(|logical| (&logical.instance.path,logical.domain)));
+        let group = prepare_tone_group_profiles_cancellable(&inputs, interval, first.nominal_basis,
+            max_profile_samples.saturating_sub(prepared_samples),
+            &|point| completed_stroke_thickness(point,source,canvas,mapping,response,response_input),is_cancelled)?;
+        for tone in group {
+            prepared_samples = prepared_samples.checked_add(tone.samples.len()).ok_or(PatternPipelineError::new("realization.stroke.profile_limit","tone profile count overflows"))?;
+            reserve_tone(&mut tones,1,"realization.tone.allocation","tone profile collection allocation failed")?;
+            tones.push(tone);
+        }
+        group_start = group_end;
+    }
+    for (logical,tone) in logical_paths.iter().zip(tones) {
+        let guide = &logical.instance;
         if is_cancelled() {
             return Err(PatternPipelineError::new(
                 "evaluation.cancelled",
                 "evaluation was cancelled",
             ));
         }
-        let nominal_basis =
-            family
-                .guide_nominal_basis(guide.id)
-                .ok_or(PatternPipelineError::new(
-                    "realization.stroke.basis",
-                    "guide path has no resolved nominal spacing basis",
-                ))?;
-        let pixel_footprint = (canvas.width / f64::from(source.identity().width))
-            .min(canvas.height / f64::from(source.identity().height));
-        let profile_sample_interval = nominal_basis.max(pixel_footprint);
-        let mut profile: Vec<StrokeProfileSample> = Vec::new();
-        for (segment_index, segment) in guide.path.segments().iter().enumerate() {
-            let start = stroke_sample(
-                segment,
-                segment_index,
-                0.0,
-                source,
-                canvas,
-                mapping,
-                response,
-                response_input,
-                nominal_basis,
-            )?;
-            let end = stroke_sample(
-                segment,
-                segment_index,
-                1.0,
-                source,
-                canvas,
-                mapping,
-                response,
-                response_input,
-                nominal_basis,
-            )?;
-            if profile
-                .last()
-                .is_some_and(|previous| previous.location != start.location)
-            {
-                if profile_samples >= max_profile_samples {
-                    return Err(PatternPipelineError::new(
-                        "realization.stroke.profile_limit",
-                        "canonical stroke profile exceeds the sample limit",
-                    ));
-                }
-                append_stroke_sample(
-                    &mut profile,
-                    &mut profile_samples,
-                    max_profile_samples,
-                    start,
-                    is_cancelled,
-                )?;
-            }
-            append_adaptive_stroke_interval(
-                segment,
-                segment_index,
-                0.0,
-                start,
-                1.0,
-                end,
-                0,
-                profile_sample_interval,
-                source,
-                canvas,
-                mapping,
-                response,
-                response_input,
-                nominal_basis,
-                &mut profile,
-                &mut profile_samples,
-                max_profile_samples,
-                is_cancelled,
-            )?;
-        }
+        let nominal_basis = logical.nominal_basis;
+        let profile = tone.samples;
+        profile_samples = profile_samples.checked_add(profile.len()).ok_or(PatternPipelineError::new("realization.stroke.profile_limit", "stroke profile count overflows"))?;
         let mut widths = Vec::new();
         for sample in &profile {
             if is_cancelled() {
@@ -13827,10 +14555,10 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
                     "evaluation was cancelled",
                 ));
             }
-            reserve_stage20m(
+            reserve_tone(
                 &mut widths,
                 1,
-                "realization.stroke.allocation",
+                "realization.tone.allocation",
                 "stroke width input allocation failed",
             )?;
             widths.push(VariableWidthPathSample {
@@ -13866,18 +14594,7 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
             }
         })?;
         outline_segments = outline_segments
-            .checked_add(
-                outline
-                    .contours
-                    .iter()
-                    .try_fold(0_usize, |total, contour| {
-                        total.checked_add(contour.segments.len())
-                    })
-                    .ok_or(PatternPipelineError::new(
-                        "realization.stroke.outline_limit",
-                        "stroke outline segment total overflows",
-                    ))?,
-            )
+            .checked_add(outline.logical_segment_count().map_err(|error|PatternPipelineError::new(error.path(),error.message()))?)
             .ok_or(PatternPipelineError::new(
                 "realization.stroke.outline_limit",
                 "canonical stroke outline exceeds the segment limit",
@@ -13888,10 +14605,10 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
                 "canonical stroke outline exceeds the segment limit",
             ));
         }
-        reserve_stage20m(
+        reserve_tone(
             &mut strokes,
             1,
-            "realization.stroke.allocation",
+            "realization.tone.allocation",
             "stroke output allocation failed",
         )?;
         strokes.push(
@@ -13915,36 +14632,44 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
         );
     }
     let mut bytes = Vec::new();
-    reserve_stage20m(
+    reserve_tone(
         &mut bytes,
         family.family_fingerprint().len(),
-        "realization.stroke.allocation",
+        "realization.tone.allocation",
         "stroke fingerprint allocation failed",
     )?;
     bytes.extend(family.family_fingerprint().as_bytes());
-    reserve_stage20m(
+    reserve_tone(
         &mut bytes,
         CANONICAL_STROKE_OUTLINE_CONTRACT_ID.len() + 24,
-        "realization.stroke.allocation",
+        "realization.tone.allocation",
         "stroke fingerprint allocation failed",
     )?;
     bytes.extend(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.as_bytes());
+    reserve_tone(&mut bytes,24,"realization.tone.allocation","tone identity allocation failed")?;
+    bytes.extend(b"anchored-tone-v1");
+    bytes.extend(interval.to_bits().to_le_bytes());
     bytes.extend(response.minimum_thickness.to_bits().to_le_bytes());
     bytes.extend(response.maximum_thickness.to_bits().to_le_bytes());
     bytes.extend(response.bias.to_bits().to_le_bytes());
-    for stroke in &strokes {
+    for (ordinal,stroke) in strokes.iter().enumerate() {
         if is_cancelled() {
             return Err(PatternPipelineError::new(
                 "evaluation.cancelled",
                 "evaluation was cancelled",
             ));
         }
-        reserve_stage20m(
+        reserve_tone(
             &mut bytes,
             128,
-            "realization.stroke.allocation",
+            "realization.tone.allocation",
             "stroke fingerprint allocation failed",
         )?;
+        let domain=logical_paths[ordinal].domain;
+        bytes.extend(domain.start_distance.to_bits().to_le_bytes());
+        bytes.push(u8::from(domain.genuine_start));
+        bytes.push(u8::from(domain.genuine_end));
+        bytes.push(domain.continuation as u8);
         match &stroke.source_id {
             toniator_geometry::CanonicalStrokeSourceId::Structural(id) => {
                 append_structural_path_instance_identity(&mut bytes, *id);
@@ -13975,10 +14700,10 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
                     "evaluation was cancelled",
                 ));
             }
-            reserve_stage20m(
+            reserve_tone(
                 &mut bytes,
                 64,
-                "realization.stroke.allocation",
+                "realization.tone.allocation",
                 "stroke fingerprint allocation failed",
             )?;
             bytes.extend(sample.center.x.to_bits().to_le_bytes());
@@ -13994,10 +14719,10 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
                     "evaluation was cancelled",
                 ));
             }
-            reserve_stage20m(
+            reserve_tone(
                 &mut bytes,
                 8,
-                "realization.stroke.allocation",
+                "realization.tone.allocation",
                 "stroke fingerprint allocation failed",
             )?;
             bytes.extend((contour.segments.len() as u64).to_le_bytes());
@@ -14117,7 +14842,7 @@ pub fn realize_connection_canonical_strokes_cancellable(
     max_profile_samples: usize,
     max_outline_segments: usize,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+) -> Result<CanonicalConnectionRealization, PatternPipelineError> {
     realize_connection_canonical_strokes_with_response_cancellable(
         paths,
         source,
@@ -14148,18 +14873,27 @@ pub fn realize_connection_canonical_strokes_with_response_cancellable(
     max_outline_segments: usize,
     response_input: GeometryResponseInput<'_>,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+) -> Result<CanonicalConnectionRealization, PatternPipelineError> {
     response_input.validate()?;
-    realize_connection_canonical_strokes_from_paths(
+    let mut connections = Vec::new();
+    reserve_tone(
+        &mut connections,
+        paths.paths.len(),
+        "connection.singleton.allocation",
+        "connection centerline staging allocation failed",
+    )?;
+    for connection in &paths.paths {
+        let path = connection
+            .path
+            .cloned_with_limits_cancellable(CurveWorkLimits::default(), is_cancelled)
+            .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+        connections.push((connection.id.clone(), path, connection.nominal_basis));
+    }
+
+    let value = realize_connection_canonical_strokes_from_paths(
         paths.fingerprint().to_owned(),
         paths.paths.len(),
-        paths.paths.iter().map(|connection| {
-            (
-                connection.id.clone(),
-                connection.path.clone(),
-                connection.nominal_basis,
-            )
-        }),
+        connections.into_iter(),
         source,
         canvas,
         mapping,
@@ -14167,6 +14901,16 @@ pub fn realize_connection_canonical_strokes_with_response_cancellable(
         style,
         max_profile_samples,
         max_outline_segments,
+        response_input,
+        is_cancelled,
+    )?;
+    finish_connection_realization(
+        value,
+        &paths.isolated_points,
+        source,
+        canvas,
+        mapping,
+        response,
         response_input,
         is_cancelled,
     )
@@ -14193,12 +14937,13 @@ pub fn realize_owned_connection_canonical_strokes_cancellable(
     max_profile_samples: usize,
     max_outline_segments: usize,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+) -> Result<CanonicalConnectionRealization, PatternPipelineError> {
     let family_fingerprint = paths.fingerprint().to_owned();
     let connections = std::mem::take(&mut paths.paths);
     let path_count = connections.len();
+    let points = std::mem::take(&mut paths.isolated_points);
     drop(paths);
-    realize_connection_canonical_strokes_from_paths(
+    let value = realize_connection_canonical_strokes_from_paths(
         family_fingerprint,
         path_count,
         connections
@@ -14211,6 +14956,16 @@ pub fn realize_owned_connection_canonical_strokes_cancellable(
         style,
         max_profile_samples,
         max_outline_segments,
+        GeometryResponseInput::Identity,
+        is_cancelled,
+    )?;
+    finish_connection_realization(
+        value,
+        &points,
+        source,
+        canvas,
+        mapping,
+        response,
         GeometryResponseInput::Identity,
         is_cancelled,
     )
@@ -14366,13 +15121,7 @@ where
             }
         })?;
         outline_segments = outline_segments
-            .checked_add(
-                outline
-                    .contours
-                    .iter()
-                    .map(|contour| contour.segments.len())
-                    .sum::<usize>(),
-            )
+            .checked_add(outline.logical_segment_count().map_err(|error|PatternPipelineError::new(error.path(),error.message()))?)
             .ok_or(PatternPipelineError::new(
                 "connection.stroke.outline_limit",
                 "connection stroke outline exceeds the segment limit",
@@ -14682,13 +15431,7 @@ where
             }
         })?;
         outline_segments = outline_segments
-            .checked_add(
-                outline
-                    .contours
-                    .iter()
-                    .map(|contour| contour.segments.len())
-                    .sum::<usize>(),
-            )
+            .checked_add(outline.logical_segment_count().map_err(|error|PatternPipelineError::new(error.path(),error.message()))?)
             .ok_or(PatternPipelineError::new(
                 "maze.stroke.outline_limit",
                 "maze stroke outline exceeds the segment limit",
@@ -14837,7 +15580,9 @@ pub fn realize_typed_connection_canonical_strokes_cancellable(
     max_profile_samples: usize,
     max_outline_segments: usize,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<TypedRealization<CanonicalStrokeRealization>, PatternPipelineError> {
+) -> Result<TypedRealization<CanonicalConnectionRealization>, PatternPipelineError> {
+    let [output] = plan.ordered_outputs.as_slice() else { return Err(PatternPipelineError::new("connection.selection.binding", "typed connection requires one output")); };
+    if output.connection_selection() != Some(paths.selection) { return Err(PatternPipelineError::new("connection.selection.binding", "frozen topology selection does not match the authored output")); }
     Ok(TypedRealization {
         provenance: realization_provenance(family, plan)?,
         output: realize_connection_canonical_strokes_cancellable(
@@ -14872,7 +15617,7 @@ pub fn realize_typed_connection_canonical_stroke_output_cancellable(
     max_profile_samples: usize,
     max_outline_segments: usize,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<TypedOutputRealization<CanonicalStrokeRealization>, PatternPipelineError> {
+) -> Result<TypedOutputRealization<CanonicalConnectionRealization>, PatternPipelineError> {
     validate_output_realization_binding(plan, capability, setting)?;
     let PatternGeometryResponse::Connected(response) = &setting.response else {
         return Err(PatternPipelineError::new(
@@ -14937,24 +15682,7 @@ fn stroke_sample(
             "stroke centerline must remain finite",
         )
     })?;
-    let ink = if let GeometryResponseInput::ConstantProbe(value) | GeometryResponseInput::RawProbe(value) = response_input {
-        value
-    } else {
-        source
-            .sample_mapping_response(center, canvas, mapping)
-            .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?
-    };
-    let thickness = if !matches!(response_input, GeometryResponseInput::ConstantProbe(_) | GeometryResponseInput::RawProbe(_))
-        && mapping.suppresses(ink)
-    {
-        0.0
-    } else {
-        response_input.resolve_raw_size(
-            ink,
-            response.minimum_thickness,
-            response.maximum_thickness,
-        )?
-    };
+    let thickness = completed_stroke_thickness(center, source, canvas, mapping, response, response_input)?;
     let width = thickness * basis;
     Ok(StrokeProfileSample {
         location: PathLocation::new(segment_index, parameter).map_err(|_| {
@@ -14967,6 +15695,43 @@ fn stroke_sample(
         normalized_thickness: thickness,
         width,
     })
+}
+
+/// Completes source alpha, mapping cutoff and response/calibration before artistic interpolation.
+/// This is shared by the ordinary connection/maze sampler and the new curve tone lattice.
+/// # Errors
+/// Returns the existing source/mapping/response diagnostics without substituting response values.
+fn completed_stroke_thickness(
+    center: Point2,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    response_input: GeometryResponseInput<'_>,
+) -> Result<f64, PatternPipelineError> {
+    let ink = if let GeometryResponseInput::ConstantProbe(value)
+    | GeometryResponseInput::RawProbe(value) = response_input
+    {
+        value
+    } else {
+        source
+            .sample_mapping_response(center, canvas, mapping)
+            .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?
+    };
+    let thickness = if !matches!(
+        response_input,
+        GeometryResponseInput::ConstantProbe(_) | GeometryResponseInput::RawProbe(_)
+    ) && mapping.suppresses(ink)
+    {
+        0.0
+    } else {
+        response_input.resolve_raw_size(
+            ink,
+            response.minimum_thickness,
+            response.maximum_thickness,
+        )?
+    };
+    Ok(thickness)
 }
 
 /// Appends one exact profile knot only after aggregate checked count and fallible reservation.
@@ -14993,10 +15758,10 @@ fn append_stroke_sample(
                 "realization.stroke.profile_limit",
                 "canonical stroke profile exceeds the sample limit",
             ))?;
-    reserve_stage20m(
+    reserve_tone(
         profile,
         1,
-        "realization.stroke.allocation",
+        "realization.tone.allocation",
         "stroke profile allocation failed",
     )?;
     profile.push(sample);
@@ -15004,145 +15769,8 @@ fn append_stroke_sample(
     Ok(())
 }
 
-/// Appends the right endpoint once centerline shape and pattern-scale response spacing are resolved.
-///
-/// Source response is sampled at nominal pattern-spacing or source-pixel-footprint resolution
-/// unless its midpoint departs materially from linear interpolation. That bounded extra
-/// refinement preserves an abrupt source-driven zero-width break instead of manufacturing a
-/// long thin taper; curved centerlines retain their independent geometric flatness refinement.
-///
-/// # Errors
-///
-/// Stops atomically at cancellation, depth, numeric, or profile-allocation limits.
-#[allow(clippy::too_many_arguments)]
-fn append_adaptive_stroke_interval(
-    segment: &CurveSegment,
-    segment_index: usize,
-    left_t: f64,
-    left: StrokeProfileSample,
-    right_t: f64,
-    right: StrokeProfileSample,
-    depth: u8,
-    profile_sample_interval: f64,
-    source: &SourceField,
-    canvas: &CanvasSpec,
-    mapping: SourceMapping,
-    response: StrokeResponse,
-    response_input: GeometryResponseInput<'_>,
-    basis: f64,
-    profile: &mut Vec<StrokeProfileSample>,
-    profile_samples: &mut usize,
-    max_profile_samples: usize,
-    is_cancelled: &dyn Fn() -> bool,
-) -> Result<(), PatternPipelineError> {
-    if is_cancelled() {
-        return Err(PatternPipelineError::new(
-            "evaluation.cancelled",
-            "evaluation was cancelled",
-        ));
-    }
-    let middle_t = (left_t + right_t) * 0.5;
-    let middle = stroke_sample(
-        segment,
-        segment_index,
-        middle_t,
-        source,
-        canvas,
-        mapping,
-        response,
-        response_input,
-        basis,
-    )?;
-    let chord_middle = Point2::new(
-        (left.center.x + right.center.x) * 0.5,
-        (left.center.y + right.center.y) * 0.5,
-    );
-    let midpoint_error = ((middle.center.x - chord_middle.x).powi(2)
-        + (middle.center.y - chord_middle.y).powi(2))
-    .sqrt();
-    let centerline_error = midpoint_error.max(cubic_subcurve_flatness(segment, left_t, right_t));
-    let response_error = (middle.normalized_thickness
-        - (left.normalized_thickness + right.normalized_thickness) * 0.5)
-        .abs();
-    let interval = ((right.center.x - left.center.x).powi(2)
-        + (right.center.y - left.center.y).powi(2))
-    .sqrt();
-    let refine = centerline_error > STROKE_CENTERLINE_TOLERANCE
-        || response_error > STROKE_RESPONSE_TOLERANCE
-        || interval > profile_sample_interval;
-    if refine {
-        if depth >= MAX_STROKE_SUBDIVISION_DEPTH {
-            return Err(PatternPipelineError::new(
-                "realization.stroke.subdivision_depth",
-                "stroke response exceeds the adaptive subdivision depth",
-            ));
-        }
-        append_adaptive_stroke_interval(
-            segment,
-            segment_index,
-            left_t,
-            left,
-            middle_t,
-            middle,
-            depth + 1,
-            profile_sample_interval,
-            source,
-            canvas,
-            mapping,
-            response,
-            response_input,
-            basis,
-            profile,
-            profile_samples,
-            max_profile_samples,
-            is_cancelled,
-        )?;
-        append_adaptive_stroke_interval(
-            segment,
-            segment_index,
-            middle_t,
-            middle,
-            right_t,
-            right,
-            depth + 1,
-            profile_sample_interval,
-            source,
-            canvas,
-            mapping,
-            response,
-            response_input,
-            basis,
-            profile,
-            profile_samples,
-            max_profile_samples,
-            is_cancelled,
-        )?;
-    } else {
-        if profile.is_empty() {
-            append_stroke_sample(
-                profile,
-                profile_samples,
-                max_profile_samples,
-                left,
-                is_cancelled,
-            )?;
-        }
-        if *profile_samples >= max_profile_samples {
-            return Err(PatternPipelineError::new(
-                "realization.stroke.profile_limit",
-                "canonical stroke profile exceeds the sample limit",
-            ));
-        }
-        append_stroke_sample(
-            profile,
-            profile_samples,
-            max_profile_samples,
-            right,
-            is_cancelled,
-        )?;
-    }
-    Ok(())
-}
+
+
 
 /// Returns a conservative De Casteljau control-polygon flatness bound for one original cubic subinterval.
 fn cubic_subcurve_flatness(segment: &CurveSegment, left: f64, right: f64) -> f64 {
@@ -15965,10 +16593,12 @@ fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapabil
             }
         }
         OutputCapabilityPayload::GuidePaths {
+            tone_sample_spacing,
             guide_mechanism_id,
             style,
         } => {
             bytes.push(2);
+            bytes.extend(tone_sample_spacing.multiplier.to_bits().to_le_bytes());
             bytes.extend(guide_mechanism_id.0.to_le_bytes());
             bytes.push(match style.join {
                 toniator_domain::StrokeJoin::Round => 1,
@@ -15978,6 +16608,7 @@ fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapabil
             });
         }
         OutputCapabilityPayload::CurveMotifPaths {
+            tone_sample_spacing,
             site_mechanism_id,
             structure_id,
             style,
@@ -15985,6 +16616,7 @@ fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapabil
             alternate_row_phase,
         } => {
             bytes.push(7);
+            bytes.extend(tone_sample_spacing.multiplier.to_bits().to_le_bytes());
             bytes.extend(site_mechanism_id.0.to_le_bytes());
             bytes.extend(structure_id.0.to_le_bytes());
             bytes.push(u8::from(*mirror_alternate_rows));
@@ -16033,10 +16665,18 @@ fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapabil
             });
         }
         OutputCapabilityPayload::ConnectionPaths {
+            selection,
             site_mechanism_id,
             program,
             style,
         } => {
+            bytes.extend(selection.maximum_final_degree.unwrap_or(0).to_le_bytes());
+            bytes.push(match selection.cycles {
+                toniator_domain::ConnectionCyclePolicy::Allow => 0,
+                toniator_domain::ConnectionCyclePolicy::Forbid => 1,
+            });
+            bytes.extend(selection.minimum_component_points.to_le_bytes());
+
             bytes.push(3);
             bytes.extend(site_mechanism_id.0.to_le_bytes());
             append_connection_program_identity(bytes, program);
@@ -16079,6 +16719,26 @@ fn append_connection_program_identity(bytes: &mut Vec<u8>, program: &ConnectionP
 /// Appends one ordered generalized canonical mark, including geometry and truthful site provenance.
 fn append_canonical_mark_identity(bytes: &mut Vec<u8>, mark: &CanonicalMark) {
     match mark {
+        CanonicalMark::DeferredPath(mark) => {
+            bytes.push(3);
+            append_family_site_identity(bytes, mark.source_site_id);
+            append_site_scope_identity(bytes, mark.scope);
+            append_family_site_provenance_identity(bytes, &mark.provenance);
+            append_fill_rule_identity(bytes, mark.fill_rule);
+            bytes.extend(mark.prototype.fingerprint().to_le_bytes());
+            for value in [
+                mark.scale,
+                mark.orientation_degrees,
+                mark.destination.x,
+                mark.destination.y,
+                mark.prototype.anchor().x,
+                mark.prototype.anchor().y,
+            ] {
+                bytes.extend(value.to_bits().to_le_bytes());
+            }
+            bytes.extend(format!("{:?}", mark.coverage).bytes());
+        }
+
         CanonicalMark::Circle {
             source_site_id,
             center,
@@ -16404,7 +17064,7 @@ mod stage20m_allocation_tests {
             append_stroke_sample(&mut profile, &mut total, 1, sample, &|| false)
                 .unwrap_err()
                 .path(),
-            "realization.stroke.allocation"
+            "realization.tone.allocation"
         );
         assert!(profile.is_empty());
         assert_eq!(total, 0);
@@ -18116,6 +18776,8 @@ pub fn evaluate_straight_grid_cancellable(
         ));
     }
 
+    let construction_context = ConstructionContext::current();
+    construction_context.count(ConstructionCounter::LogicalGridCandidates, candidate_count);
     let extension = planning_margin;
     let mut guides = Vec::new();
     for (dimension, coverage) in dimensions.iter().zip(plans.iter()) {
@@ -18136,11 +18798,31 @@ pub fn evaluate_straight_grid_cancellable(
                 "evaluation was cancelled",
             ));
         }
-        for second_index in plans[1].first_index..=plans[1].last_index {
+        let range = if construction_context.mode == ConstructionMode::Canvas {
+            fixed_grid_row_range(
+                plans[1].first_index,
+                plans[1].last_index,
+                first_index,
+                dimensions[0].spacing,
+                dimensions[1].spacing,
+                transform,
+                document_canvas,
+                planning_margin,
+                is_cancelled,
+                &construction_context,
+            )?
+        } else {
+            Some((plans[1].first_index, plans[1].last_index))
+        };
+        let Some((row_first, row_last)) = range else {
+            continue;
+        };
+        for second_index in row_first..=row_last {
             let local = Point2::new(
                 first_index as f64 * dimensions[0].spacing,
                 second_index as f64 * dimensions[1].spacing,
             );
+            construction_context.count(ConstructionCounter::GridPositions, 1);
             let position = transform.apply_point(local);
             // Coverage enumeration intentionally remains conservative in
             // inverse-local space. Publish only intersections whose world-space
@@ -18148,6 +18830,7 @@ pub fn evaluate_straight_grid_cancellable(
             // support/AA/guard envelope used to plan that enumeration. This
             // keeps required corner coverage while excluding Cartesian-product
             // corners that cannot affect final marks or clipping.
+            construction_context.count(ConstructionCounter::GridPredicates, 1);
             if distance_to_canvas(position, document_canvas) > planning_margin {
                 continue;
             }
@@ -18228,6 +18911,23 @@ impl DimensionPlan {
             .ok_or(GridError::new("coverage", "could not project local domain"))?;
         let first_index = checked_index(((minimum - self.phase) / self.spacing).floor())?;
         let last_index = checked_index(((maximum - self.phase) / self.spacing).ceil())?;
+        let (document_normal, physical_spacing) = self.document_metric(transform)?;
+        let placed_origin = transform.apply_point(Point2::new(0.0, 0.0));
+        let placed_phase = placed_origin.dot(document_normal);
+        Ok(GuideCoverage {
+            dimension_id: self.id.0,
+            spacing: physical_spacing,
+            normalized_phase: (self.phase + placed_phase).rem_euclid(physical_spacing),
+            first_index,
+            last_index,
+        })
+    }
+
+    /// Resolves this guide's physical unit normal and pitch through the exact planner transform.
+    /// Shared topology reach consumes these metrics without changing mark-normalization authority.
+    /// # Errors
+    /// Returns finite positive document-metric diagnostics before family allocation.
+    fn document_metric(self, transform: AffineTransform2D) -> Result<(Vector2, f64), GridError> {
         let transformed_tangent = transform.apply_vector(self.tangent);
         let tangent_length = transformed_tangent.x.hypot(transformed_tangent.y);
         if !tangent_length.is_finite() || tangent_length <= 0.0 {
@@ -18248,8 +18948,6 @@ impl DimensionPlan {
             transformed_tangent.y / tangent_length,
             -transformed_tangent.x / tangent_length,
         );
-        let placed_origin = transform.apply_point(Point2::new(0.0, 0.0));
-        let placed_phase = placed_origin.dot(document_normal);
         let physical_spacing = self.spacing / tangent_length;
         if !physical_spacing.is_finite() || physical_spacing <= 0.0 {
             return Err(GridError::new(
@@ -18257,13 +18955,7 @@ impl DimensionPlan {
                 "transformed guide spacing must remain finite and positive",
             ));
         }
-        Ok(GuideCoverage {
-            dimension_id: self.id.0,
-            spacing: physical_spacing,
-            normalized_phase: (self.phase + placed_phase).rem_euclid(physical_spacing),
-            first_index,
-            last_index,
-        })
+        Ok((document_normal, physical_spacing))
     }
 
     /// Emits finite presentation segments for this locally indexed guide plan.
@@ -18556,7 +19248,7 @@ mod coverage_tests {
             .expect("fixed centered domain validates");
         let center_to_corner = 0.5 * 900.0_f64.hypot(620.0);
         let (first, last) =
-            authored_normal_offset_rank_bounds(&source, domain, center_to_corner, 16.128, 1)
+            authored_normal_offset_rank_bounds(&source, &source, domain, center_to_corner, 16.128, 1)
                 .expect("finite authored Constant-gap range resolves");
         assert_eq!((first, last), (-36, 36));
     }
@@ -18582,48 +19274,6 @@ mod coverage_tests {
             16,
             "authored geometry outside the generation domain expands the proof envelope"
         );
-    }
-
-    /// Proves chained cubic runway owns exact nodes and tangent-continuous derived seams.
-    ///
-    /// # Panics
-    ///
-    /// Panics when end-to-end guide tiling changes the next handle length, leaves a floating-point
-    /// node gap, or introduces a seam tangent discontinuity before Constant-gap repetition.
-    #[test]
-    fn authored_cubic_runway_chains_with_exact_g1_seams() {
-        let cubic = CubicBezierSegment::new(
-            Point2::new(-10.0, 0.0),
-            Point2::new(-6.0, -5.0),
-            Point2::new(4.0, 7.0),
-            Point2::new(10.0, 0.0),
-        )
-        .expect("finite authored cubic");
-        let source = CurvePath::new(vec![CurveSegment::CubicBezier(cubic)], PathClosure::Open)
-            .expect("one-cubic authored guide");
-        let domain = Bounds::new(Point2::new(-45.0, -20.0), Point2::new(45.0, 20.0))
-            .expect("finite runway domain");
-        let tiled = tile_authored_guide_end_to_end(&source, domain, 10.0)
-            .expect("authored runway tiles within its bound");
-        assert!(tiled.segments().len() > 2);
-        let authored_handle_length =
-            (cubic.control_1().x - cubic.start().x).hypot(cubic.control_1().y - cubic.start().y);
-        for seam in tiled.segments().windows(2) {
-            assert_eq!(seam[0].end(), seam[1].start());
-            let incoming = seam[0]
-                .limiting_unit_tangent_at(1.0)
-                .expect("incoming tiled tangent is finite");
-            let outgoing = seam[1]
-                .limiting_unit_tangent_at(0.0)
-                .expect("outgoing tiled tangent is finite");
-            assert!((incoming.dot(outgoing) - 1.0).abs() <= 1.0e-12);
-            let CurveSegment::CubicBezier(next) = seam[1] else {
-                panic!("cubic source produces cubic runway tiles");
-            };
-            let next_handle_length =
-                (next.control_1().x - next.start().x).hypot(next.control_1().y - next.start().y);
-            assert!((next_handle_length - authored_handle_length).abs() <= 1.0e-12);
-        }
     }
 
     /// Proves one-time longitudinal scaling cannot change Stacked directional pitch.
@@ -20024,4 +20674,111 @@ mod generalized_straight_guide_tests {
             different_layer.output.realization_fingerprint
         );
     }
+}
+
+/// Conservatively bounds fixed-grid rejected work while retaining the original per-index transform.
+/// Complete guides, logical Cartesian preflight and final Euclidean acceptance remain authoritative.
+/// # Errors
+/// Returns cancellation during bounded binary searches; uncertain numeric bounds retain the full row.
+#[allow(clippy::too_many_arguments)]
+fn fixed_grid_row_range(
+    first: i64,
+    last: i64,
+    first_index: i64,
+    spacing_x: f64,
+    spacing_y: f64,
+    transform: AffineTransform2D,
+    canvas: Bounds,
+    margin: f64,
+    cancelled: &dyn Fn() -> bool,
+    context: &ConstructionContext,
+) -> Result<Option<(i64, i64)>, GridError> {
+    let point = |j: i64| {
+        context.count(ConstructionCounter::GridSearchPositions, 1);
+        transform.apply_point(Point2::new(
+            first_index as f64 * spacing_x,
+            j as f64 * spacing_y,
+        ))
+    };
+    let a = point(first);
+    let b = point(last);
+    let scale = [
+        a.x,
+        a.y,
+        b.x,
+        b.y,
+        canvas.min.x,
+        canvas.min.y,
+        canvas.max.x,
+        canvas.max.y,
+        margin,
+    ]
+    .into_iter()
+    .map(f64::abs)
+    .fold(1.0, f64::max);
+    let pad = (margin + 1.0e-9 + 64.0 * f64::EPSILON * scale).next_up();
+    let Some(bounds) = canvas.expanded(pad) else {
+        return Ok(Some((first, last)));
+    };
+    if !a.is_finite() || !b.is_finite() {
+        return Ok(Some((first, last)));
+    }
+    let mut lo = first;
+    let mut hi = last;
+    for axis in 0..2 {
+        let value = |j| {
+            let p = point(j);
+            if axis == 0 { p.x } else { p.y }
+        };
+        let (min, max, start, end) = if axis == 0 {
+            (bounds.min.x, bounds.max.x, a.x, b.x)
+        } else {
+            (bounds.min.y, bounds.max.y, a.y, b.y)
+        };
+        let increasing = end >= start;
+        let valid_lower = |j| {
+            let v = value(j);
+            if increasing { v >= min } else { v <= max }
+        };
+        let valid_upper = |j| {
+            let v = value(j);
+            if increasing { v <= max } else { v >= min }
+        };
+        let poll = || {
+            if cancelled() {
+                Err(GridError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        if !valid_lower(hi) || !valid_upper(lo) {
+            return Ok(None);
+        }
+        let (mut l, mut r) = (lo, hi);
+        while l < r {
+            poll()?;
+            let mid = (i128::from(l) + (i128::from(r) - i128::from(l)) / 2) as i64;
+            if valid_lower(mid) {
+                r = mid
+            } else {
+                l = mid + 1;
+            }
+        }
+        lo = l;
+        let (mut l, mut r) = (lo, hi);
+        while l < r {
+            poll()?;
+            let mid = (i128::from(l) + (i128::from(r) - i128::from(l) + 1) / 2) as i64;
+            if valid_upper(mid) {
+                l = mid
+            } else {
+                r = mid - 1;
+            }
+        }
+        hi = l;
+    }
+    Ok((lo <= hi).then_some((lo, hi)))
 }

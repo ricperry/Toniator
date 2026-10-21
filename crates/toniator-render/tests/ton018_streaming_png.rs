@@ -110,7 +110,7 @@ fn stroke() -> CanonicalStroke {
             width: 1.0,
         }],
         CanonicalFilledOutline {
-            contours: contours
+            full_segment_count: None, prepared: None, coverage: Default::default(), contours: contours
                 .into_iter()
                 .map(|path| CanonicalOutlineContour {
                     segments: path.segments().to_vec(),

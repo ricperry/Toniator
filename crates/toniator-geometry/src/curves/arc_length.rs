@@ -4,6 +4,15 @@ use super::{
     segment::{ArcLengthLeaf, cubic_range},
 };
 
+/// Explicit aggregate work/leaf admission for reached artistic arc-length preparation.
+/// Numerical depth and error certificates remain fixed; normal creative admission is machine-addressable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArcLengthWorkLimits { pub maximum_work_items: usize, pub maximum_leaves: usize }
+impl Default for ArcLengthWorkLimits {
+    /// Supplies machine-addressable aggregate admission without changing numerical convergence.
+    fn default() -> Self { Self { maximum_work_items: usize::MAX, maximum_leaves: usize::MAX } }
+}
+
 /// Immutable ordered segment-length table for one validated curve path.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PathArcLength {
@@ -19,17 +28,32 @@ impl PathArcLength {
     ///
     /// Propagates bounded segment measurement failures without exposing a partial table.
     pub(crate) fn measure(path: &CurvePath) -> Result<Self, CurveError> {
-        let mut segments = Vec::with_capacity(path.segments().len());
-        let mut segment_ends = Vec::with_capacity(path.segments().len());
-        let mut budget = InverseBudget::new(MAX_WORK_ITEMS, MAX_ARC_LENGTH_LEAVES);
+        Self::measure_cancellable(path, ArcLengthWorkLimits { maximum_work_items: MAX_WORK_ITEMS, maximum_leaves: MAX_ARC_LENGTH_LEAVES }, &|| false)
+    }
+
+    /// Prepares the full ordered metric using fallible incremental storage and explicit aggregate policy.
+    /// # Errors
+    /// Returns cancellation, allocation, count, numeric or unchanged convergence diagnostics atomically.
+    pub(crate) fn measure_cancellable(
+        path: &CurvePath,
+        limits: ArcLengthWorkLimits,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, CurveError> {
+        let mut segments = Vec::new();
+        let mut segment_ends = Vec::new();
+        let mut budget = InverseBudget::new(limits.maximum_work_items, limits.maximum_leaves);
         let mut total = 0.0;
         let mut compensation = 0.0;
         let mut ordinary_prefix = 0.0;
         for segment in path.segments() {
-            let profile = segment.arc_length_profile_with_counts(
+            super::check_curve_cancelled(cancelled)?;
+            super::reserve_curve(&mut segments, 1)?;
+            super::reserve_curve(&mut segment_ends, 1)?;
+            let profile = segment.arc_length_profile_with_counts_cancellable(
                 MAX_SUBDIVISION_DEPTH,
                 budget.remaining_work()?,
                 budget.remaining_leaves()?,
+                cancelled,
             )?;
             budget.consume(profile.work_items, profile.leaves.len())?;
             let leaves = profile.leaves;
@@ -64,12 +88,72 @@ impl PathArcLength {
         self.total_length
     }
 
+    /// Returns global arc distance for one exact addressed path location under the same measurement policy.
+    /// # Errors
+    /// Returns invalid-location, cancellation or unchanged bounded quadrature/convergence diagnostics.
+    pub fn length_at_location_cancellable(
+        &self,
+        location: PathLocation,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<f64, CurveError> {
+        super::check_curve_cancelled(cancelled)?;
+        let measured = self
+            .segments
+            .get(location.segment_index())
+            .ok_or(CurveError::new(
+                "curve.path.arc_length.location",
+                "arc location must address the measured path",
+            ))?;
+        let prefix = if location.segment_index() == 0 {
+            0.0
+        } else {
+            self.segment_ends[location.segment_index() - 1]
+        };
+        let t = location.parameter();
+        if t == 0.0 {
+            return Ok(prefix);
+        }
+        if t == 1.0 {
+            return Ok(prefix + measured.length);
+        }
+        let local = match measured.segment {
+            CurveSegment::Line(_) => measured.length * t,
+            CurveSegment::CubicBezier(cubic) => {
+                let partial = CurveSegment::CubicBezier(cubic_range(cubic, 0.0, t)?);
+                let profile = partial.arc_length_profile_with_counts_cancellable(
+                    MAX_SUBDIVISION_DEPTH,
+                    MAX_WORK_ITEMS,
+                    MAX_ARC_LENGTH_LEAVES,
+                    cancelled,
+                )?;
+                compensated_leaf_sum(&profile.leaves)?
+            }
+        };
+        let value = prefix + local;
+        value.is_finite().then_some(value).ok_or(CurveError::new(
+            "curve.path.numeric_overflow",
+            "arc distance must remain finite",
+        ))
+    }
+
     /// Inverts a finite distance monotonically to the earliest matching path location.
     ///
     /// # Errors
     ///
     /// Returns `curve.path.arc_length.distance` when distance is non-finite or outside `[0, total]`.
     pub fn location_at_length(&self, distance: f64) -> Result<PathLocation, CurveError> {
+        self.location_at_length_cancellable(distance, &|| false)
+    }
+
+    /// Inverts one finite distance while polling cancellation through every numeric refinement.
+    /// # Errors
+    /// Returns invalid distance, cancellation or unchanged bounded numerical convergence diagnostics.
+    pub fn location_at_length_cancellable(
+        &self,
+        distance: f64,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<PathLocation, CurveError> {
+        super::check_curve_cancelled(cancelled)?;
         if !distance.is_finite() || distance < 0.0 || distance > self.total_length {
             return Err(CurveError::new(
                 "curve.path.arc_length.distance",
@@ -95,7 +179,13 @@ impl PathArcLength {
             } else {
                 self.segment_ends[index - 1]
             };
-            let parameter = measured.parameter_at_length(distance - prefix)?;
+            let parameter = measured.parameter_at_length_with_limits_cancellable(
+                distance - prefix,
+                MAX_SUBDIVISION_DEPTH,
+                MAX_WORK_ITEMS,
+                MAX_ARC_LENGTH_LEAVES,
+                cancelled,
+            )?;
             return PathLocation::new(index, parameter);
         }
         PathLocation::new(self.segments.len() - 1, 1.0)
@@ -112,6 +202,7 @@ struct SegmentArcLength {
 
 impl SegmentArcLength {
     /// Inverts within adaptive leaves then refines cubic partial length under one aggregate bounded budget.
+    #[cfg(test)]
     fn parameter_at_length(&self, distance: f64) -> Result<f64, CurveError> {
         self.parameter_at_length_with_limits(
             distance,
@@ -122,6 +213,7 @@ impl SegmentArcLength {
     }
 
     /// Inverts a segment distance with private reduced limits for atomic inverse-budget witnesses.
+    #[cfg(test)]
     fn parameter_at_length_with_limits(
         &self,
         distance: f64,
@@ -129,6 +221,21 @@ impl SegmentArcLength {
         maximum_work_items: usize,
         maximum_leaves: usize,
     ) -> Result<f64, CurveError> {
+        self.parameter_at_length_with_limits_cancellable(distance, maximum_depth, maximum_work_items, maximum_leaves, &|| false)
+    }
+
+    /// Resolves one inverse metric under fixed numeric bounds and a caller cancellation token.
+    /// # Errors
+    /// Returns cancellation or the established inverse numerical diagnostics.
+    fn parameter_at_length_with_limits_cancellable(
+        &self,
+        distance: f64,
+        maximum_depth: u8,
+        maximum_work_items: usize,
+        maximum_leaves: usize,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<f64, CurveError> {
+        super::check_curve_cancelled(cancelled)?;
         if self.length == 0.0 {
             return Ok(0.0);
         }
@@ -140,6 +247,7 @@ impl SegmentArcLength {
         }
         let mut prefix = 0.0;
         for leaf in &self.leaves {
+            super::check_curve_cancelled(cancelled)?;
             let end = prefix + leaf.length;
             if distance <= end {
                 if leaf.length == 0.0 {
@@ -159,6 +267,7 @@ impl SegmentArcLength {
                         maximum_work_items,
                         maximum_leaves,
                     },
+                    cancelled,
                 );
             }
             prefix = end;
@@ -174,18 +283,21 @@ impl SegmentArcLength {
         mut low: f64,
         mut high: f64,
         limits: InverseLimits,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<f64, CurveError> {
         let CurveSegment::CubicBezier(cubic) = self.segment else {
             unreachable!("only cubic leaves require nonlinear inverse refinement")
         };
         let mut budget = InverseBudget::new(limits.maximum_work_items, limits.maximum_leaves);
         for _ in 0..MAX_SUBDIVISION_DEPTH {
+            super::check_curve_cancelled(cancelled)?;
             let middle = (low + high) * 0.5;
             let partial = cubic_range(cubic, leaf_start, middle)?;
-            let profile = CurveSegment::CubicBezier(partial).arc_length_profile_with_counts(
+            let profile = CurveSegment::CubicBezier(partial).arc_length_profile_with_counts_cancellable(
                 limits.maximum_depth,
                 budget.remaining_work()?,
                 budget.remaining_leaves()?,
+                cancelled,
             )?;
             budget.consume(profile.work_items, profile.leaves.len())?;
             let length = compensated_leaf_sum(&profile.leaves)?;

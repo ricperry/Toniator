@@ -19,9 +19,23 @@ impl BuiltinDocumentPreset {
         self.archive
     }
 
+    /// Stages the original embedded archive through the same explicit conversion as personal files.
+    /// # Errors
+    /// Returns strict archive, schema, endpoint or destination diagnostics without fitting in IO.
+    pub fn load_staged(
+        &self,
+        destination: &Document,
+    ) -> Result<StagedDocumentPreset, DocumentPresetError> {
+        super::document_presets::load_source_free_preset(
+            Cursor::new(self.archive),
+            self.archive.len() as u64,
+            destination,
+        )
+    }
+
     /// Decodes the complete embedded configuration against the destination without changing it.
-    /// Catalog integrity tests require current embedded archives; the shared decoder retains
-    /// the supported personal-file conversions and rejects unresolved former raw intent here.
+    /// Former embedded configurations use load_staged and the caller prepares missing
+    /// calibration; this convenience method accepts only already current configurations.
     ///
     /// # Errors
     /// Returns the shared strict ZIP, schema, calibration, or destination-validation diagnostic.
@@ -35,9 +49,11 @@ impl BuiltinDocumentPreset {
             destination,
         )? {
             StagedDocumentPreset::Current(configuration) => Ok(configuration),
-            StagedDocumentPreset::PendingRaw(_) => Err(DocumentPresetError::Version {
-                context: "built-in Document Preset requires a current configuration".into(),
-            }),
+            StagedDocumentPreset::PendingRaw(_) | StagedDocumentPreset::PendingCalibration(_) => {
+                Err(DocumentPresetError::Version {
+                    context: "built-in Document Preset requires a current configuration".into(),
+                })
+            }
         }
     }
 }

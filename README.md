@@ -20,22 +20,28 @@ Click any image to inspect its full size.
 
 ## Get Toniator
 
-Download the **0.4.5 Linux prerelease** from
-[GitHub Releases](https://github.com/ricperry/Toniator/releases/tag/v0.4.5).
+Download the **0.4.6 Linux prerelease** from
+[GitHub Releases](https://github.com/ricperry/Toniator/releases/tag/v0.4.6).
 Choose an AppImage or Flatpak:
 
 ```bash
 # AppImage
-chmod +x Toniator-0.4.5-x86_64.AppImage
-./Toniator-0.4.5-x86_64.AppImage
+chmod +x Toniator-0.4.6-x86_64.AppImage
+./Toniator-0.4.6-x86_64.AppImage
 
 # Or Flatpak
-flatpak install --user ./Toniator-0.4.5-x86_64.flatpak
+flatpak install --user ./Toniator-0.4.6-x86_64.flatpak
 flatpak run io.github.ricperry.Toniator
 ```
 
 [Installation, upgrades, and Windows](docs/INSTALLING.md) ·
-[Build from source](docs/BUILDING.md) · [Release notes](docs/releases/v0.4.5.md)
+[Build from source](docs/BUILDING.md) · [Release notes](docs/releases/v0.4.6.md)
+
+Version 0.4.6 adds artistic tone and connection controls, placement-aware coverage,
+and whole-artwork background preview refinement. Its `.toniator` project format
+is current-only. The gallery and editor screenshots below retain their **0.4.5**
+provenance; their older projects require that release. Open the source artwork
+in 0.4.6 to create a new project. See [format and Preset details](docs/USING_TONIATOR.md#046-project-and-preset-formats).
 
 ## Make your first artwork
 

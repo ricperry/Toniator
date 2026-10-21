@@ -1,6 +1,15 @@
-# Current random/dispersion performance configurations
+# Historical 0.4.4 random/dispersion performance configurations
 
-These12 source-free current-format Document Presets retain the Even circles,
+These 12 source-free Document Presets retain the format and measurements from
+published 0.4.4. “Current” in the reproduction notes below means that historical
+checkout. The unpublished artistic geometry checkout deterministically converts
+supported older source-free Presets, adopts new defaults and prepares affected
+fits; old appearance and timing are not a current-development baseline. Ordinary projects
+are current-only; this checkout rejects older `.toniator` files. Use the matching
+historical checkout/binaries for the exact recorded reproduction; do not regenerate
+these archives or historical evidence as part of development-format verification.
+
+The Presets retain the Even circles,
 Clustered random-links, and source-weighted Voronoi validation configurations at
 Feature size1 and0.25 for the immutable PNG/SVG intrinsic canvases. They derive
 from the current retained TON-018 native validation projects, not an obsolete

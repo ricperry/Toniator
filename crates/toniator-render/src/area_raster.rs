@@ -1,6 +1,7 @@
 //! Output-pixel area coverage for canonical AA-on geometry and opaque same-paint unions.
 
 use super::*;
+use crate::GeometryOutputPart;
 use i_overlay::{
     core::checked::{CheckedOverlayControl, CheckedOverlayError},
     core::{
@@ -35,19 +36,34 @@ struct RawAreaPrimitive {
 
 /// Tracks conservative absolute fill error below representable output-pixel geometry.
 #[derive(Default)]
-struct AreaOmissionBudget(AreaSum, f64);
+struct AreaOmissionBudget(
+    AreaSum,
+    f64,
+    Option<AreaFailureKind>,
+    Option<AreaDebtLedger>,
+);
+
+/// Identifies only a finite checked split certificate that exceeds the cumulative layer budget.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AreaFailureKind {
+    SplitCertificateBudget,
+}
 
 impl AreaOmissionBudget {
-    /// Charges a conservative area bound across all primitives in one layer.
+    /// Charges a conservative area bound across all primitives in one eager layer, or retains its
+    /// original-order event for later whole-region replay on the opt-in uncertified root path.
     ///
     /// # Errors
-    /// Rejects nonfinite or cumulatively visible absolute fill error, including lost holes.
+    /// Rejects nonfinite debt, eager cumulative visible error, or retained-event allocation failure.
     fn record(&mut self, bound: f64) -> Result<(), RenderError> {
         if !bound.is_finite() || bound < 0.0 {
             return Err(area_error(
                 "raster.area.precision",
                 "omitted area bound is not finite",
             ));
+        }
+        if let Some(ledger) = &mut self.3 {
+            return ledger.push(AreaDebt::Regular(bound));
         }
         self.0.add(bound);
         if self.total_bound() > MAX_OMITTED_PIXEL_AREA {
@@ -59,11 +75,38 @@ impl AreaOmissionBudget {
         Ok(())
     }
 
-    /// Charges already incurred local recovery error once with upward positive accumulation.
-    /// Zero debt leaves the original compensated circle/grid accounting bit-for-bit unchanged.
+    /// Records a checked split certificate and preserves its private origin for one exact retry.
+    /// Other precision failures never acquire this marker; no public diagnostic text is inspected.
     /// # Errors
-    /// Rejects nonfinite/negative debt or a combined layer bound above the existing authority.
+    /// Returns the unchanged eager omission diagnostic or deferred numeric/allocation failure.
+    fn record_split_certificate(&mut self, bound: f64) -> Result<(), RenderError> {
+        if let Some(ledger) = &mut self.3 {
+            validate_deferred_bound(bound)?;
+            return ledger.push(AreaDebt::Split(bound));
+        }
+        let result = self.record(bound);
+        if result.is_err()
+            && bound.is_finite()
+            && bound >= 0.0
+            && self.total_bound().is_finite()
+            && self.total_bound() > MAX_OMITTED_PIXEL_AREA
+        {
+            self.2 = Some(AreaFailureKind::SplitCertificateBudget);
+        }
+        result
+    }
+
+    /// Charges already incurred local recovery error once with upward positive accumulation.
+    /// Zero debt leaves eager compensated accounting unchanged; retained roots collect the event
+    /// after its independent local bound check, without cumulative certification yet.
+    /// # Errors
+    /// Rejects nonfinite/negative/local over-budget debt, eager cumulative error or allocation refusal.
     fn record_incurred(&mut self, bound: f64) -> Result<(), RenderError> {
+        if let Some(ledger) = &mut self.3 {
+            // Preserve the independent local bound check, but defer cumulative replay.
+            area_error_bound_sum(0.0, bound)?;
+            return ledger.push(AreaDebt::Incurred(bound));
+        }
         self.1 = area_error_bound_sum(self.1, bound)?;
         if self.total_bound() > MAX_OMITTED_PIXEL_AREA {
             return Err(area_error(
@@ -82,6 +125,112 @@ impl AreaOmissionBudget {
             (self.0.value().next_up() + self.1).next_up()
         }
     }
+}
+
+/// One original-order layer charge; only normalization has a region-local zero-fill waiver.
+#[derive(Clone, Debug)]
+pub(super) enum AreaDebt {
+    Regular(f64),
+    Incurred(f64),
+    Split(f64),
+    Normalization {
+        bound: f64,
+        boxes: Option<[[f64; 4]; 2]>,
+    },
+}
+
+/// Retains all charges independently of paints, including empty accepted geometry.
+#[derive(Default, Debug)]
+pub(super) struct AreaDebtLedger {
+    pub(super) events: Vec<AreaDebt>,
+}
+
+/// Carries the original diagnostic and private retry eligibility from exact ordered replay.
+pub(super) struct AreaDebtFailure {
+    pub(super) error: RenderError,
+    pub(super) split_budget: bool,
+}
+
+impl AreaDebtLedger {
+    /// Appends one finite charge fallibly without certifying an output or dropping geometry.
+    /// # Errors
+    /// Returns allocation refusal; independent numeric checks occur before insertion.
+    fn push(&mut self, event: AreaDebt) -> Result<(), RenderError> {
+        self.events
+            .try_reserve(1)
+            .map_err(|_| area_error("raster.allocation", "area debt allocation failed"))?;
+        self.events.push(event);
+        Ok(())
+    }
+
+    /// Replays one complete sampled region in original order under the unchanged layer budget.
+    /// Strictly disjoint complete-fill boxes waive only their normalization certificate.
+    /// Touching, unknown or invalid regions charge fully; no tile can reset this authority.
+    /// # Errors
+    /// Returns the first original debt/cancellation diagnostic and its typed retry origin.
+    pub(super) fn certify(
+        &self,
+        visible: [f64; 4],
+        work: &RasterWork<'_>,
+    ) -> Result<f64, AreaDebtFailure> {
+        let mut budget = AreaOmissionBudget::default();
+        let valid = visible.iter().all(|v| v.is_finite())
+            && visible[0] < visible[2]
+            && visible[1] < visible[3];
+        for (index, event) in self.events.iter().enumerate() {
+            if index & 1023 == 0 {
+                work.check().map_err(|error| AreaDebtFailure {
+                    error,
+                    split_budget: false,
+                })?;
+            }
+            let result = match event {
+                AreaDebt::Regular(v) => budget.record(*v),
+                AreaDebt::Incurred(v) => budget.record_incurred(*v),
+                AreaDebt::Split(v) => budget.record_split_certificate(*v),
+                AreaDebt::Normalization { bound, boxes } => {
+                    let outside = valid
+                        && boxes.as_ref().is_some_and(|boxes| {
+                            boxes.iter().all(|b| {
+                                b[2] < visible[0]
+                                    || b[0] > visible[2]
+                                    || b[3] < visible[1]
+                                    || b[1] > visible[3]
+                            })
+                        });
+                    if outside {
+                        Ok(())
+                    } else {
+                        budget.record_split_certificate(*bound)
+                    }
+                }
+            };
+            if let Err(error) = result {
+                return Err(AreaDebtFailure {
+                    error,
+                    split_budget: budget.2.is_some(),
+                });
+            }
+        }
+        work.check().map_err(|error| AreaDebtFailure {
+            error,
+            split_budget: false,
+        })?;
+        Ok(budget.total_bound())
+    }
+}
+
+/// Validates a deferred charge without granting cumulative certification.
+/// # Errors
+/// Rejects nonfinite/negative bounds immediately, retaining eager local numeric authority.
+fn validate_deferred_bound(bound: f64) -> Result<(), RenderError> {
+    if !bound.is_finite() || bound < 0.0 {
+        return Err(area_error(
+            "raster.area.precision",
+            "omitted area bound is not finite",
+        ));
+    }
+    Ok(())
 }
 
 /// Adds finite nonnegative recovery bounds upward without changing zero-debt behavior.
@@ -446,111 +595,120 @@ fn for_each_area_primitive(
     mut visit: impl FnMut(usize, RawAreaPrimitive, &mut RasterWork<'_>) -> Result<(), RenderError>,
 ) -> Result<usize, RenderError> {
     let mut count = 0;
-    match geometry {
-        GeometryOutput::CircularMarks(marks) => {
-            for (index, mark) in marks.iter().enumerate() {
-                if area_circle_outside_visible(mark.center, mark.radius, transform, visible) {
+    for part in geometry.parts() {
+        match part {
+            GeometryOutputPart::CircularMarks(marks) => {
+                for (index, mark) in marks.iter().enumerate() {
+                    if area_circle_outside_visible(mark.center, mark.radius, transform, visible) {
+                        count += 1;
+                        continue;
+                    }
+                    let (shape, omitted_area_bound) =
+                        area_circle(mark.center, mark.radius, transform, work)?;
+                    if shape.is_some() || omitted_area_bound > 0.0 {
+                        visit(
+                            index,
+                            RawAreaPrimitive {
+                                shape: shape.unwrap_or_default(),
+                                fill_rule: FillRule::NonZero,
+                                omitted_area_bound,
+                                incurred_area_error_bound: 0.0,
+                            },
+                            work,
+                        )?;
+                    }
                     count += 1;
-                    continue;
                 }
-                let (shape, omitted_area_bound) =
-                    area_circle(mark.center, mark.radius, transform, work)?;
-                if shape.is_some() || omitted_area_bound > 0.0 {
-                    visit(
-                        index,
-                        RawAreaPrimitive {
-                            shape: shape.unwrap_or_default(),
-                            fill_rule: FillRule::NonZero,
-                            omitted_area_bound,
-                            incurred_area_error_bound: 0.0,
-                        },
-                        work,
-                    )?;
-                }
-                count += 1;
             }
-        }
-        GeometryOutput::CanonicalMarks(marks) => {
-            for (index, mark) in marks.iter().enumerate() {
-                let raw = match mark {
-                    CanonicalMark::Circle { center, radius, .. } => {
-                        if area_circle_outside_visible(*center, *radius, transform, visible) {
-                            count += 1;
-                            continue;
+            GeometryOutputPart::CanonicalMarks(marks) => {
+                for (index, mark) in marks.iter().enumerate() {
+                    let raw = match mark {
+                        CanonicalMark::DeferredPath(_) => None,
+
+                        CanonicalMark::Circle { center, radius, .. } => {
+                            if area_circle_outside_visible(*center, *radius, transform, visible) {
+                                count += 1;
+                                continue;
+                            }
+                            let (shape, omitted_area_bound) =
+                                area_circle(*center, *radius, transform, work)?;
+                            (shape.is_some() || omitted_area_bound > 0.0).then(|| {
+                                RawAreaPrimitive {
+                                    shape: shape.unwrap_or_default(),
+                                    fill_rule: FillRule::NonZero,
+                                    omitted_area_bound,
+                                    incurred_area_error_bound: 0.0,
+                                }
+                            })
                         }
-                        let (shape, omitted_area_bound) =
-                            area_circle(*center, *radius, transform, work)?;
-                        (shape.is_some() || omitted_area_bound > 0.0).then(|| RawAreaPrimitive {
-                            shape: shape.unwrap_or_default(),
-                            fill_rule: FillRule::NonZero,
-                            omitted_area_bound,
-                            incurred_area_error_bound: 0.0,
-                        })
+                        CanonicalMark::ClosedPath(mark) => {
+                            let (contour, incurred_area_error_bound) =
+                                area_contour(mark.path.segments(), transform, work)?;
+                            contour.map(|contour| RawAreaPrimitive {
+                                shape: vec![contour],
+                                fill_rule: area_fill_rule(mark.fill_rule),
+                                omitted_area_bound: 0.0,
+                                incurred_area_error_bound,
+                            })
+                        }
+                    };
+                    if let Some(raw) = raw {
+                        visit(index, raw, work)?;
                     }
-                    CanonicalMark::ClosedPath(mark) => {
-                        let (contour, incurred_area_error_bound) =
-                            area_contour(mark.path.segments(), transform, work)?;
-                        contour.map(|contour| RawAreaPrimitive {
-                            shape: vec![contour],
-                            fill_rule: area_fill_rule(mark.fill_rule),
-                            omitted_area_bound: 0.0,
-                            incurred_area_error_bound,
-                        })
-                    }
-                };
-                if let Some(raw) = raw {
-                    visit(index, raw, work)?;
+                    count += 1;
                 }
-                count += 1;
             }
-        }
-        GeometryOutput::CanonicalStrokes(strokes) => {
-            for (index, stroke) in strokes.iter().enumerate() {
-                let mut shape = Vec::new();
-                let mut incurred_area_error_bound = 0.0;
-                for contour in &stroke.outline.contours {
-                    let (contour, bound) = area_contour(&contour.segments, transform, work)?;
-                    incurred_area_error_bound =
-                        area_error_bound_sum(incurred_area_error_bound, bound)?;
+            GeometryOutputPart::CanonicalStrokes(strokes) => {
+                for (index, stroke) in strokes.iter().enumerate() {
+                    let mut shape = Vec::new();
+                    let mut incurred_area_error_bound = 0.0;
+                    for contour in &stroke.outline.contours {
+                        let (contour, bound) = area_contour(&contour.segments, transform, work)?;
+                        incurred_area_error_bound =
+                            area_error_bound_sum(incurred_area_error_bound, bound)?;
+                        if let Some(contour) = contour {
+                            shape.try_reserve(1).map_err(|_| {
+                                area_error(
+                                    "raster.allocation",
+                                    "stroke contour list allocation failed",
+                                )
+                            })?;
+                            shape.push(contour);
+                        }
+                    }
+                    if !shape.is_empty() {
+                        visit(
+                            index,
+                            RawAreaPrimitive {
+                                shape,
+                                fill_rule: area_fill_rule(stroke.outline.fill_rule),
+                                omitted_area_bound: 0.0,
+                                incurred_area_error_bound,
+                            },
+                            work,
+                        )?;
+                    }
+                    count += 1;
+                }
+            }
+            GeometryOutputPart::CanonicalRegions(regions) => {
+                for (index, region) in regions.regions().iter().enumerate() {
+                    let (contour, incurred_area_error_bound) =
+                        area_contour(region.ring.segments(), transform, work)?;
                     if let Some(contour) = contour {
-                        shape.try_reserve(1).map_err(|_| {
-                            area_error("raster.allocation", "stroke contour list allocation failed")
-                        })?;
-                        shape.push(contour);
+                        visit(
+                            index,
+                            RawAreaPrimitive {
+                                shape: vec![contour],
+                                fill_rule: FillRule::NonZero,
+                                omitted_area_bound: 0.0,
+                                incurred_area_error_bound,
+                            },
+                            work,
+                        )?;
                     }
+                    count += 1;
                 }
-                if !shape.is_empty() {
-                    visit(
-                        index,
-                        RawAreaPrimitive {
-                            shape,
-                            fill_rule: area_fill_rule(stroke.outline.fill_rule),
-                            omitted_area_bound: 0.0,
-                            incurred_area_error_bound,
-                        },
-                        work,
-                    )?;
-                }
-                count += 1;
-            }
-        }
-        GeometryOutput::CanonicalRegions(regions) => {
-            for (index, region) in regions.regions().iter().enumerate() {
-                let (contour, incurred_area_error_bound) =
-                    area_contour(region.ring.segments(), transform, work)?;
-                if let Some(contour) = contour {
-                    visit(
-                        index,
-                        RawAreaPrimitive {
-                            shape: vec![contour],
-                            fill_rule: FillRule::NonZero,
-                            omitted_area_bound: 0.0,
-                            incurred_area_error_bound,
-                        },
-                        work,
-                    )?;
-                }
-                count += 1;
             }
         }
     }
@@ -793,16 +951,149 @@ fn area_collapsed_contour_bound(
     Ok(bound.value())
 }
 
+/// Retains the complete typed input and unchanged grid for a normalization-only visibility proof.
+/// Final union/clip certificates never receive this scope; no geometry or work is omitted.
+struct AreaNormalizationScope<'a> {
+    original: &'a [AreaShape],
+    adapter: FloatPointAdapter<AreaPoint, i64>,
+    visible: [f64; 4],
+}
+
+impl AreaNormalizationScope<'_> {
+    /// Proves both complete fills stay outside the pixel rectangle through downstream readback.
+    /// All rings participate. Touching, nonfinite, empty, or unrepresentable enclosures decline the
+    /// proof, retaining the entire certificate. Normalization has already validated the geometry.
+    /// # Errors
+    /// Returns cancellation from the additional bounded-storage, periodically polled scans.
+    fn proves_zero_visible_difference(
+        &self,
+        normalized: &[AreaShape],
+        work: &RasterWork<'_>,
+    ) -> Result<bool, RenderError> {
+        if !self.visible.iter().all(|v| v.is_finite())
+            || self.visible[0] >= self.visible[2]
+            || self.visible[1] >= self.visible[3]
+        {
+            return Ok(false);
+        }
+        // The original fill traverses normalization readback and final-union requantization;
+        // the accepted normalized fill has only the latter remaining. The same adapter is used.
+        for (shapes, readbacks) in [(self.original, 2), (normalized, 1)] {
+            let Some(bounds) = area_readback_enclosure(shapes, readbacks, &self.adapter, work)?
+            else {
+                return Ok(false);
+            };
+            if !(bounds[2] < self.visible[0]
+                || bounds[0] > self.visible[2]
+                || bounds[3] < self.visible[1]
+                || bounds[1] > self.visible[3])
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Encloses a complete fill and every intermediate readback on its unchanged adapter.
+/// Empty/nonfinite/unrepresentable input declines the optional proof; geometry is never omitted.
+/// # Errors
+/// Returns cancellation from bounded scans; no approximation or numeric policy is introduced.
+fn area_readback_enclosure(
+    shapes: &[AreaShape],
+    readbacks: usize,
+    adapter: &FloatPointAdapter<AreaPoint, i64>,
+    work: &RasterWork<'_>,
+) -> Result<Option<[f64; 4]>, RenderError> {
+    let Some(mut bounds) = area_complete_fill_bounds(shapes, work)? else {
+        return Ok(None);
+    };
+    for _ in 0..readbacks {
+        let Some(mapped) = area_grid_readback_bounds(bounds, adapter) else {
+            return Ok(None);
+        };
+        for axis in 0..2 {
+            bounds[axis] = bounds[axis].min(mapped[axis]);
+            bounds[axis + 2] = bounds[axis + 2].max(mapped[axis + 2]);
+        }
+    }
+    Ok(Some(bounds))
+}
+
+/// Bounds every vertex of every ring of the complete typed fill without allocating geometry.
+/// Polygon fills lie within their vertex box, irrespective of winding, holes, or self-crossings.
+/// Nonfinite or empty input declines the optional proof rather than masking a Boolean diagnostic.
+/// # Errors
+/// Returns cancellation, polling at most every 1024 vertices and once at entry.
+fn area_complete_fill_bounds(
+    shapes: &[AreaShape],
+    work: &RasterWork<'_>,
+) -> Result<Option<[f64; 4]>, RenderError> {
+    work.check()?;
+    let mut bounds = [
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for (index, point) in shapes.iter().flatten().flatten().enumerate() {
+        if index & 1023 == 0 {
+            work.check()?;
+        }
+        if !point.iter().all(|v| v.is_finite()) {
+            return Ok(None);
+        }
+        for axis in 0..2 {
+            bounds[axis] = bounds[axis].min(point[axis]);
+            bounds[axis + 2] = bounds[axis + 2].max(point[axis]);
+        }
+    }
+    Ok(bounds.iter().all(|v| v.is_finite()).then_some(bounds))
+}
+
+/// Encloses one actual float→integer→float adapter roundtrip without moving the grid or geometry.
+/// Positive-scale quantization is monotone, so actual corner conversions bound every input point.
+/// Each integer cast, positive multiplication, and offset addition is enclosed outward separately;
+/// these are floating-operation intervals, not an assumed pixel halo or a changed tolerance.
+/// Invalid scales, range failure, or nonfinite intervals conservatively decline the optional proof.
+fn area_grid_readback_bounds(
+    bounds: [f64; 4],
+    adapter: &FloatPointAdapter<AreaPoint, i64>,
+) -> Option<[f64; 4]> {
+    let scale = adapter.inv_scale();
+    if !scale.is_finite()
+        || scale <= 0.0
+        || !adapter.dir_scale().is_finite()
+        || adapter.dir_scale() <= 0.0
+    {
+        return None;
+    }
+    let lower = adapter.try_float_to_int(&[bounds[0], bounds[1]]).ok()?;
+    let upper = adapter.try_float_to_int(&[bounds[2], bounds[3]]).ok()?;
+    let offset = adapter.offset();
+    let mut mapped = [0.0; 4];
+    for (axis, (lo, hi)) in [(lower.x, upper.x), (lower.y, upper.y)]
+        .into_iter()
+        .enumerate()
+    {
+        mapped[axis] = (((lo as f64).next_down() * scale).next_down() + offset[axis]).next_down();
+        mapped[axis + 2] = (((hi as f64).next_up() * scale).next_up() + offset[axis]).next_up();
+    }
+    mapped.iter().all(|v| v.is_finite()).then_some(mapped)
+}
+
 /// Applies one typed fill with bounded checked retries on the run's common integer grid.
 ///
 /// # Errors
 /// Returns Boolean or precision diagnostics; there is no minimum positive-area threshold.
+/// Optional visibility scopes only the accepted normalization certificate, never its geometry.
 fn area_overlay(
     shape: &[AreaShape],
     rect: FloatRect<f64>,
     rule: FillRule,
     work: &mut RasterWork<'_>,
     omissions: &mut AreaOmissionBudget,
+    visible: Option<[f64; 4]>,
 ) -> Result<AreaShapes, RenderError> {
     work.check()?;
     let adapter =
@@ -825,18 +1116,32 @@ fn area_overlay(
         .flat_map(|part| part.iter())
         .try_fold(0_usize, |sum, contour| sum.checked_add(contour.len()))
         .ok_or(area_error("raster.area.work", "area edge count overflows"))?;
+    let normalization = visible.map(|visible| AreaNormalizationScope {
+        original: shape,
+        adapter: adapter.clone(),
+        visible,
+    });
     let mut overlay =
         FloatOverlay::<AreaPoint, i64>::new_custom(adapter, options, solver, edge_count)
             .unsafe_add_source(shape, ShapeType::Subject);
-    area_checked_overlay(&mut overlay, OverlayRule::Subject, rule, work, omissions)
+    area_checked_overlay(
+        &mut overlay,
+        OverlayRule::Subject,
+        rule,
+        work,
+        omissions,
+        normalization,
+    )
 }
 
 /// Charges accepted split-mutation uncertainty and all Boolean attempts before returning shapes.
 ///
 /// The exact doubled-area certificate concerns the already-quantized integer input. Initial float
 /// quantization, curve flattening, and upstream graph extraction are separate authority boundaries.
-/// Healthy unchanged contours receive no global perimeter charge. Overflow and bounded convergence
-/// failures discard local geometry; no partial pixels are published.
+/// Healthy unchanged contours receive no global perimeter charge. A normalization-only scope may
+/// omit its certificate when both complete fills provably vanish in the visible pixel rectangle;
+/// final global operations and all incurred/collapsed debt retain their cumulative authority.
+/// Overflow and bounded convergence failures discard local geometry; no partial pixels are published.
 ///
 /// # Errors
 /// Returns cancellation, Boolean work exhaustion, precision, or cumulative layer-error diagnostics.
@@ -846,6 +1151,7 @@ fn area_checked_overlay(
     fill_rule: FillRule,
     work: &mut RasterWork<'_>,
     omissions: &mut AreaOmissionBudget,
+    normalization: Option<AreaNormalizationScope<'_>>,
 ) -> Result<AreaShapes, RenderError> {
     work.check()?;
     let mut control =
@@ -875,11 +1181,40 @@ fn area_checked_overlay(
     })?;
     work.check()?;
     if doubled_area != 0 {
-        // Both conversion and division round upward; denominator rounds downward. No cancellation
-        // between absolute per-split triangles can reduce this accumulated uncertainty.
-        let numerator = (doubled_area as f64).next_up();
-        let denominator = (2.0 * AREA_BOOLEAN_SCALE * AREA_BOOLEAN_SCALE).next_down();
-        omissions.record((numerator / denominator).next_up())?;
+        if let Some(ledger) = &mut omissions.3 {
+            let boxes = match normalization.as_ref() {
+                Some(scope) => {
+                    match (
+                        area_readback_enclosure(scope.original, 2, &scope.adapter, work)?,
+                        area_readback_enclosure(&shapes, 1, &scope.adapter, work)?,
+                    ) {
+                        (Some(original), Some(normalized)) => Some([original, normalized]),
+                        _ => None,
+                    }
+                }
+                None => None,
+            };
+            let numerator = (doubled_area as f64).next_up();
+            let denominator = (2.0 * AREA_BOOLEAN_SCALE * AREA_BOOLEAN_SCALE).next_down();
+            let bound = (numerator / denominator).next_up();
+            validate_deferred_bound(bound)?;
+            let event = if normalization.is_some() {
+                AreaDebt::Normalization { bound, boxes }
+            } else {
+                AreaDebt::Split(bound)
+            };
+            ledger.push(event)?;
+        } else if !normalization
+            .as_ref()
+            .map(|scope| scope.proves_zero_visible_difference(&shapes, work))
+            .transpose()?
+            .unwrap_or(false)
+        {
+            // Same upward conversion/division and downward denominator as the eager path.
+            let numerator = (doubled_area as f64).next_up();
+            let denominator = (2.0 * AREA_BOOLEAN_SCALE * AREA_BOOLEAN_SCALE).next_down();
+            omissions.record_split_certificate((numerator / denominator).next_up())?;
+        }
     }
     Ok(shapes)
 }
@@ -891,6 +1226,8 @@ fn area_checked_overlay(
 /// A preview rectangle intersects the positive subjects in one checked operation on the same
 /// adapter, avoiding an intermediate global union and float-grid roundtrip. Unclipped consumers
 /// retain their original global union. Both branches charge actual request-wide Boolean work.
+/// Optional visible bounds scope only normalization certificates proven irrelevant to every pixel;
+/// the adapter and final global union/clip certificate remain unchanged.
 ///
 /// # Errors
 /// Returns cancellation, precision, allocation or Boolean diagnostics without painting partial pixels.
@@ -901,6 +1238,7 @@ fn normalize_and_union(
     clip: Option<[f64; 4]>,
     work: &mut RasterWork<'_>,
     omissions: &mut AreaOmissionBudget,
+    visible: Option<[f64; 4]>,
 ) -> Result<AreaShapes, RenderError> {
     if raw.is_empty() {
         return Ok(Vec::new());
@@ -928,6 +1266,7 @@ fn normalize_and_union(
             primitive.fill_rule,
             work,
             omissions,
+            visible,
         )?;
         let exact_empty = normalized.is_empty()
             && primitive.shape.len() == 2
@@ -991,9 +1330,10 @@ fn normalize_and_union(
             FillRule::NonZero,
             work,
             omissions,
+            None,
         )
     } else {
-        area_overlay(&positive, rect, FillRule::NonZero, work, omissions)
+        area_overlay(&positive, rect, FillRule::NonZero, work, omissions, None)
     }
 }
 
@@ -1067,20 +1407,74 @@ fn for_each_area_pixel(
     for_each_area_pixel_in_rows(shapes, width, height, 0, height, work, paint)
 }
 
-/// Integrates unchanged global geometry only in one half-open global pixel-row interval.
-///
-/// Row bins cover this interval only. Floating-point coordinates, contour orientation,
-/// and edge arithmetic retain the full target's coordinate system. Returned indices address
-/// local storage beginning at `first_row`, so complete-image indexing need not fit `usize`.
-///
+/// Checks one half-open region in the unchanged root pixel frame; internal row wrappers may be empty.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PixelRegion {
+    pub(super) x0: u32,
+    pub(super) y0: u32,
+    pub(super) x1: u32,
+    pub(super) y1: u32,
+}
+impl PixelRegion {
+    /// Validates ordered bounds against the root without allocating or changing sample phase.
+    /// # Errors
+    /// Returns raster.crop.region for reversed or out-of-root bounds.
+    pub(super) fn new(
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, RenderError> {
+        if x0 > x1 || y0 > y1 || x1 > width || y1 > height {
+            return Err(area_error(
+                "raster.crop.region",
+                "crop bounds exceed the root pixel frame",
+            ));
+        }
+        Ok(Self { x0, y0, x1, y1 })
+    }
+    /// Returns local row width without changing global edge coordinates.
+    pub(super) fn width(self) -> u32 {
+        self.x1 - self.x0
+    }
+    /// Returns local row count without changing global edge coordinates.
+    pub(super) fn height(self) -> u32 {
+        self.y1 - self.y0
+    }
+}
+
+/// Integrates a full-X row band through the shared region path with unchanged arithmetic.
 /// # Errors
-/// Returns cancellation, allocation, coordinate, or coverage diagnostics without changing geometry.
+/// Returns cancellation, allocation, coordinate, bounds or coverage diagnostics.
 fn for_each_area_pixel_in_rows(
     shapes: &AreaShapes,
     width: u32,
     height: u32,
     first_row: u32,
     end_row: u32,
+    work: &mut RasterWork<'_>,
+    paint: impl FnMut(usize, f64),
+) -> Result<(), RenderError> {
+    let region = PixelRegion::new(0, first_row, width, end_row, width, height)?;
+    for_each_area_pixel_in_region(shapes, width, height, region, work, paint)
+}
+
+/// Integrates unchanged global geometry inside a checked region while retaining the full-X prefix.
+///
+/// Row bins cover this interval only. Floating-point coordinates, contour orientation,
+/// and edge arithmetic retain the full target's coordinate system. Returned indices address
+/// local region storage. Global X arrays, events, loop order and compensated sums stay unchanged;
+/// only row bins and final emitted indices are restricted. No edge or left prefix is recentered.
+///
+/// # Errors
+/// Returns cancellation, allocation, coordinate, or coverage diagnostics without changing geometry.
+fn for_each_area_pixel_in_region(
+    shapes: &AreaShapes,
+    width: u32,
+    height: u32,
+    region: PixelRegion,
     work: &mut RasterWork<'_>,
     mut paint: impl FnMut(usize, f64),
 ) -> Result<(), RenderError> {
@@ -1113,8 +1507,8 @@ fn for_each_area_pixel_in_rows(
     }
     let x0 = min_x.floor().clamp(0.0, f64::from(width)) as usize;
     let x1 = max_x.ceil().clamp(0.0, f64::from(width)) as usize;
-    let y0 = (min_y.floor().clamp(0.0, f64::from(height)) as usize).max(first_row as usize);
-    let y1 = (max_y.ceil().clamp(0.0, f64::from(height)) as usize).min(end_row as usize);
+    let y0 = (min_y.floor().clamp(0.0, f64::from(height)) as usize).max(region.y0 as usize);
+    let y1 = (max_y.ceil().clamp(0.0, f64::from(height)) as usize).min(region.y1 as usize);
     if x0 >= x1 || y0 >= y1 {
         return Ok(());
     }
@@ -1247,9 +1641,10 @@ fn for_each_area_pixel_in_rows(
                 ));
             }
             let coverage = raw.clamp(0.0, 1.0);
-            if coverage > 0.0 {
+            if coverage > 0.0 && x >= region.x0 as usize && x < region.x1 as usize {
                 paint(
-                    (y0 + row - first_row as usize) * width as usize + x,
+                    (y0 + row - region.y0 as usize) * region.width() as usize
+                        + (x - region.x0 as usize),
                     coverage,
                 );
             }
@@ -1280,7 +1675,13 @@ fn paint_ordered_primitive(
     work: &mut RasterWork<'_>,
     omissions: &mut AreaOmissionBudget,
 ) -> Result<(), RenderError> {
-    let shapes = normalize_and_union(&[raw], clip, work, omissions)?;
+    let shapes = normalize_and_union(
+        &[raw],
+        clip,
+        work,
+        omissions,
+        Some(area_visible_bounds(width, height, clip)),
+    )?;
     for_each_area_pixel(&shapes, width, height, work, |index, coverage| {
         pixels.paint_shape(index, coverage, color, opacity)
     })
@@ -1307,7 +1708,24 @@ fn paint_opaque_run(
 ) -> Result<(), RenderError> {
     let (unioned, units) =
         prepare_opaque_run(outputs, width, height, transform, clip, work, omissions)?;
-    for_each_area_pixel(&unioned, width, height, work, |index, coverage| {
+    paint_prepared_opaque_run(pixels, &unioned, units, layer, width, height, work)
+}
+
+/// Integrates one prepared opaque union and reports its original logical units only after success.
+/// Geometry, shared request work and pixel composition retain the same complete-target authority.
+/// # Errors
+/// Returns area-integration allocation, numeric, resource or cancellation diagnostics; partial
+/// private pixels are discarded by the caller's existing single complete-stroke retry boundary.
+fn paint_prepared_opaque_run(
+    pixels: &mut Vec<PremultipliedLinearPixel>,
+    unioned: &AreaShapes,
+    units: usize,
+    layer: &RenderLayer,
+    width: u32,
+    height: u32,
+    work: &mut RasterWork<'_>,
+) -> Result<(), RenderError> {
+    for_each_area_pixel(unioned, width, height, work, |index, coverage| {
         pixels.paint_shape(index, coverage, &layer.color, 1.0)
     })?;
     for _ in 0..units {
@@ -1359,7 +1777,7 @@ fn prepare_opaque_run(
                 "opaque primitive progress count overflows",
             ))?;
     }
-    let unioned = normalize_and_union(&raw, clip, work, omissions)?;
+    let unioned = normalize_and_union(&raw, clip, work, omissions, Some(visible))?;
     Ok((unioned, units))
 }
 
@@ -1465,6 +1883,275 @@ impl PreparedAreaLayer {
         }
         Ok(())
     }
+    /// Paints a checked local crop without preparation, geometry changes or edge/Boolean charges.
+    /// # Errors
+    /// Returns cancellation, local allocation or unchanged area integration diagnostics.
+    pub(super) fn paint_region(
+        &self,
+        pixels: &mut Vec<PremultipliedLinearPixel>,
+        width: u32,
+        height: u32,
+        region: PixelRegion,
+        work: &mut RasterWork<'_>,
+    ) -> Result<(), RenderError> {
+        for paint in &self.paints {
+            work.check()?;
+            for_each_area_pixel_in_region(
+                &paint.shapes,
+                width,
+                height,
+                region,
+                work,
+                |index, coverage| pixels.paint_shape(index, coverage, &paint.color, paint.opacity),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Counts actual retained vector capacity and normalized cardinalities with checked arithmetic.
+    /// # Errors
+    /// Returns estimated-payload overflow rather than saturating an admission measurement.
+    pub(super) fn pilot_storage(&self) -> Result<(usize, usize, usize), RenderError> {
+        let mut bytes = self
+            .paints
+            .capacity()
+            .checked_mul(std::mem::size_of::<PreparedAreaPaint>())
+            .ok_or(area_error(
+                "raster.crop.memory",
+                "prepared capacity overflows",
+            ))?;
+        let mut edges = 0usize;
+        for paint in &self.paints {
+            bytes = pilot_add_capacity(
+                bytes,
+                paint.shapes.capacity(),
+                std::mem::size_of::<AreaShape>(),
+            )?;
+            for shape in &paint.shapes {
+                bytes = pilot_add_capacity(
+                    bytes,
+                    shape.capacity(),
+                    std::mem::size_of::<AreaContour>(),
+                )?;
+                for contour in shape {
+                    bytes = pilot_add_capacity(
+                        bytes,
+                        contour.capacity(),
+                        std::mem::size_of::<AreaPoint>(),
+                    )?;
+                    edges = edges.checked_add(contour.len()).ok_or(area_error(
+                        "raster.crop.memory",
+                        "prepared edge count overflows",
+                    ))?;
+                }
+            }
+        }
+        Ok((bytes, self.paints.len(), edges))
+    }
+
+    /// Estimates the worst single paint's row-bin growth/transient and original global-X scratch.
+    /// P counts all Y-clipped edge spans without X culling; m<=min(H,P). Twice the current-toolchain
+    /// capacity estimate covers growth/reallocation payload, not portable allocator metadata/RSS.
+    /// # Errors
+    /// Returns cancellation or checked-memory overflow before any worker dispatch.
+    pub(super) fn pilot_scratch(
+        &self,
+        width: u32,
+        height: u32,
+        region: PixelRegion,
+        work: &RasterWork<'_>,
+    ) -> Result<usize, RenderError> {
+        let mut maximum = 0;
+        for paint in &self.paints {
+            let mut min_x = f64::INFINITY;
+            let mut max_x = f64::NEG_INFINITY;
+            let mut pieces = 0usize;
+            for contour in paint.shapes.iter().flatten() {
+                for index in 0..contour.len() {
+                    if index & 1023 == 0 {
+                        work.check()?;
+                    }
+                    let a = contour[index];
+                    let b = contour[(index + 1) % contour.len()];
+                    min_x = min_x.min(a[0]);
+                    max_x = max_x.max(a[0]);
+                    if a[1] == b[1] {
+                        continue;
+                    }
+                    let first = a[1]
+                        .min(b[1])
+                        .floor()
+                        .clamp(f64::from(region.y0), f64::from(region.y1))
+                        as usize;
+                    let last = a[1]
+                        .max(b[1])
+                        .ceil()
+                        .clamp(f64::from(region.y0), f64::from(region.y1))
+                        as usize;
+                    pieces = pieces
+                        .checked_add(last - first)
+                        .ok_or(area_error("raster.crop.memory", "row span count overflows"))?;
+                }
+            }
+            let span = if min_x.is_finite() && max_x.is_finite() {
+                (max_x.ceil().clamp(0.0, f64::from(width)) as usize)
+                    - (min_x.floor().clamp(0.0, f64::from(width)) as usize)
+            } else {
+                0
+            };
+            let rows = region.height().min(height) as usize;
+            let nonempty = rows.min(pieces);
+            let mut bytes = pilot_add_capacity(0, rows, std::mem::size_of::<Vec<AreaRowPiece>>())?;
+            let capacity = pieces
+                .checked_add(nonempty)
+                .and_then(|x| x.checked_mul(4))
+                .ok_or(area_error("raster.crop.memory", "bin capacity overflows"))?;
+            bytes = pilot_add_capacity(bytes, capacity, std::mem::size_of::<AreaRowPiece>())?;
+            let sums = span
+                .checked_mul(2)
+                .and_then(|x| x.checked_add(1))
+                .ok_or(area_error(
+                    "raster.crop.memory",
+                    "global X scratch overflows",
+                ))?;
+            bytes = pilot_add_capacity(bytes, sums, std::mem::size_of::<AreaSum>())?;
+            maximum = maximum.max(bytes);
+        }
+        Ok(maximum)
+    }
+}
+
+/// Adds actual/estimated vector payload with checked platform arithmetic, excluding allocator metadata.
+/// # Errors
+/// Returns raster.crop.memory when a count, element size or cumulative byte sum overflows.
+fn pilot_add_capacity(bytes: usize, count: usize, size: usize) -> Result<usize, RenderError> {
+    count
+        .checked_mul(size)
+        .and_then(|n| bytes.checked_add(n))
+        .ok_or(area_error(
+            "raster.crop.memory",
+            "estimated payload overflows",
+        ))
+}
+
+/// Attempts private layer preparation and retries only a typed split-budget failure of restricted strokes.
+/// Failed pixels/paints and their approximation ledger drop before source-free full materialization.
+/// Both attempts consume the same edge/Boolean allowance. Logical units already reported by the
+/// discarded attempt are suppressed during the single retry; other errors retain their authority.
+/// # Errors
+/// Propagates the original error when no prepared restricted stroke exists, cancellation/storage
+/// errors during restoration, or the unchanged second-attempt error without recursive retries.
+fn with_complete_stroke_retry<T>(
+    layer: &RenderLayer,
+    work: &mut RasterWork<'_>,
+    mut attempt: impl FnMut(
+        &RenderLayer,
+        &mut RasterWork<'_>,
+        &mut AreaOmissionBudget,
+    ) -> Result<T, RenderError>,
+) -> Result<T, RenderError> {
+    let started_units = work.completed_units;
+    let mut omissions = AreaOmissionBudget::default();
+    match attempt(layer, work, &mut omissions) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            if omissions.2 != Some(AreaFailureKind::SplitCertificateBudget) {
+                return Err(error);
+            }
+            work.check()?;
+            let Some(restored) =
+                materialization::complete_restricted_stroke_layer(layer, work.is_cancelled)?
+            else {
+                return Err(error);
+            };
+            work.check()?;
+            let previous_suppression = work.suppressed_retry_units;
+            work.suppressed_retry_units = work.completed_units.saturating_sub(started_units);
+            let result = attempt(&restored, work, &mut AreaOmissionBudget::default());
+            work.suppressed_retry_units = previous_suppression;
+            result
+        }
+    }
+}
+
+/// Prepares one complete-target AA layer before any streaming encoder receives bytes.
+/// Passing Canvas geometry stays borrowed; a typed split-budget rejection permits one frozen retry.
+/// # Errors
+/// Returns the unchanged preparation, cumulative work, cancellation or checked restoration error.
+pub(super) fn prepare_area_layer(
+    layer: &RenderLayer,
+    width: u32,
+    height: u32,
+    transform: CanonicalRasterTransform,
+    work: &mut RasterWork<'_>,
+) -> Result<PreparedAreaLayer, RenderError> {
+    prepare_area_layer_with_clip(layer, width, height, transform, None, work)
+}
+
+/// Prepares one root under its original full-canvas clip and cumulative retry/work authority.
+/// Native streaming passes None through its wrapper; diagnostic Main uses the actual preview clip.
+/// # Errors
+/// Returns unchanged preparation, allocation, precision, cancellation or cumulative work errors.
+pub(super) fn prepare_area_layer_with_clip(
+    layer: &RenderLayer,
+    width: u32,
+    height: u32,
+    transform: CanonicalRasterTransform,
+    clip: Option<[f64; 4]>,
+    work: &mut RasterWork<'_>,
+) -> Result<PreparedAreaLayer, RenderError> {
+    with_complete_stroke_retry(layer, work, |layer, work, omissions| {
+        prepare_area_layer_once(layer, width, height, transform, clip, work, omissions)
+    })
+}
+
+/// Prepares full-root geometry while retaining, rather than publishing, its ordered charges.
+/// Only later complete-region replay grants certification. Extra preparation work and local errors
+/// can precede a cumulative debt failure on this opt-in path; ordinary eager callers stay unchanged.
+/// # Errors
+/// Returns local geometry, independent numeric, allocation, cancellation or consumed-work errors.
+pub(super) fn prepare_retained_area_layer(
+    layer: &RenderLayer,
+    width: u32,
+    height: u32,
+    transform: CanonicalRasterTransform,
+    clip: [f64; 4],
+    work: &mut RasterWork<'_>,
+) -> Result<(PreparedAreaLayer, AreaDebtLedger), RenderError> {
+    let mut budget = AreaOmissionBudget {
+        3: Some(AreaDebtLedger::default()),
+        ..Default::default()
+    };
+    let prepared = prepare_area_layer_once(
+        layer,
+        width,
+        height,
+        transform,
+        Some(clip),
+        work,
+        &mut budget,
+    )?;
+    Ok((
+        prepared,
+        budget.3.take().expect("retained collector exists"),
+    ))
+}
+
+/// Rasterizes a private AA layer, restoring only restricted strokes after a typed split-budget failure.
+/// Successful layers preserve original paint order and every consumed request-wide work unit.
+/// # Errors
+/// Propagates unchanged raster/precision/resource errors or source-free restoration failures.
+pub(super) fn rasterize_area_layer(
+    layer: &RenderLayer,
+    width: u32,
+    height: u32,
+    transform: CanonicalRasterTransform,
+    clip: Option<[f64; 4]>,
+    work: &mut RasterWork<'_>,
+) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
+    with_complete_stroke_retry(layer, work, |layer, work, omissions| {
+        rasterize_area_layer_once(layer, width, height, transform, clip, work, omissions)
+    })
 }
 
 /// Prepares a visible layer once using the same fill normalization and opaque-run authority.
@@ -1474,19 +2161,20 @@ impl PreparedAreaLayer {
 ///
 /// # Errors
 /// Returns cancellation, shared edge/Boolean/precision limits, or fallible allocation failures.
-pub(super) fn prepare_area_layer(
+fn prepare_area_layer_once(
     layer: &RenderLayer,
     width: u32,
     height: u32,
     transform: CanonicalRasterTransform,
+    clip: Option<[f64; 4]>,
     work: &mut RasterWork<'_>,
+    omissions: &mut AreaOmissionBudget,
 ) -> Result<PreparedAreaLayer, RenderError> {
     let mut prepared = PreparedAreaLayer { paints: Vec::new() };
     if !layer.visible {
         return Ok(prepared);
     }
     let mut pending = Vec::new();
-    let mut omissions = AreaOmissionBudget::default();
     for output in &layer.outputs {
         work.check()?;
         if output.primitive_paints().is_none() && layer.color.alpha == 1.0 && layer.opacity == 1.0 {
@@ -1496,24 +2184,23 @@ pub(super) fn prepare_area_layer(
             pending.push(output);
             continue;
         }
-        let (shapes, _) = prepare_opaque_run(
-            &pending,
-            width,
-            height,
-            transform,
-            None,
-            work,
-            &mut omissions,
-        )?;
+        let (shapes, _) =
+            prepare_opaque_run(&pending, width, height, transform, clip, work, omissions)?;
         prepared.push(shapes, &layer.color, 1.0)?;
         pending.clear();
         for_each_area_primitive(
             output.geometry(),
             transform,
-            area_visible_bounds(width, height, None),
+            area_visible_bounds(width, height, clip),
             work,
             |index, raw, work| {
-                let shapes = normalize_and_union(&[raw], None, work, &mut omissions)?;
+                let shapes = normalize_and_union(
+                    &[raw],
+                    clip,
+                    work,
+                    omissions,
+                    Some(area_visible_bounds(width, height, clip)),
+                )?;
                 prepared.push(
                     shapes,
                     output_primitive_paint(layer, Some(output), index),
@@ -1522,17 +2209,70 @@ pub(super) fn prepare_area_layer(
             },
         )?;
     }
-    let (shapes, _) = prepare_opaque_run(
-        &pending,
-        width,
-        height,
-        transform,
-        None,
-        work,
-        &mut omissions,
-    )?;
+    let (shapes, _) =
+        prepare_opaque_run(&pending, width, height, transform, clip, work, omissions)?;
     prepared.push(shapes, &layer.color, 1.0)?;
     Ok(prepared)
+}
+
+/// Rasterizes one layer, deferring its pixel buffer until opaque whole-layer preparation finishes.
+/// Only visible, uniformly opaque layers without primitive paints use this lifetime change; all
+/// other layers retain the ordered preallocated path. One caller-owned retry/work/omission ledger
+/// governs both paths, with unchanged geometry, adapter, certificates and paint arithmetic.
+/// # Errors
+/// Returns the existing raster diagnostics. Eligible geometry/cancellation errors can precede a
+/// pixel-allocation failure; failed preparation work is consumed and never refunded.
+fn rasterize_area_layer_once(
+    layer: &RenderLayer,
+    width: u32,
+    height: u32,
+    transform: CanonicalRasterTransform,
+    clip: Option<[f64; 4]>,
+    work: &mut RasterWork<'_>,
+    omissions: &mut AreaOmissionBudget,
+) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
+    if let Some(outputs) = whole_opaque_layer_outputs(layer, work)? {
+        let (unioned, units) =
+            prepare_opaque_run(&outputs, width, height, transform, clip, work, omissions)?;
+        work.check()?;
+        let mut pixels = allocate_linear_pixels(
+            width,
+            height,
+            background_pixel(RasterBackground::Transparent),
+        )?;
+        paint_prepared_opaque_run(&mut pixels, &unioned, units, layer, width, height, work)?;
+        return Ok(pixels);
+    }
+    rasterize_area_layer_preallocated(layer, width, height, transform, clip, work, omissions)
+}
+
+/// Collects references only when every output belongs to one visible uniformly opaque layer.
+/// Cancellation is polled during eligibility and reference collection; neither pass consumes
+/// geometry/Boolean work or logical progress. Empty output lists remain eligible transparent layers.
+/// # Errors
+/// Returns cancellation or reference-allocation failure before geometry or pixels are prepared.
+fn whole_opaque_layer_outputs<'a>(
+    layer: &'a RenderLayer,
+    work: &RasterWork<'_>,
+) -> Result<Option<Vec<&'a RenderOutputLayer>>, RenderError> {
+    if !layer.visible || layer.color.alpha != 1.0 || layer.opacity != 1.0 {
+        return Ok(None);
+    }
+    for output in &layer.outputs {
+        work.check()?;
+        if output.primitive_paints().is_some() {
+            return Ok(None);
+        }
+    }
+    let mut outputs = Vec::new();
+    outputs
+        .try_reserve_exact(layer.outputs.len())
+        .map_err(|_| area_error("raster.allocation", "opaque output-run allocation failed"))?;
+    for output in &layer.outputs {
+        work.check()?;
+        outputs.push(output);
+    }
+    Ok(Some(outputs))
 }
 
 /// Rasterizes one layer with floating geometric AA, keeping ineligible paint in canonical order.
@@ -1542,13 +2282,14 @@ pub(super) fn prepare_area_layer(
 ///
 /// # Errors
 /// Returns target, cancellation, precision, allocation, flattening, or area diagnostics.
-pub(super) fn rasterize_area_layer(
+fn rasterize_area_layer_preallocated(
     layer: &RenderLayer,
     width: u32,
     height: u32,
     transform: CanonicalRasterTransform,
     clip: Option<[f64; 4]>,
     work: &mut RasterWork<'_>,
+    omissions: &mut AreaOmissionBudget,
 ) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
     let mut pixels = allocate_linear_pixels(
         width,
@@ -1559,7 +2300,6 @@ pub(super) fn rasterize_area_layer(
         return Ok(pixels);
     }
     let mut pending: Vec<&RenderOutputLayer> = Vec::new();
-    let mut omissions = AreaOmissionBudget::default();
     for output in &layer.outputs {
         let eligible =
             output.primitive_paints().is_none() && layer.color.alpha == 1.0 && layer.opacity == 1.0;
@@ -1579,7 +2319,7 @@ pub(super) fn rasterize_area_layer(
             transform,
             clip,
             work,
-            &mut omissions,
+            omissions,
         )?;
         pending.clear();
         for_each_area_primitive(
@@ -1598,7 +2338,7 @@ pub(super) fn rasterize_area_layer(
                     color,
                     layer.opacity,
                     work,
-                    &mut omissions,
+                    omissions,
                 )
             },
         )?;
@@ -1607,6 +2347,10 @@ pub(super) fn rasterize_area_layer(
             GeometryOutput::CircularMarks(marks) => marks.len(),
             GeometryOutput::CanonicalMarks(marks) => marks.len(),
             GeometryOutput::CanonicalStrokes(strokes) => strokes.len(),
+            GeometryOutput::CanonicalConnections(value) => value
+                .strokes
+                .len()
+                .saturating_add(value.isolated_points.len()),
             GeometryOutput::CanonicalRegions(regions) => regions.regions().len(),
         };
         for _ in 0..count {
@@ -1622,13 +2366,903 @@ pub(super) fn rasterize_area_layer(
         transform,
         clip,
         work,
-        &mut omissions,
+        omissions,
     )?;
     Ok(pixels)
 }
 
 #[cfg(test)]
+mod allocation_lifetime_tests {
+    use super::*;
+    use toniator_domain::PatternMechanismId;
+    use toniator_geometry::*;
+
+    /// Supplies bridged holes, overlapping marks, an intentional zero-radius primitive and empty slots.
+    /// # Panics
+    /// Panics only if the finite canonical fixture fails public geometry/layer admission.
+    pub(crate) fn layer() -> RenderLayer {
+        let marks = [
+            vec![
+                (-2., -2.),
+                (12., -2.),
+                (12., 10.),
+                (-2., 10.),
+                (-2., -2.),
+                (2., 2.),
+                (2., 6.),
+                (6., 6.),
+                (6., 2.),
+                (2., 2.),
+                (-2., -2.),
+            ],
+            vec![(4., 1.), (9., 1.), (9., 5.), (4., 5.)],
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, points)| {
+            CanonicalMark::ClosedPath(
+                CanonicalPathMark::new(
+                    FamilySiteId {
+                        mechanism_id: PatternMechanismId(1),
+                        ordinal,
+                    },
+                    CurvePath::polyline(
+                        points.into_iter().map(|(x, y)| Point2::new(x, y)).collect(),
+                        PathClosure::Closed,
+                    )
+                    .unwrap(),
+                    SiteScope::Canvas,
+                    FamilySiteProvenance::Random {
+                        candidate_ordinal: ordinal,
+                        accepted_ordinal: ordinal,
+                        exclusion_neighbor_ordinal: None,
+                    },
+                    CanonicalFillRule::NonZero,
+                )
+                .unwrap(),
+            )
+        })
+        .chain([CanonicalMark::Circle {
+            source_site_id: FamilySiteId {
+                mechanism_id: PatternMechanismId(1),
+                ordinal: 2,
+            },
+            center: Point2::new(1., 1.),
+            radius: 0.,
+            scope: SiteScope::Canvas,
+            provenance: FamilySiteProvenance::Random {
+                candidate_ordinal: 2,
+                accepted_ordinal: 2,
+                exclusion_neighbor_ordinal: None,
+            },
+            fill_rule: CanonicalFillRule::EvenOdd,
+        }])
+        .collect();
+        RenderLayer::new_outputs(
+            ChannelId(1),
+            true,
+            ColorValue {
+                red: 0.2,
+                green: 0.4,
+                blue: 0.8,
+                alpha: 1.,
+            },
+            1.,
+            vec![
+                RenderOutputLayer::new(
+                    toniator_domain::PatternOutputLayerId(1),
+                    GeometryOutput::CanonicalMarks(Vec::new()),
+                    None,
+                ),
+                RenderOutputLayer::new(
+                    toniator_domain::PatternOutputLayerId(2),
+                    GeometryOutput::CanonicalMarks(marks),
+                    None,
+                ),
+                RenderOutputLayer::new(
+                    toniator_domain::PatternOutputLayerId(3),
+                    GeometryOutput::CanonicalMarks(Vec::new()),
+                    None,
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Compares actual fallback and deferred paths without rounding away f64 or ledger differences.
+    /// # Panics
+    /// Panics if pixels, certificates, consumed work or successful logical progress differ.
+    fn assert_parity(
+        layer: &RenderLayer,
+        transform: CanonicalRasterTransform,
+        clip: Option<[f64; 4]>,
+    ) {
+        let mut facts = Vec::new();
+        for deferred in [false, true] {
+            let progress = std::sync::Mutex::new(Vec::new());
+            let report = |done, total| progress.lock().unwrap().push((done, total));
+            let mut work = RasterWork::with_progress(
+                RasterizationLimits::default(),
+                RasterAntialiasing::On,
+                &|| false,
+                3,
+                &report,
+            );
+            let mut omissions = AreaOmissionBudget::default();
+            let pixels = if deferred {
+                rasterize_area_layer_once(layer, 19, 13, transform, clip, &mut work, &mut omissions)
+            } else {
+                rasterize_area_layer_preallocated(
+                    layer,
+                    19,
+                    13,
+                    transform,
+                    clip,
+                    &mut work,
+                    &mut omissions,
+                )
+            }
+            .unwrap();
+            let bits = pixels
+                .iter()
+                .map(|p| {
+                    [
+                        p.red.to_bits(),
+                        p.green.to_bits(),
+                        p.blue.to_bits(),
+                        p.alpha.to_bits(),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            let rgba = pixels_from_linear(19, 13, pixels, &|| false).unwrap();
+            facts.push((
+                bits,
+                rgba.pixels().to_vec(),
+                work.remaining_edges,
+                work.remaining_boolean_operations,
+                work.completed_units,
+                work.suppressed_retry_units,
+                omissions.total_bound().to_bits(),
+                progress.into_inner().unwrap(),
+            ));
+        }
+        assert_eq!(facts[0], facts[1]);
+    }
+
+    /// Preserves raw bits, bytes, ledgers and units across whole-layer union, empty slots and target phases.
+    /// # Panics
+    /// Panics on any changed prepared/preallocated result, including transparent empty unions.
+    #[test]
+    fn opaque_allocation_deferral_matches_preallocated_bits_work_and_progress() {
+        let mut layer = layer();
+        for (transform, clip) in [
+            (CanonicalRasterTransform::native(), None),
+            (
+                CanonicalRasterTransform {
+                    scale_x: 1.5,
+                    scale_y: 1.5,
+                    offset_x: -0.375,
+                    offset_y: 0.625,
+                },
+                Some([0.125, 0.375, 17.875, 12.625]),
+            ),
+            (
+                CanonicalRasterTransform {
+                    scale_x: 1.75,
+                    scale_y: 0.875,
+                    offset_x: 0.,
+                    offset_y: 0.,
+                },
+                None,
+            ),
+        ] {
+            assert_parity(&layer, transform, clip);
+        }
+        layer.outputs.remove(1);
+        assert_parity(&layer, CanonicalRasterTransform::native(), None);
+        layer.outputs.clear();
+        assert_parity(&layer, CanonicalRasterTransform::native(), None);
+    }
+
+    /// Keeps invisible, translucent and independently painted outputs on the existing ordered path.
+    /// # Panics
+    /// Panics if a fallback becomes eligible or changes pixels/work/progress.
+    #[test]
+    fn opaque_allocation_deferral_preserves_ineligible_ordered_paths() {
+        for kind in 0..4 {
+            let mut layer = layer();
+            match kind {
+                0 => layer.visible = false,
+                1 => layer.opacity = 0.5,
+                2 => layer.color.alpha = 0.5,
+                _ => {
+                    layer.outputs[1].primitive_paints = Some(Arc::new(vec![layer.color.clone(); 3]))
+                }
+            }
+            assert!(
+                whole_opaque_layer_outputs(
+                    &layer,
+                    &RasterWork::new(
+                        RasterizationLimits::default(),
+                        RasterAntialiasing::On,
+                        &|| false
+                    )
+                )
+                .unwrap()
+                .is_none()
+            );
+            assert_parity(
+                &layer,
+                CanonicalRasterTransform::native(),
+                Some([0.25, 0.5, 18.75, 12.5]),
+            );
+        }
+    }
+
+    /// Polls both reference passes and preserves failed resource work without exposing partial pixels.
+    /// # Panics
+    /// Panics if eligibility/collection ignores cancellation or resource errors refund/change work.
+    #[test]
+    fn opaque_allocation_deferral_preserves_cancellation_and_resource_failures() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let layer = layer();
+        for stop in [0, 3, 4] {
+            let polls = AtomicUsize::new(0);
+            let cancel = || polls.fetch_add(1, Ordering::Relaxed) >= stop;
+            let mut work = RasterWork::new(
+                RasterizationLimits::default(),
+                RasterAntialiasing::On,
+                &cancel,
+            );
+            assert_eq!(
+                rasterize_area_layer_once(
+                    &layer,
+                    19,
+                    13,
+                    CanonicalRasterTransform::native(),
+                    None,
+                    &mut work,
+                    &mut AreaOmissionBudget::default()
+                )
+                .unwrap_err()
+                .path(),
+                "evaluation.cancelled"
+            );
+            assert_eq!(work.completed_units, 0);
+            assert_eq!(
+                work.remaining_edges,
+                RasterizationLimits::default().max_flattened_edges()
+            );
+            assert_eq!(
+                work.remaining_boolean_operations,
+                RasterizationLimits::default().max_boolean_operations()
+            );
+        }
+        // With no outputs, preparation has no inner poll: the explicit pre-allocation poll is required.
+        let mut empty = layer.clone();
+        empty.outputs.clear();
+        let mut cancelled = RasterWork::new(
+            RasterizationLimits::default(),
+            RasterAntialiasing::On,
+            &|| true,
+        );
+        assert_eq!(
+            rasterize_area_layer_once(
+                &empty,
+                19,
+                13,
+                CanonicalRasterTransform::native(),
+                None,
+                &mut cancelled,
+                &mut AreaOmissionBudget::default()
+            )
+            .unwrap_err()
+            .path(),
+            "evaluation.cancelled"
+        );
+        for limits in [
+            RasterizationLimits::new(1).unwrap(),
+            RasterizationLimits::default().with_max_boolean_operations(1),
+        ] {
+            let mut facts = Vec::new();
+            for deferred in [false, true] {
+                let mut work = RasterWork::new(limits, RasterAntialiasing::On, &|| false);
+                let mut omissions = AreaOmissionBudget::default();
+                let err = if deferred {
+                    rasterize_area_layer_once(
+                        &layer,
+                        19,
+                        13,
+                        CanonicalRasterTransform::native(),
+                        None,
+                        &mut work,
+                        &mut omissions,
+                    )
+                } else {
+                    rasterize_area_layer_preallocated(
+                        &layer,
+                        19,
+                        13,
+                        CanonicalRasterTransform::native(),
+                        None,
+                        &mut work,
+                        &mut omissions,
+                    )
+                }
+                .unwrap_err();
+                facts.push((
+                    err.path().to_string(),
+                    work.remaining_edges,
+                    work.remaining_boolean_operations,
+                    work.completed_units,
+                ));
+            }
+            assert_eq!(facts[0], facts[1]);
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    /// Encloses actual adapter readbacks across offsets, quantization ties and wide integer casts.
+    /// # Panics
+    /// Panics if any actual first or second grid readback escapes the outward operation intervals.
+    #[test]
+    fn visible_certificate_enclosure_contains_actual_adapter_roundtrips() {
+        for (rect, scale) in [
+            (
+                FloatRect {
+                    min_x: -200.0,
+                    max_x: 10200.0,
+                    min_y: -170.0,
+                    max_y: 10200.0,
+                },
+                AREA_BOOLEAN_SCALE,
+            ),
+            (
+                FloatRect {
+                    min_x: -1.0e6,
+                    max_x: 1.0e6,
+                    min_y: -1.0e6,
+                    max_y: 1.0e6,
+                },
+                AREA_BOOLEAN_SCALE,
+            ),
+            (
+                FloatRect {
+                    min_x: -10.0,
+                    max_x: 30.0,
+                    min_y: -20.0,
+                    max_y: 40.0,
+                },
+                8.0,
+            ),
+        ] {
+            let adapter =
+                FloatPointAdapter::<AreaPoint, i64>::try_with_scale_conservative(rect, scale)
+                    .unwrap();
+            let wide = if rect.max_x > 1.0e5 {
+                999_999.123_456_789
+            } else {
+                1.0
+            };
+            for point in [
+                [wide, wide],
+                [0.0, 0.0],
+                [0.0625, -0.0625],
+                [0.1, 0.3],
+                [1.0_f64.next_down(), 1.0_f64.next_up()],
+                [20.25, 30.375],
+            ] {
+                let mut bounds = [point[0], point[1], point[0], point[1]];
+                let mut actual = point;
+                for _ in 0..2 {
+                    let mapped = area_grid_readback_bounds(bounds, &adapter).unwrap();
+                    actual = adapter.try_snap_to_grid(&actual).unwrap();
+                    for axis in 0..2 {
+                        assert!(mapped[axis] <= actual[axis] && actual[axis] <= mapped[axis + 2]);
+                        bounds[axis] = bounds[axis].min(mapped[axis]);
+                        bounds[axis + 2] = bounds[axis + 2].max(mapped[axis + 2]);
+                        assert!(bounds[axis] <= point[axis] && point[axis] <= bounds[axis + 2]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Requires strict separation of every ring of both complete fills, including intermediate snaps.
+    /// # Panics
+    /// Panics if touching, uncertain, empty or one-sided fill evidence can waive a certificate.
+    #[test]
+    fn visible_certificate_scope_requires_both_complete_strictly_disjoint_fills() {
+        let never = || false;
+        let work = RasterWork::new(
+            RasterizationLimits::new(100_000).unwrap(),
+            RasterAntialiasing::On,
+            &never,
+        );
+        let adapter = FloatPointAdapter::<AreaPoint, i64>::try_with_scale_conservative(
+            FloatRect {
+                min_x: -20.0,
+                max_x: 20.0,
+                min_y: -20.0,
+                max_y: 20.0,
+            },
+            8.0,
+        )
+        .unwrap();
+        let outside = vec![rectangle(2.0, 2.0, 3.0, 3.0)];
+        let inside = vec![rectangle(0.25, 0.25, 0.75, 0.75)];
+        let original = vec![outside.clone()];
+        let scope = AreaNormalizationScope {
+            original: &original,
+            adapter: adapter.clone(),
+            visible: [0.0, 0.0, 1.0, 1.0],
+        };
+        assert!(
+            scope
+                .proves_zero_visible_difference(&original, &work)
+                .unwrap()
+        );
+        assert!(
+            !scope
+                .proves_zero_visible_difference(std::slice::from_ref(&inside), &work)
+                .unwrap()
+        );
+        assert!(!scope.proves_zero_visible_difference(&[], &work).unwrap());
+        for shape in [
+            inside,
+            vec![rectangle(1.0, 0.0, 2.0, 1.0)],
+            vec![rectangle(1.01, 0.0, 2.0, 1.0)], // Actual 1/8-grid snap touches the ROI.
+            vec![
+                rectangle(2.0, 2.0, 3.0, 3.0),
+                rectangle(0.25, 0.25, 0.75, 0.75),
+            ],
+            vec![vec![[f64::NAN, 2.0], [3.0, 2.0], [3.0, 3.0]]],
+            vec![rectangle(21.0, 21.0, 22.0, 22.0)], // Outside the adapter's validated range.
+        ] {
+            let original = vec![shape];
+            let scope = AreaNormalizationScope {
+                original: &original,
+                adapter: adapter.clone(),
+                visible: [0.0, 0.0, 1.0, 1.0],
+            };
+            assert!(
+                !scope
+                    .proves_zero_visible_difference(&[outside.clone()], &work)
+                    .unwrap()
+            );
+        }
+        let cancelled = || true;
+        let cancelled_work = RasterWork::new(
+            RasterizationLimits::new(100_000).unwrap(),
+            RasterAntialiasing::On,
+            &cancelled,
+        );
+        assert_eq!(
+            scope
+                .proves_zero_visible_difference(&original, &cancelled_work)
+                .unwrap_err()
+                .path(),
+            "evaluation.cancelled"
+        );
+    }
+
+    /// Omits only an offscreen normalization certificate, retaining exact geometry and charged work.
+    /// # Panics
+    /// Panics if global/intersecting certificates, incurred debt or collapsed loss lose authority.
+    #[test]
+    fn visible_certificate_scope_preserves_geometry_work_and_other_debt() {
+        let never = || false;
+        let limits = RasterizationLimits::new(100_000).unwrap();
+        let shape = vec![vec![vec![
+            [10.1, 10.1],
+            [12.9, 11.3],
+            [10.2, 12.7],
+            [12.2, 10.4],
+        ]]];
+        let rect = FloatRect {
+            min_x: 0.0,
+            max_x: 20.0,
+            min_y: 0.0,
+            max_y: 20.0,
+        };
+        let mut global_work = RasterWork::new(limits, RasterAntialiasing::On, &never);
+        let mut global_budget = AreaOmissionBudget::default();
+        let global = area_overlay(
+            &shape,
+            rect,
+            FillRule::NonZero,
+            &mut global_work,
+            &mut global_budget,
+            None,
+        )
+        .unwrap();
+        assert!(
+            global_budget.total_bound() > 0.0,
+            "fixture must exercise an actual split certificate"
+        );
+        let mut scoped_work = RasterWork::new(limits, RasterAntialiasing::On, &never);
+        let mut scoped_budget = AreaOmissionBudget::default();
+        let scoped = area_overlay(
+            &shape,
+            rect,
+            FillRule::NonZero,
+            &mut scoped_work,
+            &mut scoped_budget,
+            Some([0.0, 0.0, 1.0, 1.0]),
+        )
+        .unwrap();
+        assert_eq!(global, scoped);
+        assert_eq!(
+            global_work.remaining_boolean_operations,
+            scoped_work.remaining_boolean_operations
+        );
+        assert_eq!(scoped_budget.total_bound(), 0.0);
+        let mut intersecting_work = RasterWork::new(limits, RasterAntialiasing::On, &never);
+        let mut intersecting_budget = AreaOmissionBudget::default();
+        assert_eq!(
+            global,
+            area_overlay(
+                &shape,
+                rect,
+                FillRule::NonZero,
+                &mut intersecting_work,
+                &mut intersecting_budget,
+                Some([10.0, 10.0, 13.0, 13.0])
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            global_budget.total_bound(),
+            intersecting_budget.total_bound()
+        );
+        // The same cumulative ledger rejects a relevant split certificate, never a proven zero.
+        let mut work = RasterWork::new(limits, RasterAntialiasing::On, &never);
+        let mut budget = AreaOmissionBudget::default();
+        budget.record(MAX_OMITTED_PIXEL_AREA).unwrap();
+        assert!(
+            area_overlay(
+                &shape,
+                rect,
+                FillRule::NonZero,
+                &mut work,
+                &mut budget,
+                None
+            )
+            .is_err()
+        );
+        assert!(budget.2 == Some(AreaFailureKind::SplitCertificateBudget));
+        let mut work = RasterWork::new(limits, RasterAntialiasing::On, &never);
+        let mut budget = AreaOmissionBudget::default();
+        budget.record(MAX_OMITTED_PIXEL_AREA).unwrap();
+        assert_eq!(
+            global,
+            area_overlay(
+                &shape,
+                rect,
+                FillRule::NonZero,
+                &mut work,
+                &mut budget,
+                Some([0.0, 0.0, 1.0, 1.0])
+            )
+            .unwrap()
+        );
+        assert_eq!(budget.total_bound(), MAX_OMITTED_PIXEL_AREA);
+        assert!(budget.2.is_none());
+        let empty = [RawAreaPrimitive {
+            shape: Vec::new(),
+            fill_rule: FillRule::NonZero,
+            omitted_area_bound: MAX_OMITTED_PIXEL_AREA * 2.0,
+            incurred_area_error_bound: 0.0,
+        }];
+        let mut work = RasterWork::new(limits, RasterAntialiasing::On, &never);
+        assert_eq!(
+            normalize_and_union(
+                &empty,
+                None,
+                &mut work,
+                &mut AreaOmissionBudget::default(),
+                Some([0.0, 0.0, 1.0, 1.0])
+            )
+            .unwrap_err()
+            .path(),
+            "raster.area.precision"
+        );
+        for visible in [None, Some([0.0, 0.0, 1.0, 1.0])] {
+            let mut work = RasterWork::new(
+                limits.with_max_boolean_operations(1),
+                RasterAntialiasing::On,
+                &never,
+            );
+            assert_eq!(
+                area_overlay(
+                    &shape,
+                    rect,
+                    FillRule::NonZero,
+                    &mut work,
+                    &mut AreaOmissionBudget::default(),
+                    visible
+                )
+                .unwrap_err()
+                .path(),
+                "raster.limits.boolean_operations"
+            );
+        }
+        let raw = [RawAreaPrimitive {
+            shape: shape[0].clone(),
+            fill_rule: FillRule::NonZero,
+            omitted_area_bound: 0.0,
+            incurred_area_error_bound: MAX_OMITTED_PIXEL_AREA * 2.0,
+        }];
+        let mut work = RasterWork::new(limits, RasterAntialiasing::On, &never);
+        assert_eq!(
+            normalize_and_union(
+                &raw,
+                None,
+                &mut work,
+                &mut AreaOmissionBudget::default(),
+                Some([0.0, 0.0, 1.0, 1.0])
+            )
+            .unwrap_err()
+            .path(),
+            "raster.area.precision"
+        );
+    }
+
+    /// Compares the actual flattened Boolean adapter frame, including independent sampled-paint slots.
+    /// # Panics
+    /// Panics if retained geometry changes normalization extrema at native or anisotropic scale.
+    #[test]
+    fn construction_materialization_preserves_actual_area_adapter_rectangles() {
+        use toniator_domain::{GuideDimensionId, PathStrokeStyle};
+        use toniator_geometry::*;
+        /// Builds the complete or certified outline fixture through the production geometry service.
+        /// # Panics
+        /// Panics on invalid finite fixture geometry.
+        fn fixture(mode: ConstructionMode, bias: f64) -> (GeometryOutput, ConstructionMetrics) {
+            let canvas = Bounds::new(Point2::new(0., 0.), Point2::new(32., 24.)).unwrap();
+            let mut points = vec![Point2::new(4., 5.), Point2::new(-15., 5.)];
+            points.extend((0..80).map(|i| Point2::new(-20. - i as f64 * 0.5, 6. + (i % 3) as f64)));
+            points.extend([Point2::new(-15., 16.), Point2::new(27., 16.)]);
+            let path = CurvePath::polyline(points, PathClosure::Open).unwrap();
+            let mut profile = Vec::new();
+            for (i, segment) in path.segments().iter().enumerate() {
+                for parameter in [0., 1.] {
+                    profile.push(StrokeProfileSample {
+                        location: PathLocation::new(i, parameter).unwrap(),
+                        center: segment.point_at(parameter).unwrap(),
+                        normalized_thickness: (2. + (i % 4) as f64 * 0.1) / 4.,
+                        width: 2. + (i % 4) as f64 * 0.1,
+                    });
+                }
+            }
+            let samples = profile
+                .iter()
+                .map(|v| VariableWidthPathSample {
+                    location: v.location,
+                    width: v.width,
+                })
+                .collect::<Vec<_>>();
+            let context = ConstructionContext::new(mode, Some(canvas), true);
+            let outline = context
+                .run(|| {
+                    build_variable_width_outline_cancellable(
+                        &path,
+                        &samples,
+                        PathStrokeStyle::default(),
+                        bias,
+                        0.125,
+                        VariableWidthOutlineLimits::new(usize::MAX).unwrap(),
+                        &|| false,
+                    )
+                })
+                .unwrap();
+            let stroke = CanonicalStroke::new(
+                StructuralPathInstanceId::guide_dimension(GuideDimensionId(1), 0, 0),
+                None,
+                path,
+                4.,
+                PathStrokeStyle::default(),
+                profile,
+                outline,
+            )
+            .unwrap();
+            (
+                GeometryOutput::CanonicalStrokes(vec![stroke]),
+                context.measurements.unwrap().snapshot(),
+            )
+        }
+        /// Builds one deferred middle decision with differing paints and stable semantic slots.
+        /// # Panics
+        /// Panics on invalid finite fixture geometry.
+        fn authored_fixture() -> (GeometryOutput, GeometryOutput, Vec<ColorValue>) {
+            use std::sync::Arc;
+            let prototype = Arc::new(PreparedMarkPrototype::new(
+                CurvePath::polyline(
+                    vec![
+                        Point2::new(-2., -2.),
+                        Point2::new(2., -2.),
+                        Point2::new(2., 2.),
+                        Point2::new(-2., 2.),
+                    ],
+                    PathClosure::Closed,
+                )
+                .unwrap(),
+                Point2::new(0., 0.),
+            ));
+            let coverage = MaterializationCoverage::for_canvas(
+                Bounds::new(Point2::new(0., 0.), Point2::new(32., 24.)).unwrap(),
+            );
+            let mut complete = Vec::new();
+            let mut pruned = Vec::new();
+            for (i, destination) in [
+                Point2::new(-60., -30.),
+                Point2::new(5., 5.),
+                Point2::new(-40., 9.),
+                Point2::new(20., 15.),
+                Point2::new(60., 50.),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let bounds = prepared_mark_hulls(
+                    prototype.path(),
+                    prototype.anchor(),
+                    1.,
+                    17.,
+                    destination,
+                    &|| false,
+                )
+                .unwrap()
+                .0;
+                let decision = DeferredPathMark {
+                    prototype: Arc::clone(&prototype),
+                    scale: 1.,
+                    orientation_degrees: 17.,
+                    destination,
+                    source_site_id: FamilySiteId {
+                        mechanism_id: toniator_domain::PatternMechanismId(1),
+                        ordinal: i,
+                    },
+                    scope: if i == 2 {
+                        SiteScope::Guard
+                    } else {
+                        SiteScope::Canvas
+                    },
+                    provenance: FamilySiteProvenance::Random {
+                        candidate_ordinal: i,
+                        accepted_ordinal: i,
+                        exclusion_neighbor_ordinal: None,
+                    },
+                    fill_rule: CanonicalFillRule::EvenOdd,
+                    bounds,
+                    coverage,
+                };
+                let full = CanonicalMark::ClosedPath(decision.materialize(&|| false).unwrap());
+                complete.push(full.clone());
+                pruned.push(if i == 2 {
+                    CanonicalMark::DeferredPath(Arc::new(decision))
+                } else {
+                    full
+                });
+            }
+            (
+                GeometryOutput::CanonicalMarks(complete),
+                GeometryOutput::CanonicalMarks(pruned),
+                vec![
+                    ColorValue {
+                        red: 0.4,
+                        green: 0.4,
+                        blue: 0.4,
+                        alpha: 1.,
+                    },
+                    ColorValue {
+                        red: 1.,
+                        green: 0.,
+                        blue: 0.,
+                        alpha: 1.,
+                    },
+                    ColorValue {
+                        red: 0.,
+                        green: 1.,
+                        blue: 0.,
+                        alpha: 1.,
+                    },
+                    ColorValue {
+                        red: 0.,
+                        green: 0.,
+                        blue: 1.,
+                        alpha: 1.,
+                    },
+                    ColorValue {
+                        red: 0.8,
+                        green: 0.8,
+                        blue: 0.8,
+                        alpha: 1.,
+                    },
+                ],
+            )
+        }
+
+        for transform in [
+            CanonicalRasterTransform::native(),
+            CanonicalRasterTransform {
+                scale_x: 3.03125,
+                scale_y: 1.7083333333333333,
+                offset_x: 0.,
+                offset_y: 0.,
+            },
+        ] {
+            for bias in [-1., 0., 1.] {
+                let (full, _) = fixture(ConstructionMode::Complete, bias);
+                let (pruned, _) = fixture(ConstructionMode::Canvas, bias);
+                let mut rectangles = Vec::new();
+                for geometry in [&full, &pruned] {
+                    let mut work = RasterWork::new(
+                        RasterizationLimits::default(),
+                        RasterAntialiasing::On,
+                        &|| false,
+                    );
+                    let mut raw = Vec::new();
+                    for_each_area_primitive(
+                        geometry,
+                        transform,
+                        [0., 0., 97., 41.],
+                        &mut work,
+                        |_, primitive, _| {
+                            raw.push(primitive);
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                    let rect = area_adapter(&raw, None, &work).unwrap();
+                    rectangles.push([rect.min_x, rect.max_x, rect.min_y, rect.max_y]);
+                }
+                assert_eq!(rectangles[0], rectangles[1]);
+            }
+            let (full, pruned, paints) = authored_fixture();
+            assert_ne!(paints[0], paints[2]);
+            let mut frames = Vec::new();
+            for geometry in [&full, &pruned] {
+                let GeometryOutput::CanonicalMarks(marks) = geometry else {
+                    unreachable!()
+                };
+                let mut work = RasterWork::new(
+                    RasterizationLimits::default(),
+                    RasterAntialiasing::On,
+                    &|| false,
+                );
+                let mut output = Vec::new();
+                for_each_area_primitive(
+                    geometry,
+                    transform,
+                    [0., 0., 97., 41.],
+                    &mut work,
+                    |index, raw, work| {
+                        let id = match &marks[index] {
+                            CanonicalMark::ClosedPath(mark) => mark.source_site_id,
+                            _ => unreachable!(),
+                        };
+                        let rect = area_adapter(&[raw], None, work)?;
+                        output.push((id, [rect.min_x, rect.max_x, rect.min_y, rect.max_y]));
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                frames.push(output);
+            }
+            assert_eq!(frames[0].len(), 5);
+            assert_eq!(frames[1].len(), 4);
+            for retained in &frames[1] {
+                assert_eq!(
+                    frames[0].iter().find(|frame| frame.0 == retained.0),
+                    Some(retained)
+                );
+            }
+        }
+    }
+
     use super::*;
     use toniator_geometry::{CubicBezierSegment, LineSegment};
 
@@ -1869,7 +3503,7 @@ mod tests {
             incurred_area_error_bound: debt,
         };
         assert!(
-            !normalize_and_union(&[raw], None, &mut work, &mut omissions)
+            !normalize_and_union(&[raw], None, &mut work, &mut omissions, None)
                 .unwrap()
                 .is_empty()
         );
@@ -1925,11 +3559,11 @@ mod tests {
     fn bounded_numeric_curve_recovery_propagates_typed_primitive_debt() {
         use toniator_domain::{PathStrokeStyle, PatternMechanismId};
         use toniator_geometry::{
-            build_canonical_regions_cancellable, CanonicalFilledOutline, CanonicalOutlineContour,
-            CanonicalPathMark, CanonicalRegionLimits, CanonicalRegionProposal,
-            CanonicalRegionSourceGroup, CanonicalRegionSourceId, CurvePath, FamilySiteId,
-            FamilySiteProvenance, PathClosure, PathLocation, SiteScope, StrokeProfileSample,
-            StructuralPathInstanceId, StructuralPathSourceId,
+            CanonicalFilledOutline, CanonicalOutlineContour, CanonicalPathMark,
+            CanonicalRegionLimits, CanonicalRegionProposal, CanonicalRegionSourceGroup,
+            CanonicalRegionSourceId, CurvePath, FamilySiteId, FamilySiteProvenance, PathClosure,
+            PathLocation, SiteScope, StrokeProfileSample, StructuralPathInstanceId,
+            StructuralPathSourceId, build_canonical_regions_cancellable,
         };
         let segments = captured_fit_recovery_contour(1.0);
         let path = CurvePath::new(segments.clone(), PathClosure::Closed).unwrap();
@@ -1973,6 +3607,9 @@ mod tests {
                 width: 1.0,
             }],
             CanonicalFilledOutline {
+                full_segment_count: None,
+                prepared: None,
+                coverage: Default::default(),
                 contours: vec![
                     CanonicalOutlineContour {
                         segments: segments.clone(),
@@ -1994,15 +3631,17 @@ mod tests {
                         mechanism_id: PatternMechanismId(1),
                         ordinal: 0,
                     }]),
-                    components: vec![CurvePath::polyline(
-                        vec![
-                            Point2::new(0.0, 0.0),
-                            Point2::new(1.0, 0.0),
-                            Point2::new(0.0, 1.0),
-                        ],
-                        PathClosure::Closed,
-                    )
-                    .unwrap()],
+                    components: vec![
+                        CurvePath::polyline(
+                            vec![
+                                Point2::new(0.0, 0.0),
+                                Point2::new(1.0, 0.0),
+                                Point2::new(0.0, 1.0),
+                            ],
+                            PathClosure::Closed,
+                        )
+                        .unwrap(),
+                    ],
                 }],
             },
             CanonicalRegionLimits::default(),
@@ -2032,7 +3671,7 @@ mod tests {
                     assert_eq!(raw.incurred_area_error_bound, expected);
                     let mut omissions = AreaOmissionBudget::default();
                     omissions.record(MAX_OMITTED_PIXEL_AREA).unwrap();
-                    let result = normalize_and_union(&[raw], None, work, &mut omissions);
+                    let result = normalize_and_union(&[raw], None, work, &mut omissions, None);
                     if expected > 0.0 {
                         assert_eq!(result.unwrap_err().path(), "raster.area.precision");
                     } else {
@@ -2157,7 +3796,7 @@ mod tests {
             );
             let mut omissions = AreaOmissionBudget::default();
             assert_eq!(
-                normalize_and_union(&raw, None, &mut work, &mut omissions)
+                normalize_and_union(&raw, None, &mut work, &mut omissions, None)
                     .unwrap_err()
                     .path(),
                 "raster.area.precision"
@@ -2187,6 +3826,7 @@ mod tests {
             None,
             &mut work,
             &mut omissions,
+            None,
         )
         .unwrap();
         assert_eq!(omissions.total_bound(), 0.0);
@@ -2277,8 +3917,14 @@ mod tests {
                 incurred_area_error_bound: 0.0,
             },
         ];
-        let unioned =
-            normalize_and_union(&raw, None, &mut work, &mut AreaOmissionBudget::default()).unwrap();
+        let unioned = normalize_and_union(
+            &raw,
+            None,
+            &mut work,
+            &mut AreaOmissionBudget::default(),
+            None,
+        )
+        .unwrap();
         assert!((pixel_area(&unioned, 0, 0) - 0.9).abs() < 1.0e-12);
         let touching = [
             RawAreaPrimitive {
@@ -2299,6 +3945,7 @@ mod tests {
             None,
             &mut work,
             &mut AreaOmissionBudget::default(),
+            None,
         )
         .unwrap();
         assert!((pixel_area(&unioned, 0, 0) - 1.0).abs() < 1.0e-12);
@@ -2331,7 +3978,7 @@ mod tests {
             },
         ];
         let mut omissions = AreaOmissionBudget::default();
-        let normalized = normalize_and_union(&raw, None, &mut work, &mut omissions).unwrap();
+        let normalized = normalize_and_union(&raw, None, &mut work, &mut omissions, None).unwrap();
         assert!(normalized.is_empty());
         assert_eq!(omissions.0.value(), 0.0);
     }
@@ -2359,9 +4006,14 @@ mod tests {
                 omitted_area_bound: bound,
                 incurred_area_error_bound: 0.0,
             }];
-            let normalized =
-                normalize_and_union(&raw, None, &mut work, &mut AreaOmissionBudget::default())
-                    .unwrap();
+            let normalized = normalize_and_union(
+                &raw,
+                None,
+                &mut work,
+                &mut AreaOmissionBudget::default(),
+                None,
+            )
+            .unwrap();
             let expected = std::f64::consts::PI * radius * radius;
             assert!((pixel_area(&normalized, 0, 0) - expected).abs() / expected < 0.007);
         }
@@ -2383,8 +4035,14 @@ mod tests {
             omitted_area_bound: bound,
             incurred_area_error_bound: 0.0,
         }];
-        let ellipse =
-            normalize_and_union(&raw, None, &mut work, &mut AreaOmissionBudget::default()).unwrap();
+        let ellipse = normalize_and_union(
+            &raw,
+            None,
+            &mut work,
+            &mut AreaOmissionBudget::default(),
+            None,
+        )
+        .unwrap();
         let expected = std::f64::consts::PI * 0.2 * 0.15;
         assert!((pixel_area(&ellipse, 0, 0) - expected).abs() / expected < 0.007);
         let clipped = [RawAreaPrimitive {
@@ -2398,6 +4056,7 @@ mod tests {
             Some([0.25, 0.25, 0.75, 0.75]),
             &mut work,
             &mut AreaOmissionBudget::default(),
+            None,
         )
         .unwrap();
         assert!((pixel_area(&clipped, 0, 0) - 0.25).abs() < 1.0e-12);
@@ -2472,8 +4131,14 @@ mod tests {
                 });
             }
         }
-        let normalized =
-            normalize_and_union(&raw, None, &mut work, &mut AreaOmissionBudget::default()).unwrap();
+        let normalized = normalize_and_union(
+            &raw,
+            None,
+            &mut work,
+            &mut AreaOmissionBudget::default(),
+            None,
+        )
+        .unwrap();
         let mut values = vec![0.0; 256];
         for_each_area_pixel(&normalized, 16, 16, &mut work, |index, q| values[index] = q).unwrap();
         let mean = values.iter().sum::<f64>() / 256.0;
@@ -2534,7 +4199,7 @@ mod tests {
             incurred_area_error_bound: 0.0,
         }];
         assert!(
-            normalize_and_union(&raw, None, &mut work, &mut omissions)
+            normalize_and_union(&raw, None, &mut work, &mut omissions, None)
                 .unwrap()
                 .is_empty()
         );
@@ -2553,7 +4218,7 @@ mod tests {
             incurred_area_error_bound: 0.0,
         }];
         assert_eq!(
-            normalize_and_union(&raw, None, &mut work, &mut omissions)
+            normalize_and_union(&raw, None, &mut work, &mut omissions, None)
                 .unwrap_err()
                 .path(),
             "raster.area.precision"
@@ -2600,6 +4265,7 @@ mod tests {
                     None,
                     &mut work,
                     &mut omissions,
+                    None,
                 )
                 .unwrap();
                 assert!(!normalized.is_empty());
@@ -2630,7 +4296,7 @@ mod tests {
             omitted_area_bound: 0.0,
             incurred_area_error_bound: 0.0,
         }];
-        normalize_and_union(&raw, clip, &mut work, &mut omissions).unwrap();
+        normalize_and_union(&raw, clip, &mut work, &mut omissions, None).unwrap();
         assert_eq!(omissions.0.value(), 0.0);
 
         let strip = rectangle(-10_000.0, -1.0e-13, 10_000.0, 1.0e-13);
@@ -2645,9 +4311,9 @@ mod tests {
         omissions
             .record(MAX_OMITTED_PIXEL_AREA - 1.5 * bound)
             .unwrap();
-        normalize_and_union(&raw, clip, &mut work, &mut omissions).unwrap();
+        normalize_and_union(&raw, clip, &mut work, &mut omissions, None).unwrap();
         assert_eq!(
-            normalize_and_union(&raw, clip, &mut work, &mut omissions)
+            normalize_and_union(&raw, clip, &mut work, &mut omissions, None)
                 .unwrap_err()
                 .path(),
             "raster.area.precision"
@@ -2664,7 +4330,7 @@ mod tests {
             incurred_area_error_bound: 0.0,
         }];
         assert!(
-            normalize_and_union(&raw, clip, &mut work, &mut omissions)
+            normalize_and_union(&raw, clip, &mut work, &mut omissions, None)
                 .unwrap()
                 .is_empty()
         );
@@ -2728,6 +4394,7 @@ mod tests {
                 None,
                 &mut work,
                 &mut omissions,
+                None,
             )
             .unwrap();
             assert_eq!(omissions.0.value() > 0.0, expected_charge, "rule={rule:?}");
@@ -2789,7 +4456,7 @@ mod tests {
         };
         let mut work = RasterWork::new(limits, RasterAntialiasing::On, &cancelled);
         let mut observed = AreaOmissionBudget::default();
-        let shapes = normalize_and_union(&[raw()], None, &mut work, &mut observed).unwrap();
+        let shapes = normalize_and_union(&[raw()], None, &mut work, &mut observed, None).unwrap();
         assert!(!shapes.is_empty());
         let bound = observed.0.value();
         assert!(bound > 0.0 && bound < MAX_OMITTED_PIXEL_AREA);
@@ -2840,9 +4507,14 @@ mod tests {
             omitted_area_bound: 0.0,
             incurred_area_error_bound: 0.0,
         };
-        let error =
-            normalize_and_union(&[raw], None, &mut work, &mut AreaOmissionBudget::default())
-                .unwrap_err();
+        let error = normalize_and_union(
+            &[raw],
+            None,
+            &mut work,
+            &mut AreaOmissionBudget::default(),
+            None,
+        )
+        .unwrap_err();
         assert_eq!(error.path, "raster.limits.boolean_operations");
         assert!(work.remaining_edges > 0);
         assert_eq!(work.remaining_boolean_operations, 0);
@@ -2889,6 +4561,7 @@ mod tests {
                 primitive.fill_rule,
                 work,
                 omissions,
+                None,
             )?;
             let exact_empty = normalized.is_empty()
                 && primitive.shape.len() == 2
@@ -2914,7 +4587,7 @@ mod tests {
         }
         omissions.record(omitted.value())?;
         work.check()?;
-        let mut unioned = area_overlay(&positive, rect, FillRule::NonZero, work, omissions)?;
+        let mut unioned = area_overlay(&positive, rect, FillRule::NonZero, work, omissions, None)?;
         if let Some([left, top, right, bottom]) = clip {
             work.check()?;
             let rectangle = vec![vec![vec![
@@ -2953,6 +4626,7 @@ mod tests {
                 FillRule::NonZero,
                 work,
                 omissions,
+                None,
             )?;
         }
         Ok(unioned)
@@ -3003,7 +4677,7 @@ mod tests {
                 let shapes = if old {
                     p1_two_pass_reference(selected, Some(clip), &mut work, &mut omissions)
                 } else {
-                    normalize_and_union(selected, Some(clip), &mut work, &mut omissions)
+                    normalize_and_union(selected, Some(clip), &mut work, &mut omissions, None)
                 }?;
                 let color = ColorValue {
                     red: rgb[0],
@@ -3179,6 +4853,7 @@ mod tests {
                     Some(clip),
                     &mut work,
                     &mut AreaOmissionBudget::default(),
+                    None,
                 )
             }
             .unwrap();
@@ -3196,7 +4871,7 @@ mod tests {
         };
         let mut observed = AreaOmissionBudget::default();
         let mut work = RasterWork::new(limits, RasterAntialiasing::On, &never);
-        normalize_and_union(&[raw()], None, &mut work, &mut observed).unwrap();
+        normalize_and_union(&[raw()], None, &mut work, &mut observed, None).unwrap();
         assert_eq!(
             observed.0.value(),
             0.0,
@@ -3204,7 +4879,7 @@ mod tests {
         );
         let clip = Some([0.317, 0.293, 0.731, 0.809]);
         let mut work = RasterWork::new(limits, RasterAntialiasing::On, &never);
-        normalize_and_union(&[raw()], clip, &mut work, &mut observed).unwrap();
+        normalize_and_union(&[raw()], clip, &mut work, &mut observed, None).unwrap();
         let bound = observed.0.value();
         assert!(bound > 0.0 && bound < MAX_OMITTED_PIXEL_AREA);
         let mut omissions = AreaOmissionBudget::default();
@@ -3255,7 +4930,14 @@ mod tests {
         let mut old = RasterWork::new(limits, RasterAntialiasing::On, &never);
         let mut new = RasterWork::new(limits, RasterAntialiasing::On, &never);
         p1_two_pass_reference(&raw, clip, &mut old, &mut AreaOmissionBudget::default()).unwrap();
-        normalize_and_union(&raw, clip, &mut new, &mut AreaOmissionBudget::default()).unwrap();
+        normalize_and_union(
+            &raw,
+            clip,
+            &mut new,
+            &mut AreaOmissionBudget::default(),
+            None,
+        )
+        .unwrap();
         assert!(new.remaining_boolean_operations > old.remaining_boolean_operations);
         for reference in [true, false] {
             let mut work = RasterWork::new(
@@ -3266,7 +4948,13 @@ mod tests {
             let result = if reference {
                 p1_two_pass_reference(&raw, clip, &mut work, &mut AreaOmissionBudget::default())
             } else {
-                normalize_and_union(&raw, clip, &mut work, &mut AreaOmissionBudget::default())
+                normalize_and_union(
+                    &raw,
+                    clip,
+                    &mut work,
+                    &mut AreaOmissionBudget::default(),
+                    None,
+                )
             };
             assert_eq!(
                 result.unwrap_err().path(),
@@ -3277,7 +4965,13 @@ mod tests {
             let result = if reference {
                 p1_two_pass_reference(&raw, clip, &mut work, &mut AreaOmissionBudget::default())
             } else {
-                normalize_and_union(&raw, clip, &mut work, &mut AreaOmissionBudget::default())
+                normalize_and_union(
+                    &raw,
+                    clip,
+                    &mut work,
+                    &mut AreaOmissionBudget::default(),
+                    None,
+                )
             };
             assert_eq!(result.unwrap_err().path(), "evaluation.cancelled");
             let empty = [RawAreaPrimitive {
@@ -3290,10 +4984,555 @@ mod tests {
             let result = if reference {
                 p1_two_pass_reference(&empty, clip, &mut work, &mut AreaOmissionBudget::default())
             } else {
-                normalize_and_union(&empty, clip, &mut work, &mut AreaOmissionBudget::default())
+                normalize_and_union(
+                    &empty,
+                    clip,
+                    &mut work,
+                    &mut AreaOmissionBudget::default(),
+                    None,
+                )
             };
             assert_eq!(result.unwrap_err().path(), "raster.area.precision");
         }
         p1_assert_rgba(&raw, clip_rect, (2, 2));
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod restricted_retry_tests {
+    use super::*;
+    use std::cell::Cell;
+    use toniator_domain::{GuideDimensionId, PathStrokeStyle, PatternMechanismId};
+    use toniator_geometry::*;
+
+    /// Builds a genuine restricted prepared stroke beside an earlier sampled circle output.
+    /// # Panics
+    /// Panics if deterministic finite fixture geometry does not produce restricted materialization.
+    pub(crate) fn layer() -> RenderLayer {
+        let canvas = Bounds::new(Point2::new(0., 0.), Point2::new(32., 24.)).unwrap();
+        let mut points = vec![Point2::new(4., 5.), Point2::new(-20., 5.)];
+        points.extend((0..24).map(|i| Point2::new(-40. - i as f64, 6. + (i % 3) as f64)));
+        points.extend([Point2::new(-20., 16.), Point2::new(27., 16.)]);
+        let path = CurvePath::polyline(points, PathClosure::Open).unwrap();
+        let mut profile = Vec::new();
+        for (i, segment) in path.segments().iter().enumerate() {
+            for parameter in [0., 1.] {
+                profile.push(StrokeProfileSample {
+                    location: PathLocation::new(i, parameter).unwrap(),
+                    center: segment.point_at(parameter).unwrap(),
+                    normalized_thickness: 0.5,
+                    width: 2.,
+                });
+            }
+        }
+        let samples = profile
+            .iter()
+            .map(|p| VariableWidthPathSample {
+                location: p.location,
+                width: p.width,
+            })
+            .collect::<Vec<_>>();
+        let outline = ConstructionContext::new(ConstructionMode::Canvas, Some(canvas), false)
+            .run(|| {
+                build_variable_width_outline_cancellable(
+                    &path,
+                    &samples,
+                    PathStrokeStyle::default(),
+                    0.,
+                    0.125,
+                    VariableWidthOutlineLimits::new(100_000).unwrap(),
+                    &|| false,
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            outline.coverage,
+            MaterializationCoverage::Canvas { .. }
+        ));
+        let stroke = CanonicalStroke::new(
+            StructuralPathInstanceId::guide_dimension(GuideDimensionId(1), 0, 0),
+            None,
+            path,
+            4.,
+            PathStrokeStyle::default(),
+            profile,
+            outline,
+        )
+        .unwrap();
+        let circle = CanonicalMark::Circle {
+            source_site_id: FamilySiteId {
+                mechanism_id: PatternMechanismId(1),
+                ordinal: 0,
+            },
+            center: Point2::new(10., 10.),
+            radius: 2.,
+            scope: SiteScope::Canvas,
+            provenance: FamilySiteProvenance::Random {
+                candidate_ordinal: 0,
+                accepted_ordinal: 0,
+                exclusion_neighbor_ordinal: None,
+            },
+            fill_rule: CanonicalFillRule::NonZero,
+        };
+        RenderLayer::new_outputs(
+            ChannelId(1),
+            true,
+            ColorValue {
+                red: 0.2,
+                green: 0.4,
+                blue: 0.8,
+                alpha: 1.,
+            },
+            0.5,
+            vec![
+                RenderOutputLayer::new(
+                    toniator_domain::PatternOutputLayerId(1),
+                    GeometryOutput::CanonicalMarks(vec![circle.clone()]),
+                    Some(vec![ColorValue {
+                        red: 0.8,
+                        green: 0.2,
+                        blue: 0.1,
+                        alpha: 1.0,
+                    }]),
+                ),
+                RenderOutputLayer::new(
+                    toniator_domain::PatternOutputLayerId(2),
+                    GeometryOutput::CanonicalConnections(CanonicalConnections {
+                        strokes: vec![stroke],
+                        isolated_points: vec![circle],
+                    }),
+                    None,
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Discards previously painted private pixels and counts logical progress once across restoration.
+    /// # Panics
+    /// Panics on changed complete pixels, duplicated progress, refunded work or altered mixed slots.
+    #[test]
+    fn split_retry_drops_painted_attempt_and_preserves_work_progress_and_slots() {
+        for opaque in [false, true] {
+            let mut layer = layer();
+            if opaque {
+                layer.opacity = 1.;
+                layer.outputs[0].primitive_paints = None;
+            }
+            let restored = materialization::complete_restricted_stroke_layer(&layer, &|| false)
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(
+                &layer.outputs[0].geometry,
+                &restored.outputs[0].geometry
+            ));
+            if !opaque {
+                assert!(Arc::ptr_eq(
+                    layer.outputs[0].primitive_paints.as_ref().unwrap(),
+                    restored.outputs[0].primitive_paints.as_ref().unwrap()
+                ));
+            }
+            let GeometryOutput::CanonicalConnections(a) = layer.outputs[1].geometry() else {
+                unreachable!()
+            };
+            let GeometryOutput::CanonicalConnections(b) = restored.outputs[1].geometry() else {
+                unreachable!()
+            };
+            assert_eq!(a.isolated_points, b.isolated_points);
+            let limits = RasterizationLimits::default();
+            let mut reference = RasterWork::new(limits, RasterAntialiasing::On, &|| false);
+            let expected = rasterize_area_layer(
+                &restored,
+                32,
+                24,
+                CanonicalRasterTransform::native(),
+                None,
+                &mut reference,
+            )
+            .unwrap();
+            let progress = std::sync::Mutex::new(Vec::new());
+            let report = |done, total| progress.lock().unwrap().push((done, total));
+            let mut work =
+                RasterWork::with_progress(limits, RasterAntialiasing::On, &|| false, 3, &report);
+            let attempts = Cell::new(0);
+            let first_remaining = Cell::new((0, 0));
+            let actual = with_complete_stroke_retry(&layer, &mut work, |layer, work, omissions| {
+                attempts.set(attempts.get() + 1);
+                let pixels = rasterize_area_layer_once(
+                    layer,
+                    32,
+                    24,
+                    CanonicalRasterTransform::native(),
+                    None,
+                    work,
+                    omissions,
+                )?;
+                if attempts.get() == 1 {
+                    first_remaining.set((work.remaining_edges, work.remaining_boolean_operations));
+                    omissions.record_split_certificate(MAX_OMITTED_PIXEL_AREA * 2.)?;
+                }
+                Ok(pixels)
+            })
+            .unwrap();
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|p| [
+                        p.red.to_bits(),
+                        p.green.to_bits(),
+                        p.blue.to_bits(),
+                        p.alpha.to_bits()
+                    ])
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|p| [
+                        p.red.to_bits(),
+                        p.green.to_bits(),
+                        p.blue.to_bits(),
+                        p.alpha.to_bits()
+                    ])
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(attempts.get(), 2);
+            assert_eq!(work.completed_units, 3);
+            assert_eq!(*progress.lock().unwrap(), vec![(1, 3), (2, 3), (3, 3)]);
+            assert!(work.remaining_edges < first_remaining.get().0);
+            assert!(work.remaining_boolean_operations < first_remaining.get().1);
+            assert_eq!(work.suppressed_retry_units, 0);
+        }
+    }
+
+    /// Rejects ordinary precision/resource failures without restoration and retries typed failures once.
+    /// # Panics
+    /// Panics if unrelated failures gain retries, passing geometry restores, or a second failure recurses.
+    #[test]
+    fn retry_origin_is_private_typed_and_second_failure_is_final() {
+        let layer = layer();
+        for kind in 0..8 {
+            let mut work = RasterWork::new(
+                RasterizationLimits::default(),
+                RasterAntialiasing::On,
+                &|| false,
+            );
+            let calls = Cell::new(0);
+            let result = with_complete_stroke_retry::<()>(&layer, &mut work, |_, _, omissions| {
+                calls.set(calls.get() + 1);
+                match kind {
+                    0 => omissions.record(MAX_OMITTED_PIXEL_AREA * 2.),
+                    1 => omissions.record_incurred(MAX_OMITTED_PIXEL_AREA * 2.),
+                    2 => omissions.record_split_certificate(f64::INFINITY),
+                    3 => Err(area_error(
+                        "raster.area.precision",
+                        "Boolean splitting did not converge within bounded precision attempts",
+                    )),
+                    4 => Err(area_error(
+                        "raster.area.precision",
+                        "Boolean output cleanup has no split certificate",
+                    )),
+                    5 => Err(area_error(
+                        "raster.area.precision",
+                        "Boolean split certificate exceeds checked integer bounds",
+                    )),
+                    6 => Err(area_error(
+                        "raster.limits.boolean_operations",
+                        "Boolean operation limit exceeded",
+                    )),
+                    _ => Err(area_error(
+                        "evaluation.cancelled",
+                        "rasterization was cancelled",
+                    )),
+                }
+            });
+            assert!(result.is_err());
+            assert_eq!(calls.get(), 1, "kind={kind}");
+        }
+        let context = ConstructionContext::new(ConstructionMode::Complete, None, true);
+        context.run(|| {
+            let mut work = RasterWork::new(
+                RasterizationLimits::default(),
+                RasterAntialiasing::On,
+                &|| false,
+            );
+            assert_eq!(
+                with_complete_stroke_retry(&layer, &mut work, |_, _, _| Ok(7)).unwrap(),
+                7
+            );
+            assert_eq!(
+                context
+                    .measurements
+                    .as_ref()
+                    .unwrap()
+                    .snapshot()
+                    .full_rematerializations,
+                0
+            );
+            let calls = Cell::new(0);
+            assert!(
+                with_complete_stroke_retry::<()>(&layer, &mut work, |_, _, omissions| {
+                    calls.set(calls.get() + 1);
+                    omissions.record_split_certificate(MAX_OMITTED_PIXEL_AREA * 2.)
+                })
+                .is_err()
+            );
+            assert_eq!(calls.get(), 2);
+            assert_eq!(
+                context
+                    .measurements
+                    .as_ref()
+                    .unwrap()
+                    .snapshot()
+                    .full_rematerializations,
+                1
+            );
+        });
+        let complete = materialization::complete_restricted_stroke_layer(&layer, &|| false)
+            .unwrap()
+            .unwrap();
+        let mut work = RasterWork::new(
+            RasterizationLimits::default(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        let calls = Cell::new(0);
+        assert!(
+            with_complete_stroke_retry::<()>(&complete, &mut work, |_, _, omissions| {
+                calls.set(calls.get() + 1);
+                omissions.record_split_certificate(MAX_OMITTED_PIXEL_AREA * 2.)
+            })
+            .is_err()
+        );
+        assert_eq!(calls.get(), 1);
+    }
+
+    /// Preserves cancellation between stages and does not reset exhausted request-wide work on retry.
+    /// # Panics
+    /// Panics if cancellation restores geometry or either consumed work allowance is refunded.
+    #[test]
+    fn retry_keeps_cancel_and_consumed_resource_authority() {
+        let layer = layer();
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let cancel = || cancelled.load(std::sync::atomic::Ordering::Relaxed);
+        let mut work = RasterWork::new(
+            RasterizationLimits::default(),
+            RasterAntialiasing::On,
+            &cancel,
+        );
+        let error = with_complete_stroke_retry::<()>(&layer, &mut work, |_, _, omissions| {
+            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            omissions.record_split_certificate(MAX_OMITTED_PIXEL_AREA * 2.)
+        })
+        .unwrap_err();
+        assert_eq!(error.path(), "evaluation.cancelled");
+        for boolean in [false, true] {
+            let mut work = RasterWork::new(
+                RasterizationLimits::new(1).unwrap(),
+                RasterAntialiasing::On,
+                &|| false,
+            );
+            let calls = Cell::new(0);
+            let error =
+                with_complete_stroke_retry::<()>(&layer, &mut work, |_, work, omissions| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == 1 {
+                        if boolean {
+                            work.remaining_boolean_operations = 0;
+                        } else {
+                            work.edge()?;
+                        }
+                        return omissions.record_split_certificate(MAX_OMITTED_PIXEL_AREA * 2.);
+                    }
+                    if boolean {
+                        assert_eq!(work.remaining_boolean_operations, 0);
+                        Err(area_error(
+                            "raster.limits.boolean_operations",
+                            "Boolean operation limit exceeded",
+                        ))
+                    } else {
+                        work.edge()
+                    }
+                })
+                .unwrap_err();
+            assert_eq!(calls.get(), 2);
+            assert_eq!(
+                error.path(),
+                if boolean {
+                    "raster.limits.boolean_operations"
+                } else {
+                    "raster.limits.flattened_edges"
+                }
+            );
+        }
+    }
+
+    /// Refuses exhausted streaming preparation before any PNG header reaches the staging sink.
+    /// # Panics
+    /// Panics if shared resource errors publish bytes or are converted into an unbounded retry.
+    #[test]
+    fn streaming_resource_failure_precedes_header() {
+        let mut layer = layer();
+        layer.outputs[0].primitive_paints = None;
+        let scene = RenderScene::new(
+            toniator_domain::CanvasSpec {
+                width: 32.,
+                height: 24.,
+            },
+            "retry-family".into(),
+            "retry-realization".into(),
+            vec![layer],
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        let error = write_png_streaming(
+            &scene,
+            StreamingRasterTarget::new(32, 24).unwrap(),
+            PngStreamOptions::default(),
+            RasterizationLimits::new(1).unwrap(),
+            &mut bytes,
+            &|| false,
+            &|_, _| {},
+        )
+        .unwrap_err();
+        assert_eq!(error.path(), "raster.limits.flattened_edges");
+        assert!(bytes.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod retained_debt_tests {
+    use super::*;
+    /// Checks ordered replay, strict boundary/unknown behavior and debt independent of paints.
+    /// # Panics
+    /// Panics when replay weakens global bounds or changes first-failure retry authority.
+    #[test]
+    fn ordered_region_debts_keep_global_and_first_failure_authority() {
+        let work = RasterWork::new(
+            RasterizationLimits::default(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        let mut ledger = AreaDebtLedger::default();
+        ledger
+            .push(AreaDebt::Normalization {
+                bound: 2e-6,
+                boxes: Some([[10., 10., 20., 20.]; 2]),
+            })
+            .unwrap();
+        assert_eq!(
+            ledger
+                .certify([0., 0., 9., 9.], &work)
+                .unwrap_or_else(|_| panic!("outside proof")),
+            0.
+        );
+        for region in [[0., 0., 10., 10.], [12., 12., 13., 13.]] {
+            assert!(ledger.certify(region, &work).err().unwrap().split_budget);
+        }
+        let combined = AreaDebtLedger {
+            events: vec![
+                AreaDebt::Normalization {
+                    bound: 6e-7,
+                    boxes: Some([[0., 0., 2., 2.]; 2]),
+                },
+                AreaDebt::Normalization {
+                    bound: 6e-7,
+                    boxes: Some([[8., 0., 10., 2.]; 2]),
+                },
+            ],
+        };
+        assert!(combined.certify([0., 0., 2., 2.], &work).is_ok());
+        assert!(combined.certify([8., 0., 10., 2.], &work).is_ok());
+        assert!(combined.certify([0., 0., 10., 2.], &work).is_err());
+        ledger.events[0] = AreaDebt::Normalization {
+            bound: 2e-6,
+            boxes: None,
+        };
+        assert!(ledger.certify([0., 0., 1., 1.], &work).is_err());
+        ledger.events = vec![
+            AreaDebt::Regular(8e-7),
+            AreaDebt::Incurred(4e-7),
+            AreaDebt::Split(1e-8),
+        ];
+        assert!(
+            !ledger
+                .certify([0., 0., 1., 1.], &work)
+                .err()
+                .unwrap()
+                .split_budget
+        );
+        ledger.events = vec![
+            AreaDebt::Regular(8e-7),
+            AreaDebt::Split(4e-7),
+            AreaDebt::Incurred(1e-8),
+        ];
+        assert!(
+            ledger
+                .certify([0., 0., 1., 1.], &work)
+                .err()
+                .unwrap()
+                .split_budget
+        );
+        assert!(
+            ledger
+                .certify(
+                    [0., 0., 1., 1.],
+                    &RasterWork::new(
+                        RasterizationLimits::default(),
+                        RasterAntialiasing::On,
+                        &|| true
+                    )
+                )
+                .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod retained_empty_tests {
+    use super::*;
+    /// Keeps actual collapsed/empty normalization debt after PreparedAreaLayer drops empty paints.
+    /// # Panics
+    /// Panics if empty accepted geometry drops charges or changes global failure origin.
+    #[test]
+    fn empty_prepared_paint_retains_global_debt() {
+        let mut budget = AreaOmissionBudget {
+            3: Some(AreaDebtLedger::default()),
+            ..Default::default()
+        };
+        let mut work = RasterWork::new(
+            RasterizationLimits::default(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        let mut prepared = PreparedAreaLayer { paints: Vec::new() };
+        for bound in [8e-7, 4e-7] {
+            let raw = [RawAreaPrimitive {
+                shape: Vec::new(),
+                fill_rule: FillRule::NonZero,
+                omitted_area_bound: bound,
+                incurred_area_error_bound: 0.,
+            }];
+            let shapes = normalize_and_union(&raw, None, &mut work, &mut budget, None).unwrap();
+            prepared
+                .push(
+                    shapes,
+                    &ColorValue {
+                        red: 1.,
+                        green: 0.,
+                        blue: 0.,
+                        alpha: 1.,
+                    },
+                    0.5,
+                )
+                .unwrap();
+        }
+        assert!(prepared.paints.is_empty());
+        let failure = budget
+            .3
+            .unwrap()
+            .certify([0., 0., 1., 1.], &work)
+            .err()
+            .unwrap();
+        assert_eq!(failure.error.path(), "raster.area.precision");
+        assert!(!failure.split_budget);
     }
 }

@@ -8,11 +8,12 @@ mod parametric;
 mod path;
 mod segment;
 
-pub use arc_length::PathArcLength;
+pub use arc_length::{ArcLengthWorkLimits, PathArcLength};
 pub use intersections::{IntersectionKind, IntersectionWorkLimits, PathIntersection, SegmentIntersection};
 pub use parametric::{
     construct_parametric_curve_path_cancellable,
     construct_parametric_curve_path_with_limits_cancellable,
+    extend_parametric_curve_path_with_limits_cancellable,
 };
 pub use path::{CurvePath, PathClosure, PathLocation};
 pub use segment::{CubicBezierSegment, CurveSegment, LineSegment};

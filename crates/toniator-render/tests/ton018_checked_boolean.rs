@@ -4,7 +4,7 @@ use i_overlay::{
     core::{
         checked::{CheckedOverlayControl, CheckedOverlayError},
         fill_rule::FillRule,
-        overlay::ShapeType,
+        overlay::{IntOverlayOptions, Overlay, ShapeType},
         overlay_rule::OverlayRule,
         solver::{Precision, Solver},
     },
@@ -18,12 +18,11 @@ use std::{
 
 type Shapes = Vec<Vec<Vec<[f64; 2]>>>;
 
-/// Reads an exact current 170-edge reduced maze witness captured from the normalized native union.
-///
+/// Reads one bounded exact native-area capture without changing float bits or contour ordering.
 /// # Panics
-/// Panics if the immutable focused fixture is truncated or has the wrong stream signature.
-fn maze() -> (FloatRect<f64>, Shapes) {
-    let mut reader = Cursor::new(include_bytes!("fixtures/ton018-maze-union.bin"));
+/// Panics if the trusted regression fixture is truncated or has the wrong stream signature.
+fn fixture(bytes: &[u8]) -> (FloatRect<f64>, Shapes) {
+    let mut reader = Cursor::new(bytes);
     let mut word = || {
         let mut b = [0; 8];
         reader.read_exact(&mut b).unwrap();
@@ -51,12 +50,20 @@ fn maze() -> (FloatRect<f64>, Shapes) {
         }
         shapes.push(shape);
     }
-    assert_eq!(shapes.len(), 5);
-    assert_eq!(shapes.iter().flatten().map(Vec::len).sum::<usize>(), 170);
     (
         FloatRect::new(bounds[0], bounds[1], bounds[2], bounds[3]).unwrap(),
         shapes,
     )
+}
+
+/// Retains the existing reduced maze witness and its exact original cardinality.
+/// # Panics
+/// Panics if the immutable current capture changes shape or point counts.
+fn maze() -> (FloatRect<f64>, Shapes) {
+    let (rect, shapes) = fixture(include_bytes!("fixtures/ton018-maze-union.bin"));
+    assert_eq!(shapes.len(), 5);
+    assert_eq!(shapes.iter().flatten().map(Vec::len).sum::<usize>(), 170);
+    (rect, shapes)
 }
 
 /// Builds the current fixed-scale native adapter with output cleanup disabled.
@@ -189,4 +196,82 @@ fn checked_candidate_loops_poll_mid_operation() {
     assert_eq!(polls.get(), 8);
     assert!(control.operations() >= 1024);
     assert_eq!(control.attempts(), 1);
+}
+
+/// Clips the six disjoint original zoom shapes and checks exact integer geometry against a rational oracle.
+/// The oracle independently clips the adapter-quantized contours with Python Fraction arithmetic;
+/// the doubled-area nearest integer is rounded by less than one, and accepted split debt bounds drift.
+/// # Panics
+/// Panics on changed geometry bounds, topology, area, fixed attempts/rounds, finite work or publication.
+#[test]
+fn zoom_split_order_clips_exact_original_shapes_with_certified_area() {
+    let (rect, shapes) = fixture(include_bytes!("fixtures/zoom-split-order.bin"));
+    assert_eq!(shapes.len(), 6);
+    assert_eq!(shapes.iter().flatten().map(Vec::len).sum::<usize>(), 639);
+    let adapter =
+        FloatPointAdapter::<[f64; 2], i64>::try_with_scale_conservative(rect, 1e12).unwrap();
+    let integer_shapes: Vec<Vec<Vec<_>>> = shapes
+        .iter()
+        .map(|shape| {
+            shape
+                .iter()
+                .map(|contour| contour.iter().map(|p| adapter.float_to_int(p)).collect())
+                .collect()
+        })
+        .collect();
+    let lo = adapter.float_to_int(&[0., 0.]);
+    let hi = adapter.float_to_int(&[3762., 3762.]);
+    let clip = vec![
+        lo,
+        i_overlay::i_float::int::point::IntPoint::new(hi.x, lo.y),
+        hi,
+        i_overlay::i_float::int::point::IntPoint::new(lo.x, hi.y),
+    ];
+    for solver in [Solver::AUTO, Solver::TREE, Solver::FRAG] {
+        let options = IntOverlayOptions {
+            min_output_area: 0,
+            ..Default::default()
+        };
+        let mut overlay = Overlay::from_subj_and_clip_custom(
+            &integer_shapes,
+            &clip,
+            options,
+            Solver {
+                precision: Precision::ABSOLUTE,
+                ..solver
+            },
+        );
+        let mut control = CheckedOverlayControl::new(8_000_000, &|| false);
+        let output = overlay
+            .overlay_checked(OverlayRule::Intersect, FillRule::NonZero, &mut control)
+            .unwrap();
+        assert_eq!(output.shapes.len(), 8);
+        let mut doubled_area = 0_i128;
+        for contour in output.shapes.iter().flatten() {
+            let origin = contour[0];
+            for (a, b) in contour
+                .iter()
+                .zip(contour.iter().cycle().skip(1))
+                .take(contour.len())
+            {
+                assert!(a.x >= lo.x && a.x <= hi.x && a.y >= lo.y && a.y <= hi.y);
+                let ax = i128::from(a.x) - i128::from(origin.x);
+                let ay = i128::from(a.y) - i128::from(origin.y);
+                let bx = i128::from(b.x) - i128::from(origin.x);
+                let by = i128::from(b.y) - i128::from(origin.y);
+                doubled_area += ax * by - ay * bx;
+            }
+        }
+        const ORACLE_NEAREST_DOUBLED_AREA: i128 = 4735561560681731909261060920;
+        let error = (doubled_area.abs() - ORACLE_NEAREST_DOUBLED_AREA).unsigned_abs();
+        assert!(
+            error <= output.doubled_area + 1,
+            "area drift {error} exceeds certificate {}",
+            output.doubled_area
+        );
+        assert!(output.doubled_area > 0 && output.doubled_area < 2_000_000_000_000_000_000);
+        assert_eq!(control.attempts(), 1);
+        assert!(control.split_rounds() <= 16);
+        assert!(control.operations() < 8_000_000);
+    }
 }

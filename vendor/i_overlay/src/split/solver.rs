@@ -11,7 +11,7 @@ use crate::segm::winding::WindingCount;
 use crate::split::cross_solver::{CrossSolver, CrossType, EndMask};
 use crate::split::line_mark::{LineMark, SortMarkByIndexAndPoint};
 use alloc::vec::Vec;
-use i_float::int::number::int::IntNumber;
+use i_float::int::number::{int::IntNumber, wide_int::WideIntNumber};
 
 pub(crate) struct SplitSolver<I: IntNumber> {
     pub(super) marks: Vec<LineMark<I>>,
@@ -322,12 +322,32 @@ where
     }
 
     #[inline]
-    /// Preserves upstream mark order while polling during x-group scans and reversals.
+    /// Orders snapped marks along directed Y on steep edges and retains shallow-edge ordering.
+    /// Integer differences widen before subtraction, and equal-Y marks retain ascending X ties.
+    /// The caller precharges sorting and polls afterward; coordinates, snapping, certificates and
+    /// shared work/cancellation authority stay unchanged. Existing grouped scans also poll control.
+    /// The caller supplies one nonempty same-edge mark group with at least two points.
+    /// # Panics
+    /// Panics for an empty group on the preserved shallow-edge path, violating that caller invariant.
     fn sort_sub_marks(
         marks: &mut [LineMark<I>],
         x_seg: XSegment<I>,
         control: &mut impl SplitControl<I>,
     ) {
+        let dx = (x_seg.b.x.to_wide() - x_seg.a.x.to_wide()).unsigned_abs();
+        let dy = (x_seg.b.y.to_wide() - x_seg.a.y.to_wide()).unsigned_abs();
+        if dy > dx {
+            let ascending = x_seg.a.y <= x_seg.b.y;
+            marks.sort_unstable_by(|first, second| {
+                let y_order = if ascending {
+                    first.point.y.cmp(&second.point.y)
+                } else {
+                    second.point.y.cmp(&first.point.y)
+                };
+                y_order.then(first.point.x.cmp(&second.point.x))
+            });
+            return;
+        }
         let mut j0 = 0;
         let mut j = 1;
 
@@ -452,6 +472,115 @@ mod non_degenerate_tests {
                     assert!(segments.iter().all(|s| s.x_segment.a < s.x_segment.b));
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod zoom_split_ordering_tests {
+    use super::*;
+    use i_float::int::point::IntPoint;
+
+    /// Checks vertical and steep signed traversal, deterministic ties and unchanged shallow paths.
+    /// Coordinates stay exact; the public apply path owns sort charging and cancellation checks.
+    /// # Panics
+    /// Panics if snapped marks backtrack on the dominant axis or shallow/equal-slope order changes.
+    #[test]
+    fn zoom_split_ordering_respects_directed_dominant_axis_and_ties() {
+        let cases = [
+            ((0, 0), (4, 40), [(3, 10), (2, 20), (3, 20), (1, 30)]),
+            ((0, 40), (4, 0), [(1, 30), (2, 20), (3, 20), (3, 10)]),
+            ((4, 0), (4, 40), [(3, 10), (2, 20), (3, 20), (1, 30)]),
+            ((4, 40), (4, 0), [(1, 30), (2, 20), (3, 20), (3, 10)]),
+            (
+                (-4, -40),
+                (0, 0),
+                [(-1, -30), (-2, -20), (-1, -20), (-3, -10)],
+            ),
+            ((0, 0), (40, 4), [(10, 3), (20, 3), (20, 2), (30, 1)]),
+            ((0, 0), (40, 40), [(10, 3), (20, 3), (20, 2), (30, 1)]),
+        ];
+        for (a, b, expected) in cases {
+            let point = |(x, y)| IntPoint::<i64>::new(x, y);
+            let mut marks = expected.map(|xy| LineMark {
+                index: 0,
+                point: point(xy),
+            });
+            marks.sort_unstable_by_key(|mark| (mark.point.x, mark.point.y));
+            SplitSolver::sort_sub_marks(
+                &mut marks,
+                XSegment {
+                    a: point(a),
+                    b: point(b),
+                },
+                &mut Unchecked,
+            );
+            assert_eq!(marks.map(|mark| mark.point), expected.map(point));
+        }
+    }
+
+    /// Instantiates the same steep signed ordering for all supported integer engine widths.
+    /// # Panics
+    /// Panics if widening or directed ties differ between i16, i32 and i64.
+    #[test]
+    fn zoom_split_ordering_covers_integer_engine_widths() {
+        macro_rules! check {
+            ($int:ty) => {{
+                let mut marks = [
+                    LineMark {
+                        index: 0,
+                        point: IntPoint::<$int>::new(1, 10),
+                    },
+                    LineMark {
+                        index: 0,
+                        point: IntPoint::<$int>::new(2, 20),
+                    },
+                    LineMark {
+                        index: 0,
+                        point: IntPoint::<$int>::new(3, 20),
+                    },
+                ];
+                SplitSolver::sort_sub_marks(
+                    &mut marks,
+                    XSegment {
+                        a: IntPoint::new(0, 40),
+                        b: IntPoint::new(4, 0),
+                    },
+                    &mut Unchecked,
+                );
+                assert_eq!(
+                    marks.map(|m| (m.point.x, m.point.y)),
+                    [(2, 20), (3, 20), (1, 10)]
+                );
+            }};
+        }
+        check!(i16);
+        check!(i32);
+        check!(i64);
+    }
+
+    /// Widens legal i64 endpoint differences before dominant-axis selection without wrapping.
+    /// # Panics
+    /// Panics if near-limit coordinates overflow or select the wrong traversal coordinate.
+    #[test]
+    fn zoom_split_ordering_widens_signed_integer_bounds() {
+        let bound = (1_i64 << 62) - 1;
+        for descending in [false, true] {
+            let a = IntPoint::new(-bound, if descending { bound } else { -bound });
+            let b = IntPoint::new(bound - 1, if descending { -bound } else { bound });
+            let mut marks = [
+                LineMark {
+                    index: 0,
+                    point: IntPoint::new(-1, if descending { -2 } else { 2 }),
+                },
+                LineMark {
+                    index: 0,
+                    point: IntPoint::new(1, if descending { 2 } else { -2 }),
+                },
+            ];
+            SplitSolver::sort_sub_marks(&mut marks, XSegment { a, b }, &mut Unchecked);
+            assert_eq!(marks[0].point.x, 1);
+            assert_eq!(marks[1].point.x, -1);
         }
     }
 }

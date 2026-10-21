@@ -740,3 +740,32 @@ fn equivalent_geometry_retains_explicit_orientation_identity() {
         normal.realization_fingerprint
     );
 }
+
+/// Separates complete semantic usage from deferred guard shapes and retains exact sampled paint slots.
+/// # Panics
+/// Panics if material omission changes Used/Unused sets, zero semantics, or source-free restoration.
+#[test]
+fn construction_authored_marks_retain_usage_paint_and_frozen_fallback(){
+    use toniator_geometry::{ConstructionContext,ConstructionMode,Bounds,Point2};
+    use toniator_domain::SiteUseFilter;
+    let(document,definition)=multi_site_shape_document();let plan=resolve_document_pattern_pipeline(&document,&definition).unwrap();
+    let mut req=family_request();req.guard_steps=2;req.support_radius=100.;req.max_family_candidates=100_000;
+    let family=evaluate_document_typed_family_cancellable(&document,&definition,&req,&||false).unwrap();
+    let source=decode_source(&one_pixel_png([100,60,200,255]),SourceFormatHint::Png).unwrap();
+    let canvas=Bounds::new(Point2::new(0.,0.),Point2::new(100.,100.)).unwrap();
+    let run=|mode,source:&toniator_sampling::SourceField,sampled_paint| {let context=ConstructionContext::new(mode,Some(canvas),true);let output=context.run(||realize_typed_canonical_marks(&document,&family,&plan,source,&req.canvas,CanonicalMarkRequest{mapping:SourceMapping::canonical(SourceMappingComponent::Alpha),sampled_paint,response:MarkResponse{minimum_fill:0.4,maximum_fill:0.4,rotation_offset_degrees:17.},max_transformed_curve_segment_instances:usize::MAX})).unwrap().output;(output,context.measurements.unwrap().snapshot())};
+    let(full,fc)=run(ConstructionMode::Complete,&source,false);let(pruned,pc)=run(ConstructionMode::Canvas,&source,false);
+    assert_eq!(full.usage,pruned.usage);assert_eq!(full.paints,pruned.paints);assert_eq!(full.marks.len(),pruned.marks.len());assert!(pc.mark_constructors<fc.mark_constructors);
+    let deferred=pruned.marks.iter().filter(|m|matches!(m,CanonicalMark::DeferredPath(_))).count();assert!(deferred>0);
+    for(a,b)in full.marks.iter().zip(&pruned.marks){match b{CanonicalMark::DeferredPath(v)=>{assert!(v.is_valid());assert_eq!(a,&CanonicalMark::ClosedPath(v.materialize(&||false).unwrap()));},_=>assert_eq!(a,b)}}
+    for filter in [SiteUseFilter::SitesUsedBy{output_layer_id:PatternOutputLayerId(8)},SiteUseFilter::SitesUnusedBy{output_layer_id:PatternOutputLayerId(8)}]{let a=family.filtered_for_output(filter,Some(&full.usage)).unwrap();let b=family.filtered_for_output(filter,Some(&pruned.usage)).unwrap();assert_eq!(a.site_set(),b.site_set());}
+    let used=family.filtered_for_output(SiteUseFilter::SitesUsedBy{output_layer_id:PatternOutputLayerId(8)},Some(&pruned.usage)).unwrap();
+    let downstream=realize_typed_canonical_marks_with_response_cancellable(&document,&used,&plan,&source,&req.canvas,CanonicalMarkRequest{mapping:SourceMapping::canonical(SourceMappingComponent::Alpha),sampled_paint:false,response:MarkResponse{minimum_fill:0.4,maximum_fill:0.4,rotation_offset_degrees:17.},max_transformed_curve_segment_instances:usize::MAX},GeometryResponseInput::UniformRadiusProbe(100.),&||false).unwrap().output;
+    assert!(pruned.marks.iter().any(|producer|match producer {CanonicalMark::DeferredPath(producer)=>downstream.marks.iter().any(|mark|matches!(mark,CanonicalMark::ClosedPath(mark) if mark.source_site_id==producer.source_site_id&&mark.bounds.min.x<100.&&mark.bounds.max.x>0.&&mark.bounds.min.y<100.&&mark.bounds.max.y>0.)),_=>false}));
+    let varying=decode_source(&std::fs::read("../../assets/raster-sample.png").unwrap(),SourceFormatHint::Png).unwrap();
+    let(a,_)=run(ConstructionMode::Complete,&varying,true);let(b,_)=run(ConstructionMode::Canvas,&varying,true);
+    assert_eq!(a.usage,b.usage);assert_eq!(a.paints,b.paints);assert!(b.marks.iter().any(|m|matches!(m,CanonicalMark::DeferredPath(_))));
+    assert!(a.paints.as_ref().unwrap().windows(2).any(|pair|pair[0]!=pair[1]));
+    for (a,b) in a.marks.iter().zip(&b.marks) {if let CanonicalMark::DeferredPath(mark)=b {assert_eq!(a,&CanonicalMark::ClosedPath(mark.materialize(&||false).unwrap()));}}
+    let zero=decode_source(&one_pixel_png([100,60,200,0]),SourceFormatHint::Png).unwrap();let(a,_)=run(ConstructionMode::Complete,&zero,true);let(b,_)=run(ConstructionMode::Canvas,&zero,true);assert_eq!(a.usage,b.usage);assert_eq!(a.usage.members().len(),family.site_set().len());assert_eq!(a.paints,b.paints);
+}

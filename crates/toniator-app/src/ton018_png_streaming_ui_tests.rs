@@ -159,7 +159,7 @@ fn captured_both_sources_stream_exact_pixels_and_preserve_cancelled_destination(
     }
 }
 
-/// Proves a published PNG warning cannot be hidden by cancellation or prepared-output wording.
+/// Proves format-aware published-output warnings precede cancellation and prepared-output wording.
 /// # Panics
 /// Panics if late cancellation or prepared mode takes precedence over already-published output.
 #[test]
@@ -171,18 +171,22 @@ fn published_warning_precedes_late_cancel_and_prepared_failure() {
     for cancelled in [false, true] {
         for prepared in [false, true] {
             assert_eq!(
-                still_export_failure_status(&published, cancelled, prepared),
+                still_export_failure_status(&published, cancelled, prepared, ExportFormat::Png),
                 Some("PNG exported; final folder synchronization failed. See error log.")
             );
         }
     }
+    assert_eq!(
+        still_export_failure_status(&published, true, false, ExportFormat::Svg),
+        Some("SVG exported; final folder synchronization failed. See error log.")
+    );
     let unpublished: StillExportError = "prepublication failure".into();
     assert_eq!(
-        still_export_failure_status(&unpublished, true, true),
+        still_export_failure_status(&unpublished, true, true, ExportFormat::Png),
         Some("Export cancelled.")
     );
     assert_eq!(
-        still_export_failure_status(&unpublished, false, true),
+        still_export_failure_status(&unpublished, false, true, ExportFormat::Png),
         Some("Print PNG export failed; see error log.")
     );
 }

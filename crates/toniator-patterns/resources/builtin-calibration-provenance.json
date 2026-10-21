@@ -1,0 +1,918 @@
+{
+  "generation": "greenfield-rewrite",
+  "git_head": "12e1d54ff707e65022daaf2d349b08b3feb270b3",
+  "authority": "reference_calibration::calibrate_saved_binding; CalibrationBinding exact equality; SavedCalibration typed constructors",
+  "binding_guard": "Complete normalized CalibrationBinding derived Debug representation compared byte for byte; a Debug format change safely refuses reuse. Regenerate with the offline example, review new observations, then replace resources. The representation is not parsed or hashed into runtime identity.",
+  "profile_guard": "Stored literal full producer profile; no producer suffix is appended to numeric observations. Mean restoration explicitly compares current eligible mean profile before construction.",
+  "records": [
+    {
+      "artifact_sha256": "7e19d43ed11aba480e0ca5d4692ff303294e36bb9a680d915f4c67ade8dc2b20",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: RandomSites { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, character: Clustered { cluster_density: 1.0, cluster_spread: 16.0, cluster_strength: 0.5 }, nominal_spacing: Some(10.24), seed: 43, density_modulation: Uniform, exclusion: None, maximum_attempts: 16000000, maximum_neighbor_checks: 16000000, refinement: RandomSiteRefinement { enabled: false, density_weighted: false, iterations: 4 } }, outputs: [ConnectionPaths { selection: ConnectionSelectionIntent { maximum_final_degree: None, cycles: Allow, minimum_component_points: 1 }, program: RandomLinks { adjacency: ConnectionAdjacencyIntent { maximum_degree: 3, maximum_distance: 48.0 }, minimum_degree: 0, seed: 43 }, style: PathStrokeStyle { join: Round, cap: Round } }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_artifact_equal": true,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-random-links-raster/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-64-mean-seed-neutral-v5+connection-selection-v2",
+        "sha256": "2dbf035e55397695a3f50d9171c2fa1c0ab17786f03068e8bc66e41be0d997f3"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+connection-selection-v2",
+      "id": "clustered-dispersion-random-links",
+      "knots": 65,
+      "name": "Clustered Connections",
+      "numeric_rust_sha256": "66344e49ae2012392baba24d001591b9906236a9bb658f4f744ccadec53f3490",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-64-mean-seed-neutral-v5+connection-selection-v2",
+      "seconds": 85.545001888
+    },
+    {
+      "artifact_sha256": "4cd958ea32a8c12ea4da25958dfa25293ca10c59fde741170d3c2a40c0478513",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: AuthoredResources { resources: [AuthoredStructureDraft { kind: OpenPath, segments: [Line { start: AuthoredPoint2 { x: 0.0, y: 0.0 }, end: AuthoredPoint2 { x: 0.32, y: 0.27 } }, Line { start: AuthoredPoint2 { x: 0.32, y: 0.27 }, end: AuthoredPoint2 { x: 0.7, y: -0.18 } }, Line { start: AuthoredPoint2 { x: 0.7, y: -0.18 }, end: AuthoredPoint2 { x: 1.0, y: 0.0 } }] }], definition: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.125, spacing_multiplier: 1.0 }], product: AlongGuides { dimension_indices: [0], interval_multiplier: 1.0, phase: 0.25 }, orientation: Fixed }, outputs: [CurveMotifPaths { tone_sample_spacing: ToneSampleSpacing { multiplier: 1.0 }, resource_index: 0, style: PathStrokeStyle { join: Round, cap: Round }, mirror_alternate_rows: true, alternate_row_phase: Some(0.25) }] } }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_artifact_equal": true,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-motif-vector/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1",
+        "sha256": "41d9897b153459182098fec22d0ca4f19ac420e9890e24dab5635d2461fdd109"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1",
+      "id": "curve-motif-rows",
+      "knots": 64,
+      "name": "Curve Motif",
+      "numeric_rust_sha256": "836f0dd8bdd46f7bc8afb82bf3a7b344830bd0db593c56726cef191ac3d35288",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1",
+      "seconds": 14.032867455
+    },
+    {
+      "artifact_sha256": "8bf675b78caa5d6acb864d92803a2c44698312b3042af750cb32579846052737",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: RandomSites { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, character: Even { minimum_center_distance: 8.0 }, nominal_spacing: None, seed: 43, density_modulation: Uniform, exclusion: None, maximum_attempts: 16000000, maximum_neighbor_checks: 16000000, refinement: RandomSiteRefinement { enabled: false, density_weighted: false, iterations: 4 } }, outputs: [Marks] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Marks(MarkGeometryResponse { minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": true,
+      "exact_existing_artifact_equal": null,
+      "exact_existing_donor": null,
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4",
+      "id": "even-random-circles",
+      "knots": 116,
+      "name": "Poisson Disk Marks",
+      "numeric_rust_sha256": "417687424f6e219e60bd3f11542925be347b6210c0cfe688d855ac69c37a8b55",
+      "origin": {
+        "kind": "unchanged-current-bundled"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-64-mean-seed-neutral-v5",
+      "seconds": 0.003326415
+    },
+    {
+      "artifact_sha256": "4e67f9095880e08b6fd9caa8dcc911b602f32102a49a53a4a1b8c4b93c1aa62e",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 90.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [VoronoiRegions] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Regions(RegionGeometryResponse { algorithm: Scale, sampling: AreaAverage, minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_artifact_equal": true,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-voronoi-vector/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+voronoi-cell-reach-v1",
+        "sha256": "0f5d052b6ee930aef283069b25d3494d9089e1ff02d8e75b5d018da622905b08"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+voronoi-cell-reach-v1",
+      "id": "grid-voronoi-scale",
+      "knots": 77,
+      "name": "Grid Voronoi",
+      "numeric_rust_sha256": "c417b939cca0f371b3039d3280841c678d1e18c60c8d77876b7d11b0f3480d03",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+voronoi-cell-reach-v1",
+      "seconds": 0.810597278
+    },
+    {
+      "artifact_sha256": "3b51085f70398c37ef676821564d62b2af6b53d68c523565f0951bb969e6a9c6",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }], product: AlongGuides { dimension_indices: [0], interval_multiplier: 1.0, phase: 0.0 }, orientation: Fixed }, outputs: [StructuralPaths { tone_sample_spacing: ToneSampleSpacing { multiplier: 1.0 }, style: PathStrokeStyle { join: Round, cap: Round } }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_artifact_equal": true,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-straight-raster/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1",
+        "sha256": "939f3ecee321cb475335ded4c6b9794b9377bf576f7396a069bc3d341e3c4fa2"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1",
+      "id": "one-guide-lines",
+      "knots": 12,
+      "name": "One Guide Lines",
+      "numeric_rust_sha256": "4f72e4b5d6a20af468bd7a376f67fd506a278cf454664825fc9849614704921b",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1",
+      "seconds": 0.35179656
+    },
+    {
+      "artifact_sha256": "6a4a237657e94f31023fdf317152f3a2f34b60eb823584c9f90ff2dd90563858",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: ParametricCurve { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, curve: Spiral(SpiralCurve { shape: Round, turns: 5.0, radial_spacing: 16.0, phase_degrees: 0.0, winding: Clockwise }), spiral_coverage: CoverCanvas, repetition: Single, sites: None }, outputs: [StructuralPaths { tone_sample_spacing: ToneSampleSpacing { multiplier: 1.0 }, style: PathStrokeStyle { join: Round, cap: Round } }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_artifact_equal": true,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/gtk-gallery-saved.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1+cover-envelope-v1",
+        "sha256": "eff409bd7e65b044c5877d3c63cc3ba61e41a64de5edcc50f681ae3aa7457739"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1+cover-envelope-v1",
+      "id": "round-spiral-line",
+      "knots": 37,
+      "name": "Round Spiral Line",
+      "numeric_rust_sha256": "8f7f3614b9a0ef9608498080b6fdf92317aef2370a8879eaf72a2c79c6410a30",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1+cover-envelope-v1",
+      "seconds": 5.9802456920000004
+    },
+    {
+      "artifact_sha256": "bac6942a5cc806a81db3a9600a734ee06f8d0ae486116133994c44c941525579",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: ParametricCurve { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, curve: Spiral(SpiralCurve { shape: Round, turns: 5.0, radial_spacing: 16.0, phase_degrees: 0.0, winding: Clockwise }), spiral_coverage: CoverCanvas, repetition: Single, sites: Some(ParametricCurveSiteDraft { interval: 16.0, phase: 0.0 }) }, outputs: [Marks] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Marks(MarkGeometryResponse { minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_artifact_equal": true,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-parametric-marks-vector/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+cover-envelope-v1",
+        "sha256": "3c7ca29bb7c116bb80768ebaa8447253f301877c5d98eac76979b609392a5428"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+cover-envelope-v1",
+      "id": "round-spiral-marks",
+      "knots": 117,
+      "name": "Round Spiral Marks",
+      "numeric_rust_sha256": "f8f95efe0d8f20f7e9cfc57c499c3e07fc29eb4099c8aa9c0741574b42dedb49",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+cover-envelope-v1",
+      "seconds": 10.850503397
+    },
+    {
+      "artifact_sha256": "f672eb83939ebfa276211e7da27ae6fb1859252c87ad4d8ab9fb961218e217c1",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: RandomSites { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, character: RawUniform, nominal_spacing: Some(10.24), seed: 43, density_modulation: ArtworkWeighted, exclusion: None, maximum_attempts: 16000000, maximum_neighbor_checks: 16000000, refinement: RandomSiteRefinement { enabled: false, density_weighted: false, iterations: 4 } }, outputs: [VoronoiRegions] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Regions(RegionGeometryResponse { algorithm: Scale, sampling: AreaAverage, minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": true,
+      "exact_existing_artifact_equal": false,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-weighted-raster/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5",
+        "sha256": "615f5dc828214f798f183ff3b32e1db482a426b2881cfbd78ea2c80c5a5f2b50"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4",
+      "id": "source-weighted-dispersion-voronoi",
+      "knots": 77,
+      "name": "Source-Weighted Voronoi",
+      "numeric_rust_sha256": "547612f11ae95e4b2d75e194d74a4cfc98892daf5866df355be6d58e8f3dc378",
+      "origin": {
+        "kind": "unchanged-current-bundled"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5",
+      "seconds": 0.003052362
+    },
+    {
+      "artifact_sha256": "f1d063a89cf0a500b43fb1141902ab32dcbbcecaf96cf1952f6d97301d8011fb",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: ParametricCurve { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, curve: Spiral(SpiralCurve { shape: Square, turns: 5.0, radial_spacing: 16.0, phase_degrees: 0.0, winding: Clockwise }), spiral_coverage: CoverCanvas, repetition: Single, sites: Some(ParametricCurveSiteDraft { interval: 16.0, phase: 0.0 }) }, outputs: [Marks] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Marks(MarkGeometryResponse { minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_artifact_equal": true,
+      "exact_existing_donor": {
+        "path": "target/validation/wizard-calibration-companions-20261019/generated-current/square-spiral-marks.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings64-v4+cover-envelope-v1",
+        "sha256": "f1d063a89cf0a500b43fb1141902ab32dcbbcecaf96cf1952f6d97301d8011fb"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+cover-envelope-v1",
+      "id": "square-spiral-marks",
+      "knots": 122,
+      "name": "Square Spiral Marks",
+      "numeric_rust_sha256": "08a3f2ac6ee10fd36dee3e5569609cdb1b76565f154d174c9f792212c5ee9279",
+      "origin": {
+        "kind": "exact-current-project",
+        "path": "target/validation/wizard-calibration-companions-20261019/generated-current/square-spiral-marks.toniator",
+        "sha256": "f1d063a89cf0a500b43fb1141902ab32dcbbcecaf96cf1952f6d97301d8011fb"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings64-v4+cover-envelope-v1",
+      "seconds": 0.003279404
+    },
+    {
+      "artifact_sha256": "6478a58f17b93a42f166e4ff56a6a2d542f2a42f5f15cdedf7bbc4e355ca8550",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 90.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1], merge_epsilon: 1e-9 }, orientation: GuideTangent { dimension_index: 0 } }, outputs: [Marks] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Marks(MarkGeometryResponse { minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": true,
+      "exact_existing_artifact_equal": false,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-grid-raster/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-v4",
+        "sha256": "2e0dc92c9eee859c0fc3e60fd52dda5ce74960628e9be876d6fcb7d7e705169e"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4",
+      "id": "straight-grid-circles",
+      "knots": 124,
+      "name": "Straight Grid Circles",
+      "numeric_rust_sha256": "3c548b6d36a36b27366ba76f8065e083296666fa184d0e69e43ac4f3e18c5194",
+      "origin": {
+        "kind": "unchanged-current-bundled"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-v4",
+      "seconds": 0.003382156
+    },
+    {
+      "artifact_sha256": "1f47ce9d90bc8c24648feee9cedb064ca5db9adcad49afe82ca54b636008bc2b",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 60.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 120.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1, 2], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [GuideFaceRegions { dimension_indices: [0, 1, 2] }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Regions(RegionGeometryResponse { algorithm: Scale, sampling: AreaAverage, minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_artifact_equal": true,
+      "exact_existing_donor": {
+        "path": "target/validation/wizard-calibration-companions-20261019/generated-current/three-guide-cells-scale.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-guide-faces-v5+cell-reach-v1",
+        "sha256": "1f47ce9d90bc8c24648feee9cedb064ca5db9adcad49afe82ca54b636008bc2b"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+cell-reach-v1",
+      "id": "three-guide-cells-scale",
+      "knots": 77,
+      "name": "Three-Guide Cells",
+      "numeric_rust_sha256": "d6d7f6b2cbc118b0985df67738b6d0a3997988e29d0851ea2372f3d1a04fce99",
+      "origin": {
+        "kind": "exact-current-project",
+        "path": "target/validation/wizard-calibration-companions-20261019/generated-current/three-guide-cells-scale.toniator",
+        "sha256": "1f47ce9d90bc8c24648feee9cedb064ca5db9adcad49afe82ca54b636008bc2b"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-guide-faces-v5+cell-reach-v1",
+      "seconds": 0.003585337
+    },
+    {
+      "artifact_sha256": "0c5d60aeae33b8ad6b96fd4ab15231998fc03ce1a949b64c8e666a48b32e7b32",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 60.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 120.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1, 2], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [MazeWalls { program: MazeProgram { algorithm: RecursiveBacktracker, seed: 43 }, style: PathStrokeStyle { join: Round, cap: Round } }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_artifact_equal": true,
+      "exact_existing_donor": {
+        "path": "target/validation/wizard-calibration-companions-20261019/generated-current/three-guide-maze.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5+maze-guard-topology-v2",
+        "sha256": "0c5d60aeae33b8ad6b96fd4ab15231998fc03ce1a949b64c8e666a48b32e7b32"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+maze-guard-topology-v2",
+      "id": "three-guide-maze",
+      "knots": 59,
+      "name": "Three-Guide Maze",
+      "numeric_rust_sha256": "91d8652bf4e205f31ea9338f116726061884710fc9aeae9a1df300aabac8a563",
+      "origin": {
+        "kind": "exact-current-project",
+        "path": "target/validation/wizard-calibration-companions-20261019/generated-current/three-guide-maze.toniator",
+        "sha256": "0c5d60aeae33b8ad6b96fd4ab15231998fc03ce1a949b64c8e666a48b32e7b32"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5+maze-guard-topology-v2",
+      "seconds": 0.003099383
+    },
+    {
+      "artifact_sha256": "483a9c7c21aebea1da44df8e2e3e81b1762d4ec731ec1b2cedc04b7271b12a08",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: AuthoredResources { resources: [AuthoredStructureDraft { kind: ClosedShape, segments: [Line { start: AuthoredPoint2 { x: 0.0, y: -1.0 }, end: AuthoredPoint2 { x: 1.0, y: 0.0 } }, Line { start: AuthoredPoint2 { x: 1.0, y: 0.0 }, end: AuthoredPoint2 { x: 0.0, y: 1.0 } }, Line { start: AuthoredPoint2 { x: 0.0, y: 1.0 }, end: AuthoredPoint2 { x: -1.0, y: 0.0 } }, Line { start: AuthoredPoint2 { x: -1.0, y: 0.0 }, end: AuthoredPoint2 { x: 0.0, y: -1.0 } }] }], definition: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 60.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 120.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1, 2], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [AuthoredClosedShapeMarks { resource_index: 0, orientation: Fixed }] } }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Marks(MarkGeometryResponse { minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": true,
+      "exact_existing_artifact_equal": null,
+      "exact_existing_donor": null,
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4",
+      "id": "triagrid-custom-shape-marks",
+      "knots": 83,
+      "name": "Triagrid Diamond Marks",
+      "numeric_rust_sha256": "bbb761ddc2b5740cbe07d3906de7a0cd045d7ec959d6bc4b7242bfb9bfaacc87",
+      "origin": {
+        "kind": "unchanged-current-bundled"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-v4",
+      "seconds": 0.003106563
+    },
+    {
+      "artifact_sha256": "fa2618a58def7d2302a2e3490d9a89bbe8636544abe274f94966172a7cf2864f",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 60.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 120.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1, 2], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [ConnectionPaths { selection: ConnectionSelectionIntent { maximum_final_degree: None, cycles: Allow, minimum_component_points: 1 }, program: GridSpanningTree { adjacency: ConnectionAdjacencyIntent { maximum_degree: 6, maximum_distance: 48.0 }, algorithm: RandomizedPrim, seed: 43 }, style: PathStrokeStyle { join: Round, cap: Round } }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_artifact_equal": true,
+      "exact_existing_donor": {
+        "path": "target/validation/wizard-calibration-companions-20261019/generated-current/triagrid-spanning-tree.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5+connection-selection-v2",
+        "sha256": "fa2618a58def7d2302a2e3490d9a89bbe8636544abe274f94966172a7cf2864f"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+connection-selection-v2",
+      "id": "triagrid-spanning-tree",
+      "knots": 64,
+      "name": "Triagrid Spanning Tree",
+      "numeric_rust_sha256": "ad991af181639c74a28f2b5e99014a1411784bed9dbe18d061a179d6f0661485",
+      "origin": {
+        "kind": "exact-current-project",
+        "path": "target/validation/wizard-calibration-companions-20261019/generated-current/triagrid-spanning-tree.toniator",
+        "sha256": "fa2618a58def7d2302a2e3490d9a89bbe8636544abe274f94966172a7cf2864f"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5+connection-selection-v2",
+      "seconds": 0.003178563
+    },
+    {
+      "artifact_sha256": "5538b9b22947cb6cab30dc270bf96a8921486d382e14027459143dbc56404ca1",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 90.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [GuideFaceRegions { dimension_indices: [0, 1] }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Regions(RegionGeometryResponse { algorithm: UniformOffset, sampling: AreaAverage, minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_artifact_equal": true,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-faces-vector/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-guide-faces-v5+convex-inset-v3+cell-reach-v1",
+        "sha256": "e406de78c5b91fb967d1fe769d19aeed3902331575b211318908e33765613858"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+convex-inset-v3+cell-reach-v1",
+      "id": "two-guide-cells-uniform-offset",
+      "knots": 77,
+      "name": "Two-Guide Cells",
+      "numeric_rust_sha256": "5746471a56ecdbd9ec152cdb00f2e0f0c7140512757630d522d19526a1ea1541",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-guide-faces-v5+convex-inset-v3+cell-reach-v1",
+      "seconds": 2.394610731
+    },
+    {
+      "artifact_sha256": "8d24cee03aa78bf5186d384ffe63ea3c6308052140db3f0cfa94c5692aaef305",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 90.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [MazeWalls { program: MazeProgram { algorithm: RecursiveBacktracker, seed: 43 }, style: PathStrokeStyle { join: Round, cap: Round } }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_artifact_equal": true,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-maze-raster/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5+maze-guard-topology-v2",
+        "sha256": "2f8d9873d29dba583ecc3fe72219672c087029a7f3ba8673377b0e290cbac890"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+maze-guard-topology-v2",
+      "id": "two-guide-maze",
+      "knots": 52,
+      "name": "Two-Guide Maze",
+      "numeric_rust_sha256": "05176a46e513b30b8a306160eb2c642d77d9819022a732e78d5bb89abfc70f37",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5+maze-guard-topology-v2",
+      "seconds": 10.195356585
+    }
+  ],
+  "measurement_probe_sha256": "02586d4af0a4a951a1b2ef2f57e99d3d19b4d4a4f60470b7fef929034a0680b9",
+  "producer_admission_source_sha256": {
+    "crates/toniator-domain/Cargo.toml": "c6ca33f290809fb070f2adb29edecc726932d24d7d1f6f1a5f46604078c57154",
+    "crates/toniator-domain/src/temporal.rs": "c8678a78fa7cca8c2effbef6644836cf86a590814846c35bb46def056099a74e",
+    "crates/toniator-domain/src/color_authoring.rs": "47f538a7eae92bab327c9f1e3dcc8dadc4067f0ac7ed8647702d0a1f59de4dfa",
+    "crates/toniator-domain/src/channel_defaults.rs": "532a9d25b6fec32d4d3945b36c25fd227ab701066bb9913b70e12e9e6a2baf0a",
+    "crates/toniator-domain/src/pattern_batches.rs": "407b00bdd4d4e210f31fb15edf29d44ba88cacef70f9c4dc46079234203b3c72",
+    "crates/toniator-domain/src/lib.rs": "8993a396187230520576aa7da870a6aa60bf9349a83ad534360df439fd326b41",
+    "crates/toniator-domain/src/print_intent.rs": "c927f93804da0096250b1093ed61779cf14f4b139b889120ae89b4c91feabf8a",
+    "crates/toniator-domain/src/calibration.rs": "7faa944a8662347f5e3c9d0b01acd52fda1b451c6aadac2569b1068824a2609d",
+    "crates/toniator-domain/src/default_calibration.rs": "a3d311148a75ded177c32d0c1630c7820549ee4357842feaa4f9f845fcf90123",
+    "crates/toniator-domain/src/artistic_geometry.rs": "824ebc3bbc2da7a6066c32bf3816a93c972de333c4f3fd20a240abf5974d3aea",
+    "crates/toniator-geometry/Cargo.toml": "9b43bea6098935e4ff5f8879b3c46963ff6960a78caed68b98671d0d16f0038a",
+    "crates/toniator-geometry/src/lib.rs": "913b5f82bcc53a2eb5e612aaecee5fadcde83b4f36ea2527b6564819cb78a305",
+    "crates/toniator-geometry/src/outlines.rs": "3cbd95864904adbee3b9cfde003079d8eb5eab75943d13b21e41c85c90dcd6fb",
+    "crates/toniator-geometry/src/path_offsets.rs": "ae8200036f04a9f13094a24b9b60b0d125146edb3c5f8536360a9c3af6e29c9d",
+    "crates/toniator-geometry/src/connection_paths.rs": "9009b893d6ddee163c41d47ce12690fd86d742ab767e826918f0aa97ece29b6e",
+    "crates/toniator-geometry/src/maze_walls.rs": "9f0a3ac051987ad13a29a7c68e835a4d80911634562028880a0c3226961f0354",
+    "crates/toniator-geometry/src/canonical_regions.rs": "b6d30039bc6a5aee961fc0a9ee7096672430ceb009be0565f579e5c67d3052fb",
+    "crates/toniator-geometry/src/voronoi_regions.rs": "08acbc5003f30049415aed6748055baab56012bdaeaa12cf4840a5a0107767b3",
+    "crates/toniator-geometry/src/planar_arrangement.rs": "b5204f8533b1d96ca77e0fe9cd9da8a7373605b9c3e5fc16c94a2a13cbeb7476",
+    "crates/toniator-geometry/src/guide_faces.rs": "aacf1a6b9d21fa7d2c240b0576e166914df012a8771b86dff1ea424b4a62fcb6",
+    "crates/toniator-geometry/src/region_treatment.rs": "20b9838feca97f4ad5b98b9db7ec84270d3f8eb89a612f86f99654c2c57f0934",
+    "crates/toniator-geometry/src/site_adjacency.rs": "6d72c99ccf5c8ae7a7eb49a59299318bce4365306aec7537c2f90745dda18e19",
+    "crates/toniator-geometry/src/connection_selection.rs": "cda72a7aa996be117e8f8296b00ddce8a77bdf4fc47fdb8f6b37656b358de4f5",
+    "crates/toniator-geometry/src/construction.rs": "9fe3be9e467a765c65c7eb53166ec146399260155cc03475c3fa2b0325c7eafb",
+    "crates/toniator-geometry/src/prepared_marks.rs": "0fb5902028005f5fbe8a24f3e95457b8813f16601d7f5f56b7bf4e8a7e760fe4",
+    "crates/toniator-geometry/src/curves/mod.rs": "148441eac63b73ba72a7fb06bfa3e0be7c24c5408897a3db6c21413d194e00fe",
+    "crates/toniator-geometry/src/curves/segment.rs": "08b33cb7af2090db5be8215da8a42a2e13727acd351632b9b60de1eee9aeacd1",
+    "crates/toniator-geometry/src/curves/path.rs": "e2235a7a273d3df2a40899d04ca62c1d0d175a1e07320615898d2ef6408173a9",
+    "crates/toniator-geometry/src/curves/arc_length.rs": "10b448af9651bebb90da65043259a98f78c19d8c102a8b62aab6f2f366226ddc",
+    "crates/toniator-geometry/src/curves/intersections.rs": "3ef736c74044a22903548dd30955fb492aa1d81a9bf6eb199bca6bd127095f23",
+    "crates/toniator-geometry/src/curves/clipping.rs": "b8f6318bc790819c4fc8218e74c201c92b73656398a86b275697901c6f3ea760",
+    "crates/toniator-geometry/src/curves/authored.rs": "09ce669c9ed13a0ac23fdd9a7560b4d5187715410cae57fe9c79a64b81319449",
+    "crates/toniator-geometry/src/curves/parametric.rs": "a9ae468e6186ad7f43dbccf218762c195347207538882ea4c3457743732410cb",
+    "crates/toniator-geometry/src/guides/mod.rs": "9993b6d290729fa900883354862595e9cd16551b1d2d89b89d746a2d21c2bcde",
+    "crates/toniator-geometry/src/guides/prototype.rs": "70a6d31430a55806ab109afd56d9ec0b9ceab9de0e588cefdf675cfd5d43af4e",
+    "crates/toniator-geometry/src/guides/repetition.rs": "d52fae60f9dccd0b909429fed91b1355a75f07d101ecb1104fed66e9df0b120f",
+    "crates/toniator-geometry/src/guides/coverage.rs": "79d462e7179811be0650c2632109b7ffe5eb003eb67eed56a09bd72dd43ba0e3",
+    "crates/toniator-sampling/Cargo.toml": "6623c55565b460e983db9c8bd09fe9a76c68a9fbc87709fdfa66b5f010832cd6",
+    "crates/toniator-sampling/src/lib.rs": "cb92ef3a52f61acf0f76a08f257cf6b90bf9d8d29f9dd567241a20342b79a072",
+    "crates/toniator-sampling/src/media/mod.rs": "bfc710dc1f4bf2c294d4136243352c0c2b5022a37f9b005623d336f9112f1dcb",
+    "crates/toniator-sampling/src/media/still.rs": "872f069ed3fd478b83d3bf6dadf0e4e723cef7bf75fb07c93589e3b8c2b88ca1",
+    "crates/toniator-sampling/src/media/image_sequence.rs": "32816c324a04389e050f5d9b786c05ee2b76cd5c404954e988089528cb250eb2",
+    "crates/toniator-sampling/src/media/video.rs": "50a30facb3e620a171585df98046e727226a3df4b96e54dc7e829fa5fac3d502",
+    "crates/toniator-sampling/src/media/animated_image.rs": "8442ba29625c218edfd9ba9618949fab3d93485ca975923571be6c9d1553b3a6",
+    "crates/toniator-sampling/src/media/frame_source.rs": "10b8f7737b4ebb8e82e1e685cec9cfcc30ba998e788a74832dd17d662e7691aa",
+    "crates/toniator-sampling/src/media/jpegxl.rs": "2f706b27bc1255a25883fdb988f055416bbe1919e3aa5d37c97e33c238396257",
+    "crates/toniator-patterns/Cargo.toml": "da89e86d42620ea0c7bf9145438e9e342d068479505c9828089ea4aa7528588a",
+    "crates/toniator-patterns/src/transform_regressions.rs": "1e29d6dddb88a42b97b0fae006e4e73040c695be7822fb24dbf30b5efec31c23",
+    "crates/toniator-patterns/src/lib.rs": "f14d9c74ad2ee978f6956fa0ba1b493f148badbc6e6916f841fb93d38585ed9b",
+    "crates/toniator-patterns/src/candidate_order_tests.rs": "8a81199580b4b50017be4975b105dcbcc3ab5c9e7aaa59419adfeea8886831b2",
+    "crates/toniator-patterns/src/coverage_response.rs": "5baa165f2f7bbd8cfed6ffc6b09a134fd0a51aac76fd8ae3bbabc62d2ad9a6dd",
+    "crates/toniator-patterns/src/builtin_calibrations.rs": "7947cb12babf39d9ca7db3d93988679fda8765cd368660ad179232d25a1ec6fa",
+    "crates/toniator-patterns/src/random_spatial_index_evidence.rs": "0209e587505e3c5063d8be4743463e3f23a47b9554a54e32641c0580162c219a",
+    "crates/toniator-patterns/src/curve_tone.rs": "d083722fdd8c9a9d5fc7bfd72392cf41cd9b908dd75f49a7f349518395bc92ac",
+    "crates/toniator-render/Cargo.toml": "25d942c5665573c396607681350108bb372b77dc93a0517af4c348c326962eb6",
+    "crates/toniator-render/src/lib.rs": "5e8f178e8f45080978c555298ba1f80e9ee335d7988ae9d23f5ea098d7c44e2a",
+    "crates/toniator-render/src/vector_occupancy.rs": "d1eea348d295f18a9faa1cf172ea58822bf04d48c3456eb552bab7c1d0d9ab94",
+    "crates/toniator-render/src/area_raster.rs": "396f3c1f1bae68799f532c12933172f4a9a34bfc563f8cdffb2ea9f346cc8476",
+    "crates/toniator-render/src/svg_join.rs": "663a9ef85388066790ee6bc8ff51962ad0ccc4c4a4d2c2c16b46d0f9c9c2dcc9",
+    "crates/toniator-render/src/svg_clip.rs": "fe2d3b2146423981f53021da255dd89e7393998fbb4dcb2064c5ce6d0e30e524",
+    "crates/toniator-render/src/streaming_png.rs": "12e60f89d49c7bd124ffb1a2fa465c1a89f67018335162b9982f362435588042",
+    "crates/toniator-render/src/materialization.rs": "ad716feb08f739d01ab62a79028bc81ef4b73534add4c007e346115e78c50725",
+    "crates/toniator-io/Cargo.toml": "da82800d91c36133e553a9a14e16f4ace485c1c5b7d20e26d0a9774dbf71812c",
+    "crates/toniator-io/src/temporal.rs": "67e91a8dcad27898853ca2087315cc6c4e1ede80f2f07a09c95edb5cf2f2b864",
+    "crates/toniator-io/src/media.rs": "696da86231da38e9d7299671256e641269d7caa1effe0dd18a61830e8ec08336",
+    "crates/toniator-io/src/export_defaults.rs": "896c93c65d20ff3768e553082a1625b318ec92f669ef33c3515bcbcdfade34be",
+    "crates/toniator-io/src/personal_library.rs": "b50623358444e624571c62bbf26c4fb50620ed0a38dc4e82f3c8886ea2f442ce",
+    "crates/toniator-io/src/recent.rs": "e77f719f6649d347138286b51c55be2e1a752b433ab1ec7292c980edd924d1d6",
+    "crates/toniator-io/src/sequence.rs": "fab0c46e8bff1ab5d34ae71fb1a09f35815990f524300eba68a021317cfe86ef",
+    "crates/toniator-io/src/video_output.rs": "f3be3515ccf5bd5b9cd543f3d4e921bbde966509d8f4fc01ad98a7685c46c1b0",
+    "crates/toniator-io/src/document_presets.rs": "ba29e0fea85c771940cbe0aad83d687acb4f8313c985a680590dac668bfd0c36",
+    "crates/toniator-io/src/lib.rs": "ab42a99a87c858e8c1af97275b9e671f2b44b2c077378feacfb1ff8f52338174",
+    "crates/toniator-io/src/builtin_document_presets.rs": "e27fbbf1b1a557af752fe0d7bcd01dfd70ba5d66b3ae03c3fdfb8d9178e17ec3",
+    "crates/toniator-io/src/atomic_output.rs": "17e4984d5e574bf89ac691536594d5bd973eb97382913b15f634625f249ae284",
+    "crates/toniator-io/src/filesystem/mod.rs": "81e316920624448dc6a62b3eb6f1d8d6f0235e96510376de8d61a168c49dcc5d",
+    "crates/toniator-io/src/filesystem/unix.rs": "3422391dbc7d0938facdf42e61558af4be5aaf31096520a886c4fd238f3e3dbf",
+    "crates/toniator-io/src/filesystem/windows.rs": "1e57799388312c7ecb88aa96df5347ee5ba6e274fd85c33a1ff0a83e419a55a7",
+    "crates/toniator-engine/Cargo.toml": "014a7e2428601a2f63e6734e99aa2667548b6e9846a157479933091467d6adf7",
+    "crates/toniator-engine/src/scheduler.rs": "08492e083904ad99ce2f6f72efec7a50272d11f845ebbb06260fd705c1807290",
+    "crates/toniator-engine/src/temporal_tests.rs": "222fc0045e4fdc3e5e6b9a6995404ac0564a7a504c57e2be807d51b20e4daf80",
+    "crates/toniator-engine/src/media.rs": "5e66b44db1889dbc1a1680a352407ff065f79dbaf899768caef7534a19664baf",
+    "crates/toniator-engine/src/export.rs": "9ea52ac501b83d7550dadd0249fd6eb91a1fce963168125b49f6d52d65d014c7",
+    "crates/toniator-engine/src/export_tests.rs": "b6f6ff42910ef6b011be6835d5c544fb2c0ee03b8a85cab90c1291a131b8c970",
+    "crates/toniator-engine/src/media_import.rs": "53ba2a9e09ecc55a3cf9953f3e0e699e6766bc9482cf618ec6469c058474146e",
+    "crates/toniator-engine/src/export_video.rs": "ea2e620c52235600ab503e534fb9f422be02c9fc2363ef5a2f445ed545938596",
+    "crates/toniator-engine/src/export_video_process.rs": "b57d9b3a4e3e038ea21ff0822d965fcf9566819d8be4f18fdc7824bf8fd7bb9c",
+    "crates/toniator-engine/src/export_video_tests.rs": "494b388143d4f1a65790ed51d4799af202d246d0466dcba6ee26903412cf98ec",
+    "crates/toniator-engine/src/media_import_tests.rs": "5453ff4879212874e5605b36b29ead7d59de91a05206acfa892e1e68f892a71f",
+    "crates/toniator-engine/src/lib.rs": "6c9f2752f1709eaac0b97d2276673d7a015cf68634ae808090a6fb1d528fff6d",
+    "crates/toniator-engine/src/print_preflight.rs": "dc3d0f44d63db03f94723bf32bbd549e177362209c4e5d2bb06d5624994877fe",
+    "crates/toniator-engine/src/coverage.rs": "d6573527f331de0792df18e757ef50ef187c62b1852f7910920f5d58c304620c",
+    "crates/toniator-engine/src/coverage_output.rs": "8fe267fd6ce8898cf492208a54a4beaae04f1080f97fe8da42d787c1e0503b48",
+    "crates/toniator-engine/src/uniform_density.rs": "34e955a489d653c73c94e1e81c06c8b8693f2dd1ef3cd3faa4f0871517f30768",
+    "crates/toniator-engine/src/reference_calibration.rs": "b97f89b87e706a9e5ac4a2d074f44a7bae455853b59765e94e2faf99822aa79a",
+    "crates/toniator-engine/src/artistic_connection_tests.rs": "6282515794469ee4e128f2e3404335dc620357b907477a2c7f92a0639f32c38e",
+    "crates/toniator-cli/Cargo.toml": "26fc27d35815ebef778a7cde1cb374a2e47f2a4fd7db1e8d7c5c44de988a0649",
+    "crates/toniator-cli/src/temporal.rs": "9d45febd6da2196fb2ba23303b8df02cb92cf375c20aaf03b53a26a143aadcc4",
+    "crates/toniator-cli/src/main.rs": "08eac1ea5b9f39ef1e0c2fae20ad1683941ad711b2657f439f505da5136e8051",
+    "crates/toniator-cli/src/preflight.rs": "154c483f4e1b230b3fc7232df646239427d7c977285dcb912893cf95157565e6",
+    "crates/toniator-app/Cargo.toml": "822b82904c557c1f6234be4b42ab9178bbea16ee1c7dd1c2788b9ea66e503486",
+    "crates/toniator-app/src/automation.rs": "65cba689897e1062b0f22c79185483a167c54100a2a464c57b298a61cd953905",
+    "crates/toniator-app/src/preview_coordinator.rs": "65a256e1631d29f826f21168cfcf21e97850fe23fb487fd6904a8312f5f5958d",
+    "crates/toniator-app/src/view_models.rs": "f908d09861b0486ecb51e2b150510e03f4ce842cd6929ba20fb91bfd0d2f75ba",
+    "crates/toniator-app/src/controller.rs": "d053f80093a8b55cc182f10fe90622d64da74a9bdeb4e390fb0c38d528d53560",
+    "crates/toniator-app/src/stage20f_editor.rs": "8f1fb173e656c0cfacf430f63a75985748b9678568a27feaaef16c215a8b1cf0",
+    "crates/toniator-app/src/personal_pattern_management.rs": "2bca63619248fc63314c62ccb65f054d49c67bf6dd42dc0af3530ce40fe9eedf",
+    "crates/toniator-app/src/startup.rs": "18406b2099cd18516793c7a17b9bd76a00a9368e25c26215488dd24129cf8ca4",
+    "crates/toniator-app/src/temporal_edit.rs": "bcb8acd8f3555901101c85ce353690cdd05871606e576ad2396459f0202cca67",
+    "crates/toniator-app/src/viewport_paintable.rs": "1d5dcc799edc8b37404989946c0b7b4e42dd0b536b9ac2a89898214bc9e81570",
+    "crates/toniator-app/src/source_notice.rs": "c231bf65752b1749f3b7456af24d714c42096aabddd2d7e14e79e74011c6ac3d",
+    "crates/toniator-app/src/advanced_defaults.rs": "512b4a700cfb109ad39ce97b5d62a41aa54436eaf94128c2bca56c2eaa8ab02a",
+    "crates/toniator-app/src/document_presets.rs": "21fbcda7d44aa13c74c8994a2ca73526147a8d71058b2b5908968f8a0a0a8d94",
+    "crates/toniator-app/src/advanced_temporal.rs": "61b29b23bab82cc56e669b9cbd95c44030d91ddbcaf42926879f660006d1849d",
+    "crates/toniator-app/src/scatter_memory.rs": "277ab09e1ee4442dc1c15c9f2aae4281fe0d1e57b13a17a9907d015dd167e31b",
+    "crates/toniator-app/src/temporal_export.rs": "5f0b4560361ac389297409d9375f4945b85b406fc651c686cd6f268d40583b5f",
+    "crates/toniator-app/src/wizard_validation.rs": "2edaa6f58e86034777b715d5c2e6e89fb4be406d0fa6fb5a03b20b5f140f3457",
+    "crates/toniator-app/src/about.rs": "cc3a029c4748a35db0da676617fce43e814c53e93c3680e3771a71cc9d1a6757",
+    "crates/toniator-app/src/wizard_guides.rs": "624d1326f23e8ebddfb43a10ebf5539238a50a9c37b9e9a40826fad5eb0f3d8c",
+    "crates/toniator-app/src/viewport_request.rs": "1acc1de4fa55f77ebcbac3b9f75c11b88686cea0bbbda92d5297c143145cfbce",
+    "crates/toniator-app/src/advanced_batches.rs": "60e272a57f24b56a7f8b0465ef0a134dbf28a8a104848dafc2259fe68c7b1b40",
+    "crates/toniator-app/src/app_events.rs": "c87b1c2dba9f10574bf1912bfb0a0d1412c2c69580b1cb2a5a8b9ae72db709f3",
+    "crates/toniator-app/src/application_model.rs": "3377111947a4cd4395a951e47bae538159146c6321bf2c5334b048e3434c28b7",
+    "crates/toniator-app/src/components.rs": "a3ec83478e566989fb357b9d85f499dd7b234455b63ac65fdce346130aeaa9af",
+    "crates/toniator-app/src/main.rs": "0c16557982824970fc79a4d2e413b6fa1cd6c8a3a842f1d0c1f5e1e1dd1cf43e",
+    "crates/toniator-app/src/main_view_state.rs": "4f0d207e02bb5298c5e8b6e4de905dd6d5dbc5fce768c6276318b63573126a17",
+    "crates/toniator-app/src/paint_editor.rs": "2b6984f0eeaf6dde597c653c416618383c39e34e8312a5a83f11848a32681583",
+    "crates/toniator-app/src/png_export_size.rs": "7d811c14450756ff1f50a1c0b6353be805a1937f83c7c18e2eb7ea4ac4b504e5",
+    "crates/toniator-app/src/prepared_paintable.rs": "e455bd1c7bbc4c24842882f3eb29cbc2eb23f7976eefa697239faf7390646264",
+    "crates/toniator-app/src/print_cleanup.rs": "944ae50ad50ee06d1297422a86dcc9b5871e6449905dc8e96009194e67d442c0",
+    "crates/toniator-app/src/print_preparation.rs": "de9de044e5a58837ca820060ef219974a23fbe954adebe1221a45ab8b4030b8e",
+    "crates/toniator-app/src/print_preparation_view.rs": "6e1889d5c56b90e3767cd4635413bc61dc0382c1f4d1c2d23721bb02af278cea",
+    "crates/toniator-app/src/sequence_import.rs": "ea3fc1b3f66a6816a22ec4381562c1f914cde3331db6f03e20f6954a378f5f4d",
+    "crates/toniator-app/src/source_response_ui_tests.rs": "85d25ad81f3fc5bd365dad10c8d39cd781f379ce70e71d64ddafa6bbb5678d6c",
+    "crates/toniator-app/src/temporal_preview.rs": "ed030c702cb52aa4218d52a873aaa19af68f4a671ef3412984b905563ff58242",
+    "crates/toniator-app/src/temporal_settings.rs": "3e3d0451d827c667dddabeedc763195e69606f8312c6a1ad7664dacb7bdf3e59",
+    "crates/toniator-app/src/preview_backdrop.rs": "00f98e0866aadbc34a436a4d2bc5bef58c2d9b2613a80876f81f834af159ba5a",
+    "crates/toniator-app/src/calibration_preparation.rs": "debd6cec06e07c265a8730d677baf7522729ad139d93bf393aea486374eb6025",
+    "crates/toniator-app/src/process_memory.rs": "8e45219c807f7968fb2879e6769a86e3bc49280d56efdec4dacafd5d4dea283c",
+    "crates/toniator-app/src/current_test_fixtures.rs": "45be6537fb085c9683cba62914122cd3b7563c47a755f4e14526ceabbabdc78d",
+    "crates/toniator-app/src/wizard_workflow_tests.rs": "4c7e45b08751657e1f67dd1e299be45b1ce02f5071ff7085cd1cb7c189bc5fa8",
+    "crates/toniator-app/src/ton018_animation_response_ui_tests.rs": "14ae33c4804e01acb2f01ac11aa607f359aa3aa9911f75006b7ee0ea9ca7f0bc",
+    "crates/toniator-app/src/ton018_png_streaming_ui_tests.rs": "9abe75487ce6f880f2020fbe715fd156b606183c63da8cdeb30837a11aca9e3a",
+    "crates/toniator-app/src/preview_diagnostics.rs": "43e92ba44595a7b508529adb56cd3e01eb8030b56d15fdd9b400ce1e929a0d08",
+    "crates/toniator-app/src/preview_diagnostics_view.rs": "29ddb1f7b208403c9c405a175e692fb2b00a1d6a33e423ed7493ab3db7250f9d",
+    "crates/toniator-app/src/artistic_preset_tests.rs": "8ed749afc2ee6dc01f394577d9625710a0ba680e30d272b9ecb332f8072cfc1e",
+    "crates/toniator-windows-fs/Cargo.toml": "d0234b0b8c3cc04acb0694743a4329e7bb1087e6b6e730d704bc7271d8fd2279",
+    "crates/toniator-windows-fs/src/lib.rs": "931a517123b49655aabfb9e82203c8f6990ad4d762dd7dd62ceea90164849026",
+    "crates/toniator-windows-fs/src/tests.rs": "238e33ef3d096d0df848c9305d4dd1b2a126255e65a492bef76c9f313dc054d0",
+    "crates/toniator-windows-fs/src/windows.rs": "7d6952b47e8d301e436096db8f7f51208c02d837f37050a77fda6e00648c590f",
+    "assets/raster-sample.png": "324ac232e319002a13fbcfac46538ca5d7e8ba8a127eea2eaf20e8ddb3ed2ef2",
+    "assets/vector-sample.svg": "42eb5e23111a5dbad66f2b1802a7cc06391c7ede829b99eb28aeb1ac91596e2e"
+  },
+  "evidence": "target/validation/wizard-calibration-companions-20261019",
+  "commands": [
+    "cargo build --release -p toniator-engine --example wizard_calibration_companions",
+    "wizard_calibration_companions generate FRESH_OUTPUT DONOR_PATHS_FILE",
+    "wizard_calibration_companions verify FRESH_OUTPUT VERIFIED_FOUR_PLUS_C_DONORS_FILE"
+  ],
+  "four_unchanged_resources": [
+    "even-random-circles",
+    "source-weighted-dispersion-voronoi",
+    "straight-grid-circles",
+    "triagrid-custom-shape-marks"
+  ],
+  "note": "All eight reused changed-producer C artifacts were independently remeasured on pinned current production dependencies and entire SavedCalibration equality passed. Four previously available immutable resources retain their existing full numeric artifacts; an independently measured compatible C donor never replaces them.",
+  "initial_generation_inventory": [
+    {
+      "artifact_sha256": "7e19d43ed11aba480e0ca5d4692ff303294e36bb9a680d915f4c67ade8dc2b20",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: RandomSites { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, character: Clustered { cluster_density: 1.0, cluster_spread: 16.0, cluster_strength: 0.5 }, nominal_spacing: Some(10.24), seed: 43, density_modulation: Uniform, exclusion: None, maximum_attempts: 16000000, maximum_neighbor_checks: 16000000, refinement: RandomSiteRefinement { enabled: false, density_weighted: false, iterations: 4 } }, outputs: [ConnectionPaths { selection: ConnectionSelectionIntent { maximum_final_degree: None, cycles: Allow, minimum_component_points: 1 }, program: RandomLinks { adjacency: ConnectionAdjacencyIntent { maximum_degree: 3, maximum_distance: 48.0 }, minimum_degree: 0, seed: 43 }, style: PathStrokeStyle { join: Round, cap: Round } }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-random-links-raster/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-64-mean-seed-neutral-v5+connection-selection-v2",
+        "sha256": "2dbf035e55397695a3f50d9171c2fa1c0ab17786f03068e8bc66e41be0d997f3"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+connection-selection-v2",
+      "id": "clustered-dispersion-random-links",
+      "knots": 65,
+      "name": "Clustered Connections",
+      "numeric_rust_sha256": "66344e49ae2012392baba24d001591b9906236a9bb658f4f744ccadec53f3490",
+      "origin": {
+        "kind": "exact-current-project",
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-random-links-raster/canvas/fixture.toniator",
+        "sha256": "2dbf035e55397695a3f50d9171c2fa1c0ab17786f03068e8bc66e41be0d997f3"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-64-mean-seed-neutral-v5+connection-selection-v2",
+      "seconds": 0.014774336
+    },
+    {
+      "artifact_sha256": "4cd958ea32a8c12ea4da25958dfa25293ca10c59fde741170d3c2a40c0478513",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: AuthoredResources { resources: [AuthoredStructureDraft { kind: OpenPath, segments: [Line { start: AuthoredPoint2 { x: 0.0, y: 0.0 }, end: AuthoredPoint2 { x: 0.32, y: 0.27 } }, Line { start: AuthoredPoint2 { x: 0.32, y: 0.27 }, end: AuthoredPoint2 { x: 0.7, y: -0.18 } }, Line { start: AuthoredPoint2 { x: 0.7, y: -0.18 }, end: AuthoredPoint2 { x: 1.0, y: 0.0 } }] }], definition: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.125, spacing_multiplier: 1.0 }], product: AlongGuides { dimension_indices: [0], interval_multiplier: 1.0, phase: 0.25 }, orientation: Fixed }, outputs: [CurveMotifPaths { tone_sample_spacing: ToneSampleSpacing { multiplier: 1.0 }, resource_index: 0, style: PathStrokeStyle { join: Round, cap: Round }, mirror_alternate_rows: true, alternate_row_phase: Some(0.25) }] } }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-motif-vector/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1",
+        "sha256": "41d9897b153459182098fec22d0ca4f19ac420e9890e24dab5635d2461fdd109"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1",
+      "id": "curve-motif-rows",
+      "knots": 64,
+      "name": "Curve Motif",
+      "numeric_rust_sha256": "836f0dd8bdd46f7bc8afb82bf3a7b344830bd0db593c56726cef191ac3d35288",
+      "origin": {
+        "kind": "exact-current-project",
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-motif-vector/canvas/fixture.toniator",
+        "sha256": "41d9897b153459182098fec22d0ca4f19ac420e9890e24dab5635d2461fdd109"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1",
+      "seconds": 0.003710439
+    },
+    {
+      "artifact_sha256": "8bf675b78caa5d6acb864d92803a2c44698312b3042af750cb32579846052737",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: RandomSites { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, character: Even { minimum_center_distance: 8.0 }, nominal_spacing: None, seed: 43, density_modulation: Uniform, exclusion: None, maximum_attempts: 16000000, maximum_neighbor_checks: 16000000, refinement: RandomSiteRefinement { enabled: false, density_weighted: false, iterations: 4 } }, outputs: [Marks] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Marks(MarkGeometryResponse { minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": true,
+      "exact_existing_donor": null,
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4",
+      "id": "even-random-circles",
+      "knots": 116,
+      "name": "Poisson Disk Marks",
+      "numeric_rust_sha256": "417687424f6e219e60bd3f11542925be347b6210c0cfe688d855ac69c37a8b55",
+      "origin": {
+        "kind": "unchanged-current-bundled"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-64-mean-seed-neutral-v5",
+      "seconds": 0.002927101
+    },
+    {
+      "artifact_sha256": "4e67f9095880e08b6fd9caa8dcc911b602f32102a49a53a4a1b8c4b93c1aa62e",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 90.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [VoronoiRegions] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Regions(RegionGeometryResponse { algorithm: Scale, sampling: AreaAverage, minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-voronoi-vector/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+voronoi-cell-reach-v1",
+        "sha256": "0f5d052b6ee930aef283069b25d3494d9089e1ff02d8e75b5d018da622905b08"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+voronoi-cell-reach-v1",
+      "id": "grid-voronoi-scale",
+      "knots": 77,
+      "name": "Grid Voronoi",
+      "numeric_rust_sha256": "c417b939cca0f371b3039d3280841c678d1e18c60c8d77876b7d11b0f3480d03",
+      "origin": {
+        "kind": "exact-current-project",
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-voronoi-vector/canvas/fixture.toniator",
+        "sha256": "0f5d052b6ee930aef283069b25d3494d9089e1ff02d8e75b5d018da622905b08"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+voronoi-cell-reach-v1",
+      "seconds": 0.002984052
+    },
+    {
+      "artifact_sha256": "3b51085f70398c37ef676821564d62b2af6b53d68c523565f0951bb969e6a9c6",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }], product: AlongGuides { dimension_indices: [0], interval_multiplier: 1.0, phase: 0.0 }, orientation: Fixed }, outputs: [StructuralPaths { tone_sample_spacing: ToneSampleSpacing { multiplier: 1.0 }, style: PathStrokeStyle { join: Round, cap: Round } }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-straight-raster/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1",
+        "sha256": "939f3ecee321cb475335ded4c6b9794b9377bf576f7396a069bc3d341e3c4fa2"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1",
+      "id": "one-guide-lines",
+      "knots": 12,
+      "name": "One Guide Lines",
+      "numeric_rust_sha256": "4f72e4b5d6a20af468bd7a376f67fd506a278cf454664825fc9849614704921b",
+      "origin": {
+        "kind": "exact-current-project",
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-straight-raster/canvas/fixture.toniator",
+        "sha256": "939f3ecee321cb475335ded4c6b9794b9377bf576f7396a069bc3d341e3c4fa2"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1",
+      "seconds": 0.002661038
+    },
+    {
+      "artifact_sha256": "6a4a237657e94f31023fdf317152f3a2f34b60eb823584c9f90ff2dd90563858",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: ParametricCurve { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, curve: Spiral(SpiralCurve { shape: Round, turns: 5.0, radial_spacing: 16.0, phase_degrees: 0.0, winding: Clockwise }), spiral_coverage: CoverCanvas, repetition: Single, sites: None }, outputs: [StructuralPaths { tone_sample_spacing: ToneSampleSpacing { multiplier: 1.0 }, style: PathStrokeStyle { join: Round, cap: Round } }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/gtk-gallery-saved.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1+cover-envelope-v1",
+        "sha256": "eff409bd7e65b044c5877d3c63cc3ba61e41a64de5edcc50f681ae3aa7457739"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1+cover-envelope-v1",
+      "id": "round-spiral-line",
+      "knots": 37,
+      "name": "Round Spiral Line",
+      "numeric_rust_sha256": "8f7f3614b9a0ef9608498080b6fdf92317aef2370a8879eaf72a2c79c6410a30",
+      "origin": {
+        "kind": "exact-current-project",
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/gtk-gallery-saved.toniator",
+        "sha256": "eff409bd7e65b044c5877d3c63cc3ba61e41a64de5edcc50f681ae3aa7457739"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+anchored-tone-v1+cover-envelope-v1",
+      "seconds": 0.003057092
+    },
+    {
+      "artifact_sha256": "bac6942a5cc806a81db3a9600a734ee06f8d0ae486116133994c44c941525579",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: ParametricCurve { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, curve: Spiral(SpiralCurve { shape: Round, turns: 5.0, radial_spacing: 16.0, phase_degrees: 0.0, winding: Clockwise }), spiral_coverage: CoverCanvas, repetition: Single, sites: Some(ParametricCurveSiteDraft { interval: 16.0, phase: 0.0 }) }, outputs: [Marks] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Marks(MarkGeometryResponse { minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-parametric-marks-vector/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+cover-envelope-v1",
+        "sha256": "3c7ca29bb7c116bb80768ebaa8447253f301877c5d98eac76979b609392a5428"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+cover-envelope-v1",
+      "id": "round-spiral-marks",
+      "knots": 117,
+      "name": "Round Spiral Marks",
+      "numeric_rust_sha256": "f8f95efe0d8f20f7e9cfc57c499c3e07fc29eb4099c8aa9c0741574b42dedb49",
+      "origin": {
+        "kind": "exact-current-project",
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-parametric-marks-vector/canvas/fixture.toniator",
+        "sha256": "3c7ca29bb7c116bb80768ebaa8447253f301877c5d98eac76979b609392a5428"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-v4+cover-envelope-v1",
+      "seconds": 0.002802
+    },
+    {
+      "artifact_sha256": "f672eb83939ebfa276211e7da27ae6fb1859252c87ad4d8ab9fb961218e217c1",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: RandomSites { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, character: RawUniform, nominal_spacing: Some(10.24), seed: 43, density_modulation: ArtworkWeighted, exclusion: None, maximum_attempts: 16000000, maximum_neighbor_checks: 16000000, refinement: RandomSiteRefinement { enabled: false, density_weighted: false, iterations: 4 } }, outputs: [VoronoiRegions] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Regions(RegionGeometryResponse { algorithm: Scale, sampling: AreaAverage, minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": true,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-weighted-raster/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5",
+        "sha256": "615f5dc828214f798f183ff3b32e1db482a426b2881cfbd78ea2c80c5a5f2b50"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4",
+      "id": "source-weighted-dispersion-voronoi",
+      "knots": 77,
+      "name": "Source-Weighted Voronoi",
+      "numeric_rust_sha256": "547612f11ae95e4b2d75e194d74a4cfc98892daf5866df355be6d58e8f3dc378",
+      "origin": {
+        "kind": "unchanged-current-bundled"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5",
+      "seconds": 0.002978061
+    },
+    {
+      "artifact_sha256": "f1d063a89cf0a500b43fb1141902ab32dcbbcecaf96cf1952f6d97301d8011fb",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: ParametricCurve { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, curve: Spiral(SpiralCurve { shape: Square, turns: 5.0, radial_spacing: 16.0, phase_degrees: 0.0, winding: Clockwise }), spiral_coverage: CoverCanvas, repetition: Single, sites: Some(ParametricCurveSiteDraft { interval: 16.0, phase: 0.0 }) }, outputs: [Marks] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Marks(MarkGeometryResponse { minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": null,
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+cover-envelope-v1",
+      "id": "square-spiral-marks",
+      "knots": 122,
+      "name": "Square Spiral Marks",
+      "numeric_rust_sha256": "08a3f2ac6ee10fd36dee3e5569609cdb1b76565f154d174c9f792212c5ee9279",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings64-v4+cover-envelope-v1",
+      "seconds": 34.638547115
+    },
+    {
+      "artifact_sha256": "6478a58f17b93a42f166e4ff56a6a2d542f2a42f5f15cdedf7bbc4e355ca8550",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 90.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1], merge_epsilon: 1e-9 }, orientation: GuideTangent { dimension_index: 0 } }, outputs: [Marks] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Marks(MarkGeometryResponse { minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": true,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-grid-raster/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-v4",
+        "sha256": "2e0dc92c9eee859c0fc3e60fd52dda5ce74960628e9be876d6fcb7d7e705169e"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4",
+      "id": "straight-grid-circles",
+      "knots": 124,
+      "name": "Straight Grid Circles",
+      "numeric_rust_sha256": "3c548b6d36a36b27366ba76f8065e083296666fa184d0e69e43ac4f3e18c5194",
+      "origin": {
+        "kind": "unchanged-current-bundled"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-v4",
+      "seconds": 0.003293345
+    },
+    {
+      "artifact_sha256": "1f47ce9d90bc8c24648feee9cedb064ca5db9adcad49afe82ca54b636008bc2b",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 60.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 120.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1, 2], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [GuideFaceRegions { dimension_indices: [0, 1, 2] }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Regions(RegionGeometryResponse { algorithm: Scale, sampling: AreaAverage, minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": null,
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+cell-reach-v1",
+      "id": "three-guide-cells-scale",
+      "knots": 77,
+      "name": "Three-Guide Cells",
+      "numeric_rust_sha256": "d6d7f6b2cbc118b0985df67738b6d0a3997988e29d0851ea2372f3d1a04fce99",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-guide-faces-v5+cell-reach-v1",
+      "seconds": 1.727109139
+    },
+    {
+      "artifact_sha256": "0c5d60aeae33b8ad6b96fd4ab15231998fc03ce1a949b64c8e666a48b32e7b32",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 60.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 120.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1, 2], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [MazeWalls { program: MazeProgram { algorithm: RecursiveBacktracker, seed: 43 }, style: PathStrokeStyle { join: Round, cap: Round } }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": null,
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+maze-guard-topology-v2",
+      "id": "three-guide-maze",
+      "knots": 59,
+      "name": "Three-Guide Maze",
+      "numeric_rust_sha256": "91d8652bf4e205f31ea9338f116726061884710fc9aeae9a1df300aabac8a563",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5+maze-guard-topology-v2",
+      "seconds": 17.916138276
+    },
+    {
+      "artifact_sha256": "483a9c7c21aebea1da44df8e2e3e81b1762d4ec731ec1b2cedc04b7271b12a08",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: AuthoredResources { resources: [AuthoredStructureDraft { kind: ClosedShape, segments: [Line { start: AuthoredPoint2 { x: 0.0, y: -1.0 }, end: AuthoredPoint2 { x: 1.0, y: 0.0 } }, Line { start: AuthoredPoint2 { x: 1.0, y: 0.0 }, end: AuthoredPoint2 { x: 0.0, y: 1.0 } }, Line { start: AuthoredPoint2 { x: 0.0, y: 1.0 }, end: AuthoredPoint2 { x: -1.0, y: 0.0 } }, Line { start: AuthoredPoint2 { x: -1.0, y: 0.0 }, end: AuthoredPoint2 { x: 0.0, y: -1.0 } }] }], definition: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 60.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 120.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1, 2], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [AuthoredClosedShapeMarks { resource_index: 0, orientation: Fixed }] } }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Marks(MarkGeometryResponse { minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": true,
+      "exact_existing_donor": null,
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4",
+      "id": "triagrid-custom-shape-marks",
+      "knots": 83,
+      "name": "Triagrid Diamond Marks",
+      "numeric_rust_sha256": "bbb761ddc2b5740cbe07d3906de7a0cd045d7ec959d6bc4b7242bfb9bfaacc87",
+      "origin": {
+        "kind": "unchanged-current-bundled"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-v4",
+      "seconds": 0.003280674
+    },
+    {
+      "artifact_sha256": "fa2618a58def7d2302a2e3490d9a89bbe8636544abe274f94966172a7cf2864f",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 60.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 120.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1, 2], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [ConnectionPaths { selection: ConnectionSelectionIntent { maximum_final_degree: None, cycles: Allow, minimum_component_points: 1 }, program: GridSpanningTree { adjacency: ConnectionAdjacencyIntent { maximum_degree: 6, maximum_distance: 48.0 }, algorithm: RandomizedPrim, seed: 43 }, style: PathStrokeStyle { join: Round, cap: Round } }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": null,
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+connection-selection-v2",
+      "id": "triagrid-spanning-tree",
+      "knots": 64,
+      "name": "Triagrid Spanning Tree",
+      "numeric_rust_sha256": "ad991af181639c74a28f2b5e99014a1411784bed9dbe18d061a179d6f0661485",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5+connection-selection-v2",
+      "seconds": 13.205833484
+    },
+    {
+      "artifact_sha256": "5538b9b22947cb6cab30dc270bf96a8921486d382e14027459143dbc56404ca1",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 90.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [GuideFaceRegions { dimension_indices: [0, 1] }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Regions(RegionGeometryResponse { algorithm: UniformOffset, sampling: AreaAverage, minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-faces-vector/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-guide-faces-v5+convex-inset-v3+cell-reach-v1",
+        "sha256": "e406de78c5b91fb967d1fe769d19aeed3902331575b211318908e33765613858"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+convex-inset-v3+cell-reach-v1",
+      "id": "two-guide-cells-uniform-offset",
+      "knots": 77,
+      "name": "Two-Guide Cells",
+      "numeric_rust_sha256": "5746471a56ecdbd9ec152cdb00f2e0f0c7140512757630d522d19526a1ea1541",
+      "origin": {
+        "kind": "exact-current-project",
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-faces-vector/canvas/fixture.toniator",
+        "sha256": "e406de78c5b91fb967d1fe769d19aeed3902331575b211318908e33765613858"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-guide-faces-v5+convex-inset-v3+cell-reach-v1",
+      "seconds": 0.003274925
+    },
+    {
+      "artifact_sha256": "8d24cee03aa78bf5186d384ffe63ea3c6308052140db3f0cfa94c5692aaef305",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 90.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [MazeWalls { program: MazeProgram { algorithm: RecursiveBacktracker, seed: 43 }, style: PathStrokeStyle { join: Round, cap: Round } }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": {
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-maze-raster/canvas/fixture.toniator",
+        "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5+maze-guard-topology-v2",
+        "sha256": "2f8d9873d29dba583ecc3fe72219672c087029a7f3ba8673377b0e290cbac890"
+      },
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+maze-guard-topology-v2",
+      "id": "two-guide-maze",
+      "knots": 52,
+      "name": "Two-Guide Maze",
+      "numeric_rust_sha256": "05176a46e513b30b8a306160eb2c642d77d9819022a732e78d5bb89abfc70f37",
+      "origin": {
+        "kind": "exact-current-project",
+        "path": "target/validation/offset-coverage-20261019/implementation/stage-c/case-maze-raster/canvas/fixture.toniator",
+        "sha256": "2f8d9873d29dba583ecc3fe72219672c087029a7f3ba8673377b0e290cbac890"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5+maze-guard-topology-v2",
+      "seconds": 0.003091612
+    }
+  ],
+  "fresh_measured_records": [
+    {
+      "artifact_sha256": "f1d063a89cf0a500b43fb1141902ab32dcbbcecaf96cf1952f6d97301d8011fb",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: ParametricCurve { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, curve: Spiral(SpiralCurve { shape: Square, turns: 5.0, radial_spacing: 16.0, phase_degrees: 0.0, winding: Clockwise }), spiral_coverage: CoverCanvas, repetition: Single, sites: Some(ParametricCurveSiteDraft { interval: 16.0, phase: 0.0 }) }, outputs: [Marks] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Marks(MarkGeometryResponse { minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": null,
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+cover-envelope-v1",
+      "id": "square-spiral-marks",
+      "knots": 122,
+      "name": "Square Spiral Marks",
+      "numeric_rust_sha256": "08a3f2ac6ee10fd36dee3e5569609cdb1b76565f154d174c9f792212c5ee9279",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings64-v4+cover-envelope-v1",
+      "seconds": 34.638547115
+    },
+    {
+      "artifact_sha256": "1f47ce9d90bc8c24648feee9cedb064ca5db9adcad49afe82ca54b636008bc2b",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 60.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 120.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1, 2], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [GuideFaceRegions { dimension_indices: [0, 1, 2] }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Regions(RegionGeometryResponse { algorithm: Scale, sampling: AreaAverage, minimum_fill: 0.0, maximum_fill: 1.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": null,
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+cell-reach-v1",
+      "id": "three-guide-cells-scale",
+      "knots": 77,
+      "name": "Three-Guide Cells",
+      "numeric_rust_sha256": "d6d7f6b2cbc118b0985df67738b6d0a3997988e29d0851ea2372f3d1a04fce99",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-guide-faces-v5+cell-reach-v1",
+      "seconds": 1.727109139
+    },
+    {
+      "artifact_sha256": "0c5d60aeae33b8ad6b96fd4ab15231998fc03ce1a949b64c8e666a48b32e7b32",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 60.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 120.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1, 2], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [MazeWalls { program: MazeProgram { algorithm: RecursiveBacktracker, seed: 43 }, style: PathStrokeStyle { join: Round, cap: Round } }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": null,
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+maze-guard-topology-v2",
+      "id": "three-guide-maze",
+      "knots": 59,
+      "name": "Three-Guide Maze",
+      "numeric_rust_sha256": "91d8652bf4e205f31ea9338f116726061884710fc9aeae9a1df300aabac8a563",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5+maze-guard-topology-v2",
+      "seconds": 17.916138276
+    },
+    {
+      "artifact_sha256": "fa2618a58def7d2302a2e3490d9a89bbe8636544abe274f94966172a7cf2864f",
+      "binding": "CalibrationBinding { recipe: PatternDefinitionRecipe { structure: OrderedOutputs { definition: GeneralizedStraightGuides { name: \"\", coverage: CoveragePolicy { guard_steps: 2, additional_margin: 0.0 }, dimensions: [GuideDimensionDraft { baseline_angle_degrees: 0.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 60.0, phase: 0.0, spacing_multiplier: 1.0 }, GuideDimensionDraft { baseline_angle_degrees: 120.0, phase: 0.0, spacing_multiplier: 1.0 }], product: Intersections { dimension_indices: [0, 1, 2], merge_epsilon: 1e-9 }, orientation: Fixed }, outputs: [ConnectionPaths { selection: ConnectionSelectionIntent { maximum_final_degree: None, cycles: Allow, minimum_component_points: 1 }, program: GridSpanningTree { adjacency: ConnectionAdjacencyIntent { maximum_degree: 6, maximum_distance: 48.0 }, algorithm: RandomizedPrim, seed: 43 }, style: PathStrokeStyle { join: Round, cap: Round } }] }, output_settings: [PatternOutputSettingsRecipe { source_filter: All, response: Connected(ConnectedGeometryResponse { minimum_thickness: 0.0, maximum_thickness: 1.0, bias: 0.0 }) }] }, density_aspect: 1.0, shape_rotation_degrees: 0.0 }",
+      "bundled_companion": false,
+      "exact_existing_donor": null,
+      "expected_profile": "ton018-reference-fixed-canvas1024-spacings32-v4+connection-selection-v2",
+      "id": "triagrid-spanning-tree",
+      "knots": 64,
+      "name": "Triagrid Spanning Tree",
+      "numeric_rust_sha256": "ad991af181639c74a28f2b5e99014a1411784bed9dbe18d061a179d6f0661485",
+      "origin": {
+        "authority": "reference_calibration::calibrate_saved_binding",
+        "kind": "fresh-genuine-fit"
+      },
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5+connection-selection-v2",
+      "seconds": 13.205833484
+    }
+  ],
+  "measurement_execution_context": {
+    "phase": "pre-install v4 example binary, compiled before current bundled resources were installed",
+    "changed_recipe_bundled_companions": false,
+    "eight_replay_records_origin": "fresh-genuine-fit; entire exact-existing SavedCalibration equality true",
+    "four_fresh_records": "fresh_measured_records; carried unchanged into verified-current inventory",
+    "executed_example_source_snapshot": "not retained before later formatting and additional consumers/regeneration tooling; final example source is not claimed byte-identical to executed v4 source",
+    "core_producer_source_pins": "producer_admission_source_sha256 records exact sources at both genuine measurement runs; this repair changes only bundled data/factory and an app test in those production paths"
+  },
+  "regeneration": "cargo run --release -p toniator-engine --example wizard_calibration_companions -- verify FRESH_OUTPUT DONOR_PATHS_FILE. Verify always genuinely measures the twelve changed-producer recipes even after installation and preserves four explicitly unchanged numeric resources. Generate inventories/reuses exact current artifacts. Review generated full binding/profile/payload before replacing checked-in resource; rustfmt generated Rust.",
+  "final_generator_source_sha256": "98813b0749eb1ad2cdaa076a744b50d32e7cb632a3c67307dca50267c2022b98"
+}

@@ -199,6 +199,8 @@ pub struct OffsetPathComponent {
     pub source_end: PathLocation,
     /// Stores reusable line/cubic centerline geometry without thickness primitives.
     pub path: CurvePath,
+    /// Retains construction-source correspondence for each stored derived segment.
+    pub source_intervals: Vec<(PathLocation, PathLocation)>,
     /// Identifies exact relink nodes that remain construction switches on the next offset rank.
     pub planar_switch_nodes: Vec<Point2>,
 }
@@ -225,6 +227,7 @@ struct TracedOffsetSegment {
 #[derive(Clone, Debug)]
 struct CleanedOffsetPath {
     path: CurvePath,
+    source_intervals: Vec<(PathLocation, PathLocation)>,
     source_start: PathLocation,
     source_end: PathLocation,
     earliest_source: PathLocation,
@@ -451,7 +454,21 @@ fn stabilize_planar_terminal_curls_at_fixed_nodes(
     path: &CurvePath,
     tolerance: f64,
 ) -> Result<CurvePath, CurveError> {
-    let mut segments = path.segments().to_vec();
+    stabilize_planar_terminal_curls_with_trace(path, tolerance, None)
+}
+
+/// Applies the established stabilization arithmetic while retaining one provenance entry per segment.
+/// Removed sub-tolerance segments remove their trace; fixed-node replacements retain their source span.
+/// # Errors
+/// Returns existing geometry diagnostics or provenance allocation failures atomically.
+fn stabilize_planar_terminal_curls_with_trace(
+    path: &CurvePath,
+    tolerance: f64,
+    mut trace: Option<&mut Vec<(PathLocation, PathLocation)>>,
+) -> Result<CurvePath, CurveError> {
+    let mut segments = Vec::new();
+    crate::curves::reserve_curve(&mut segments, path.segments().len())?;
+    segments.extend_from_slice(path.segments());
     let mut index = 0_usize;
     while index + 1 < segments.len() {
         let original = segments[index];
@@ -475,6 +492,9 @@ fn stabilize_planar_terminal_curls_at_fixed_nodes(
                     replace_planar_growth_segment_end(segments[index - 1], fixed_node, tolerance)?;
             }
             segments.remove(index);
+            if let Some(trace) = &mut trace {
+                trace.remove(index);
+            }
             index = index.saturating_sub(1);
             continue;
         }
@@ -959,6 +979,7 @@ fn offset_path_with_work_join_policy_cancellable(
             component_ordinal: 0,
             source_start: authored_start,
             source_end: authored_end,
+            source_intervals: source.source_intervals,
             path: source.path,
             planar_switch_nodes: planar_switch_nodes.to_vec(),
         }]));
@@ -1160,8 +1181,8 @@ fn offset_path_with_work_join_policy_cancellable(
     }
     if request.cleanup == PathOffsetCleanup::PlanarConstantGap {
         for component in &mut paths {
-            component.path =
-                stabilize_planar_terminal_curls_at_fixed_nodes(&component.path, limits.tolerance)?;
+            component.path = stabilize_planar_terminal_curls_with_trace(
+                &component.path, limits.tolerance, Some(&mut component.source_intervals))?;
         }
     }
     paths.sort_by(|left, right| {
@@ -1187,6 +1208,7 @@ fn offset_path_with_work_join_policy_cancellable(
                 source_start: component.source_start,
                 source_end: component.source_end,
                 path: component.path,
+                source_intervals: component.source_intervals,
                 planar_switch_nodes: component.planar_switch_nodes,
             })
             .collect(),
@@ -1947,7 +1969,7 @@ fn dissolve_cross_run_reversal_crossings(
     budget: &mut CleanupBudget,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CurveError> {
-    while let Some(crossing) = first_cross_run_transverse_crossing(runs, budget, is_cancelled)? {
+    while let Some(crossing) = first_cross_run_transverse_crossing(runs, budget, relink_retained_sides, is_cancelled)? {
         let (
             first_run,
             first_segment,
@@ -2150,6 +2172,8 @@ fn append_exact_cusp_round_join(
 /// segments expand diagonally from the first run's end and the second run's start, which selects
 /// the crossing that closes the omitted source interval without scanning unrelated outer lobes.
 /// Conservative segment bounds reject impossible contacts before they consume intersection work.
+/// Planar Constant-gap alone reuses the existing exact line-overlap midpoint split, preserving
+/// traced outer sides and reversal loops through the normal cross-run relink path.
 ///
 /// # Errors
 ///
@@ -2158,6 +2182,7 @@ fn append_exact_cusp_round_join(
 fn first_cross_run_transverse_crossing(
     runs: &[OrderedOffsetRun],
     budget: &mut CleanupBudget,
+    dissolve_coincident_overlaps: bool,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<CrossRunTransverseCrossing>, CurveError> {
     for run_separation in 1..runs.len() {
@@ -2210,7 +2235,34 @@ fn first_cross_run_transverse_crossing(
                             "path offset cleanup pair limit exceeded",
                         ));
                     }
-                    for intersection in first.segment.intersections(&second.segment)? {
+                    let intersections = match first.segment.intersections(&second.segment) {
+                        Ok(intersections) => intersections,
+                        Err(error)
+                            if dissolve_coincident_overlaps
+                                && error.path() == "curve.path.intersections.overlap"
+                                && matches!(
+                                    (first.segment, second.segment),
+                                    (CurveSegment::Line(_), CurveSegment::Line(_))
+                                ) =>
+                        {
+                            if let Some((first_parameter, second_parameter, point)) =
+                                coincident_line_overlap_split(first.segment, second.segment)?
+                            {
+                                return Ok(Some((
+                                    first_run,
+                                    first_segment,
+                                    second_run,
+                                    second_segment,
+                                    first_parameter,
+                                    second_parameter,
+                                    point,
+                                )));
+                            }
+                            return Err(error);
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    for intersection in intersections {
                         if matches!(
                             intersection.kind(),
                             crate::IntersectionKind::Crossing | crate::IntersectionKind::Tangent
@@ -2627,8 +2679,12 @@ fn dissolve_crossings_with_budget(
                     .any(|segment| segment.start() == *node || segment.end() == *node)
             });
             switches.dedup();
+            let mut source_intervals = Vec::new();
+            crate::curves::reserve_curve(&mut source_intervals,segments.len())?;
+            source_intervals.extend(segments.iter().map(|segment| (segment.source_start, segment.source_end)));
             cleaned.push(CleanedOffsetPath {
                 path,
+                source_intervals,
                 source_start: earliest_source,
                 source_end: latest_source,
                 earliest_source,

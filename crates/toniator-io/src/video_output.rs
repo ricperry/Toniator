@@ -58,7 +58,8 @@ mod tests {
     /// Panics if failure cleanup removes published bytes or leaves an unpublished staging sibling.
     #[test]
     fn video_publication_survives_parent_sync_failure() {
-        let mut root = RenderWorkspace::create(&std::env::temp_dir()).unwrap();
+        let base = current_test_root("parent-sync");
+        let mut root = RenderWorkspace::create(&base).unwrap();
         let path = root.path().join("video.mkv");
         let output = VideoOutput::reserve(&path, 4096).unwrap();
         output
@@ -66,10 +67,15 @@ mod tests {
             .unwrap()
             .write_all(b"published video")
             .unwrap();
-        assert!(
-            output
-                .publish_with_sync(|_| Err(std::io::Error::other("injected sync failure")))
-                .is_err()
+        let error = output
+            .publish_with_sync(|_| Err(std::io::Error::other("injected sync failure")))
+            .unwrap_err();
+        assert!(error.published());
+        assert_eq!(error.path(), path.as_path());
+        eprintln!(
+            "published={} path={} diagnostic={error}",
+            error.published(),
+            error.path().display()
         );
         assert_eq!(fs::read(&path).unwrap(), b"published video");
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
@@ -78,6 +84,38 @@ mod tests {
         assert!(!root.path().exists());
         root.discard().unwrap();
         assert!(root.require_space(0).is_err());
+    }
+
+    /// Selects a fresh current test root; it never regenerates an earlier stage's output.
+    /// # Panics
+    /// Panics when owned test scratch cannot be created.
+    fn current_test_root(label: &str) -> PathBuf {
+        let base = std::env::var_os("TONIATOR_B4_OUTPUT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join(format!("toniator-video-publication-{}", std::process::id()))
+            });
+        let root = base.join(label);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// Preserves an existing destination and reports that no publication occurred.
+    /// # Panics
+    /// Panics if prepublication failure changes the approved bytes or claims published state.
+    #[test]
+    fn video_prepublication_failure_reports_unpublished() {
+        let base = current_test_root("prepublication");
+        let mut root = RenderWorkspace::create(&base).unwrap();
+        let path = root.path().join("existing.mkv");
+        fs::write(&path, b"approved prior bytes").unwrap();
+        let error = VideoOutput::reserve(&path, 4096).unwrap_err();
+        assert!(!error.published());
+        assert_eq!(error.path(), path.as_path());
+        assert_eq!(fs::read(&path).unwrap(), b"approved prior bytes");
+        fs::remove_file(path).unwrap();
+        root.discard().unwrap();
     }
 }
 
@@ -94,6 +132,7 @@ use std::{
 pub struct VideoStorageError {
     path: PathBuf,
     detail: String,
+    published: bool,
 }
 impl VideoStorageError {
     /// Associates a concrete owned location with its filesystem diagnostic.
@@ -101,7 +140,19 @@ impl VideoStorageError {
         Self {
             path: path.into(),
             detail: detail.to_string(),
+            published: false,
         }
+    }
+
+    /// Reports whether the final file was renamed before a later directory durability failure.
+    /// This never promises rollback of an already published file.
+    pub const fn published(&self) -> bool {
+        self.published
+    }
+
+    /// Borrows the concrete failed or already-published path without reopening it.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 impl std::fmt::Display for VideoStorageError {
@@ -222,7 +273,8 @@ impl VideoOutput {
 
     /// Publishes through the production rename boundary while exposing its later sync barrier for tests.
     /// # Errors
-    /// Returns prepublication or sync failures; rename success permanently revokes staging cleanup.
+    /// Returns prepublication failures with published=false; only a post-rename directory-sync
+    /// failure carries published=true and the final path. Rename success revokes staging cleanup.
     fn publish_with_sync(
         mut self,
         sync: impl FnOnce(&Directory) -> std::io::Result<()>,
@@ -252,7 +304,11 @@ impl VideoOutput {
             .ok_or_else(|| VideoStorageError::new(&path, "staging handle released"))?
             .rename(&self.parent, &self.target, PublishMode::NoReplace)
             .map_err(|error| VideoStorageError::new(&path, error))?;
-        sync(&self.parent).map_err(|error| VideoStorageError::new(&self.path(), error))?;
+        sync(&self.parent).map_err(|error| {
+            let mut failure = VideoStorageError::new(&path, error);
+            failure.published = true;
+            failure
+        })?;
         Ok(self.path())
     }
 

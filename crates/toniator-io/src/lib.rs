@@ -19,11 +19,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use toniator_domain::{
-    AttachedCalibration, CALIBRATION_PROFILE_MEAN, CalibrationBinding, CalibrationKnot,
-    CalibrationVariation, SavedCalibration,
-    UniformCalibration, ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure,
-    AuthoredStructureDraft, AuthoredStructureId, AuthoredStructureKind, CanvasSpec,
-    ChannelAppearance, ChannelGeometryResponseDelta, ChannelId, ChannelOutputResponse,
+    ConnectionSelectionIntent, ToneSampleSpacing, AttachedCalibration, CALIBRATION_PROFILE_MEAN,
+    CalibrationBinding, CalibrationKnot, CalibrationVariation, SavedCalibration,
+    UniformCalibration, ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2,
+    AuthoredStructure, AuthoredStructureDraft, AuthoredStructureId, AuthoredStructureKind,
+    CanvasSpec, ChannelAppearance, ChannelGeometryResponseDelta, ChannelId, ChannelOutputResponse,
     ChannelPaint, ChannelPatternInstance, ChannelPatternLayoutDelta, ChannelResponseOverride,
     ChannelSourceMapping, ChannelState, ChannelTopology, ColorValue, ConnectedGeometryResponse,
     ConnectedGeometryResponseDelta, CoveragePolicy, CurveWinding, DensityMetric2D,
@@ -79,14 +79,14 @@ use media::MediaManifestDto;
 pub use media::SourceMediaManifest;
 
 pub const CONTAINER_VERSION: u32 = 2;
-pub const DOCUMENT_SCHEMA_VERSION: u32 = 17;
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 19;
 /// Frozen schema for the source-free v3 document Preset field shape.
-pub const DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION: u32 = 16;
+pub const DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION: u32 = 18;
 /// Current source-free document Preset archive envelope version.
 pub const DOCUMENT_PRESET_FORMAT_VERSION: u32 = 3;
 /// Standalone pure-schema preset JSON format version. It is deliberately
 /// independent from the `.toniator` container and document schema versions.
-pub const PRESET_FORMAT_VERSION: u32 = 8;
+pub const PRESET_FORMAT_VERSION: u32 = 10;
 pub const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
@@ -1258,6 +1258,7 @@ enum PresetStructureRecipeDto {
         sites: Option<ParametricCurveSiteRecipeDtoV3>,
     },
     ConnectionPaths {
+        selection: ConnectionSelectionIntent,
         definition: Box<PresetStructureRecipeDto>,
         program: ConnectionProgramDtoV6,
         style: PathStrokeStyle,
@@ -1272,6 +1273,7 @@ enum PresetStructureRecipeDto {
         resource_index: usize,
     },
     CurveMotifPaths {
+        tone_sample_spacing: ToneSampleSpacing,
         definition: Box<PresetStructureRecipeDto>,
         resource_index: usize,
         style: PathStrokeStyle,
@@ -1295,7 +1297,7 @@ enum PresetStructureRecipeDto {
     },
 }
 
-/// Current preset-v4 tagged recipe-only spiral materialization intent.
+/// Required current tagged spiral extent intent shared by recipes and document mechanisms.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
@@ -1321,15 +1323,18 @@ enum PatternOutputRealizationRecipeDtoV3 {
         orientation: MarkOrientationDraftDto,
     },
     StructuralPaths {
+        tone_sample_spacing: ToneSampleSpacing,
         style: PathStrokeStyle,
     },
     CurveMotifPaths {
+        tone_sample_spacing: ToneSampleSpacing,
         resource_index: usize,
         style: PathStrokeStyle,
         mirror_alternate_rows: bool,
         alternate_row_phase: Option<f64>,
     },
     ConnectionPaths {
+        selection: ConnectionSelectionIntent,
         program: ConnectionProgramDtoV6,
         style: PathStrokeStyle,
     },
@@ -2110,6 +2115,7 @@ enum PatternMechanismDtoV6 {
     ParametricCurveSource {
         id: u64,
         curve: ParametricCurveDtoV6,
+        spiral_coverage: SpiralCoveragePolicyDtoV3,
         repetition: GuideRepetitionDtoV6,
     },
     AlongParametricCurveSites {
@@ -2503,14 +2509,17 @@ enum PatternOutputRealizationDtoV6 {
         orientation: MarkOrientationDtoV6,
     },
     GuidePaths {
+        tone_sample_spacing: ToneSampleSpacing,
         guide_mechanism_id: u64,
         style: PathStrokeStyle,
     },
     ParametricPaths {
+        tone_sample_spacing: ToneSampleSpacing,
         curve_mechanism_id: u64,
         style: PathStrokeStyle,
     },
     CurveMotifPaths {
+        tone_sample_spacing: ToneSampleSpacing,
         site_mechanism_id: u64,
         structure_id: u64,
         style: PathStrokeStyle,
@@ -2518,6 +2527,7 @@ enum PatternOutputRealizationDtoV6 {
         alternate_row_phase: Option<f64>,
     },
     ConnectionPaths {
+        selection: ConnectionSelectionIntent,
         site_mechanism_id: u64,
         program: ConnectionProgramDtoV6,
         style: PathStrokeStyle,
@@ -2817,10 +2827,12 @@ impl PresetStructureRecipeDto {
                 }),
             },
             PatternStructureRecipe::ConnectionPaths {
+                selection,
                 definition,
                 program,
                 style,
             } => Self::ConnectionPaths {
+                selection: *selection,
                 definition: Box::new(Self::from_domain(definition)),
                 program: ConnectionProgramDtoV6::from_domain(program),
                 style: *style,
@@ -2842,12 +2854,14 @@ impl PresetStructureRecipeDto {
                 resource_index: *resource_index,
             },
             PatternStructureRecipe::CurveMotifPaths {
+                tone_sample_spacing,
                 definition,
                 resource_index,
                 style,
                 mirror_alternate_rows,
                 alternate_row_phase,
             } => Self::CurveMotifPaths {
+                tone_sample_spacing: *tone_sample_spacing,
                 definition: Box::new(Self::from_domain(definition)),
                 resource_index: *resource_index,
                 style: *style,
@@ -2985,10 +2999,12 @@ impl PresetStructureRecipeDto {
                 }),
             }),
             Self::ConnectionPaths {
+                selection,
                 definition,
                 program,
                 style,
             } => Ok(PatternStructureRecipe::ConnectionPaths {
+                selection,
                 definition: Box::new(definition.into_domain()?),
                 program: program.into_domain(),
                 style,
@@ -3010,12 +3026,14 @@ impl PresetStructureRecipeDto {
                 resource_index,
             }),
             Self::CurveMotifPaths {
+                tone_sample_spacing,
                 definition,
                 resource_index,
                 style,
                 mirror_alternate_rows,
                 alternate_row_phase,
             } => Ok(PatternStructureRecipe::CurveMotifPaths {
+                tone_sample_spacing,
                 definition: Box::new(definition.into_domain()?),
                 resource_index,
                 style,
@@ -3068,26 +3086,35 @@ impl PatternOutputRealizationRecipeDtoV3 {
                 resource_index: *resource_index,
                 orientation: MarkOrientationDraftDto::from_domain(orientation),
             },
-            PatternOutputRealizationRecipe::StructuralPaths { style } => {
-                Self::StructuralPaths { style: *style }
-            }
+            PatternOutputRealizationRecipe::StructuralPaths {
+                tone_sample_spacing,
+                style,
+            } => Self::StructuralPaths {
+                tone_sample_spacing: *tone_sample_spacing,
+                style: *style,
+            },
             PatternOutputRealizationRecipe::CurveMotifPaths {
+                tone_sample_spacing,
                 resource_index,
                 style,
                 mirror_alternate_rows,
                 alternate_row_phase,
             } => Self::CurveMotifPaths {
+                tone_sample_spacing: *tone_sample_spacing,
                 resource_index: *resource_index,
                 style: *style,
                 mirror_alternate_rows: *mirror_alternate_rows,
                 alternate_row_phase: *alternate_row_phase,
             },
-            PatternOutputRealizationRecipe::ConnectionPaths { program, style } => {
-                Self::ConnectionPaths {
-                    program: ConnectionProgramDtoV6::from_domain(program),
-                    style: *style,
-                }
-            }
+            PatternOutputRealizationRecipe::ConnectionPaths {
+                selection,
+                program,
+                style,
+            } => Self::ConnectionPaths {
+                selection: *selection,
+                program: ConnectionProgramDtoV6::from_domain(program),
+                style: *style,
+            },
             PatternOutputRealizationRecipe::MazeWalls { program, style } => Self::MazeWalls {
                 program: MazeProgramDtoV6::from_domain(program),
                 style: *style,
@@ -3116,26 +3143,35 @@ impl PatternOutputRealizationRecipeDtoV3 {
                 resource_index,
                 orientation: orientation.into_domain(),
             },
-            Self::StructuralPaths { style } => {
-                PatternOutputRealizationRecipe::StructuralPaths { style }
-            }
+            Self::StructuralPaths {
+                tone_sample_spacing,
+                style,
+            } => PatternOutputRealizationRecipe::StructuralPaths {
+                tone_sample_spacing,
+                style,
+            },
             Self::CurveMotifPaths {
+                tone_sample_spacing,
                 resource_index,
                 style,
                 mirror_alternate_rows,
                 alternate_row_phase,
             } => PatternOutputRealizationRecipe::CurveMotifPaths {
+                tone_sample_spacing,
                 resource_index,
                 style,
                 mirror_alternate_rows,
                 alternate_row_phase,
             },
-            Self::ConnectionPaths { program, style } => {
-                PatternOutputRealizationRecipe::ConnectionPaths {
-                    program: program.into_domain(),
-                    style,
-                }
-            }
+            Self::ConnectionPaths {
+                selection,
+                program,
+                style,
+            } => PatternOutputRealizationRecipe::ConnectionPaths {
+                selection,
+                program: program.into_domain(),
+                style,
+            },
             Self::MazeWalls { program, style } => PatternOutputRealizationRecipe::MazeWalls {
                 program: program.into_domain(),
                 style,
@@ -4192,6 +4228,7 @@ impl PatternFamilyDtoV6 {
     }
 }
 impl PatternMechanismDtoV6 {
+    /// Serializes exact authored mechanism identity, including persistent extent policy, without deriving geometry.
     fn from_domain(value: &toniator_domain::PatternMechanism) -> Self {
         match value {
             toniator_domain::PatternMechanism::StraightGuides { id } => {
@@ -4249,10 +4286,15 @@ impl PatternMechanismDtoV6 {
             toniator_domain::PatternMechanism::ParametricCurveSource {
                 id,
                 curve,
+                spiral_coverage,
                 repetition,
             } => Self::ParametricCurveSource {
                 id: id.0,
                 curve: ParametricCurveDtoV6::from_domain(curve),
+                spiral_coverage: match spiral_coverage {
+                    SpiralCoveragePolicy::Fixed => SpiralCoveragePolicyDtoV3::Fixed,
+                    SpiralCoveragePolicy::CoverCanvas => SpiralCoveragePolicyDtoV3::CoverCanvas,
+                },
                 repetition: GuideRepetitionDtoV6::from_domain(repetition),
             },
             toniator_domain::PatternMechanism::AlongParametricCurveSites {
@@ -4310,6 +4352,7 @@ impl PatternMechanismDtoV6 {
             },
         }
     }
+    /// Restores required current mechanism fields; document validation remains the publication gate.
     fn into_domain(self) -> toniator_domain::PatternMechanism {
         match self {
             Self::StraightGuides { id } => toniator_domain::PatternMechanism::StraightGuides {
@@ -4367,10 +4410,15 @@ impl PatternMechanismDtoV6 {
             Self::ParametricCurveSource {
                 id,
                 curve,
+                spiral_coverage,
                 repetition,
             } => toniator_domain::PatternMechanism::ParametricCurveSource {
                 id: PatternMechanismId(id),
                 curve: curve.into_domain(),
+                spiral_coverage: match spiral_coverage {
+                    SpiralCoveragePolicyDtoV3::Fixed => SpiralCoveragePolicy::Fixed,
+                    SpiralCoveragePolicyDtoV3::CoverCanvas => SpiralCoveragePolicy::CoverCanvas,
+                },
                 repetition: repetition.into_domain(),
             },
             Self::AlongParametricCurveSites {
@@ -4582,26 +4630,32 @@ impl PatternOutputLayerDtoV6 {
                 orientation: MarkOrientationDtoV6::from_domain(orientation),
             },
             toniator_domain::PatternOutputRealization::GuidePaths {
+                tone_sample_spacing,
                 guide_mechanism_id,
                 style,
             } => PatternOutputRealizationDtoV6::GuidePaths {
+                tone_sample_spacing: *tone_sample_spacing,
                 guide_mechanism_id: guide_mechanism_id.0,
                 style: *style,
             },
             toniator_domain::PatternOutputRealization::ParametricPaths {
+                tone_sample_spacing,
                 curve_mechanism_id,
                 style,
             } => PatternOutputRealizationDtoV6::ParametricPaths {
+                tone_sample_spacing: *tone_sample_spacing,
                 curve_mechanism_id: curve_mechanism_id.0,
                 style: *style,
             },
             toniator_domain::PatternOutputRealization::CurveMotifPaths {
+                tone_sample_spacing,
                 site_mechanism_id,
                 structure_id,
                 style,
                 mirror_alternate_rows,
                 alternate_row_phase,
             } => PatternOutputRealizationDtoV6::CurveMotifPaths {
+                tone_sample_spacing: *tone_sample_spacing,
                 site_mechanism_id: site_mechanism_id.0,
                 structure_id: structure_id.0,
                 style: *style,
@@ -4609,10 +4663,12 @@ impl PatternOutputLayerDtoV6 {
                 alternate_row_phase: *alternate_row_phase,
             },
             toniator_domain::PatternOutputRealization::ConnectionPaths {
+                selection,
                 site_mechanism_id,
                 program,
                 style,
             } => PatternOutputRealizationDtoV6::ConnectionPaths {
+                selection: *selection,
                 site_mechanism_id: site_mechanism_id.0,
                 program: ConnectionProgramDtoV6::from_domain(program),
                 style: *style,
@@ -4670,26 +4726,32 @@ impl PatternOutputLayerDtoV6 {
                 orientation: orientation.into_domain(),
             },
             PatternOutputRealizationDtoV6::GuidePaths {
+                tone_sample_spacing,
                 guide_mechanism_id,
                 style,
             } => toniator_domain::PatternOutputRealization::GuidePaths {
+                tone_sample_spacing,
                 guide_mechanism_id: PatternMechanismId(guide_mechanism_id),
                 style,
             },
             PatternOutputRealizationDtoV6::ParametricPaths {
+                tone_sample_spacing,
                 curve_mechanism_id,
                 style,
             } => toniator_domain::PatternOutputRealization::ParametricPaths {
+                tone_sample_spacing,
                 curve_mechanism_id: PatternMechanismId(curve_mechanism_id),
                 style,
             },
             PatternOutputRealizationDtoV6::CurveMotifPaths {
+                tone_sample_spacing,
                 site_mechanism_id,
                 structure_id,
                 style,
                 mirror_alternate_rows,
                 alternate_row_phase,
             } => toniator_domain::PatternOutputRealization::CurveMotifPaths {
+                tone_sample_spacing,
                 site_mechanism_id: PatternMechanismId(site_mechanism_id),
                 structure_id: toniator_domain::AuthoredStructureId(structure_id),
                 style,
@@ -4697,10 +4759,12 @@ impl PatternOutputLayerDtoV6 {
                 alternate_row_phase,
             },
             PatternOutputRealizationDtoV6::ConnectionPaths {
+                selection,
                 site_mechanism_id,
                 program,
                 style,
             } => toniator_domain::PatternOutputRealization::ConnectionPaths {
+                selection,
                 site_mechanism_id: PatternMechanismId(site_mechanism_id),
                 program: program.into_domain(),
                 style,

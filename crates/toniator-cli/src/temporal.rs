@@ -94,6 +94,7 @@ fn parse_rate(value: &str) -> Result<toniator_domain::FrameRate, String> {
 ///
 /// Encoding failure keeps rendered PNGs at the reported recovery path. Interactive recovery
 /// actions are supplied by the engine's retained-state API for the desktop workflow.
+/// A published durability warning reports saved output separately from temporary cleanup.
 ///
 /// # Errors
 /// Returns static/capability/render/encode/validation/publication diagnostics and retained paths.
@@ -136,6 +137,9 @@ pub(super) fn render_project_video(
         result.frame_count,
         result.file.display()
     );
+    if let Some(warning) = result.publication_warning {
+        eprintln!("{}", video_publication_warning(&warning));
+    }
     if let Some(warning) = result.cleanup_warning {
         eprintln!("Video saved; temporary cleanup: {warning}");
     }
@@ -193,6 +197,9 @@ pub(super) fn render_project_sequence(
         result.frame_count,
         result.directory.display()
     );
+    if let Some(warning) = result.publication_warning {
+        eprintln!("{}", sequence_publication_warning(&warning));
+    }
     Ok(())
 }
 
@@ -238,5 +245,51 @@ impl ExportSignals {
         ctrlc::set_handler(move || cancelled.store(true, std::sync::atomic::Ordering::Release))
             .map_err(|error| CliError::new("export.signal", error.to_string()))?;
         Ok(Self)
+    }
+}
+
+
+/// Formats truthful saved-video durability status independently of temporary cleanup reporting.
+fn video_publication_warning(detail: &str) -> String {
+    format!("Video saved; final folder synchronization could not be confirmed: {detail}")
+}
+
+#[cfg(test)]
+mod video_publication_tests {
+    use super::*;
+    /// Keeps a late publication warning distinct from an encoding failure or temporary cleanup.
+    /// # Panics
+    /// Panics if the actual published diagnostic loses its saved/durability meaning.
+    #[test]
+    fn published_warning_is_distinct_from_temporary_cleanup() {
+        let message = video_publication_warning("actual directory sync error");
+        assert!(message.starts_with("Video saved;") && message.contains("synchronization"));
+        assert!(
+            message.contains("actual directory sync error")
+                && !message.contains("temporary cleanup")
+        );
+    }
+}
+
+
+/// Reports a saved complete sequence's late durability warning without an incomplete-output suffix.
+fn sequence_publication_warning(detail: &str) -> String {
+    format!("Sequence saved; final folder synchronization could not be confirmed: {detail}")
+}
+
+#[cfg(test)]
+mod sequence_publication_tests {
+    use super::*;
+    /// Retains saved truth and actual durability detail independently of incomplete/error guidance.
+    /// # Panics
+    /// Panics if a complete sequence is described as incomplete or a failed export.
+    #[test]
+    fn complete_sequence_warning_never_claims_incomplete_output() {
+        let message = sequence_publication_warning("actual directory sync error");
+        assert!(
+            message.starts_with("Sequence saved;")
+                && message.contains("actual directory sync error")
+        );
+        assert!(!message.contains("incomplete") && !message.contains("temporary cleanup"));
     }
 }

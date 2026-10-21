@@ -1147,6 +1147,7 @@ fn video_progress(value: VideoProgress) -> Progress {
 }
 
 /// Runs a validated immutable snapshot through the shared headless exporter.
+/// Published video/sequence warnings retain Complete/path/Close semantics, never a failed retry state.
 fn render(
     snapshot: SavedContent,
     options: Options,
@@ -1175,7 +1176,11 @@ fn render(
                     })
                     .map(|result| Outcome::Complete {
                         path: Some(result.directory),
-                        message: format!("Exported {} PNG frames.", result.frame_count),
+                        message: sequence_completion_message(
+                            result.publication_warning.as_deref(),
+                            None,
+                            &format!("Exported {} PNG frames.", result.frame_count),
+                        ),
                     })
                     .map_err(|error| error.to_string());
             }
@@ -1201,12 +1206,17 @@ fn render(
                 match job.run(MediaTools::default(), cancelled, &|progress| {
                     report(video_progress(progress))
                 }) {
-                    Ok(result) => Outcome::Complete {
-                        path: Some(result.file),
-                        message: result.cleanup_warning.unwrap_or_else(|| {
-                            format!("Exported {} video frames.", result.frame_count)
-                        }),
-                    },
+                    Ok(result) => {
+                        let message = video_completion_message(
+                            result.publication_warning.as_deref(),
+                            result.cleanup_warning.as_deref(),
+                            &format!("Exported {} video frames.", result.frame_count),
+                        );
+                        Outcome::Complete {
+                            path: Some(result.file),
+                            message,
+                        }
+                    }
                     Err(error) => Outcome::Failed {
                         error: error.to_string(),
                         recovery: error.recovery,
@@ -1324,6 +1334,7 @@ fn report_not_started(state: &Rc<RefCell<AppState>>, epoch: u64, error: &str) {
 /// Prepares one operation without moving recovery ownership until input validates.
 /// Invalid input reports that the attempted operation has not started and clears
 /// any preceding operation's completed progress; retained frames remain owned.
+/// Published video/PNG warnings retain Complete/path/Close state and both independent warning kinds.
 fn submit(state: &Rc<RefCell<AppState>>, epoch: u64, action: Action) {
     if matches!(action, Action::Render) {
         submit_render(state, epoch);
@@ -1395,18 +1406,25 @@ fn submit(state: &Rc<RefCell<AppState>>, epoch: u64, action: Action) {
                     &|value| report(video_progress(value)),
                 )
                 .map(|result| {
-                    (
-                        Some(result.file),
-                        result
-                            .cleanup_warning
-                            .unwrap_or_else(|| "Video encoding complete.".into()),
-                    )
+                    let message = video_completion_message(
+                        result.publication_warning.as_deref(),
+                        result.cleanup_warning.as_deref(),
+                        "Video encoding complete.",
+                    );
+                    (Some(result.file), message)
                 }),
             Action::SavePng => recovery
                 .save_png_sequence(&options.destination, cancelled, &|value| {
                     report(video_progress(value))
                 })
-                .map(|path| (Some(path), "Saved rendered PNG sequence.".into())),
+                .map(|result| {
+                    let message = sequence_completion_message(
+                        result.publication_warning.as_deref(),
+                        result.cleanup_warning.as_deref(),
+                        "Saved rendered PNG sequence.",
+                    );
+                    (Some(result.directory), message)
+                }),
             Action::Discard => recovery
                 .discard()
                 .map(|()| (None, "Discarded this job’s rendered PNGs.".into())),
@@ -2351,5 +2369,101 @@ mod tests {
         assert!(!cancelled.destination.exists());
         assert_eq!(workspace.snapshot(), accepted);
         println!("Gate3 timing export artifacts: {}", directory.display());
+    }
+}
+
+
+/// Formats existing Complete status truth without introducing a second export lifecycle or control.
+/// Published durability warnings and temporary cleanup diagnostics remain independently visible.
+fn video_completion_message(
+    publication: Option<&str>,
+    cleanup: Option<&str>,
+    success: &str,
+) -> String {
+    match (publication, cleanup) {
+        (Some(publication), Some(cleanup)) => format!(
+            "Video exported; final folder synchronization failed: {publication}. Temporary cleanup: {cleanup}"
+        ),
+        (Some(publication), None) => {
+            format!("Video exported; final folder synchronization failed: {publication}")
+        }
+        (None, Some(cleanup)) => cleanup.to_owned(),
+        (None, None) => success.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod publication_warning_tests {
+    use super::*;
+    /// Preserves ordinary completion and each/both warnings without implying a stopped/retry state.
+    /// # Panics
+    /// Panics if either actual diagnostic is hidden or normal completion vocabulary changes.
+    #[test]
+    fn video_publication_and_cleanup_warnings_both_survive() {
+        assert_eq!(
+            video_completion_message(None, None, "Video encoding complete."),
+            "Video encoding complete."
+        );
+        assert_eq!(
+            video_completion_message(None, Some("cleanup detail"), "success"),
+            "cleanup detail"
+        );
+        let warning = video_completion_message(Some("directory detail"), None, "success");
+        assert!(warning.starts_with("Video exported;") && warning.contains("directory detail"));
+        let both =
+            video_completion_message(Some("directory detail"), Some("cleanup detail"), "success");
+        assert!(
+            both.contains("directory detail")
+                && both.contains("cleanup detail")
+                && both.starts_with("Video exported;")
+        );
+    }
+}
+
+
+/// Formats the existing Complete status for a saved PNG sequence without conflating independent warnings.
+/// Saved truth and the caller's actual directory remain authoritative; no retry guidance is invented.
+fn sequence_completion_message(
+    publication: Option<&str>,
+    cleanup: Option<&str>,
+    success: &str,
+) -> String {
+    let mut message = success.to_owned();
+    if let Some(detail) = publication {
+        message.push_str(&format!(
+            " The sequence is saved; final folder synchronization could not be confirmed: {detail}."
+        ));
+    }
+    if let Some(detail) = cleanup {
+        message.push_str(&format!(
+            " The sequence is saved; temporary cleanup: {detail}"
+        ));
+    }
+    message
+}
+
+#[cfg(test)]
+mod sequence_warning_tests {
+    use super::*;
+    /// Keeps saved-completion wording and independent diagnostics in the existing Complete status.
+    /// # Panics
+    /// Panics if healthy text changes or either/both warnings lose saved truth or their detail.
+    #[test]
+    fn saved_sequence_preserves_publication_and_cleanup_warnings() {
+        assert_eq!(
+            sequence_completion_message(None, None, "Saved PNGs."),
+            "Saved PNGs."
+        );
+        for (publication, cleanup) in [
+            (Some("sync detail"), None),
+            (None, Some("cleanup detail")),
+            (Some("sync detail"), Some("cleanup detail")),
+        ] {
+            let message = sequence_completion_message(publication, cleanup, "Saved PNGs.");
+            assert!(message.starts_with("Saved PNGs.") && message.contains("sequence is saved"));
+            assert_eq!(message.contains("sync detail"), publication.is_some());
+            assert_eq!(message.contains("cleanup detail"), cleanup.is_some());
+            assert!(!message.contains("Retry") && !message.contains("incomplete"));
+        }
     }
 }

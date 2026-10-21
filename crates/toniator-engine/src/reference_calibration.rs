@@ -2869,3 +2869,78 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod artistic_saturation_diagnostic {
+    use super::*;
+
+    /// Remeasures the exact tree saturation pairs on frozen references at both existing precisions.
+    /// This diagnostic changes no acceptance criteria, canonical producer, or stored artifact.
+    /// # Panics
+    /// Panics if the current registry fixture, geometry, or independent occupancy consumer fails.
+    #[test]
+    #[ignore = "bounded Phase5 numerical diagnosis"]
+    fn tree_saturation_pairs() {
+        let registry = toniator_patterns::PresetRegistry::bundled();
+        let recipe = &registry.find("triagrid-spanning-tree").unwrap().recipe;
+        let (base, _, channel) = reference_document(recipe, 32).unwrap();
+        let binding = CalibrationBinding::for_channel(&base, channel).unwrap();
+        let recipe = reference_recipe_from_binding(&binding);
+        for side in [32, 64] {
+            let (document, source, channel) = reference_document(&recipe, side).unwrap();
+            let probe = FrozenCoverageProbe::new(
+                &document,
+                source,
+                channel,
+                EvaluationLimits::default(),
+                &|| false,
+            )
+            .unwrap();
+            for size in [0.8125, 0.84375, 0.9375, 1.0, 1.5, 1.75] {
+                let geometry = probe.produce(size / RAW_SIZE_MAXIMUM, &|| false).unwrap();
+                for precision in [
+                    VectorOccupancyPrecision::Baseline,
+                    VectorOccupancyPrecision::Tight,
+                ] {
+                    let result = measure_geometry_vector_occupancy(
+                        &geometry,
+                        document.canvas(),
+                        precision,
+                        RasterizationLimits::default(),
+                        &|| false,
+                    )
+                    .unwrap();
+                    eprintln!(
+                        "TREE_PAIR side={side} size={size:.17} precision={precision:?} fraction={:.17} normalized_canvas_area=1 vertices={}",
+                        result.fraction, result.vertices
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod artistic_strict_curve_tests {
+    use super::*;
+
+    /// Keeps genuine raw-coverage reversals invalid after the vector adapter correction.
+    /// # Panics
+    /// Panics if strict calibration smooths, sorts coverage, or accepts a decreasing measured curve.
+    #[test]
+    fn real_coverage_reversal_still_rejects() {
+        let points = vec![(0.0, 0.0), (1.0, 0.7), (2.0, 0.69)]
+            .into_iter()
+            .map(|(size, coverage)| RawCoveragePoint {
+                size,
+                coverage,
+                vertices: 0,
+                elapsed: Duration::ZERO,
+            })
+            .collect();
+        assert_eq!(
+            RawCoverageCurve::new(points).unwrap_err().path(),
+            "reference.curve.monotone"
+        );
+    }
+}

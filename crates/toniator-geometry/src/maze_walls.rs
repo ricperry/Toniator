@@ -10,7 +10,7 @@ use super::{
 };
 
 /// Stable identity for the bounded guide-arrangement and dual wall-maze contract.
-pub const MAZE_WALL_CONTRACT_ID: &str = "toniator-stage-20m-wall-maze-v1";
+pub const MAZE_WALL_CONTRACT_ID: &str = "toniator-wall-maze-guard-topology-v2";
 
 /// One normalized tangent supplied by the evaluated straight-guide family for maze wall ordering.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -318,8 +318,8 @@ impl std::error::Error for MazeError {}
 
 /// Derives a conventional wall maze from on-or-inside guide-intersection sites and a dual DFS.
 ///
-/// The canvas admits every evaluated site on or inside its bounds, then derives every positively
-/// oriented bounded arrangement face solely from those sites. If that finite arrangement has
+/// The supplied requested guard sites define every positively oriented bounded arrangement
+/// face, including complete cells outside the canvas. If that finite arrangement has
 /// multiple disconnected face components, only its stable largest component emits maze walls. The
 /// canvas never adds arrangement walls, cells, passages, or endpoints.
 ///
@@ -376,8 +376,7 @@ pub fn build_maze_walls_from_sites_cancellable(
         limits.maximum_inspections,
     )?;
     let mut work = Work::new(limits.maximum_inspections, is_cancelled);
-    let in_canvas = in_canvas_sites(sites, canvas, &mut work)?;
-    let source_sites = canonical_source_sites(&in_canvas, &mut work)?;
+    let source_sites = canonical_source_sites(sites, &mut work)?;
     let positions = positions(&source_sites, &mut work)?;
     let bases = nominal_bases(&source_sites, &mut work)?;
     let arrangement_walls = source_walls(&source_sites, guide_axes, &positions, limits, &mut work)?;
@@ -512,37 +511,6 @@ impl<'a> Work<'a> {
         ))?;
         Ok(())
     }
-}
-
-/// Selects every exact family site inside or on the document canvas before maze topology.
-///
-/// Inclusive site authority preserves actual guide intersections on canvas edges. Later face
-/// extraction uses only bounded faces from this candidate arrangement and never creates a canvas
-/// edge, site, wall, or face.
-fn in_canvas_sites(
-    sites: &[FamilySite],
-    canvas: Bounds,
-    work: &mut Work<'_>,
-) -> Result<Vec<FamilySite>, MazeError> {
-    let mut count = 0_usize;
-    for site in sites {
-        work.tick()?;
-        if canvas.contains(site.position) {
-            count = count.checked_add(1).ok_or(MazeError::new(
-                "maze.allocation",
-                "in-canvas site count overflows",
-            ))?;
-        }
-    }
-    let mut values = Vec::new();
-    reserve(&mut values, count, "in-canvas site allocation failed")?;
-    for site in sites {
-        work.tick()?;
-        if canvas.contains(site.position) {
-            values.push(site.clone());
-        }
-    }
-    Ok(values)
 }
 
 /// Reserves one material maze vector through a stable allocation-error mapping.

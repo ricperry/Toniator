@@ -294,7 +294,11 @@ fn video_recovery_preserves_frames_until_successful_copy_or_discard() {
     let copied = recovery
         .save_png_sequence(&scratch.path.join("saved-frames"), &cancelled, &|_| {})
         .unwrap();
-    assert_eq!(fs::read(copied.join("frame-000001.png")).unwrap(), expected);
+    assert!(copied.publication_warning.is_none() && copied.cleanup_warning.is_none());
+    assert_eq!(
+        fs::read(copied.directory.join("frame-000001.png")).unwrap(),
+        expected
+    );
     assert!(!retained.exists());
     assert!(recovery.frames_path().is_none());
     let mut second_job = job.clone();

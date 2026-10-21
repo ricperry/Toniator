@@ -8,12 +8,16 @@ use serde::{Serialize, Serializer, ser::SerializeStruct};
 use toniator_domain::{GuideDimensionId, PatternMechanismId};
 
 mod canonical_regions;
+mod construction;
+pub use construction::{ConstructionMode, ConstructionContext, ConstructionGuard, ConstructionMeasurements, ConstructionMetrics, ConstructionCounter, MaterializationCoverage, CANVAS_MATERIALIZATION_CONTRACT, construction_bounds};
 mod connection_paths;
 mod curves;
 mod guide_faces;
 mod guides;
 mod maze_walls;
 mod outlines;
+mod prepared_marks;
+pub use prepared_marks::{PreparedMarkPrototype, DeferredPathMark, prepared_mark_point, prepared_mark_hulls, transform_prepared_mark};
 mod path_offsets;
 mod planar_arrangement;
 mod region_treatment;
@@ -33,12 +37,13 @@ pub use connection_paths::{
     CONNECTION_PRIM_SELECTION_CONTRACT_ID, CONNECTION_RANDOM_SELECTION_CONTRACT_ID,
     CONNECTION_TRAIL_CONTRACT_ID, ConnectionPath, ConnectionPathDiagnostics, ConnectionPathError,
     ConnectionPathId, ConnectionPathLimits, ConnectionPathSet, build_connection_paths_cancellable,
-    connection_program_contract_id,
+    connection_program_contract_id, build_connection_paths_with_selection_cancellable,
 };
 pub use curves::{
-    CubicBezierSegment, CurveError, CurvePath, CurveSegment, CurveWorkLimits, IntersectionKind, IntersectionWorkLimits, LineSegment,
+    ArcLengthWorkLimits, CubicBezierSegment, CurveError, CurvePath, CurveSegment, CurveWorkLimits, IntersectionKind, IntersectionWorkLimits, LineSegment,
     PathArcLength, PathClosure, PathIntersection, PathLocation, SegmentIntersection,
     construct_parametric_curve_path_cancellable, construct_parametric_curve_path_with_limits_cancellable,
+    extend_parametric_curve_path_with_limits_cancellable,
 };
 pub use guide_faces::{
     GUIDE_FACE_CONTRACT_ID, GuideFaceDiagnostics, GuideFaceError, GuideFaceLimits,
@@ -55,7 +60,7 @@ pub use maze_walls::{
     build_maze_walls_cancellable, build_maze_walls_from_sites_cancellable,
 };
 pub use outlines::{
-    CanonicalFilledOutline, CanonicalOutlineContour, VariableWidthOutlineLimits,
+    CanonicalFilledOutline, CanonicalOutlineContour, PreparedVariableWidthOutline, materialize_prepared_outline_cancellable, VariableWidthOutlineLimits,
     VariableWidthPathSample, build_variable_width_outline_cancellable,
 };
 pub(crate) use path_offsets::offset_path_with_work_region_round_cancellable;
@@ -925,6 +930,14 @@ pub enum CanonicalStrokeSourceId {
     Maze(MazeWallPathId),
 }
 
+/// One connected output's strokes and surviving ordinary singleton circles.
+/// These collections share output paint and topology authority; circles are not zero-length strokes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CanonicalConnections {
+    pub strokes: Vec<CanonicalStroke>,
+    pub isolated_points: Vec<CanonicalMark>,
+}
+
 /// Ordered canonical stroke geometry derived from exactly one structural or connection path.
 ///
 /// The original centerline remains immutable and is never clipped by this value.
@@ -1185,6 +1198,8 @@ pub enum CanonicalMark {
         fill_rule: CanonicalFillRule,
     },
     ClosedPath(CanonicalPathMark),
+    /// Retains a resolved semantic mark without constructing its certified exterior path.
+    DeferredPath(std::sync::Arc<DeferredPathMark>),
 }
 
 impl CanonicalCircleMark {

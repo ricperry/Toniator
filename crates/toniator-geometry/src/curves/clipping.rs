@@ -127,7 +127,10 @@ fn clip_segment(
     }
 }
 
-/// Implements Liang-Barsky clipping for one finite source line.
+/// Clips one finite line with Liang-Barsky while retaining exact included source endpoints.
+/// Only genuine rectangle contacts use existing boundary snapping; no near-node welding occurs.
+/// # Errors
+/// Returns existing finite arithmetic or line-construction diagnostics without partial geometry.
 fn clip_line(line: LineSegment, bounds: Bounds) -> Result<Option<CurveSegment>, CurveError> {
     let dx = line.end().x - line.start().x;
     let dy = line.end().y - line.start().y;
@@ -164,11 +167,19 @@ fn clip_line(line: LineSegment, bounds: Bounds) -> Result<Option<CurveSegment>, 
     start = start.clamp(0.0, 1.0);
     end = end.clamp(0.0, 1.0);
     let start_point = snap_to_bounds(
-        Point2::new(line.start().x + dx * start, line.start().y + dy * start),
+        if start == 0.0 {
+            line.start()
+        } else {
+            Point2::new(line.start().x + dx * start, line.start().y + dy * start)
+        },
         bounds,
     );
     let end_point = snap_to_bounds(
-        Point2::new(line.start().x + dx * end, line.start().y + dy * end),
+        if end == 1.0 {
+            line.end()
+        } else {
+            Point2::new(line.start().x + dx * end, line.start().y + dy * end)
+        },
         bounds,
     );
     if start == end && (line.start() != line.end() || !bounds.contains(line.start())) {

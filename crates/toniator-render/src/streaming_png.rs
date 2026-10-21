@@ -1,6 +1,7 @@
 //! Global canonical preparation and bounded row-band PNG consumption.
 
 use super::*;
+use crate::GeometryOutputPart;
 use std::io::{self, Write};
 
 // Two f64 linear RGBA buffers plus the final straight RGBA bytes, with headroom below 64 MiB.
@@ -114,6 +115,7 @@ pub struct PngStreamSummary {
 /// Prepares geometry once and streams exact straight-sRGBA bands to a caller-owned PNG sink.
 ///
 /// Full output coordinates govern flattening, Boolean normalization, sample phase, and paint order.
+/// The resolved finite positive target frame is checked before geometry materialization.
 /// Progress reports completed global rows after preparation and after each encoded band. The sink
 /// can contain partial PNG bytes on error; callers publish only a successful completed staging file.
 /// Optional binary alpha is local pixel preparation and never applies global artistic cleanup.
@@ -150,15 +152,12 @@ pub fn write_png_streaming<W: Write>(
         offset_x: 0.0,
         offset_y: 0.0,
     };
-    if ![transform.scale_x, transform.scale_y]
-        .into_iter()
-        .all(f64::is_finite)
-    {
-        return Err(RenderError::new(
-            "png.target",
-            "output transform is not finite",
-        ));
-    }
+    transform
+        .validate()
+        .map_err(|_| RenderError::new("png.target", "output transform is not finite"))?;
+    let prepared_scene = super::materialization::prepare_scene(scene, is_cancelled)?;
+    let scene = prepared_scene.as_ref();
+
     let mut layers = Vec::new();
     for layer in &scene.layers {
         work.check()?;
@@ -328,9 +327,9 @@ struct SampledPaint {
     opacity: f64,
 }
 
-/// Preserves each existing AA-off primitive's arithmetic rather than substituting area AA.
+/// Retains AA-off primitives and certified sampled decisions without substituting area AA.
 enum SampledShape {
-    Ellipse([f64; 4]),
+    Ellipse(MappedSampledEllipse),
     Polygon {
         edges: Vec<(Point2, Point2)>,
         even_odd: bool,
@@ -338,14 +337,11 @@ enum SampledShape {
     Stroke(Vec<OutlineRowEdgeStart>),
 }
 
-/// Computes the same conservative complete-target bounds used by the original primitive walker.
-fn sample_bounds(min: Point2, max: Point2, margin: f64, target: StreamingRasterTarget) -> [u32; 4] {
-    [
-        (min.x - margin).floor().max(0.0) as u32,
-        (min.y - margin).floor().max(0.0) as u32,
-        (max.x + margin).ceil().min(f64::from(target.width)) as u32,
-        (max.y + margin).ceil().min(f64::from(target.height)) as u32,
-    ]
+/// Computes original complete-target sampled bounds with shared finite-arithmetic validation.
+/// # Errors
+/// Returns the sampled-numeric diagnostic before support is clamped or cast into pixel indices.
+fn sample_bounds(min: Point2, max: Point2, margin: f64, target: StreamingRasterTarget) -> Result<[u32; 4], RenderError> {
+    sampled_raster_bounds(min, max, margin, target.width, target.height)
 }
 
 /// Appends one original sampled primitive using fallible storage growth and unchanged paint.
@@ -376,7 +372,8 @@ fn push_sampled(
     Ok(())
 }
 
-/// Captures a transformed ellipse without changing its original normalized-distance test.
+/// Captures one mapped ellipse with authored-zero authority and outward canonical support.
+/// The nominal distance test remains intact after provably outside samples are excluded.
 ///
 /// # Errors
 /// Returns cancellation or fallible prepared-storage allocation errors.
@@ -384,6 +381,7 @@ fn push_sampled(
     clippy::too_many_arguments,
     reason = "original ellipse and capture authorities remain explicit"
 )]
+/// Returns `raster.sample.numeric` for nonfinite mapped/support or sampled flattening arithmetic.
 fn prepare_ellipse(
     paints: &mut Vec<SampledPaint>,
     center: Point2,
@@ -394,18 +392,21 @@ fn prepare_ellipse(
     opacity: f64,
     work: &RasterWork<'_>,
 ) -> Result<(), RenderError> {
-    let center = transform.point(center);
-    let rx = radius * transform.scale_x;
-    let ry = radius * transform.scale_y;
-    let bounds = sample_bounds(
-        Point2::new(center.x - rx, center.y - ry),
-        Point2::new(center.x + rx, center.y + ry),
-        1.0,
-        target,
-    );
+    work.check()?;
+    let Some(ellipse) = mapped_sampled_ellipse(center, radius, transform)? else {
+        return Ok(());
+    };
+    let bounds = sampled_ellipse_bounds(
+        ellipse.center.x,
+        ellipse.center.y,
+        ellipse.radius_x,
+        ellipse.radius_y,
+        target.width,
+        target.height,
+    )?;
     push_sampled(
         paints,
-        SampledShape::Ellipse([center.x, center.y, rx, ry]),
+        SampledShape::Ellipse(ellipse),
         bounds,
         color,
         opacity,
@@ -415,11 +416,12 @@ fn prepare_ellipse(
 
 /// Flattens each original AA-off path once under the same request-wide edge authority.
 ///
-/// Marks retain even-odd point tests, regions retain nonzero point tests, and strokes retain the
+/// Marks retain their canonical fill rule, regions retain nonzero point tests, and strokes retain the
 /// existing active-edge scanline arithmetic. Canonical source geometry and clipping remain intact.
 ///
 /// # Errors
 /// Returns cancellation, flattening limits/precision, or fallible allocation errors.
+/// Returns `raster.sample.numeric` for nonfinite mapped/support or sampled flattening arithmetic.
 fn prepare_sampled_layer(
     layer: &RenderLayer,
     target: StreamingRasterTarget,
@@ -432,101 +434,105 @@ fn prepare_sampled_layer(
     }
     for output in &layer.outputs {
         work.check()?;
-        match output.geometry() {
-            GeometryOutput::CircularMarks(marks) => {
-                for (index, mark) in marks.iter().enumerate() {
-                    prepare_ellipse(
-                        &mut paints,
-                        mark.center,
-                        mark.radius,
-                        transform,
-                        target,
-                        output_primitive_paint(layer, Some(output), index),
-                        layer.opacity,
-                        work,
-                    )?;
-                }
-            }
-            GeometryOutput::CanonicalMarks(marks) => {
-                for (index, mark) in marks.iter().enumerate() {
-                    let color = output_primitive_paint(layer, Some(output), index);
-                    match mark {
-                        CanonicalMark::Circle { center, radius, .. } => prepare_ellipse(
+        for part in output.geometry().parts() {
+            match part {
+                GeometryOutputPart::CircularMarks(marks) => {
+                    for (index, mark) in marks.iter().enumerate() {
+                        prepare_ellipse(
                             &mut paints,
-                            *center,
-                            *radius,
+                            mark.center,
+                            mark.radius,
                             transform,
                             target,
-                            color,
+                            output_primitive_paint(layer, Some(output), index),
                             layer.opacity,
                             work,
-                        )?,
-                        CanonicalMark::ClosedPath(path) => {
-                            let edges = flattened_path_edges(&path.path, transform, work)?;
-                            let bounds = sample_bounds(
-                                transform.point(path.bounds.min),
-                                transform.point(path.bounds.max),
-                                1.0 / 64.0,
-                                target,
-                            );
-                            push_sampled(
+                        )?;
+                    }
+                }
+                GeometryOutputPart::CanonicalMarks(marks) => {
+                    for (index, mark) in marks.iter().enumerate() {
+                        let color = output_primitive_paint(layer, Some(output), index);
+                        match mark {
+CanonicalMark::DeferredPath(_) => {},
+
+                            CanonicalMark::Circle { center, radius, .. } => prepare_ellipse(
                                 &mut paints,
-                                SampledShape::Polygon {
-                                    edges,
-                                    even_odd: true,
-                                },
-                                bounds,
+                                *center,
+                                *radius,
+                                transform,
+                                target,
                                 color,
                                 layer.opacity,
                                 work,
-                            )?;
+                            )?,
+                            CanonicalMark::ClosedPath(path) => {
+                                let edges = flattened_path_edges(&path.path, transform, work)?;
+                                let bounds = sample_bounds(
+                                    transform.point(path.bounds.min),
+                                    transform.point(path.bounds.max),
+                                    1.0 / 64.0,
+                                    target,
+                                )?;
+                                push_sampled(
+                                    &mut paints,
+                                    SampledShape::Polygon {
+                                        edges,
+                                        even_odd: path.fill_rule == CanonicalFillRule::EvenOdd,
+                                    },
+                                    bounds,
+                                    color,
+                                    layer.opacity,
+                                    work,
+                                )?;
+                            }
                         }
                     }
                 }
-            }
-            GeometryOutput::CanonicalRegions(regions) => {
-                for (index, region) in regions.regions().iter().enumerate() {
-                    let edges = flattened_path_edges(&region.ring, transform, work)?;
-                    let bounds = sample_bounds(
-                        transform.point(region.bounds.min),
-                        transform.point(region.bounds.max),
-                        1.0,
-                        target,
-                    );
-                    push_sampled(
-                        &mut paints,
-                        SampledShape::Polygon {
-                            edges,
-                            even_odd: false,
-                        },
-                        bounds,
-                        output_primitive_paint(layer, Some(output), index),
-                        layer.opacity,
-                        work,
-                    )?;
+                GeometryOutputPart::CanonicalRegions(regions) => {
+                    for (index, region) in regions.regions().iter().enumerate() {
+                        let edges = flattened_path_edges(&region.ring, transform, work)?;
+                        let bounds = sample_bounds(
+                            transform.point(region.bounds.min),
+                            transform.point(region.bounds.max),
+                            1.0,
+                            target,
+                        )?;
+                        push_sampled(
+                            &mut paints,
+                            SampledShape::Polygon {
+                                edges,
+                                even_odd: false,
+                            },
+                            bounds,
+                            output_primitive_paint(layer, Some(output), index),
+                            layer.opacity,
+                            work,
+                        )?;
+                    }
                 }
-            }
-            GeometryOutput::CanonicalStrokes(strokes) => {
-                for stroke in strokes {
-                    let Some(bounds) = stroke.outline.bounds else {
-                        continue;
-                    };
-                    let bounds = sample_bounds(
-                        transform.point(bounds.min),
-                        transform.point(bounds.max),
-                        1.0,
-                        target,
-                    );
-                    let edges = flattened_outline_edges(&stroke.outline, transform, work)?;
-                    let starts = outline_row_edge_starts(&edges, bounds[1], bounds[3], work)?;
-                    push_sampled(
-                        &mut paints,
-                        SampledShape::Stroke(starts),
-                        bounds,
-                        &layer.color,
-                        layer.opacity,
-                        work,
-                    )?;
+                GeometryOutputPart::CanonicalStrokes(strokes) => {
+                    for stroke in strokes {
+                        let Some(bounds) = stroke.outline.bounds else {
+                            continue;
+                        };
+                        let bounds = sample_bounds(
+                            transform.point(bounds.min),
+                            transform.point(bounds.max),
+                            1.0,
+                            target,
+                        )?;
+                        let edges = flattened_outline_edges(&stroke.outline, transform, work)?;
+                        let starts = outline_row_edge_starts(&edges, bounds[1], bounds[3], work)?;
+                        push_sampled(
+                            &mut paints,
+                            SampledShape::Stroke(starts),
+                            bounds,
+                            &layer.color,
+                            layer.opacity,
+                            work,
+                        )?;
+                    }
                 }
             }
         }
@@ -563,11 +569,8 @@ fn paint_sampled_band(
                     work.check()?;
                     for x in x0..x1 {
                         let coverage = match shape {
-                            SampledShape::Ellipse([cx, cy, rx, ry]) => ellipse_coverage(
-                                *cx,
-                                *cy,
-                                *rx,
-                                *ry,
+                            SampledShape::Ellipse(ellipse) => ellipse_coverage(
+                                *ellipse,
                                 x,
                                 y,
                                 RasterAntialiasing::Off,
@@ -631,6 +634,7 @@ fn paint_stroke_band(
         .map_err(|_| RenderError::new("raster.allocation", "stroke row-end allocation failed"))?;
     let mut covered = Vec::new();
     let mut crossings = Vec::new();
+    let mut uncertain = Vec::new();
     let mut next = 0;
     for y in start..end {
         work.check()?;
@@ -643,6 +647,7 @@ fn paint_stroke_band(
             1,
             &mut covered,
             &mut crossings,
+            &mut uncertain,
             work,
         )?;
         for &(x, coverage) in &covered {

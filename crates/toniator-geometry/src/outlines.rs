@@ -1,6 +1,8 @@
 //! Renderer-independent conversion of variable-width centerlines into filled outlines.
 
 use crate::curves::{check_curve_cancelled, reserve_curve};
+use crate::{ConstructionContext, ConstructionCounter, MaterializationCoverage};
+use std::sync::Arc;
 
 use crate::{
     Bounds, CanonicalFillRule, CubicBezierSegment, CurveError, CurvePath, CurveSegment,
@@ -29,12 +31,37 @@ pub struct CanonicalOutlineContour {
 /// Immutable nonzero filled geometry derived from one variable-width centerline.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalFilledOutline {
+    /// Complete original procedural command count, independent of certified segment omission.
+    pub full_segment_count: Option<usize>,
+    /// Complete globally compacted, source-free preparation for compatible reuse or full fallback.
+    pub prepared: Option<Arc<PreparedVariableWidthOutline>>,
+    /// Names the canvas contract of any omitted exterior materialization.
+    pub coverage: MaterializationCoverage,
     /// Ordered independent contours; empty means an all-zero-width stroke.
     pub contours: Vec<CanonicalOutlineContour>,
     /// The fixed semantic required to retain self-overlap without Boolean cleanup.
     pub fill_rule: CanonicalFillRule,
     /// Finite derived bounds, absent only for an empty all-zero outline.
     pub bounds: Option<Bounds>,
+}
+
+impl CanonicalFilledOutline {
+    /// Charges complete original procedural commands while retaining actual storage as a lower bound.
+    /// # Errors
+    /// Returns the original segment-limit authority if stored contour accounting overflows.
+    pub fn logical_segment_count(&self) -> Result<usize, CurveError> {
+        let actual = self
+            .contours
+            .iter()
+            .try_fold(0_usize, |total, contour| {
+                total.checked_add(contour.segments.len())
+            })
+            .ok_or(CurveError::new(
+                "curve.outline.segment_limit",
+                "outline segment accounting overflows",
+            ))?;
+        Ok(self.full_segment_count.unwrap_or(actual).max(actual))
+    }
 }
 
 /// Bounded allocation policy for one reusable variable-width outline request.
@@ -122,6 +149,9 @@ pub fn build_variable_width_outline_cancellable(
     }
     if all_zero {
         return Ok(CanonicalFilledOutline {
+            full_segment_count: Some(0),
+            prepared: None,
+            coverage: MaterializationCoverage::Complete,
             contours: Vec::new(),
             fill_rule: CanonicalFillRule::NonZero,
             bounds: None,
@@ -147,8 +177,7 @@ pub fn build_variable_width_outline_cancellable(
     } else {
         samples
     };
-    let mut contours = Vec::new();
-    let mut remaining_segments = limits.maximum_segments();
+    let mut runs = Vec::new();
     let mut start = 0_usize;
     while start < samples.len() {
         if is_cancelled() {
@@ -178,54 +207,31 @@ pub fn build_variable_width_outline_cancellable(
         };
         let run =
             simplify_positive_run(path, &samples[run_start..run_end], tolerance, is_cancelled)?;
-        if run.len() == 1 {
-            reserve_curve(&mut contours, 1)?;
-            contours.push(single_sample_disc(
-                path,
-                run[0],
-                bias,
-                &mut remaining_segments,
-                is_cancelled,
-            )?);
-        } else {
-            let run_contours = build_positive_run(
-                path,
-                &run,
-                bias,
-                path.closure() == PathClosure::Closed && start == 0 && end == samples.len(),
-                &mut remaining_segments,
-                is_cancelled,
-            )?;
-            for contour in run_contours {
-                check_curve_cancelled(is_cancelled)?;
-                reserve_curve(&mut contours, 1)?;
-                contours.push(contour);
-            }
+        let mut vertices = Vec::new();
+        for sample in &run {
+            check_curve_cancelled(is_cancelled)?;
+            reserve_curve(&mut vertices, 1)?;
+            vertices.push(outline_vertex(path, *sample, bias)?);
         }
+        reserve_curve(&mut runs, 1)?;
+        runs.push(PreparedOutlineRun {
+            vertices,
+            closed: path.closure() == PathClosure::Closed && start == 0 && end == samples.len(),
+        });
         start = end;
     }
-    let mut extrema: Option<(Point2, Point2)> = None;
-    for contour in &contours {
-        for segment in &contour.segments {
-            check_curve_cancelled(is_cancelled)?;
-            for point in outline_segment_points(segment) {
-                if let Some((min, max)) = extrema.as_mut() {
-                    min.x = min.x.min(point.x);
-                    min.y = min.y.min(point.y);
-                    max.x = max.x.max(point.x);
-                    max.y = max.y.max(point.y);
-                } else {
-                    extrema = Some((point, point));
-                }
-            }
-        }
+    let context = ConstructionContext::current();
+    context.count_storage(ConstructionCounter::PreparedOutlineBytes, &runs);
+    for run in &runs {
+        context.count_storage(ConstructionCounter::PreparedOutlineBytes, &run.vertices);
     }
-    let bounds = extrema.and_then(|(min, max)| Bounds::new(min, max));
-    Ok(CanonicalFilledOutline {
-        contours,
-        fill_rule: CanonicalFillRule::NonZero,
-        bounds,
-    })
+    let prepared = Arc::new(PreparedVariableWidthOutline { runs });
+    materialize_prepared_outline_cancellable(
+        prepared,
+        ConstructionContext::current().coverage(),
+        limits,
+        is_cancelled,
+    )
 }
 
 /// Validates finite exact width samples in nondecreasing authored path order.
@@ -268,11 +274,180 @@ fn validate_samples(
     Ok(())
 }
 
+/// Immutable complete compacted vertices; materialization never samples artwork or changes runs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreparedVariableWidthOutline {
+    runs: Vec<PreparedOutlineRun>,
+}
+/// One original zero-separated positive run, including its unchanged closed seam authority.
+#[derive(Clone, Debug, PartialEq)]
+struct PreparedOutlineRun {
+    vertices: Vec<OutlineVertex>,
+    closed: bool,
+}
+
+/// Materializes complete prepared runs without changing original primitive arithmetic.
+/// # Errors
+/// Returns cancellation, numeric, allocation or explicit segment-policy failures atomically.
+pub fn materialize_prepared_outline_cancellable(
+    prepared: Arc<PreparedVariableWidthOutline>,
+    coverage: MaterializationCoverage,
+    limits: VariableWidthOutlineLimits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CanonicalFilledOutline, CurveError> {
+    let context = ConstructionContext::current();
+    let mut endpoints = EndpointScan(None);
+    let mut full_segment_count = None;
+    if !matches!(coverage, MaterializationCoverage::Complete) {
+        let mut ignored = limits.maximum_segments();
+        for run in &prepared.runs {
+            for side in 0..if run.closed && run.vertices.len() > 1 {
+                2
+            } else {
+                1
+            } {
+                check_curve_cancelled(cancelled)?;
+                emit_prepared_run(run, side, &mut endpoints, &mut ignored, cancelled)?;
+            }
+        }
+        full_segment_count = Some(limits.maximum_segments() - ignored);
+    }
+    let mut contours = Vec::new();
+    let mut any_pruned = false;
+    let mut remaining = limits.maximum_segments();
+    for run in &prepared.runs {
+        check_curve_cancelled(cancelled)?;
+        for side in 0..if run.closed && run.vertices.len() > 1 {
+            2
+        } else {
+            1
+        } {
+            let mut sink = MaterializingSink {
+                segments: Vec::new(),
+                coverage,
+                endpoints: endpoints.0,
+                pending: None,
+                pruned: false,
+                context: context.clone(),
+            };
+            emit_prepared_run(run, side, &mut sink, &mut remaining, cancelled)?;
+            sink.flush(&mut remaining)?;
+            any_pruned |= sink.pruned;
+            if !sink.segments.is_empty() {
+                reserve_curve(&mut contours, 1)?;
+                contours.push(CanonicalOutlineContour {
+                    segments: sink.segments,
+                });
+            }
+        }
+    }
+    let mut extrema: Option<(Point2, Point2)> = None;
+    for contour in &contours {
+        for segment in &contour.segments {
+            check_curve_cancelled(cancelled)?;
+            for point in outline_segment_points(segment) {
+                if let Some((min, max)) = &mut extrema {
+                    min.x = min.x.min(point.x);
+                    min.y = min.y.min(point.y);
+                    max.x = max.x.max(point.x);
+                    max.y = max.y.max(point.y);
+                } else {
+                    extrema = Some((point, point));
+                }
+            }
+        }
+    }
+    context.count_storage(ConstructionCounter::OutlineIndexBytes, &contours);
+    Ok(CanonicalFilledOutline {
+        full_segment_count: Some(
+            full_segment_count.unwrap_or(limits.maximum_segments() - remaining),
+        ),
+        contours,
+        fill_rule: CanonicalFillRule::NonZero,
+        bounds: extrema.and_then(|(min, max)| Bounds::new(min, max)),
+        prepared: Some(prepared),
+        coverage: if any_pruned {
+            coverage
+        } else {
+            MaterializationCoverage::Complete
+        },
+    })
+}
+/// Emits one original contour from globally prepared vertices, preserving caps, seams and winding.
+/// # Errors
+/// Propagates cancellation and original primitive-construction diagnostics.
+fn emit_prepared_run(
+    run: &PreparedOutlineRun,
+    side: usize,
+    segments: &mut impl OutlineEmitter,
+    remaining: &mut usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), CurveError> {
+    let v = &run.vertices;
+    if v.len() == 1 {
+        let p = v[0];
+        let forward = add(p.center, p.tangent.scale(p.half_width));
+        let backward = add(p.center, p.tangent.scale(-p.half_width));
+        for (a, b) in [
+            (p.left, forward),
+            (forward, p.right),
+            (p.right, backward),
+            (backward, p.left),
+        ] {
+            check_curve_cancelled(cancelled)?;
+            push_round_arc(segments, p.center, a, b, true, remaining)?;
+        }
+    } else if run.closed {
+        if side == 0 {
+            for pair in v.windows(2) {
+                check_curve_cancelled(cancelled)?;
+                push_join_or_rail(segments, pair[0], pair[1], true, remaining)?;
+            }
+            push_join_or_rail(segments, v[v.len() - 1], v[0], true, remaining)?;
+        } else {
+            for i in (1..v.len()).rev() {
+                check_curve_cancelled(cancelled)?;
+                push_join_or_rail(segments, v[i], v[i - 1], false, remaining)?;
+            }
+            push_join_or_rail(segments, v[0], v[v.len() - 1], false, remaining)?;
+        }
+    } else {
+        for pair in v.windows(2) {
+            check_curve_cancelled(cancelled)?;
+            push_join_or_rail(segments, pair[0], pair[1], true, remaining)?;
+        }
+        let last = v[v.len() - 1];
+        let first = v[0];
+        push_round_cap(
+            segments,
+            last.left,
+            last.right,
+            last.tangent,
+            true,
+            remaining,
+        )?;
+        for pair in v.windows(2).rev() {
+            check_curve_cancelled(cancelled)?;
+            push_join_or_rail(segments, pair[1], pair[0], false, remaining)?;
+        }
+        push_round_cap(
+            segments,
+            first.right,
+            first.left,
+            first.tangent,
+            false,
+            remaining,
+        )?;
+    }
+    Ok(())
+}
+
 /// Builds a closed circular outline for one positive zero-length run.
 ///
 /// # Errors
 ///
 /// Returns cancellation, tangent, numeric, or segment-limit diagnostics without a partial contour.
+#[allow(dead_code)]
 fn single_sample_disc(
     path: &CurvePath,
     sample: VariableWidthPathSample,
@@ -333,6 +508,7 @@ fn single_sample_disc(
 /// # Errors
 ///
 /// Returns cancellation, tangent, numeric, or segment-limit diagnostics without a partial contour.
+#[allow(dead_code)]
 fn build_positive_run(
     path: &CurvePath,
     samples: &[VariableWidthPathSample],
@@ -399,6 +575,7 @@ fn build_positive_run(
 /// # Errors
 ///
 /// Returns cancellation, numeric, or segment-limit diagnostics without a partial contour.
+#[allow(dead_code)]
 fn build_closed_rail(
     vertices: &[OutlineVertex],
     left: bool,
@@ -620,7 +797,7 @@ fn outline_vertex(
 ///
 /// Returns finite-coordinate or segment-limit errors without leaving a partial contour.
 fn push_join_or_rail(
-    segments: &mut Vec<CurveSegment>,
+    segments: &mut impl OutlineEmitter,
     first: OutlineVertex,
     second: OutlineVertex,
     left: bool,
@@ -652,7 +829,7 @@ fn push_join_or_rail(
 ///
 /// Returns the segment-limit or finite-coordinate error before appending a partial contour.
 fn push_rail(
-    segments: &mut Vec<CurveSegment>,
+    segments: &mut impl OutlineEmitter,
     start: Point2,
     end: Point2,
     remaining_segments: &mut usize,
@@ -674,21 +851,12 @@ fn push_rail(
 ///
 /// Returns the segment-limit or finite-coordinate diagnostic before mutating the contour.
 fn push_line(
-    segments: &mut Vec<CurveSegment>,
+    segments: &mut impl OutlineEmitter,
     start: Point2,
     end: Point2,
     remaining_segments: &mut usize,
 ) -> Result<(), CurveError> {
-    if *remaining_segments == 0 {
-        return Err(CurveError::new(
-            "curve.outline.segment_limit",
-            "variable-width outline exceeds the configured segment limit",
-        ));
-    }
-    reserve_curve(segments, 1)?;
-    segments.push(CurveSegment::Line(LineSegment::new(start, end)?));
-    *remaining_segments -= 1;
-    Ok(())
+    segments.emit(OutlineCommand::Line(start, end), remaining_segments)
 }
 
 /// Appends a true two-cubic semicircular endpoint cap.
@@ -697,7 +865,7 @@ fn push_line(
 ///
 /// Returns a finite-coordinate or segment-limit error before exposing a partial cap.
 fn push_round_cap(
-    segments: &mut Vec<CurveSegment>,
+    segments: &mut impl OutlineEmitter,
     start: Point2,
     end: Point2,
     tangent: Vector2,
@@ -721,7 +889,7 @@ fn push_round_cap(
 ///
 /// Returns a segment-limit or finite-coordinate error before mutating the destination contour.
 fn push_round_arc(
-    segments: &mut Vec<CurveSegment>,
+    segments: &mut impl OutlineEmitter,
     center: Point2,
     start: Point2,
     end: Point2,
@@ -785,25 +953,17 @@ fn push_round_arc(
 ///
 /// Returns a limit or finite-coordinate error before mutating the segment collection.
 fn push_cubic(
-    segments: &mut Vec<CurveSegment>,
+    segments: &mut impl OutlineEmitter,
     start: Point2,
     control_1: Point2,
     control_2: Point2,
     end: Point2,
     remaining_segments: &mut usize,
 ) -> Result<(), CurveError> {
-    if *remaining_segments == 0 {
-        return Err(CurveError::new(
-            "curve.outline.segment_limit",
-            "variable-width outline exceeds the configured segment limit",
-        ));
-    }
-    reserve_curve(segments, 1)?;
-    segments.push(CurveSegment::CubicBezier(CubicBezierSegment::new(
-        start, control_1, control_2, end,
-    )?));
-    *remaining_segments -= 1;
-    Ok(())
+    segments.emit(
+        OutlineCommand::Cubic(start, control_1, control_2, end),
+        remaining_segments,
+    )
 }
 
 /// Returns all construction points retained by one derived contour segment.
@@ -834,7 +994,7 @@ fn cancelled() -> CurveError {
 }
 
 /// Resolved paired rails and tangent data for one retained outline sample.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct OutlineVertex {
     center: Point2,
     left: Point2,
@@ -1027,4 +1187,176 @@ mod tests {
                 .all(|point| point.x.abs() <= 1.1 && point.y.abs() <= 1.1)
         );
     }
+}
+
+/// One original procedural primitive, represented on the stack before canonical construction.
+#[derive(Clone, Copy)]
+enum OutlineCommand {
+    Line(Point2, Point2),
+    Cubic(Point2, Point2, Point2, Point2),
+}
+impl OutlineCommand {
+    /// Returns the exact original directed endpoint pair.
+    fn ends(self) -> (Point2, Point2) {
+        match self {
+            Self::Line(a, b) | Self::Cubic(a, _, _, b) => (a, b),
+        }
+    }
+    /// Encloses every original control point outward, including arc handle bulges.
+    fn bounds(self) -> Option<Bounds> {
+        match self {
+            Self::Line(a, b) => crate::construction_bounds([a, b]),
+            Self::Cubic(a, b, c, d) => crate::construction_bounds([a, b, c, d]),
+        }
+    }
+    /// Constructs one original primitive only after its materialization decision.
+    /// # Errors
+    /// Propagates the unchanged finite-control-point diagnostic.
+    fn construct(self) -> Result<CurveSegment, CurveError> {
+        match self {
+            Self::Line(a, b) => Ok(CurveSegment::Line(LineSegment::new(a, b)?)),
+            Self::Cubic(a, b, c, d) => Ok(CurveSegment::CubicBezier(CubicBezierSegment::new(
+                a, b, c, d,
+            )?)),
+        }
+    }
+}
+/// A procedural sink can inspect an original command without allocating a canonical segment.
+trait OutlineEmitter {
+    /// Emits or certifiably replaces one command under the caller's actual storage policy.
+    /// # Errors
+    /// Propagates finite geometry, count or allocation diagnostics.
+    fn emit(&mut self, command: OutlineCommand, remaining: &mut usize) -> Result<(), CurveError>;
+}
+/// Preserves the complete direct helper route used by focused geometry tests.
+impl OutlineEmitter for Vec<CurveSegment> {
+    /// Constructs the unchanged command through checked fallible canonical storage.
+    /// # Errors
+    /// Propagates original finite-coordinate, reserve or policy diagnostics.
+    fn emit(&mut self, command: OutlineCommand, remaining: &mut usize) -> Result<(), CurveError> {
+        let context = ConstructionContext::current();
+        context.count(ConstructionCounter::OutlineCommands, 1);
+        emit_outline_command(self, command, remaining, &context)
+    }
+}
+/// Computes only the original endpoint extrema; no segment arrays or constructors are reached.
+struct EndpointScan(Option<Bounds>);
+impl OutlineEmitter for EndpointScan {
+    /// Retains the original endpoint envelope for quantization-frame anchor certification.
+    fn emit(&mut self, command: OutlineCommand, remaining: &mut usize) -> Result<(), CurveError> {
+        if *remaining == 0 {
+            return Err(CurveError::new(
+                "curve.outline.segment_limit",
+                "variable-width outline exceeds the configured segment limit",
+            ));
+        }
+        *remaining -= 1;
+        let (a, b) = command.ends();
+        for p in [a, b] {
+            self.0 = Some(match self.0 {
+                None => Bounds { min: p, max: p },
+                Some(v) => Bounds {
+                    min: Point2::new(v.min.x.min(p.x), v.min.y.min(p.y)),
+                    max: Point2::new(v.max.x.max(p.x), v.max.y.max(p.y)),
+                },
+            });
+        }
+        Ok(())
+    }
+}
+/// Streams materialized commands and common-half-plane exterior connectors in original contour order.
+struct MaterializingSink {
+    segments: Vec<CurveSegment>,
+    coverage: MaterializationCoverage,
+    endpoints: Option<Bounds>,
+    pending: Option<(Point2, Point2, u8)>,
+    pruned: bool,
+    context: ConstructionContext,
+}
+impl MaterializingSink {
+    /// Finishes a pending exterior excursion without inserting an endpoint cap.
+    /// # Errors
+    /// Propagates original finite/storage diagnostics before contour publication.
+    fn flush(&mut self, remaining: &mut usize) -> Result<(), CurveError> {
+        if let Some((a, b, _)) = self.pending.take()
+            && a != b
+        {
+            self.context
+                .count(ConstructionCounter::OutlineConnectors, 1);
+            emit_outline_command(
+                &mut self.segments,
+                OutlineCommand::Line(a, b),
+                remaining,
+                &self.context,
+            )?;
+        }
+        Ok(())
+    }
+}
+impl OutlineEmitter for MaterializingSink {
+    /// Preserves extrema-bearing originals and certifies each omitted command before construction.
+    /// # Errors
+    /// Returns finite/count/allocation failure without publishing a partial outline.
+    fn emit(&mut self, command: OutlineCommand, remaining: &mut usize) -> Result<(), CurveError> {
+        self.context.count(ConstructionCounter::OutlineCommands, 1);
+        let mask = command.bounds().map_or(0, |bounds| {
+            let anchor = self.endpoints.is_none_or(|e| {
+                bounds.min.x <= e.min.x
+                    || bounds.min.y <= e.min.y
+                    || bounds.max.x >= e.max.x
+                    || bounds.max.y >= e.max.y
+            });
+            if anchor {
+                0
+            } else {
+                self.coverage.exterior(bounds)
+            }
+        });
+        if mask != 0 {
+            self.pruned = true;
+            let (a, b) = command.ends();
+            if let Some((start, end, old)) = self.pending
+                && end == a
+                && old & mask != 0
+            {
+                self.pending = Some((start, b, old & mask));
+                return Ok(());
+            }
+            self.flush(remaining)?;
+            self.pending = Some((a, b, mask));
+            return Ok(());
+        }
+        self.flush(remaining)?;
+        emit_outline_command(&mut self.segments, command, remaining, &self.context)
+    }
+}
+/// Records real constructor/reserved-capacity work, rather than counting retained vector lengths.
+/// # Errors
+/// Returns finite/control, actual allocator or explicit segment-policy failures before append.
+fn emit_outline_command(
+    segments: &mut Vec<CurveSegment>,
+    command: OutlineCommand,
+    remaining: &mut usize,
+    context: &ConstructionContext,
+) -> Result<(), CurveError> {
+    if *remaining == 0 {
+        return Err(CurveError::new(
+            "curve.outline.segment_limit",
+            "variable-width outline exceeds the configured segment limit",
+        ));
+    }
+    let old = segments.capacity();
+    reserve_curve(segments, 1)?;
+    context.count(
+        ConstructionCounter::OutlineReservedBytes,
+        segments
+            .capacity()
+            .saturating_sub(old)
+            .saturating_mul(std::mem::size_of::<CurveSegment>()),
+    );
+    let segment = command.construct()?;
+    context.count(ConstructionCounter::OutlineConstructors, 1);
+    segments.push(segment);
+    *remaining -= 1;
+    Ok(())
 }

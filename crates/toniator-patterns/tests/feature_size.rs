@@ -67,7 +67,8 @@ fn random_definition(character: RandomSiteCharacter) -> PatternDefinition {
     )
 }
 
-/// Builds a finite parametric family with one raw path output and optional along-path sites.
+/// Builds an explicitly Fixed finite family with one raw path output and optional along-path sites.
+/// Validation remains the caller boundary; this constructor owns no derived geometry.
 fn parametric_definition(with_sites: bool) -> PatternDefinition {
     let curve_id = PatternMechanismId(821);
     let site_id = PatternMechanismId(822);
@@ -80,6 +81,7 @@ fn parametric_definition(with_sites: bool) -> PatternDefinition {
             phase_degrees: 0.0,
             winding: CurveWinding::CounterClockwise,
         }),
+        spiral_coverage: toniator_domain::SpiralCoveragePolicy::Fixed,
         repetition: GuideRepetition::Single,
     };
     let mut mechanisms = vec![curve];
@@ -107,6 +109,7 @@ fn parametric_definition(with_sites: bool) -> PatternDefinition {
             PatternOutputLayer::all(
                 PatternOutputLayerId(824),
                 PatternOutputRealization::ParametricPaths {
+                    tone_sample_spacing: Default::default(),
                     curve_mechanism_id: curve_id,
                     style: PathStrokeStyle::default(),
                 },

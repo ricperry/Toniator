@@ -1,10 +1,8 @@
 //! Source-independent opaque union of already realized canonical geometry.
 
 use super::{GeometryOutput, RasterizationLimits, RenderError, validate_canvas, validate_geometry};
-use i_overlay::{
-    core::{fill_rule::FillRule, overlay_rule::OverlayRule},
-    float::scale::FixedScaleFloatOverlay,
-};
+use crate::GeometryOutputPart;
+use i_overlay::core::{fill_rule::FillRule, overlay_rule::OverlayRule};
 use kurbo::{Circle, CubicBez, ParamCurve as _, PathEl, Point, Shape as _, flatten};
 use std::time::{Duration, Instant};
 use toniator_domain::CanvasSpec;
@@ -12,7 +10,6 @@ use toniator_geometry::{CanonicalFillRule, CanonicalMark, CurveSegment};
 
 type Contour = Vec<[f64; 2]>;
 type FilledShape = Vec<Contour>;
-type FilledShapes = Vec<FilledShape>;
 
 /// Two canvas-relative precision settings for independent vector measurements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +59,14 @@ pub fn measure_geometry_vector_occupancy(
     limits: RasterizationLimits,
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<VectorOccupancyMeasurement, RenderError> {
+    let prepared_geometry = super::prepare_geometry_for_canvas(
+        geometry,
+        canvas,
+        toniator_geometry::CANVAS_MATERIALIZATION_CONTRACT,
+        is_cancelled,
+    )?;
+    let geometry = prepared_geometry.as_ref();
+
     validate_canvas(canvas)?;
     validate_geometry(geometry)?;
     check_cancel(is_cancelled)?;
@@ -82,8 +87,13 @@ pub fn measure_geometry_vector_occupancy(
         ));
     }
     let budget = limits.max_flattened_edges();
-    let empty: Contour = Vec::new();
-    let mut normalized = FilledShapes::new();
+    let mut normalized = i_overlay::i_shape::int::shape::IntShapes::<i64>::new();
+    // The canvas origin owns one frame. Symmetric admission bounds keep the adapter origin
+    // exactly zero while retaining the existing coordinate guard and requested fixed scale.
+    let bound = (i64::MAX as f64 / 16.0) / scale;
+    let adapter = i_overlay::i_float::adapter::FloatPointAdapter::<[f64; 2], i64>::try_with_scale_conservative(
+        i_overlay::i_float::float::rect::FloatRect::new(-bound,bound,-bound,bound).map_err(|_|error("vector.precision.coordinate","invalid fixed canvas frame"))?,scale
+    ).map_err(|_|error("vector.precision.coordinate","invalid fixed canvas adapter"))?;
     let mut vertices = 0_usize;
     let mut append = |shape: Option<(FilledShape, FillRule)>| -> Result<(), RenderError> {
         check_cancel(is_cancelled)?;
@@ -115,117 +125,124 @@ pub fn measure_geometry_vector_occupancy(
             }
         }
         check_cancel(is_cancelled)?;
-        let mut one = shape
-            .overlay_with_fixed_scale_as::<i64>(&empty, OverlayRule::Subject, rule, scale)
-            .map_err(|_| {
-                error(
-                    "vector.overlay.primitive",
-                    "canonical primitive normalization failed",
-                )
-            })?;
+        let integer = quantize_contours(&shape, &adapter, is_cancelled)?;
+        let mut one = i_overlay::core::overlay::Overlay::<i64>::from_subj(&integer)
+            .overlay(OverlayRule::Subject, rule);
         check_cancel(is_cancelled)?;
+        reserve_integer_storage(&mut normalized, one.len())?;
         normalized.append(&mut one);
         Ok(())
     };
-    match geometry {
-        GeometryOutput::CircularMarks(marks) => {
-            for mark in marks {
-                check_cancel(is_cancelled)?;
-                append(circle_shape(
-                    mark.center.x,
-                    mark.center.y,
-                    mark.radius,
-                    axis,
-                    tolerance,
-                    budget,
-                    is_cancelled,
-                )?)?;
-            }
-        }
-        GeometryOutput::CanonicalMarks(marks) => {
-            for mark in marks {
-                check_cancel(is_cancelled)?;
-                let shape = match mark {
-                    CanonicalMark::Circle { center, radius, .. } => circle_shape(
-                        center.x,
-                        center.y,
-                        *radius,
+    for part in geometry.parts() {
+        match part {
+            GeometryOutputPart::CircularMarks(marks) => {
+                for mark in marks {
+                    check_cancel(is_cancelled)?;
+                    append(circle_shape(
+                        mark.center.x,
+                        mark.center.y,
+                        mark.radius,
                         axis,
                         tolerance,
                         budget,
                         is_cancelled,
-                    )?,
-                    CanonicalMark::ClosedPath(path) => Some((
+                    )?)?;
+                }
+            }
+            GeometryOutputPart::CanonicalMarks(marks) => {
+                for mark in marks {
+                    check_cancel(is_cancelled)?;
+                    let shape = match mark {
+                        CanonicalMark::DeferredPath(_) => None,
+
+                        CanonicalMark::Circle { center, radius, .. } => circle_shape(
+                            center.x,
+                            center.y,
+                            *radius,
+                            axis,
+                            tolerance,
+                            budget,
+                            is_cancelled,
+                        )?,
+                        CanonicalMark::ClosedPath(path) => Some((
+                            vec![flatten_contour(
+                                path.path.segments(),
+                                axis,
+                                tolerance,
+                                budget,
+                                is_cancelled,
+                            )?],
+                            fill_rule(path.fill_rule),
+                        )),
+                    };
+                    append(shape)?;
+                }
+            }
+            GeometryOutputPart::CanonicalStrokes(strokes) => {
+                for stroke in strokes {
+                    check_cancel(is_cancelled)?;
+                    if stroke.outline.contours.is_empty() {
+                        continue;
+                    }
+                    let mut shape = FilledShape::new();
+                    for contour in &stroke.outline.contours {
+                        shape.push(flatten_contour(
+                            &contour.segments,
+                            axis,
+                            tolerance,
+                            budget,
+                            is_cancelled,
+                        )?);
+                    }
+                    append(Some((shape, fill_rule(stroke.outline.fill_rule))))?;
+                }
+            }
+            GeometryOutputPart::CanonicalRegions(regions) => {
+                for region in regions.regions() {
+                    check_cancel(is_cancelled)?;
+                    append(Some((
                         vec![flatten_contour(
-                            path.path.segments(),
+                            region.ring.segments(),
                             axis,
                             tolerance,
                             budget,
                             is_cancelled,
                         )?],
-                        fill_rule(path.fill_rule),
-                    )),
-                };
-                append(shape)?;
-            }
-        }
-        GeometryOutput::CanonicalStrokes(strokes) => {
-            for stroke in strokes {
-                check_cancel(is_cancelled)?;
-                if stroke.outline.contours.is_empty() {
-                    continue;
+                        FillRule::NonZero,
+                    )))?;
                 }
-                let mut shape = FilledShape::new();
-                for contour in &stroke.outline.contours {
-                    shape.push(flatten_contour(
-                        &contour.segments,
-                        axis,
-                        tolerance,
-                        budget,
-                        is_cancelled,
-                    )?);
-                }
-                append(Some((shape, fill_rule(stroke.outline.fill_rule))))?;
-            }
-        }
-        GeometryOutput::CanonicalRegions(regions) => {
-            for region in regions.regions() {
-                check_cancel(is_cancelled)?;
-                append(Some((
-                    vec![flatten_contour(
-                        region.ring.segments(),
-                        axis,
-                        tolerance,
-                        budget,
-                        is_cancelled,
-                    )?],
-                    FillRule::NonZero,
-                )))?;
             }
         }
     }
     check_cancel(is_cancelled)?;
     let started = Instant::now();
-    let rect = vec![
+    let rect = [
         [0.0, 0.0],
         [normalized_canvas[0], 0.0],
         [normalized_canvas[0], normalized_canvas[1]],
         [0.0, normalized_canvas[1]],
     ];
-    // Primitive normalization makes each subject's winding nonnegative on its filled set.
-    // NonZero subject/clip intersection therefore computes union(subjects) intersect canvas
-    // directly, without materializing and requantizing an intermediate full union.
-    let clipped = normalized
-        .overlay_with_fixed_scale_as::<i64>(&rect, OverlayRule::Intersect, FillRule::NonZero, scale)
-        .map_err(|_| {
+    let [a, b, c, d] = rect.map(|point| {
+        adapter.try_float_to_int(&point).map_err(|_| {
             error(
-                "vector.overlay.clip",
-                "opaque union canvas intersection failed",
+                "vector.precision.coordinate",
+                "canvas coordinate is out of range",
             )
-        })?;
+        })
+    });
+    let integer_rect = [a?, b?, c?, d?];
+    // Primitive fill rules normalize independently before a common NonZero union/intersection.
+    // Keeping that entire computation on one integer grid avoids per-shape adapter shifts and
+    // an intermediate float round trip. Numerical flattening and the default solver are unchanged.
+    let clipped = i_overlay::core::overlay::Overlay::<i64>::from_subj_and_clip(
+        &normalized,
+        integer_rect.as_slice(),
+    )
+    .overlay(OverlayRule::Intersect, FillRule::NonZero);
     let union_duration = started.elapsed();
     check_cancel(is_cancelled)?;
-    let area = area_of_shapes(&clipped, is_cancelled)?;
+    let double_area = integer_area_twice(&clipped, is_cancelled)?;
+    let area = (double_area as f64 / 2.0) / (scale * scale);
     let fraction = area / canvas_area;
     if !fraction.is_finite() || !(-1e-8..=1.0 + 1e-8).contains(&fraction) {
         return Err(error(
@@ -495,39 +512,7 @@ fn flatten_elements(
     Ok(points)
 }
 
-/// Sums iOverlay-normalized outer/hole contours with finite shoelace arithmetic.
-///
-/// # Errors
-/// Rejects cancellation, degenerate library results, or nonfinite area.
-fn area_of_shapes(
-    shapes: &FilledShapes,
-    cancelled: &(dyn Fn() -> bool + Sync),
-) -> Result<f64, RenderError> {
-    let mut total = 0.0;
-    for shape in shapes {
-        check_cancel(cancelled)?;
-        if shape.is_empty() {
-            return Err(error("vector.area", "union has an empty filled shape"));
-        }
-        let mut shape_area = 0.0;
-        for contour in shape {
-            if contour.len() < 3 {
-                return Err(error("vector.area", "union has a degenerate contour"));
-            }
-            let mut signed = 0.0;
-            for (index, point) in contour.iter().enumerate() {
-                let next = contour[(index + 1) % contour.len()];
-                signed += point[0] * next[1] - next[0] * point[1];
-            }
-            shape_area += signed * 0.5;
-        }
-        total += shape_area.abs();
-        if !total.is_finite() {
-            return Err(error("vector.area", "union area is not finite"));
-        }
-    }
-    Ok(total)
-}
+
 
 /// Polls cancellation before a library call or canonical primitive.
 ///
@@ -559,7 +544,7 @@ mod tests {
     };
 
     /// Returns one opaque fixture mark with identity irrelevant to vector occupancy.
-    fn circle(ordinal: usize, x: f64, y: f64, radius: f64) -> CanonicalMark {
+    pub(super) fn circle(ordinal: usize, x: f64, y: f64, radius: f64) -> CanonicalMark {
         CanonicalMark::Circle {
             source_site_id: FamilySiteId {
                 mechanism_id: PatternMechanismId(1),
@@ -873,7 +858,7 @@ mod tests {
         fn stroke(contours: Vec<CurvePath>) -> CanonicalStroke {
             let bounds = contours[0].bounds().unwrap();
             let outline = CanonicalFilledOutline {
-                contours: contours
+                full_segment_count: None, prepared: None, coverage: Default::default(), contours: contours
                     .into_iter()
                     .map(|p| CanonicalOutlineContour {
                         segments: p.segments().to_vec(),
@@ -1078,6 +1063,229 @@ mod tests {
                 cases.push((name, GeometryOutput::CanonicalRegions(regions), expected));
             }
             cases
+        }
+    }
+}
+
+/// Quantizes canonical contours once in the shared canvas frame with bounded fallible storage.
+/// # Errors
+/// Returns cancellation, coordinate, or allocation failure without a partial publication.
+fn quantize_contours(
+    shape: &FilledShape,
+    adapter: &i_overlay::i_float::adapter::FloatPointAdapter<[f64; 2], i64>,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<i_overlay::i_shape::int::shape::IntShape<i64>, RenderError> {
+    let mut out = Vec::new();
+    reserve_integer_storage(&mut out, shape.len())?;
+    for contour in shape {
+        check_cancel(cancelled)?;
+        let mut points = Vec::new();
+        reserve_integer_storage(&mut points, contour.len())?;
+        for point in contour {
+            check_cancel(cancelled)?;
+            points.push(adapter.try_float_to_int(point).map_err(|_| {
+                error(
+                    "vector.precision.coordinate",
+                    "fixed coordinate is out of range",
+                )
+            })?);
+        }
+        out.push(points);
+    }
+    Ok(out)
+}
+
+/// Sums fixed-grid outer/hole area exactly with checked signed integer arithmetic.
+/// # Errors
+/// Returns cancellation, degenerate contour, or explicit area overflow without truncating half-grid units.
+fn integer_area_twice(
+    shapes: &i_overlay::i_shape::int::shape::IntShapes<i64>,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<i128, RenderError> {
+    let overflow = || error("vector.area", "integer area overflows");
+    let mut total = 0_i128;
+    for shape in shapes {
+        check_cancel(cancelled)?;
+        if shape.is_empty() {
+            return Err(error("vector.area", "union has an empty filled shape"));
+        }
+        let mut area = 0_i128;
+        for contour in shape {
+            if contour.len() < 3 {
+                return Err(error("vector.area", "union has a degenerate contour"));
+            }
+            for (index, point) in contour.iter().enumerate() {
+                check_cancel(cancelled)?;
+                let next = contour[(index + 1) % contour.len()];
+                let cross = i128::from(point.x)
+                    .checked_mul(i128::from(next.y))
+                    .and_then(|a| {
+                        i128::from(next.x)
+                            .checked_mul(i128::from(point.y))
+                            .and_then(|b| a.checked_sub(b))
+                    })
+                    .ok_or_else(overflow)?;
+                area = area.checked_add(cross).ok_or_else(overflow)?;
+            }
+        }
+        total = total
+            .checked_add(area.checked_abs().ok_or_else(overflow)?)
+            .ok_or_else(overflow)?;
+    }
+    Ok(total)
+}
+
+/// Reserves new integer measurement storage without conflating impossible counts and allocator refusal.
+/// # Errors
+/// Returns the existing edge-limit path for unaddressable counts or allocation failure separately.
+fn reserve_integer_storage<T>(values: &mut Vec<T>, additional: usize) -> Result<(), RenderError> {
+    values
+        .len()
+        .checked_add(additional)
+        .and_then(|count| count.checked_mul(std::mem::size_of::<T>()))
+        .filter(|bytes| *bytes <= isize::MAX as usize)
+        .ok_or_else(|| {
+            error(
+                "vector.limits.flattened_edges",
+                "integer measurement storage count overflows",
+            )
+        })?;
+    values.try_reserve(additional).map_err(|_| {
+        error(
+            "vector.allocation",
+            "integer measurement storage allocation failed",
+        )
+    })
+}
+
+#[cfg(test)]
+mod artistic_integer_tests {
+    use super::*;
+
+    /// Preserves nonsquare physical area, genuine partial coverage, and translated primitive geometry.
+    /// # Panics
+    /// Panics if integer occupancy normalizes by a quantized rectangle or replaces partial coverage.
+    #[test]
+    fn nonsquare_translated_partial_coverage_remains_physical() {
+        let canvas = CanvasSpec {
+            width: 10.0,
+            height: 6.0,
+        };
+        for precision in [
+            VectorOccupancyPrecision::Baseline,
+            VectorOccupancyPrecision::Tight,
+        ] {
+            for (x, y, radius) in [(5.0, 3.0, 1.0), (2.0, 2.0, 1.0), (5.0, 3.0, 0.5)] {
+                let geometry = GeometryOutput::CanonicalMarks(vec![tests::circle(0, x, y, radius)]);
+                let measured = measure_geometry_vector_occupancy(
+                    &geometry,
+                    &canvas,
+                    precision,
+                    RasterizationLimits::default(),
+                    &|| false,
+                )
+                .unwrap();
+                assert!(
+                    (measured.fraction - std::f64::consts::PI * radius * radius / 60.0).abs() < 0.0001
+                );
+                assert!(measured.fraction > 0.0 && measured.fraction < 0.1);
+            }
+        }
+    }
+
+    /// Retains the original coordinate admission above the experimental half-range.
+    /// # Panics
+    /// Panics if the fixed adapter silently tightens the original coordinate limits.
+    #[test]
+    fn fixed_frame_keeps_original_coordinate_admission() {
+        let scale = 1_000_000_000.0;
+        let bound = (i64::MAX as f64 / 16.0) / scale;
+        let adapter=i_overlay::i_float::adapter::FloatPointAdapter::<[f64;2],i64>::try_with_scale_conservative(i_overlay::i_float::float::rect::FloatRect::new(-bound,bound,-bound,bound).unwrap(),scale).unwrap();
+        let shape = vec![vec![
+            [400_000_000.0, 0.0],
+            [400_000_001.0, 0.0],
+            [400_000_000.0, 1.0],
+        ]];
+        let integer = quantize_contours(&shape, &adapter, &|| false).unwrap();
+        assert!(integer[0][0].x > i64::MAX / 32);
+        assert!(integer[0][0].x < i64::MAX / 16);
+    }
+
+    /// Counts half-grid triangles exactly and preserves degenerate/canceled area diagnostics.
+    /// # Panics
+    /// Panics if half-units truncate or malformed/canceled geometry is accepted.
+    #[test]
+    fn integer_area_retains_half_units_and_rejects_invalid_shapes() {
+        use i_overlay::i_float::int::point::IntPoint;
+        let point = IntPoint::<i64>::new;
+        let triangle = vec![vec![vec![point(0, 0), point(1, 0), point(0, 1)]]];
+        assert_eq!(integer_area_twice(&triangle, &|| false).unwrap(), 1);
+        assert!(integer_area_twice(&vec![vec![]], &|| false).is_err());
+        assert!(integer_area_twice(&vec![vec![vec![point(0, 0)]]], &|| false).is_err());
+        assert!(integer_area_twice(&triangle, &|| true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod artistic_physical_denominator_tests {
+    use super::*;
+
+    /// Normalizes quantized filled area by the original physical canvas, including a fractional grid edge.
+    /// # Panics
+    /// Panics if quantized rectangle area replaces physical canvas area or numerical precision changes.
+    #[test]
+    fn seven_by_four_canvas_retains_physical_denominator() {
+        let canvas = CanvasSpec {
+            width: 7.0,
+            height: 4.0,
+        };
+        use toniator_geometry::{CanonicalPathMark, CurvePath, PathClosure, Point2};
+        let CanonicalMark::Circle {
+            source_site_id,
+            scope,
+            provenance,
+            ..
+        } = tests::circle(0, 0.0, 0.0, 1.0)
+        else {
+            unreachable!()
+        };
+        let path = CurvePath::polyline(
+            vec![
+                Point2::new(0.7, 0.7),
+                Point2::new(1.4, 0.7),
+                Point2::new(0.7, 1.4),
+            ],
+            PathClosure::Closed,
+        )
+        .unwrap();
+        let geometry = GeometryOutput::CanonicalMarks(vec![CanonicalMark::ClosedPath(
+            CanonicalPathMark::new(
+                source_site_id,
+                path,
+                scope,
+                provenance,
+                CanonicalFillRule::NonZero,
+            )
+            .unwrap(),
+        )]);
+        for precision in [
+            VectorOccupancyPrecision::Baseline,
+            VectorOccupancyPrecision::Tight,
+        ] {
+            let expected = 0.00875;
+            let actual = measure_geometry_vector_occupancy(
+                &geometry,
+                &canvas,
+                precision,
+                RasterizationLimits::default(),
+                &|| false,
+            )
+            .unwrap()
+            .fraction;
+            assert!(
+                (actual - expected).abs() <= 1e-15,
+                "{precision:?}: {actual} vs {expected}"
+            );
         }
     }
 }

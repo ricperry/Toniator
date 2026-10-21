@@ -44,3 +44,15 @@ Run the current renderer checked/area/coverage/SVG regressions and the direct
 certificate/fragment/tree callback tests; do not treat a new upstream version as
 automatically equivalent. Do not run omitted historical upstream fixture suites
 from this source-only vendor package.
+
+Local correction, 2026-10-19:
+
+- `split/solver.rs`: order snapped marks along directed Y when the original edge
+  is strictly steeper than 45 degrees, with ascending-X ties. Widen integer
+  endpoint differences before comparing unsigned magnitudes. Preserve the
+  existing shallow/equal-slope ordering, exact coordinates, snap radii, checked
+  split certificates, round/work bounds and caller-owned sort charging/polling.
+  This corrects shared checked/ordinary traversal: one-unit X endpoint snaps
+  must not make a vertical or steep original edge backtrack across distant Y
+  positions. The exact six-shape zoom/clip regression and independent rational
+  clipped-area oracle are retained in Toniator's current renderer tests.

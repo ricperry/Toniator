@@ -540,7 +540,8 @@ fn curved_transform_stacks_and_along_guides_preserve_scope_phase_and_variable_in
 ///
 /// # Panics
 ///
-/// Panics when the repetition cannot evaluate or leaves any final-canvas tile without geometry.
+/// Panics when the repetition cannot evaluate or leaves any final-canvas tile without geometry
+/// under wide/tall canvases, anisotropy and translations larger than the document.
 fn assert_curved_repetition_covers_canvas(repetition_name: &str, repetition: GuideRepetition) {
     for canvas in [
         CanvasSpec {
@@ -552,7 +553,12 @@ fn assert_curved_repetition_covers_canvas(repetition_name: &str, repetition: Gui
             height: 320.0,
         },
     ] {
-        for rotation_degrees in [0.0, 37.0] {
+        for (rotation_degrees, translation_x, translation_y) in [
+            (0.0, 0.0, 0.0),
+            (37.0, 0.0, 0.0),
+            (37.0, -2.0 * canvas.width, 1.5 * canvas.height),
+            (-71.0, 1.5 * canvas.width, -2.0 * canvas.height),
+        ] {
             let definition = definition(
                 vec![GuideDimension {
                     id: GuideDimensionId(91),
@@ -597,11 +603,11 @@ fn assert_curved_repetition_covers_canvas(repetition_name: &str, repetition: Gui
                 canvas: canvas.clone(),
                 density: ResolvedDensityMetric2D {
                     across_x: canvas.width / 8.0,
-                    across_y: canvas.height / 8.0,
+                    across_y: canvas.height / if rotation_degrees == -71.0 { 12.0 } else { 8.0 },
                 },
                 rotation_degrees,
-                translation_x: 0.0,
-                translation_y: 0.0,
+                translation_x,
+                translation_y,
                 guard_steps: 2,
                 support_radius: 4.5,
                 max_family_candidates: 100_000,
@@ -614,7 +620,7 @@ fn assert_curved_repetition_covers_canvas(repetition_name: &str, repetition: Gui
             )
             .unwrap_or_else(|error| {
                 panic!(
-                    "{repetition_name} evaluates on {}x{} at {rotation_degrees} degrees: {error}",
+                    "{repetition_name} evaluates on {}x{} at {rotation_degrees} degrees, translation ({translation_x},{translation_y}): {error}",
                     canvas.width, canvas.height
                 )
             });
@@ -630,13 +636,13 @@ fn assert_curved_repetition_covers_canvas(repetition_name: &str, repetition: Gui
                     let maximum_x = canvas.width * f64::from(tile_x + 1) / 4.0;
                     let minimum_y = canvas.height * f64::from(tile_y) / 4.0;
                     let maximum_y = canvas.height * f64::from(tile_y + 1) / 4.0;
-                    assert!(
-                        canvas_sites.iter().any(|site| {
+                    let occupied = canvas_sites.iter().any(|site| {
                             site.position.x >= minimum_x
                                 && site.position.x <= maximum_x
                                 && site.position.y >= minimum_y
                                 && site.position.y <= maximum_y
-                        }),
+                        });
+                    assert!(occupied,
                         "{repetition_name} left tile ({tile_x}, {tile_y}) empty on {}x{} at {rotation_degrees} degrees",
                         canvas.width,
                         canvas.height
@@ -1419,4 +1425,24 @@ fn normal_offset_along_guides_bound_their_transverse_basis_before_mark_realizati
     )
     .expect("maximum-fill marks realize within the planned support");
     assert!(!marks.output.marks.is_empty());
+}
+
+/// Preserves the exact authored cubic under combined placement while only extending exterior runway.
+/// # Panics
+/// Panics if rotation/translation rescale the interior, tile a new core or move its controls.
+#[test]
+fn authored_core_is_exact_under_whole_pattern_placement() {
+    use toniator_geometry::{CurveSegment,CubicBezierSegment};
+    let canvas=CanvasSpec{width:120.0,height:320.0};
+    for repetition in [GuideRepetition::TransformStack{direction_degrees:90.0,spacing_multiplier:1.0},GuideRepetition::NormalOffset{spacing:8.0,cleanup:OffsetCleanup::DissolveCrossings}] {
+        let definition=definition(vec![GuideDimension{id:GuideDimensionId(91),baseline_angle_degrees:0.0,phase:0.0,prototype:GuidePrototype::AuthoredOpenPath{structure_id:AuthoredStructureId(91)},repetition}],GeneralizedSiteProduct::AlongGuides{dimensions:vec![GuideDimensionId(91)],interval_multiplier:0.75,phase:0.0});
+        let curve=AuthoredStructure::new(AuthoredStructureId(91),AuthoredStructureKind::OpenPath,vec![AuthoredCurveSegment::CubicBezier{start:AuthoredPoint2{x:-60.0,y:0.0},control_1:AuthoredPoint2{x:-20.0,y:-57.6},control_2:AuthoredPoint2{x:20.0,y:0.0},end:AuthoredPoint2{x:60.0,y:0.0}}]).unwrap();
+        let document=document_with_canvas(definition.clone(),vec![curve],canvas.clone());
+        for (rotation,x,y) in [(0.0,0.0,0.0),(37.0,13.0,-7.0),(-71.0,7.0,11.0)] {
+            let output=evaluate_document_typed_family_cancellable(&document,&definition,&GridInspectRequest{canvas:canvas.clone(),density:ResolvedDensityMetric2D{across_x:15.0,across_y:320.0/12.0},rotation_degrees:rotation,translation_x:x,translation_y:y,guard_steps:2,support_radius:4.5,max_family_candidates:100_000},&||false).unwrap();
+            let transform=AffineTransform2D::rotate_about_then_translate(Point2::new(0.0,0.0),rotation,Vector2::new(60.0+x,160.0+y)).unwrap();
+            let expected=CurveSegment::CubicBezier(CubicBezierSegment::new(transform.apply_point(Point2::new(-60.0,0.0)),transform.apply_point(Point2::new(-20.0,-57.6)),transform.apply_point(Point2::new(20.0,0.0)),transform.apply_point(Point2::new(60.0,0.0))).unwrap());
+            assert!(output.logical_tone_paths().iter().filter(|path|path.instance.id.repetition_index==0).any(|path|path.instance.path.segments().contains(&expected)),"authored core changes at rotation{rotation}, translation({x},{y}): expected {expected:?}; actual {:?}",output.logical_tone_paths().iter().filter(|path|path.instance.id.repetition_index==0).map(|path|&path.instance.path).collect::<Vec<_>>());
+        }
+    }
 }

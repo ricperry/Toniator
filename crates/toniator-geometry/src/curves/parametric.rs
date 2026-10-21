@@ -42,9 +42,52 @@ pub fn construct_parametric_curve_path_with_limits_cancellable(
 ) -> Result<CurvePath, CurveError> {
     match curve {
         ParametricCurve::Spiral(spiral) => {
-            construct_spiral_curve_path(spiral, origin, limits, is_cancelled)
+            construct_spiral_curve_path(spiral, origin, None, limits, is_cancelled)
         }
     }
+}
+
+/// Extends an analytic spiral while retaining every canonical segment of its finite authored prefix.
+/// The fractional terminal block/edge remains an internal boundary of one open path, never a cap
+/// or source-sampling knot. Existing constructors and Fixed geometry are unchanged.
+/// # Errors
+/// Returns finite/count/allocation/cancellation or explicit segment-policy diagnostics atomically.
+pub fn extend_parametric_curve_path_with_limits_cancellable(
+    curve: &ParametricCurve,
+    required_turns: f64,
+    origin: Point2,
+    limits: CurveWorkLimits,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CurvePath, CurveError> {
+    super::check_curve_cancelled(is_cancelled)?;
+    let ParametricCurve::Spiral(authored) = curve;
+    if !required_turns.is_finite()
+        || required_turns <= 0.0
+        || !authored.turns.is_finite()
+        || authored.turns <= 0.0
+    {
+        return Err(CurveError::new(
+            "curve.parametric.extent",
+            "spiral extent must remain finite and positive",
+        ));
+    }
+    if required_turns <= authored.turns {
+        return construct_parametric_curve_path_with_limits_cancellable(
+            curve,
+            origin,
+            limits,
+            is_cancelled,
+        );
+    }
+    let mut extended = authored.clone();
+    extended.turns = required_turns;
+    construct_spiral_curve_path(
+        &extended,
+        origin,
+        Some(authored.turns),
+        limits,
+        is_cancelled,
+    )
 }
 
 /// Converts one finite round/square spiral to deterministic cubic or exact-polyline geometry.
@@ -55,6 +98,7 @@ pub fn construct_parametric_curve_path_with_limits_cancellable(
 fn construct_spiral_curve_path(
     spiral: &SpiralCurve,
     origin: Point2,
+    prefix_turns: Option<f64>,
     limits: CurveWorkLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CurvePath, CurveError> {
@@ -95,70 +139,76 @@ fn construct_spiral_curve_path(
                         "evaluation was cancelled",
                     ));
                 }
-                let block_end = (core::f64::consts::TAU * (block_index + 1) as f64).min(total);
-                let span = block_end - block_start;
-                if span <= 0.0 {
-                    return Err(CurveError::new(
-                        "curve.parametric.residual_limit",
-                        "spiral parameter spans must remain positive",
-                    ));
-                }
-                let minimum = curve_count((span / core::f64::consts::FRAC_PI_2).ceil())?;
-                let full_turn = block_index < whole_turns;
-                let mut count = if full_turn {
-                    previous_full_turn_count.max(minimum)
-                } else {
-                    minimum
-                };
-                loop {
-                    if count > limits.maximum_segments - segments.len() {
+                let whole_end = (core::f64::consts::TAU * (block_index + 1) as f64).min(total);
+                let split = prefix_turns
+                    .map(|turns| core::f64::consts::TAU * turns)
+                    .filter(|boundary| *boundary > block_start && *boundary < whole_end);
+                let ends = [split.unwrap_or(whole_end), whole_end];
+                for block_end in ends.into_iter().take(if split.is_some() { 2 } else { 1 }) {
+                    let span = block_end - block_start;
+                    if span <= 0.0 {
                         return Err(CurveError::new(
-                            "curve.parametric.segment_limit",
-                            "spiral construction exceeds the CurvePath segment limit",
+                            "curve.parametric.residual_limit",
+                            "spiral parameter spans must remain positive",
                         ));
                     }
-                    if round_spiral_block_fits(
-                        spiral,
-                        origin,
-                        phase,
-                        sign,
-                        block_start,
-                        block_end,
-                        count,
-                        is_cancelled,
-                    )? {
-                        break;
-                    }
-                    count = count.checked_add(1).ok_or(CurveError::new(
-                        "curve.path.count_overflow",
-                        "curve count exceeds machine representation",
-                    ))?;
-                }
-                let mut start_theta = block_start;
-                for index in 0..count {
-                    let end_theta = if index + 1 == count {
-                        block_end
+                    let minimum = curve_count((span / core::f64::consts::FRAC_PI_2).ceil())?;
+                    let full_turn = split.is_none() && block_index < whole_turns;
+                    let mut count = if full_turn {
+                        previous_full_turn_count.max(minimum)
                     } else {
-                        block_start + span * (index + 1) as f64 / count as f64
+                        minimum
                     };
-                    append_adaptive_round_spiral_span(
-                        &mut segments,
-                        spiral,
-                        origin,
-                        phase,
-                        sign,
-                        start_theta,
-                        end_theta,
-                        0,
-                        limits,
-                        is_cancelled,
-                    )?;
-                    start_theta = end_theta;
+                    loop {
+                        if count > limits.maximum_segments - segments.len() {
+                            return Err(CurveError::new(
+                                "curve.parametric.segment_limit",
+                                "spiral construction exceeds the CurvePath segment limit",
+                            ));
+                        }
+                        if round_spiral_block_fits(
+                            spiral,
+                            origin,
+                            phase,
+                            sign,
+                            block_start,
+                            block_end,
+                            count,
+                            is_cancelled,
+                        )? {
+                            break;
+                        }
+                        count = count.checked_add(1).ok_or(CurveError::new(
+                            "curve.path.count_overflow",
+                            "curve count exceeds machine representation",
+                        ))?;
+                    }
+                    let mut start_theta = block_start;
+                    for index in 0..count {
+                        let end_theta = if index + 1 == count {
+                            block_end
+                        } else {
+                            block_start + span * (index + 1) as f64 / count as f64
+                        };
+                        append_adaptive_round_spiral_span(
+                            &mut segments,
+                            spiral,
+                            origin,
+                            phase,
+                            sign,
+                            start_theta,
+                            end_theta,
+                            0,
+                            limits,
+                            is_cancelled,
+                        )?;
+                        start_theta = end_theta;
+                    }
+                    if full_turn {
+                        previous_full_turn_count = count;
+                    }
+                    block_start = block_end;
                 }
-                if full_turn {
-                    previous_full_turn_count = count;
-                }
-                block_start = block_end;
             }
             CurvePath::new_with_limits_cancellable(
                 segments,
@@ -170,14 +220,23 @@ fn construct_spiral_curve_path(
         SpiralShape::Square => {
             let quarter_turns = spiral.turns * 4.0;
             let count = curve_count(quarter_turns.ceil())?;
-            if count == 0 || count > limits.maximum_segments {
+            let prefix_quarters = prefix_turns.map(|turns| turns * 4.0);
+            let extra = usize::from(
+                prefix_quarters
+                    .is_some_and(|prefix| prefix.fract() != 0.0 && prefix < quarter_turns),
+            );
+            let segment_count = count.checked_add(extra).ok_or(CurveError::new(
+                "curve.path.count_overflow",
+                "square segment count overflows",
+            ))?;
+            if count == 0 || segment_count > limits.maximum_segments {
                 return Err(CurveError::new(
                     "curve.parametric.segment_limit",
                     "spiral construction exceeds the CurvePath segment limit",
                 ));
             }
-            curve_storage_count::<CurveSegment>(count)?;
-            let vertex_count = count.checked_add(1).ok_or(CurveError::new(
+            curve_storage_count::<CurveSegment>(segment_count)?;
+            let vertex_count = segment_count.checked_add(1).ok_or(CurveError::new(
                 "curve.path.count_overflow",
                 "square vertex count overflows",
             ))?;
@@ -198,6 +257,24 @@ fn construct_spiral_curve_path(
                 }
                 let fraction = (quarter_turns - index as f64).clamp(0.0, 1.0);
                 let length = spiral.radial_spacing * (index / 2 + 1) as f64 * fraction;
+                if let Some(prefix) = prefix_quarters
+                    .filter(|prefix| *prefix > index as f64 && *prefix < index as f64 + fraction)
+                {
+                    let prefix_length =
+                        spiral.radial_spacing * (index / 2 + 1) as f64 * (prefix - index as f64);
+                    let boundary = Point2::new(
+                        point.x + prefix_length * direction.x,
+                        point.y + prefix_length * direction.y,
+                    );
+                    if !boundary.is_finite() {
+                        return Err(CurveError::new(
+                            "curve.path.polyline.vertices",
+                            "polyline vertices must be finite",
+                        ));
+                    }
+                    reserve_curve(&mut vertices, 1)?;
+                    vertices.push(boundary);
+                }
                 point = Point2::new(
                     point.x + length * direction.x,
                     point.y + length * direction.y,

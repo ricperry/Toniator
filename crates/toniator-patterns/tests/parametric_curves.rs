@@ -30,7 +30,8 @@ fn request() -> GridInspectRequest {
     }
 }
 
-/// Builds a homogeneous raw-path or equal-arc-site parametric spiral definition.
+/// Builds a homogeneous explicitly Fixed raw-path or equal-arc-site spiral definition.
+/// Validation remains the caller boundary; this constructor owns no derived geometry.
 fn definition(shape: SpiralShape, sites: bool) -> PatternDefinition {
     let curve_id = PatternMechanismId(91);
     let site_id = PatternMechanismId(92);
@@ -52,6 +53,7 @@ fn definition(shape: SpiralShape, sites: bool) -> PatternDefinition {
                         phase_degrees: 0.0,
                         winding: CurveWinding::CounterClockwise,
                     }),
+                    spiral_coverage: toniator_domain::SpiralCoveragePolicy::Fixed,
                     repetition: GuideRepetition::Single,
                 },
                 PatternMechanism::AlongParametricCurveSites {
@@ -71,6 +73,7 @@ fn definition(shape: SpiralShape, sites: bool) -> PatternDefinition {
                     phase_degrees: 0.0,
                     winding: CurveWinding::CounterClockwise,
                 }),
+                spiral_coverage: toniator_domain::SpiralCoveragePolicy::Fixed,
                 repetition: GuideRepetition::Single,
             }]
         },
@@ -87,6 +90,7 @@ fn definition(shape: SpiralShape, sites: bool) -> PatternDefinition {
             vec![PatternOutputLayer::all(
                 PatternOutputLayerId(93),
                 PatternOutputRealization::ParametricPaths {
+                    tone_sample_spacing: Default::default(),
                     curve_mechanism_id: curve_id,
                     style: PathStrokeStyle::default(),
                 },

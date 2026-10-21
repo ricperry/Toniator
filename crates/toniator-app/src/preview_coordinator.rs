@@ -91,6 +91,22 @@ impl PreviewCoordinator {
         self.intent = None;
     }
 
+    /// Reconciles concrete cache intent without creating an upstream ticket or pending work.
+    /// A changed intent retires obsolete failure; only complete visible success clears a matching
+    /// failure. Waiting or partial coverage preserves a genuine failure for that same intent.
+    pub(crate) fn cache_view(&mut self, intent: PreviewIntent, complete: bool) {
+        self.clear_submission();
+        self.intent = Some(intent);
+        if complete
+            || self
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.intent != intent)
+        {
+            self.failure = None;
+        }
+    }
+
     /// Clears all workspace-owned coordination on Close/replacement; old callbacks stay stale.
     pub(crate) fn clear_workspace(&mut self) {
         *self = Self::default();
@@ -101,6 +117,11 @@ impl PreviewCoordinator {
         self.refresh_queued || self.submission.is_some()
     }
 
+    /// Preserves a matching ordinary fallback job across cache-only refinement notifications.
+    /// Different artwork/target or an idle/failed intent never suppresses a new ordinary submission.
+    pub(crate) fn preserve_ordinary(&self, intent: PreviewIntent, required: bool) -> bool {
+        required && self.is_pending() && self.intent == Some(intent)
+    }
     /// Returns the captured current intent while preparation or evaluation owns it.
     pub(crate) const fn intent(&self) -> Option<PreviewIntent> {
         self.intent
@@ -356,6 +377,31 @@ mod tests {
         assert!(coordinator.queue_intent(Some(current)));
     }
 
+    /// Retires obsolete cache-view errors without tickets and requires complete success for equal intent.
+    /// # Panics
+    /// Panics if partial cache coverage hides a matching failure or creates pending upstream work.
+    #[test]
+    fn cached_intent_and_visible_success_reconcile_terminal_failure() {
+        let mut coordinator = PreviewCoordinator::default();
+        let failed = intent(1, 100);
+        coordinator.prepare(failed);
+        assert!(coordinator.fail_preparation(failed, "failed A".into()));
+        coordinator.cache_view(failed, false);
+        assert!(coordinator.is_failed(failed));
+        assert!(!coordinator.is_pending());
+        assert!(coordinator.submission().is_none());
+        coordinator.cache_view(failed, true);
+        assert!(coordinator.failure().is_none());
+        coordinator.prepare(failed);
+        assert!(coordinator.fail_preparation(failed, "failed A again".into()));
+        coordinator.cache_view(intent(1, 101), false);
+        assert!(coordinator.failure().is_none());
+        assert!(!coordinator.is_pending());
+        coordinator.cache_view(intent(1, 101), true);
+        assert!(coordinator.failure().is_none());
+        assert_eq!(coordinator.last_accepted_ticket(), None);
+    }
+
     /// Keeps failure terminal while GTK has no allocation to establish changed exact intent.
     /// # Panics
     /// Panics if an unallocated refresh clears failure or manufactures pending decode work.
@@ -370,5 +416,23 @@ mod tests {
         assert!(!coordinator.is_pending());
         assert!(!coordinator.queue_intent(Some(current)));
         assert!(coordinator.queue_intent(Some(intent(2, 100))));
+    }
+    /// Keeps source/evaluation ownership across coarse notifications without admitting another request.
+    /// # Panics
+    /// Panics if equal pending fallback can resubmit or a new target is incorrectly suppressed.
+    #[test]
+    fn coarse_cache_notifications_preserve_one_matching_ordinary_submission() {
+        let mut coordinator = PreviewCoordinator::default();
+        let current = intent(0, 100);
+        assert!(coordinator.prepare(current));
+        assert!(coordinator.preserve_ordinary(current, true));
+        assert!(!coordinator.queue_intent(Some(current)));
+        coordinator.submit(1, 7);
+        assert!(coordinator.preserve_ordinary(current, true));
+        assert_eq!(coordinator.submission().unwrap().ticket, 7);
+        assert!(!coordinator.preserve_ordinary(intent(0, 101), true));
+        assert!(!coordinator.preserve_ordinary(current, false));
+        coordinator.clear_submission();
+        assert!(!coordinator.preserve_ordinary(current, true));
     }
 }

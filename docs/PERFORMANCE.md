@@ -9,16 +9,200 @@ verification are complete. These measurements establish specific workload
 improvements, not universal speedups or user acceptance. The later recovery and
 capacity work below is user-accepted for the 0.4.5 release preparation.
 
+## 0.4.6: retained preview regions
+
+The 2026-10-20 followup renders the **whole artwork at each visited eligible
+zoom** in the background, using fixed 1536-pixel cells. Visible work receives
+bounded priority while other visited zooms continue; panning does not cancel
+their demand. The closest already-cached certified scales provide provisional
+coverage while requested-scale detail streams in. Retention applies to one
+accepted artwork/frame, in memory only. The implementation is user-accepted for
+0.4.6. These development checks retain their original source and executable pins;
+they do not benchmark the 0.4.6 packages. The frozen
+[background-cache report](../target/validation/preview-background-cache-20261020/report.md)
+is the current source/runtime entry point; the
+[renderer audit](RENDERER_AUDIT_2026-10-20.md) retains earlier repairs and limits.
+
+The engine owns one shared accepted scene, exact-scale roots, sparse pixel
+coverage, in-flight deduplication and LRU accounting. One dedicated worker handles
+preparation, certificate scans/restoration, painting and upload-data assembly;
+GTK owns widgets and textures. Stored pixels alone grant no display permission:
+each displayed source scale needs a current whole-source-view certificate under
+the unchanged cumulative `1e-6` precision authority, work limits and cancellation.
+There is no separate allowance per tile. Fixed canvas-origin grids include
+actual GTK sampling support and gutters, with disjoint coverage between scales
+and the current-frame full Fit fallback. After an edit at a retained zoom, that
+new full fallback is accepted before detail resumes without changing zoom/scroll.
+Fractional presentation intentionally resamples this fixed grid; arbitrary old
+per-pan sampling-phase byte identity is not promised. Unsupported optimizations
+use the ordinary renderer with a separate exact-target memo.
+
+Actual sustained resident motion has 32 held surface captures, 359 distinct
+origins and 892 GTK draws at requested physical scale 8, with no new preparation,
+painting, pixel work, certificate queries or copied upload bytes. A separate
+current-frame cold motion has 32 held captures, 358 crop readbacks and 306 draw
+origins while 23 more fixed tiles stream in; visible artwork remains in every
+capture. Natural device-1 PNG/SVG controls each have eight held captures, 366
+distinct crops and all five visited zooms complete. These establish the tested
+motion/reuse behavior, not all-frame correctness, app FPS or an end-to-end
+microsecond response. First-traversal texture construction is legitimate upload
+work. `copied_upload_bytes` measures CPU texture-data copies, not driver GPU traffic.
+
+Whole-root retention has a generous **8 GiB soft target**.
+Accounting includes CPU pixels, prepared geometry/debt, the shared scene and
+additional owned materialization, gutters, conservative GTK/GPU copies and
+estimated in-flight payload. Active/projected/running roots remain protected;
+older unpinned zoom roots evict coherently instead of discarding individual cells.
+Oversized roots decline to ordinary viewport rendering. Nothing allocates 8 GiB
+upfront, and this is not a process RSS cap: source decode, allocator/backend
+overhead and other app allocations remain outside that accounting guarantee.
+App restarts and earlier canonical frames are outside retention.
+
+One earlier autonomous headless Spectrum observation fills all 10032² pixels
+with one preparation and 49 tiles in **47.225 s**, at **1,675,040 KiB** process
+peak RSS. Seven ROI hashes and both natural controls match prior painter output.
+This is a single diagnostic observation, not a clean benchmark or UI memory cap.
+Its historical probe binary remains separately pinned; final app presentation
+repairs do not rerun that painter proof.
+
+### Earlier scoped measurements
+
+The user rejected C2's demand-only cache usability result: its separated,
+settled checks do not establish continuous-panning behavior. Its **4 GiB** policy,
+31 zero-work settled events and the cache-tuning timings below are historical,
+superseded evidence, not acceptance of the current interaction. The reported full
+blackout was not reproduced in the frozen 32 held samples; subsequent source
+review established and repaired paintable/placement/invalidation defects.
+The first repaired 32 `cold-*` captures did not demonstrate sustained panning
+and are excluded; the valid current cold proof is `edit-cold-*`.
+
+The following observations have different boundaries and must not be combined:
+
+| Observation | Result | Measurement boundary |
+| --- | --- | --- |
+| Fresh four-worker XY pilot, Spectrum | 76.7% slower than paired native Direct | Corrected P2 paired raster measurements; the diagnostic pilot remains default-off. This does not measure persistent reuse. |
+| Opaque-layer allocation deferral, Spectrum | About 183 MiB lower peak RSS; no material time gain | P3, three fresh-process pairs, before retaining the new cache; not a cached-app RSS saving. |
+| Cache tile size 512→1536, Spectrum interior | 28 jobs / 7.63 s → 6 jobs / 2.85 s | Single diagnostic observations; all seven cache-case hashes stay exact. |
+| Same tile-size comparison, cold view | 28 jobs / 18.97 s → 6 jobs / 13.93 s | Same diagnostic boundary; excludes source evaluation, copies, encoding, I/O and GTK. |
+| Retained same-scale headless lookup | About 4–5 µs | Metadata only; excludes pixel assembly/copy, encoding and GTK. |
+
+Overlap reuse paints exactly 532,288 missing pixels in the recorded case.
+Single tile-size observations are not clean paired benchmarks. The
+[P2 report](../target/validation/renderer-bughunt-20261020/p2/report.md),
+[P3 report](../target/validation/renderer-bughunt-20261020/p3/report.md) and
+[C2 tuning observations](../target/validation/renderer-bughunt-20261020/cache-c2/tuning-observations.json)
+retain their exact inputs and bounds. No universal speedup, memory saving or
+backend superiority follows.
+
+## 0.4.6: certified construction
+
+The 2026-10-19 artistic geometry implementation compares **Complete** construction
+with certified **Canvas** materialization of the same new recipe. These are
+development measurements of the implementation accepted for 0.4.6, not packaged
+benchmarks or a comparison with the pre-refactor implementation. The later historical
+sections retain their published 0.4.4/0.4.5 provenance.
+
+Semantic `SiteUsageSet` stays independent of materialized geometry. Authored closed
+marks can omit certified off-canvas construction; the fixed straight-grid route
+prunes rejected candidate work only. Curves and connections prepare complete
+profiles and globally compacted spines before conservative outline pruning. Full
+sites, topology, tone lattices, logical work budgets, cancellation and numerical
+authority remain. Immutable preparation supports source-free materialization;
+cache identity includes coverage and numeric contracts, with a frozen full fallback
+when certificates do not apply. SVG restores full pruned **stroke outlines** for
+exact external normalization; authored-mark certificates can remain. The fallback
+can temporarily retain both restricted and full geometry.
+
+The later precision correction also permits one complete-stroke retry when
+antialiased raster preparation of a restricted layer exceeds its checked Boolean
+split-certificate budget. It reuses frozen geometry and the same remaining work
+allowances, without relaxing precision. A failing case pays for both attempts and
+can use more temporary memory; the measurements below do not benchmark that retry.
+See the [correction report](../target/validation/preview-area-precision-20261019/fix/report.md).
+
+One warmup and five measured cold/warm timings per case use the same final binary,
+counters off. Timed end-to-end work includes native evaluation, scaled PNG, preview,
+337×219 streamed PNG and SVG; artifact I/O is outside timing. Separate diagnostics
+count actual constructors and reserved storage capacities, which are work/storage
+sums rather than live peak memory. Process peak RSS is measured separately.
+
+| Authored-mark workload | Complete peak RSS | Canvas peak RSS | Reduction |
+| --- | ---: | ---: | ---: |
+| Immutable raster source | 376.0 MiB | 238.8 MiB | about 37% |
+| Immutable vector source | 289.7 MiB | 211.8 MiB | about 27% |
+
+Grid results are neutral or slightly slower; other cases are mixed. A bounded
+vector-motif repeat increases Canvas peak RSS by about 11%. These data establish
+neither universal memory savings nor net pre-refactor performance gains. There
+is no GPU acceleration claim. Synthetic transfer fixtures isolate geometry in
+these measurements; Phase 5 separately uses genuine strict preparation.
+
+All ten Complete/Canvas pairs have exact native RGBA, scaled PNG, preview, streamed
+PNG and independently decoded SVG output; two Inkscape Complete/Canvas pairs are
+also exact. The 337×219 stream is not the intrinsic native size. Phase 3 separately
+checks its own intrinsic native/stream pairs. Native versus external antialiasing
+is not claimed equal. See the [Phase 4 report](../target/validation/artistic-geometry-20261019/phase4/report.md)
+for per-case timings, repeats, commands, source identities and retained failures,
+and the [Phase 5 report](../target/validation/artistic-geometry-20261019/phase5/report.md)
+for genuine preparation and external-consumer isolation/warning limits. Both
+immutable artwork inputs retain the SVG live-text/font caveat.
+
+The generic vector-occupancy correction retains one canvas-origin integer frame
+through normalization and clipping, each primitive's fill rule, existing scales,
+flatten tolerance and strict solver criteria. Checked integer double-area uses the
+original physical-canvas denominator. No fit criterion or epsilon is relaxed.
+Scoped producer identities `anchored-tone-v1` and `connection-selection-v2` prevent
+reuse of affected old fits; current exact fits remain reusable. Tone-spacing
+edits retain conservative calibration binding and Realization invalidation, with
+copy-on-edit escalation where required. Connection selection changes Family
+authority; geometric point spacing remains separate.
+
+The architecture shell guard still flags the unchanged io-to-patterns development
+dependency; separate production metadata checks confirm headless boundaries.
+No validator or dependency adjustment is part of these measurements.
+
+### Placement-aware coverage follow-up
+
+The coverage-intent fix accepted for 0.4.6 retains certified Canvas construction and
+complete off-canvas topology. B1 grid/dead-corner checks prove actual rejected
+construction is omitted. Positive-epsilon Maze/straight-Voronoi support uses exact
+cache keys where broader reuse would change topology; exact warm reuse remains.
+Placement preserves exact saved calibration and response authority without refits;
+new producer bindings are genuinely measured before reuse.
+
+The later production matrix has 15 full Complete/Canvas consumer pairs plus the
+3118×1916 Main preview at Feature size 0.25, with 61 independently decoded pair
+comparisons across native PNG, streaming PNG, SVG consumers and preview. Eight
+fixture groups traverse four poses on the same evolving document, including a
+combined X/Y/rotation → zero restoration: all retain exact authority, zero new
+fits, exact cold/warm pixels and restored-zero pixels. Both immutable source
+assets are exercised. The sequential follow-up supersedes the initial Stage C
+probe's independent-pose restoration claim.
+
+These are correctness checks, not a new performance benchmark. Main Canvas incurs
+three full rematerializations and 1,607,820 outline constructors versus Complete's
+1,043,447; ray cases incur 240/361 rematerializations and random connections 3,129.
+Fallback can increase work and memory while retaining the existing precision and
+work-budget contracts. No universal memory or speed advantage follows.
+
+Checkout-local evidence, absent from release packages: the
+[Stage C report](../target/validation/offset-coverage-20261019/implementation/stage-c/report.md),
+[parent gate](../target/validation/offset-coverage-20261019/implementation/stage-c/parent-gate.json)
+and superseding [sequential roundtrip report](../target/validation/offset-coverage-20261019/implementation/stage-c-roundtrip/report.md).
+Native RGBA and hidden RGB are preserved without flattening; external SVG
+antialiasing can differ from native output, and SVG live text remains font-dependent.
+
 ## 0.4.5: preview recovery and curve capacity
 
 The 2026-10-18 engineering checks cover the accepted 0.4.5 implementation,
 collected before its metadata-only version bump from a working tree based on
 `798fb5d86032a53636c09eeda58ee1755cc5a800`. The behavior is new since published
-0.4.4. User acceptance authorizes release preparation; package publication and
-fresh-download verification remain separate steps. The measured pre-bump app
-SHA-256 is `981696d9001b33994f40c9f994c082e9bea216b57cc338dd2a917d7e331d0827`;
-it identifies the measured binary, not the future 0.4.5 package. The new `v0.4.5`
-tag and attached build provenance will identify the release source and artifacts.
+0.4.4. This paragraph records the pre-publication measurement context; the
+replacement 0.4.5 publication is recorded in [the tracker](../ProgressTracker.md).
+The measured pre-bump app SHA-256 is `981696d9001b33994f40c9f994c082e9bea216b57cc338dd2a917d7e331d0827`;
+it identifies the measured binary rather than the published 0.4.5 package. The
+replacement `v0.4.5` tag and attached build provenance identify the published
+release source and artifacts.
 Detailed evidence links in this section refer to checkout-local artifacts under
 `target/validation/preview-recovery-20261018/`; those artifacts are not shipped.
 

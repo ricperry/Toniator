@@ -25,20 +25,23 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use toniator_domain::{FrameRange, FrameRate};
 
-    /// Creates one unique scratch root for owned output tests.
+    /// Creates unique owned scratch under an explicit current evidence root or the native temporary root.
     ///
     /// # Panics
     /// Panics if test time or temporary storage is unavailable.
     fn root() -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "toniator-sequence-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&path).unwrap();
+        let path = std::env::var_os("TONIATOR_B4_OUTPUT")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!(
+                "toniator-sequence-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        fs::create_dir_all(&path).unwrap();
         path
     }
 
@@ -123,13 +126,13 @@ mod tests {
         let root = root();
         let path = root.join("frames");
         let mut writer = SequenceWriter::create(&path, manifest(), 4096).unwrap();
-        assert!(
-            writer
-                .write_frame_with_sync(b"first", |_| Err(std::io::Error::other(
-                    "injected sync failure"
-                )))
-                .is_err()
-        );
+        let error = writer
+            .write_frame_with_sync(b"first", |_| {
+                Err(std::io::Error::other("injected sync failure"))
+            })
+            .unwrap_err();
+        assert!(!error.completion_published());
+        assert_eq!(error.path(), path);
         assert_eq!(fs::read(path.join("frame-000000.png")).unwrap(), b"first");
         let progress: SequenceManifest =
             serde_json::from_slice(&fs::read(path.join("manifest.json")).unwrap()).unwrap();
@@ -139,6 +142,65 @@ mod tests {
         writer.finish().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// Preserves actual complete bytes and directory truth after the final rename's failed sync.
+    /// # Panics
+    /// Panics if late durability failure hides published completion or damages frame/manifest bytes.
+    #[test]
+    fn sequence_completion_survives_directory_sync_failure() {
+        let root = root();
+        let path = root.join("frames");
+        let mut writer = SequenceWriter::create(&path, manifest(), 4096).unwrap();
+        writer.write_frame(b"first").unwrap();
+        writer.write_frame(b"last").unwrap();
+        let mut expected = writer.manifest.clone();
+        expected.complete = true;
+        let mut expected_bytes = serde_json::to_vec_pretty(&expected).unwrap();
+        expected_bytes.push(b'\n');
+        let error = writer
+            .finish_with_sync(|_| Err(std::io::Error::other("injected final sync")))
+            .unwrap_err();
+        assert!(error.completion_published());
+        assert_eq!(error.path(), path);
+        assert_eq!(
+            fs::read(path.join("manifest.json")).unwrap(),
+            expected_bytes
+        );
+        assert_eq!(fs::read(path.join("frame-000000.png")).unwrap(), b"first");
+        assert_eq!(fs::read(path.join("frame-000001.png")).unwrap(), b"last");
+        assert!(!path.join(".manifest.partial").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Keeps prepublication collision false and leaves existing metadata/unknown bytes untouched.
+    /// # Panics
+    /// Panics if completion is claimed before rename or the occupied temporary name is replaced.
+    #[test]
+    fn sequence_completion_collision_is_not_published() {
+        let root = root();
+        let path = root.join("frames");
+        let mut writer = SequenceWriter::create(&path, manifest(), 4096).unwrap();
+        writer.write_frame(b"first").unwrap();
+        writer.write_frame(b"last").unwrap();
+        let previous = fs::read(path.join("manifest.json")).unwrap();
+        fs::write(path.join(".manifest.partial"), b"keep occupied name").unwrap();
+        let sync_called = std::cell::Cell::new(false);
+        let error = writer
+            .finish_with_sync(|_| {
+                sync_called.set(true);
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(!error.completion_published());
+        assert!(!sync_called.get());
+        assert_eq!(fs::read(path.join("manifest.json")).unwrap(), previous);
+        assert_eq!(
+            fs::read(path.join(".manifest.partial")).unwrap(),
+            b"keep occupied name"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
 }
 
 impl SequenceFormat {
@@ -202,22 +264,29 @@ impl SequenceManifest {
     }
 }
 
-/// Reports filesystem, storage, or publication errors without claiming a sequence is complete.
+/// Reports sequence storage errors with explicit truth about an already published complete manifest.
 #[derive(Debug)]
 pub struct SequenceError {
     path: PathBuf,
     context: String,
+    completion_published: bool,
 }
 
 impl SequenceError {
-    /// Associates one concrete output path with its filesystem or manifest diagnostic.
+    /// Associates one concrete output path with its diagnostic, initially without completion publication.
     fn new(path: &Path, context: impl ToString) -> Self {
         Self {
             path: path.into(),
             context: context.to_string(),
+            completion_published: false,
         }
     }
-    /// Returns the concrete failed output path.
+    /// Reports whether the complete manifest rename succeeded before a later directory-sync error.
+    /// Incomplete progress and every failure before completion publication remain false.
+    pub const fn completion_published(&self) -> bool {
+        self.completion_published
+    }
+    /// Returns the concrete failed output path; a published completion identifies its directory.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -347,11 +416,21 @@ impl SequenceWriter {
         self.write_manifest_with_sync(false, sync)
     }
 
-    /// Marks completion only after all numbered frames are durably published.
-    ///
+    /// Publishes a complete manifest only after all declared numbered frames are synchronized.
     /// # Errors
-    /// Rejects incomplete sequences and returns final manifest/directory synchronization failures.
-    pub fn finish(mut self) -> Result<PathBuf, SequenceError> {
+    /// Rejects incomplete or displaced sequences and storage failures. A late directory-sync error
+    /// has completion_published=true: the complete manifest is visible and is never rolled back.
+    pub fn finish(self) -> Result<PathBuf, SequenceError> {
+        self.finish_with_sync(Directory::sync)
+    }
+
+    /// Retains the actual completion boundary while selecting only its final directory-sync barrier.
+    /// # Errors
+    /// Returns prepublication failures or a typed post-rename durability error without rollback.
+    fn finish_with_sync(
+        mut self,
+        sync: impl FnOnce(&Directory) -> std::io::Result<()>,
+    ) -> Result<PathBuf, SequenceError> {
         self.directory
             .ensure_path(&self.path)
             .map_err(|error| SequenceError::new(&self.path, error))?;
@@ -364,7 +443,7 @@ impl SequenceWriter {
             ));
         }
         self.manifest.complete = true;
-        self.write_manifest(false)?;
+        self.write_manifest_with_sync(false, sync)?;
         Ok(self.path)
     }
 
@@ -412,7 +491,9 @@ impl SequenceWriter {
 
     /// Replaces synchronized manifest bytes before the caller-selected final metadata barrier.
     /// # Errors
-    /// Returns serialization/create/file-sync/rename or later directory-sync failures without rolling progress back.
+    /// Returns serialization/create/file-sync/rename failures with completion_published=false.
+    /// Only a directory-sync failure after a complete-manifest rename sets that fact true; manifest
+    /// bytes/schema and incomplete progress publication ordering remain unchanged.
     fn write_manifest_with_sync(
         &self,
         initial: bool,
@@ -433,6 +514,10 @@ impl SequenceWriter {
                 },
             )
             .map_err(|error| SequenceError::new(&self.path, error))?;
-        sync(&self.directory).map_err(|error| SequenceError::new(&self.path, error))
+        sync(&self.directory).map_err(|error| {
+            let mut error = SequenceError::new(&self.path, error);
+            error.completion_published = self.manifest.complete;
+            error
+        })
     }
 }

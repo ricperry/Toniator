@@ -535,7 +535,7 @@ fn outline_scene(contours: Vec<Vec<CurveSegment>>) -> RenderScene {
             width: 1.0,
         }],
         CanonicalFilledOutline {
-            contours: contours
+            full_segment_count: None, prepared: None, coverage: Default::default(), contours: contours
                 .into_iter()
                 .map(|segments| CanonicalOutlineContour { segments })
                 .collect(),

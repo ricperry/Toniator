@@ -1968,3 +1968,189 @@ Filename policy and recovery decisions remain with callers. Publication revokes
 staging cleanup authority before parent synchronization; synchronization failure
 does not authorize deletion of an already published output. Drop never removes
 caller-retained partials or recovery artifacts.
+
+
+## 22. Artistic geometry controls and certified construction (2026-10-19)
+
+This explicitly approved coordinated TON-021/TON-023/TON-024 contract supersedes
+conflicting earlier sampling, connection-selection and current-format statements
+only within the scope below. The bounded execution contract is
+`docs/ARTISTIC_GEOMETRY_CONTROL_PLAN.md`; phase evidence never implies acceptance.
+
+GuidePaths, ParametricPaths and CurveMotifPaths own one finite positive tone-sample
+spacing multiplier, default 1. Connected-point paths and mazes do not expose it.
+The requested arc-length interval is the multiplier times `max(canvas.width,
+canvas.height)/100` times the ratio of `DensityMetric2D::default_for_canvas(canvas)
+.density` to effective Density. It scales proportionally with Feature size, without
+a decoded-source-pixel floor, Automatic mode, numerical tolerance change or legacy
+sampling branch. Existing point-spacing authority continues to scale with Feature
+size. Complete logical paths retain structural cadence anchors across pieces,
+subdivision and construction/clipping windows. Genuine endpoints are sampled;
+geometric refinement evaluates a linear reconstruction of completed normalized
+thickness between retained source-response knots and adds no artwork knots. Existing
+alpha/mapping/cutoff/response authority remains; sampled zeros, true corners and seams
+remain explicit. Artistic coarsening may omit source features between knots.
+
+ConnectionSelectionIntent is distinct from candidate adjacency and ConnectionProgram.
+It owns optional positive maximum final degree (None by default), cycle policy Allow
+or Forbid (Allow by default), and minimum component size in distinct family points
+(at least 1, default 1). Final degree and cycle constraints include rescue joins.
+Joining singleton/undersized components is automatic, with no separate toggle. A
+join targets any existing family vertex within the existing maximum connection
+distance, introduces no crossing or overlapping selected centerline, and creates no
+new vertex. Rescue ties use (distance, source point ID, target point ID); original-program seeds
+do not randomize rescue ties. Ordinary connection crossings retain their existing
+behavior, and painted thick-stroke overlap is not prohibited. Join before component
+filtering and count combined distinct points.
+Unresolved singleton components surviving minimum 1 render an ordinary canonical
+circle from the same connected response/source/basis as neighboring points; bias is
+inapplicable. One connected output carries strokes and canonical circles together
+through every shared consumer; zero-length stroke substitutes are prohibited.
+Selection edits invalidate Family; tone-spacing edits invalidate Realization, with
+existing stronger copy-on-edit invalidation where required.
+
+Construction may prune off-canvas authored-shape materialization, straight-grid
+candidates and curve/connection stroke outlines only behind the approved semantic
+boundary. Full logical usage, family/topology, centerline and source profile remain
+authoritative. Complete profiles and global compaction decisions precede certified
+envelope outline materialization. Exterior half-plane excursion connectors preserve
+nonzero fill without artificial caps; unproved cases use full fallback. True caps,
+zeros, seams, extrema/anchor metadata and the raster quantization frame remain.
+Numerical accuracy, cancellation, checked/fallible growth, shared canonical outputs
+and strict calibration criteria do not weaken.
+
+Current project schema is 18, Document Preset configuration schema 17 and standalone
+Pattern format 9; container and Document Preset envelope versions stay unchanged.
+Projects remain current-only. Supported older source-free Document Presets adopt
+new defaults deterministically and preserve original bytes; prior artwork behavior
+need not survive. Changed calibration bindings/assignments and pools are prepared
+anew while preserving desired coverage endpoints for ALL, channels and animation.
+Legacy raw-response origin is explicit and cannot be inferred merely from schema
+age. Tone cadence leaves uniform calibration identity only after constant-probe and
+uniform-source equivalence proofs; structural spacing/selection remains bound.
+
+## 23. Persistent coverage intent and transformed generation (2026-10-19)
+
+This explicitly approved correction supersedes earlier recipe-only CoverCanvas
+materialization and corresponding current-format statements. Section 22 remains
+authoritative for artistic controls, full logical construction and certified pruning.
+
+ParametricCurveSource persists the existing Fixed or CoverCanvas spiral policy
+alongside its authored curve and repetition. Recipes, definitions, copies, history,
+configuration, persistence and calibration reconstruct the same policy. Fixed keeps
+the authored finite curve exactly; no gallery name, identifier, turn count or saved
+measurement may infer CoverCanvas for an existing finite curve.
+
+CoverCanvas retains authored turns as a minimum. Evaluation resolves Feature-scaled
+spacing and turns, then generates at least the larger of that authored extent and
+the extent required by the inverse-transformed canvas plus finite support and guard
+requirements. Round spirals use a radial bound and a complete outer revolution;
+square spirals use their own square/max-norm coverage bound. Rotation, translation,
+phase and winding remain authored. Extending coverage preserves the existing inner
+curve prefix and complete logical tone anchor; it changes neither artistic sampling
+cadence nor numerical tolerances.
+
+Every canvas-covering or repeated family must plan sufficient transformed generation
+before certified pruning. Existing finite source semantics remain finite: an authored
+arc or single-axis finite repetition does not become an infinite two-dimensional
+family. Stochastic and artwork-weighted gaps are not themselves coverage failures.
+The implementation retains bounded cancellation, checked/fallible growth, complete
+family/topology/source-profile authority, downstream final clipping and shared
+canonical preview/PNG/SVG construction while avoiding unneeded materialization.
+
+Strict calibration binds the explicit policy and authored structural intent.
+Whole-Pattern X/Y translation and rotation do not change the calibration binding,
+profile, numeric artifact or desired response endpoints and require no new fit;
+they change only the required derived generation envelope.
+CoverCanvas uses producer suffix `+cover-envelope-v1` after applicable existing
+producer suffixes and receives a genuine measurement for its exact reference
+binding. A finite Fixed companion cannot be relabelled as CoverCanvas, including
+when their centered geometry happens to coincide. Unaffected Fixed profiles and
+numeric artifacts retain their meaning. Optional former CoverCanvas numeric
+companions are discarded only through the recognized source-free resource route;
+unknown profiles still reject and desired response endpoints remain unchanged.
+
+Current project schema is **19**, Document Preset configuration schema **18** and
+standalone Pattern format **10**. Container **2** and Document Preset envelope **3**
+remain unchanged. Ordinary projects and standalone Patterns remain current-only.
+Supported older source-free Document Presets deterministically make an absent
+mechanism policy explicitly Fixed, preserving authored finite intent, existing
+artistic controls, desired ALL/named/End endpoints and original archive bytes.
+An explicitly stored generic recipe policy stays explicit; lost gallery intent is
+never reconstructed by heuristic. Missing or changed strict bindings are genuinely
+prepared before publication. A reported older ordinary project remains an immutable
+before witness; any corrected current fixture receives coverage intent explicitly.
+
+Maze construction uses the complete requested guard-site domain before topology,
+including sites and bounded cells outside the canvas. This explicitly supersedes
+the canvas-only admission and permitted fringe in the historical Stage 20M plan;
+the canvas never supplies artificial walls, openings or boundary cells. The finite
+Maze retains its connected bounded-cell dual, seeded spanning tree, two genuine
+perimeter openings and solution even when its perimeter lies outside the final
+canvas. Requested admission follows the family planner's Euclidean distance to
+the original canvas, reconstructed from the actual request rather than a broader
+cached generation domain. Broader-support reuse is permitted only when it preserves
+the exact canonical topology, walls, openings, solution and fingerprint; otherwise
+Maze regenerates the exact requested family while other products retain their
+existing cache and certified-pruning policies.
+
+Straight Maze and Guide Faces reserve complete-cell reach before family generation.
+The bound uses the selected document-space guide normals and physical pitches,
+including the existing aspect and rotation transforms. For each independent pair,
+its reciprocal cell basis bounds the cell diameter by the longer of its two
+fundamental-parallelogram diagonals; a third selected dimension may subdivide those
+cells. This derived reach does not replace nominal mark normalization or alter
+artistic response. It supplies intrinsic complete-cell support even with zero
+configured guard steps; existing extra guard runway and positive outward-treatment
+support remain. Arbitrary authored curved arrangements retain their separate
+existing generation contract; the straight reciprocal-lattice proof does not claim
+to certify arbitrary curved cells or stochastic Voronoi populations.
+
+Corrected Maze geometry uses producer contract
+`toniator-wall-maze-guard-topology-v2` and strict calibration suffix
+`+maze-guard-topology-v2`; the changed Guide Faces reference producer adds
+`+cell-reach-v1`. Applicable existing and CoverCanvas suffixes retain their order.
+Former numeric companions are not relabelled. Supported source-free conversion
+recognizes complete former typed producer profiles exactly, including mixed ordered
+outputs, and drops obsolete numeric companions while preserving authored responses;
+unknown or partial producer profiles still reject. New reference bindings receive
+genuine measurements. Placement edits thereafter retain the same profile, numeric
+artifact, binding and response endpoints without fitting.
+
+The stable authored-guide core frame depends on canvas dimensions and authored
+structural baseline orientation, and excludes both whole-Pattern rotation and X/Y
+translation. Placement changes only the inverse-transformed generation demand.
+NormalOffset extends one unchanged scaled authored core with two finite outer
+terminal rays, sufficient for the maximum requested signed offset travel; it does
+not introduce hidden longitudinal tiles, repeated source lobes or altered seam
+handles. Genuine Tile repetition remains a separate authored operation. Original
+controls, source intervals, the original-core tone zero and anchored cadence remain
+authoritative. The changed authored-guide coverage producer uses
+`+guide-ray-coverage-v1`; former measurements are not relabelled.
+
+Ordinary Voronoi outputs from complete typed straight-intersection families also
+reserve finite defining-neighbor reach before generation. For an independent guide
+pair with reciprocal cell diameter bound D, the unmerged lattice has covering bound
+R = D/2, and canvas-relevant complete cells require a 3R guard. The current direct
+merge into an unchanged representative within authored epsilon gives the local
+finite-population bound rho = D/2 + epsilon, so generation reserves at least
+3rho = 1.5D + 3epsilon in addition to authored margin, existing extra guard runway
+and outward-treatment support. Degenerate/nonfinite arithmetic, cancellation and
+ordinary resource limits still reject atomically. The typed producer suffix is
+`+voronoi-cell-reach-v1`; arbitrary curved, finite and random populations do not
+acquire this straight-lattice contract.
+
+Positive-epsilon greedy merging can depend on earlier exterior input. The exact
+requested finite family therefore owns positive-epsilon straight-intersection
+Maze and Voronoi topology. Their upstream cache admits exact support keys and
+rejects broader-support substitution, while unaffected producers retain existing
+broader reuse. This finite local coverage proof does not promise an infinite merged
+pattern or identical topology between different requested supports. Independent
+unmerged reference envelopes compare the same source/facet topology within the
+existing canonical numerical policy; same-request cache and canonical consumer
+comparisons remain exact. Lower-level Maze membership maps only exact absolute
+contributor identities into an accepted family and fails atomically on ambiguity
+or absence; coordinates and cache-local ordinals do not establish equivalence.
+All newly applicable producer revisions participate together in exact prior-profile
+recognition. Genuine new measurements precede publication; subsequent placement
+continues to reuse unchanged artifacts and responses without fitting.

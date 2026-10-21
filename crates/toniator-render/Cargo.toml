@@ -1,11 +1,12 @@
 [package]
 name = "toniator-render"
-version = "0.4.5"
+version = "0.4.6"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+robust.workspace = true
 image.workspace = true
 png = "0.18.1"
 rayon.workspace = true
@@ -16,3 +17,7 @@ toniator-geometry = { path = "../toniator-geometry" }
 
 [lib]
 path = "src/lib.rs"
+
+[features]
+default = []
+prepared-crop-pilot = []

@@ -5,6 +5,7 @@
 //! combines members, so touching and overlapping members paint once.
 
 use super::{GeometryOutput, RenderError, color_hex};
+use crate::GeometryOutputPart;
 use i_overlay::{
     core::{fill_rule::FillRule, overlay_rule::OverlayRule},
     float::scale::FixedScaleFloatOverlay,
@@ -195,50 +196,54 @@ impl<'a> SvgJoin<'a> {
         let mut data = String::new();
         for geometry in outputs {
             self.check()?;
-            match geometry {
-                GeometryOutput::CircularMarks(marks) => {
-                    for mark in marks {
-                        self.circle(&mut data, mark.center, mark.radius)?;
+            for part in geometry.parts() {
+                match part {
+                    GeometryOutputPart::CircularMarks(marks) => {
+                        for mark in marks {
+                            self.circle(&mut data, mark.center, mark.radius)?;
+                        }
                     }
-                }
-                GeometryOutput::CanonicalMarks(marks) => {
-                    for mark in marks {
-                        self.check()?;
-                        match mark {
-                            CanonicalMark::Circle { center, radius, .. } => {
-                                self.circle(&mut data, *center, *radius)?
+                    GeometryOutputPart::CanonicalMarks(marks) => {
+                        for mark in marks {
+                            self.check()?;
+                            match mark {
+CanonicalMark::DeferredPath(_) => {},
+
+                                CanonicalMark::Circle { center, radius, .. } => {
+                                    self.circle(&mut data, *center, *radius)?
+                                }
+                                CanonicalMark::ClosedPath(mark) => {
+                                    self.path(&mut data, mark.path.segments(), mark.fill_rule)?;
+                                }
                             }
-                            CanonicalMark::ClosedPath(mark) => {
-                                self.path(&mut data, mark.path.segments(), mark.fill_rule)?;
+                        }
+                    }
+                    GeometryOutputPart::CanonicalStrokes(strokes) => {
+                        for stroke in strokes {
+                            self.check()?;
+                            if let [contour] = stroke.outline.contours.as_slice() {
+                                self.path(&mut data, &contour.segments, stroke.outline.fill_rule)?;
+                                continue;
                             }
+                            let contours: Vec<_> = stroke
+                                .outline
+                                .contours
+                                .iter()
+                                .map(|contour| contour.segments.as_slice())
+                                .collect();
+                            self.contours(&mut data, &contours, stroke.outline.fill_rule)?;
                         }
                     }
-                }
-                GeometryOutput::CanonicalStrokes(strokes) => {
-                    for stroke in strokes {
-                        self.check()?;
-                        if let [contour] = stroke.outline.contours.as_slice() {
-                            self.path(&mut data, &contour.segments, stroke.outline.fill_rule)?;
-                            continue;
+                    GeometryOutputPart::CanonicalRegions(regions) => {
+                        for region in regions.regions() {
+                            self.check()?;
+                            if !self.contour_intersects_canvas(region.ring.segments()) {
+                                continue;
+                            }
+                            // CanonicalRegion validates counter-clockwise, simple,
+                            // positive, hole-free geometry at construction.
+                            self.curve_data(&mut data, region.ring.segments(), false)?;
                         }
-                        let contours: Vec<_> = stroke
-                            .outline
-                            .contours
-                            .iter()
-                            .map(|contour| contour.segments.as_slice())
-                            .collect();
-                        self.contours(&mut data, &contours, stroke.outline.fill_rule)?;
-                    }
-                }
-                GeometryOutput::CanonicalRegions(regions) => {
-                    for region in regions.regions() {
-                        self.check()?;
-                        if !self.contour_intersects_canvas(region.ring.segments()) {
-                            continue;
-                        }
-                        // CanonicalRegion validates counter-clockwise, simple,
-                        // positive, hole-free geometry at construction.
-                        self.curve_data(&mut data, region.ring.segments(), false)?;
                     }
                 }
             }

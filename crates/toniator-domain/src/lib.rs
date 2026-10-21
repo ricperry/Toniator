@@ -11,6 +11,8 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+mod artistic_geometry;
+pub use artistic_geometry::{ConnectionCyclePolicy, ConnectionSelectionIntent, ToneSampleSpacing};
 mod calibration;
 mod channel_defaults;
 pub use calibration::{
@@ -824,41 +826,14 @@ pub struct SpiralCurve {
     pub winding: CurveWinding,
 }
 
-/// Selects whether a preset recipe keeps its authored finite spiral turns or
-/// derives fixed turns once from the receiving document canvas at materialization.
+/// Selects authored finite extent or evaluation-time canvas coverage for a spiral.
+/// Covering intent retains authored turns as a minimum and survives document placement edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpiralCoveragePolicy {
     /// Preserves the recipe's finite `SpiralCurve::turns` exactly.
     Fixed,
-    /// Derives enough fixed turns for the centered spiral to reach every canvas corner.
+    /// Extends derived geometry to cover the transformed, support-padded canvas without shortening authored extent.
     CoverCanvas,
-}
-
-/// Converts recipe-only canvas coverage intent into the existing finite spiral
-/// field during materialization without mutating manually authored curves.
-fn materialize_recipe_spiral_curve(
-    curve: &ParametricCurve,
-    policy: SpiralCoveragePolicy,
-    canvas: &CanvasSpec,
-) -> Result<ParametricCurve, ValidationError> {
-    let ParametricCurve::Spiral(spiral) = curve;
-    if policy == SpiralCoveragePolicy::Fixed {
-        return Ok(curve.clone());
-    }
-    let corner_radius = (canvas.width * 0.5).hypot(canvas.height * 0.5);
-    // The final whole revolution keeps every phase direction at or beyond the
-    // corner radius; endpoint radius alone would leave phase-dependent gaps.
-    let turns = (corner_radius / spiral.radial_spacing).ceil() + 1.0;
-    if !turns.is_finite() || turns <= 0.0 {
-        return Err(ValidationError::new(
-            "preset.recipe.parametric.cover_canvas",
-            "canvas coverage cannot derive finite positive spiral turns",
-        ));
-    }
-    Ok(ParametricCurve::Spiral(SpiralCurve {
-        turns,
-        ..spiral.clone()
-    }))
 }
 
 /// Selects the exact local construction family for a spiral source.
@@ -2075,15 +2050,18 @@ fn reconstruct_recipe_family(
             curve_mechanism_id,
             site_mechanism_id,
         } => {
-            let (curve, repetition) = definition
+            let (curve, spiral_coverage, repetition) = definition
                 .mechanisms
                 .iter()
                 .find_map(|mechanism| match mechanism {
                     PatternMechanism::ParametricCurveSource {
                         id,
                         curve,
+                        spiral_coverage,
                         repetition,
-                    } if *id == curve_mechanism_id => Some((curve.clone(), repetition.clone())),
+                    } if *id == curve_mechanism_id => {
+                        Some((curve.clone(), *spiral_coverage, repetition.clone()))
+                    }
                     _ => None,
                 })
                 .ok_or_else(|| {
@@ -2115,7 +2093,7 @@ fn reconstruct_recipe_family(
                 name: definition.name.clone(),
                 coverage: definition.coverage.clone(),
                 curve,
-                spiral_coverage: SpiralCoveragePolicy::Fixed,
+                spiral_coverage,
                 repetition,
                 sites,
             })
@@ -2188,6 +2166,7 @@ fn reconstruct_recipe_output(
             })
         }
         PatternOutputRealization::CurveMotifPaths {
+            tone_sample_spacing,
             structure_id,
             style,
             mirror_alternate_rows,
@@ -2207,22 +2186,36 @@ fn reconstruct_recipe_output(
                 },
             )?;
             Ok(PatternOutputRealizationRecipe::CurveMotifPaths {
+                tone_sample_spacing: *tone_sample_spacing,
                 resource_index,
                 style: *style,
                 mirror_alternate_rows: *mirror_alternate_rows,
                 alternate_row_phase: *alternate_row_phase,
             })
         }
-        PatternOutputRealization::GuidePaths { style, .. }
-        | PatternOutputRealization::ParametricPaths { style, .. } => {
-            Ok(PatternOutputRealizationRecipe::StructuralPaths { style: *style })
+        PatternOutputRealization::GuidePaths {
+            tone_sample_spacing,
+            style,
+            ..
         }
-        PatternOutputRealization::ConnectionPaths { program, style, .. } => {
-            Ok(PatternOutputRealizationRecipe::ConnectionPaths {
-                program: program.clone(),
-                style: *style,
-            })
-        }
+        | PatternOutputRealization::ParametricPaths {
+            tone_sample_spacing,
+            style,
+            ..
+        } => Ok(PatternOutputRealizationRecipe::StructuralPaths {
+            tone_sample_spacing: *tone_sample_spacing,
+            style: *style,
+        }),
+        PatternOutputRealization::ConnectionPaths {
+            selection,
+            program,
+            style,
+            ..
+        } => Ok(PatternOutputRealizationRecipe::ConnectionPaths {
+            selection: *selection,
+            program: program.clone(),
+            style: *style,
+        }),
         PatternOutputRealization::MazeWalls { program, style, .. } => {
             Ok(PatternOutputRealizationRecipe::MazeWalls {
                 program: program.clone(),
@@ -5050,10 +5043,11 @@ pub enum PatternMechanism {
         interval_multiplier: f64,
         phase: f64,
     },
-    /// One finite parametric source and its reusable Stage 20J repetition policy.
+    /// One authored parametric source with persistent extent and reusable repetition intent.
     ParametricCurveSource {
         id: PatternMechanismId,
         curve: ParametricCurve,
+        spiral_coverage: SpiralCoveragePolicy,
         repetition: CurveRepetition,
     },
     /// Equal-arc sites along one parametric source. `interval` is absolute document distance.
@@ -5170,16 +5164,19 @@ pub enum PatternOutputRealization {
     },
     /// Consumes one ordered guide-path mechanism as round-brush strokes.
     GuidePaths {
+        tone_sample_spacing: ToneSampleSpacing,
         guide_mechanism_id: PatternMechanismId,
         style: PathStrokeStyle,
     },
     /// Consumes one ordered parametric source as canonical connected paths.
     ParametricPaths {
+        tone_sample_spacing: ToneSampleSpacing,
         curve_mechanism_id: PatternMechanismId,
         style: PathStrokeStyle,
     },
     /// Chains one document-owned open motif between consecutive Along Guides sites.
     CurveMotifPaths {
+        tone_sample_spacing: ToneSampleSpacing,
         site_mechanism_id: PatternMechanismId,
         structure_id: AuthoredStructureId,
         style: PathStrokeStyle,
@@ -5188,6 +5185,7 @@ pub enum PatternOutputRealization {
     },
     /// Consumes one typed site product as deterministic positive connection paths.
     ConnectionPaths {
+        selection: ConnectionSelectionIntent,
         site_mechanism_id: PatternMechanismId,
         program: ConnectionProgram,
         style: PathStrokeStyle,
@@ -5604,7 +5602,8 @@ impl PatternDefinition {
     ///
     /// The optional site intent selects a circle-mark output; its absence
     /// selects the raw structural path output. Validation remains the caller's
-    /// publication gate and this constructor owns no evaluator state.
+    /// publication gate and this constructor owns no evaluator state. Direct construction
+    /// keeps finite Fixed extent; recipe application installs its explicit coverage policy.
     #[allow(clippy::too_many_arguments)]
     pub fn parametric_curve(
         id: PatternDefinitionId,
@@ -5620,6 +5619,7 @@ impl PatternDefinition {
         let mut mechanisms = vec![PatternMechanism::ParametricCurveSource {
             id: curve_id,
             curve,
+            spiral_coverage: SpiralCoveragePolicy::Fixed,
             repetition,
         }];
         let output = if let (Some(site_id), Some(sites)) = (site_id, sites) {
@@ -5636,6 +5636,7 @@ impl PatternDefinition {
             }
         } else {
             PatternOutputRealization::ParametricPaths {
+                tone_sample_spacing: Default::default(),
                 curve_mechanism_id: curve_id,
                 style: PathStrokeStyle::default(),
             }
@@ -8312,9 +8313,22 @@ impl Document {
                         target,
                     ));
                 }
+                if matches!(layer.realization, PatternOutputRealization::GuidePaths { .. } | PatternOutputRealization::ParametricPaths { .. } | PatternOutputRealization::CurveMotifPaths { .. }) {
+                    descriptors.push(descriptor_from_contract(PropertyFieldId::ToneSampleSpacing, target));
+                }
                 if let PatternOutputRealization::ConnectionPaths { program, .. } =
                     &layer.realization
                 {
+                    let PatternOutputRealization::ConnectionPaths { selection, .. } = &layer.realization else { unreachable!("matched connection") };
+                    for field in [PropertyFieldId::ConnectionFinalDegreeLimit, PropertyFieldId::ConnectionMaximumFinalDegree, PropertyFieldId::ConnectionAllowLoops, PropertyFieldId::ConnectionMinimumComponentPoints] {
+                        let mut descriptor = descriptor_from_contract(field, target);
+                        descriptor.enabled = match field {
+                            PropertyFieldId::ConnectionMaximumFinalDegree => selection.maximum_final_degree.is_some(),
+                            PropertyFieldId::ConnectionAllowLoops => !matches!(program, ConnectionProgram::GridSpanningTree { .. }),
+                            _ => true,
+                        };
+                        descriptors.push(descriptor);
+                    }
                     for field in [
                         PropertyFieldId::ConnectionProgram,
                         PropertyFieldId::ConnectionMaximumDegree,
@@ -9351,6 +9365,15 @@ impl Document {
                     _ => {}
                 }
                 match (descriptor.field, &layer.realization) {
+                    (PropertyFieldId::ConnectionFinalDegreeLimit, PatternOutputRealization::ConnectionPaths { selection, .. }) => PropertyCurrentValueKind::Boolean(selection.maximum_final_degree.is_some()),
+                    (PropertyFieldId::ConnectionMaximumFinalDegree, PatternOutputRealization::ConnectionPaths { selection, .. }) => PropertyCurrentValueKind::U32(selection.maximum_final_degree.unwrap_or(2)),
+                    (PropertyFieldId::ConnectionAllowLoops, PatternOutputRealization::ConnectionPaths { selection, program, .. }) => PropertyCurrentValueKind::Boolean(!matches!(program, ConnectionProgram::GridSpanningTree { .. }) && selection.cycles == ConnectionCyclePolicy::Allow),
+                    (PropertyFieldId::ConnectionMinimumComponentPoints, PatternOutputRealization::ConnectionPaths { selection, .. }) => PropertyCurrentValueKind::U32(selection.minimum_component_points),
+
+                    (PropertyFieldId::ToneSampleSpacing, PatternOutputRealization::GuidePaths { tone_sample_spacing, .. }
+                        | PatternOutputRealization::ParametricPaths { tone_sample_spacing, .. }
+                        | PatternOutputRealization::CurveMotifPaths { tone_sample_spacing, .. }) => PropertyCurrentValueKind::FiniteF64(tone_sample_spacing.multiplier),
+
                     (PropertyFieldId::OutputSiteUseFilterKind, _) => {
                         PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SiteUseFilter(
                             layer.source_filter.kind(),
@@ -10038,6 +10061,7 @@ impl Document {
                     }
                 }
                 PatternOutputRealization::CurveMotifPaths {
+                    tone_sample_spacing,
                     structure_id,
                     style,
                     mirror_alternate_rows,
@@ -10057,6 +10081,7 @@ impl Document {
                         },
                     )?;
                     PatternStructureRecipe::CurveMotifPaths {
+                        tone_sample_spacing: *tone_sample_spacing,
                         definition: Box::new(base),
                         resource_index,
                         style: *style,
@@ -10436,6 +10461,7 @@ impl Document {
                 None,
             ),
             PatternStructureRecipe::CurveMotifPaths {
+                tone_sample_spacing,
                 definition,
                 resource_index,
                 style,
@@ -10449,6 +10475,7 @@ impl Document {
                     *mirror_alternate_rows,
                     *alternate_row_phase,
                     *resource_index,
+                    *tone_sample_spacing,
                 )),
                 None,
                 None,
@@ -10456,6 +10483,7 @@ impl Document {
                 None,
             ),
             PatternStructureRecipe::ConnectionPaths {
+                selection,
                 definition,
                 program,
                 style,
@@ -10465,7 +10493,7 @@ impl Document {
                     definition.as_ref(),
                     None,
                     None,
-                    Some((program, *style)),
+                    Some((program, *style, *selection)),
                     None,
                     false,
                     None,
@@ -10518,7 +10546,7 @@ impl Document {
             candidate.prune_document_base_output_response_deltas();
         }
         candidate.apply_recipe_controls(neutral.id, definition_recipe, true)?;
-        if let Some((program, style)) = connection {
+        if let Some((program, style, selection)) = connection {
             let definition = candidate
                 .pattern_definition_bundles
                 .iter_mut()
@@ -10542,6 +10570,7 @@ impl Document {
             definition.output_layers = vec![PatternOutputLayer::all(
                 output_id,
                 PatternOutputRealization::ConnectionPaths {
+                    selection,
                     site_mechanism_id,
                     program: program.clone(),
                     style,
@@ -10580,8 +10609,13 @@ impl Document {
             )];
             validate_definition(definition)?;
         }
-        if let Some((style, mirror_alternate_rows, alternate_row_phase, resource_index)) =
-            curve_motif
+        if let Some((
+            style,
+            mirror_alternate_rows,
+            alternate_row_phase,
+            resource_index,
+            tone_sample_spacing,
+        )) = curve_motif
         {
             let structure_id = resolve_materialized_recipe_resource(
                 &candidate,
@@ -10612,6 +10646,7 @@ impl Document {
             definition.output_layers = vec![PatternOutputLayer::all(
                 output_id,
                 PatternOutputRealization::CurveMotifPaths {
+                    tone_sample_spacing,
                     site_mechanism_id,
                     structure_id,
                     style,
@@ -10918,29 +10953,33 @@ impl Document {
                         orientation,
                     }
                 }
-                PatternOutputRealizationRecipe::StructuralPaths { style } => {
-                    match definition.family {
-                        PatternFamily::GuideIntersections { .. } => {
-                            PatternOutputRealization::GuidePaths {
-                                guide_mechanism_id: structural_mechanism_id,
-                                style: *style,
-                            }
-                        }
-                        PatternFamily::ParametricCurve { .. } => {
-                            PatternOutputRealization::ParametricPaths {
-                                curve_mechanism_id: structural_mechanism_id,
-                                style: *style,
-                            }
-                        }
-                        PatternFamily::RandomSites { .. } => {
-                            return Err(ValidationError::new(
-                                "preset.recipe.outputs.structural_paths",
-                                "random-site families do not publish structural paths",
-                            ));
+                PatternOutputRealizationRecipe::StructuralPaths {
+                    tone_sample_spacing,
+                    style,
+                } => match definition.family {
+                    PatternFamily::GuideIntersections { .. } => {
+                        PatternOutputRealization::GuidePaths {
+                            tone_sample_spacing: *tone_sample_spacing,
+                            guide_mechanism_id: structural_mechanism_id,
+                            style: *style,
                         }
                     }
-                }
+                    PatternFamily::ParametricCurve { .. } => {
+                        PatternOutputRealization::ParametricPaths {
+                            tone_sample_spacing: *tone_sample_spacing,
+                            curve_mechanism_id: structural_mechanism_id,
+                            style: *style,
+                        }
+                    }
+                    PatternFamily::RandomSites { .. } => {
+                        return Err(ValidationError::new(
+                            "preset.recipe.outputs.structural_paths",
+                            "random-site families do not publish structural paths",
+                        ));
+                    }
+                },
                 PatternOutputRealizationRecipe::CurveMotifPaths {
+                    tone_sample_spacing,
                     resource_index,
                     style,
                     mirror_alternate_rows,
@@ -10953,6 +10992,7 @@ impl Document {
                         AuthoredStructureKind::OpenPath,
                     )?;
                     PatternOutputRealization::CurveMotifPaths {
+                        tone_sample_spacing: *tone_sample_spacing,
                         site_mechanism_id: site_mechanism_id.ok_or(ValidationError::new(
                             "preset.recipe.outputs.curve_motif",
                             "Curve Motif output requires a site-backed family",
@@ -10963,16 +11003,19 @@ impl Document {
                         alternate_row_phase: *alternate_row_phase,
                     }
                 }
-                PatternOutputRealizationRecipe::ConnectionPaths { program, style } => {
-                    PatternOutputRealization::ConnectionPaths {
-                        site_mechanism_id: site_mechanism_id.ok_or(ValidationError::new(
-                            "preset.recipe.outputs.connection",
-                            "connection output requires a site-backed family",
-                        ))?,
-                        program: program.clone(),
-                        style: *style,
-                    }
-                }
+                PatternOutputRealizationRecipe::ConnectionPaths {
+                    selection,
+                    program,
+                    style,
+                } => PatternOutputRealization::ConnectionPaths {
+                    selection: *selection,
+                    site_mechanism_id: site_mechanism_id.ok_or(ValidationError::new(
+                        "preset.recipe.outputs.connection",
+                        "connection output requires a site-backed family",
+                    ))?,
+                    program: program.clone(),
+                    style: *style,
+                },
                 PatternOutputRealizationRecipe::MazeWalls { program, style } => {
                     PatternOutputRealization::MazeWalls {
                         site_mechanism_id: site_mechanism_id.ok_or(ValidationError::new(
@@ -11320,18 +11363,24 @@ impl Document {
                             })
                     })
                     .transpose()?;
-                let curve = materialize_recipe_spiral_curve(curve, *spiral_coverage, &self.canvas)?;
-                let definition = PatternDefinition::parametric_curve(
+                let mut definition = PatternDefinition::parametric_curve(
                     definition_id,
                     name.clone(),
                     curve_id,
                     site_id,
                     self.allocate_output_layer_id()?,
-                    curve,
+                    curve.clone(),
                     repetition.clone(),
                     sites.clone(),
                     coverage.clone(),
                 );
+                if let Some(PatternMechanism::ParametricCurveSource {
+                    spiral_coverage: policy,
+                    ..
+                }) = definition.mechanisms.first_mut()
+                {
+                    *policy = *spiral_coverage;
+                }
                 validate_definition(&definition)?;
                 Ok(definition)
             }
@@ -11960,10 +12009,12 @@ impl Document {
                 PatternMechanism::ParametricCurveSource {
                     id,
                     curve,
+                    spiral_coverage,
                     repetition,
                 } => PatternMechanism::ParametricCurveSource {
                     id: remap_mechanism(*id),
                     curve: curve.clone(),
+                    spiral_coverage: *spiral_coverage,
                     repetition: repetition.clone(),
                 },
                 PatternMechanism::AlongParametricCurveSites {
@@ -12054,26 +12105,32 @@ impl Document {
                         },
                     },
                     PatternOutputRealization::GuidePaths {
+                        tone_sample_spacing,
                         guide_mechanism_id,
                         style,
                     } => PatternOutputRealization::GuidePaths {
+                        tone_sample_spacing: *tone_sample_spacing,
                         guide_mechanism_id: remap_mechanism(*guide_mechanism_id),
                         style: *style,
                     },
                     PatternOutputRealization::ParametricPaths {
+                        tone_sample_spacing,
                         curve_mechanism_id,
                         style,
                     } => PatternOutputRealization::ParametricPaths {
+                        tone_sample_spacing: *tone_sample_spacing,
                         curve_mechanism_id: remap_mechanism(*curve_mechanism_id),
                         style: *style,
                     },
                     PatternOutputRealization::CurveMotifPaths {
+                        tone_sample_spacing,
                         site_mechanism_id,
                         structure_id,
                         style,
                         mirror_alternate_rows,
                         alternate_row_phase,
                     } => PatternOutputRealization::CurveMotifPaths {
+                        tone_sample_spacing: *tone_sample_spacing,
                         site_mechanism_id: remap_mechanism(*site_mechanism_id),
                         structure_id: *structure_id,
                         style: *style,
@@ -12081,10 +12138,12 @@ impl Document {
                         alternate_row_phase: *alternate_row_phase,
                     },
                     PatternOutputRealization::ConnectionPaths {
+                        selection,
                         site_mechanism_id,
                         program,
                         style,
                     } => PatternOutputRealization::ConnectionPaths {
+                        selection: *selection,
                         site_mechanism_id: remap_mechanism(*site_mechanism_id),
                         program: program.clone(),
                         style: *style,
@@ -12984,6 +13043,22 @@ fn recipe_exclusion_transition(
 /// deliberately left unchanged so validation can reject them before this mutation seam is used.
 fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefinitionEdit) {
     match edit {
+        PatternDefinitionEdit::SetConnectionFinalDegreeLimit { output_layer_id, enabled } => apply_connection_selection(definition, *output_layer_id, |selection| selection.maximum_final_degree = if *enabled {Some(selection.maximum_final_degree.unwrap_or(2))} else {None}),
+        PatternDefinitionEdit::SetConnectionMaximumFinalDegree { output_layer_id, value } => apply_connection_selection(definition, *output_layer_id, |selection| selection.maximum_final_degree=Some(*value)),
+        PatternDefinitionEdit::SetConnectionAllowLoops { output_layer_id, allow } => apply_connection_selection(definition, *output_layer_id, |selection| selection.cycles=if *allow {ConnectionCyclePolicy::Allow}else{ConnectionCyclePolicy::Forbid}),
+        PatternDefinitionEdit::SetConnectionMinimumComponentPoints { output_layer_id, value } => apply_connection_selection(definition, *output_layer_id, |selection| selection.minimum_component_points = *value),
+
+        PatternDefinitionEdit::SetToneSampleSpacing { output_layer_id, value } => {
+            if let Some(output) = definition.output_layers.iter_mut().find(|output| output.id == *output_layer_id) {
+                match &mut output.realization {
+                    PatternOutputRealization::GuidePaths { tone_sample_spacing, .. }
+                    | PatternOutputRealization::ParametricPaths { tone_sample_spacing, .. }
+                    | PatternOutputRealization::CurveMotifPaths { tone_sample_spacing, .. } => *tone_sample_spacing = *value,
+                    _ => {}
+                }
+            }
+        }
+
         PatternDefinitionEdit::SetParametricShape {
             mechanism_id,
             shape,
@@ -13880,6 +13955,23 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
     }
 }
 
+/// Applies a validated output-local selection change without modifying candidate adjacency or program.
+/// Validation owns applicability; this helper only mutates the matched connection output.
+fn apply_connection_selection(
+    definition: &mut PatternDefinition,
+    id: PatternOutputLayerId,
+    mutate: impl FnOnce(&mut ConnectionSelectionIntent),
+) {
+    if let Some(PatternOutputRealization::ConnectionPaths { selection, .. }) = definition
+        .output_layers
+        .iter_mut()
+        .find(|layer| layer.id == id)
+        .map(|layer| &mut layer.realization)
+    {
+        mutate(selection);
+    }
+}
+
 /// Applies one validated connection-program mutation without altering the output's site mechanism.
 ///
 /// The helper intentionally ignores absent or non-connection targets because validation rejects
@@ -14083,6 +14175,12 @@ fn remap_definition_edit_with(
     output: &impl Fn(PatternOutputLayerId) -> PatternOutputLayerId,
 ) -> PatternDefinitionEdit {
     match edit {
+        PatternDefinitionEdit::SetConnectionFinalDegreeLimit { output_layer_id, enabled } => PatternDefinitionEdit::SetConnectionFinalDegreeLimit { output_layer_id: output(*output_layer_id), enabled: *enabled },
+        PatternDefinitionEdit::SetConnectionMaximumFinalDegree { output_layer_id, value } => PatternDefinitionEdit::SetConnectionMaximumFinalDegree { output_layer_id: output(*output_layer_id), value: *value },
+        PatternDefinitionEdit::SetConnectionAllowLoops { output_layer_id, allow } => PatternDefinitionEdit::SetConnectionAllowLoops { output_layer_id: output(*output_layer_id), allow: *allow },
+        PatternDefinitionEdit::SetConnectionMinimumComponentPoints { output_layer_id, value } => PatternDefinitionEdit::SetConnectionMinimumComponentPoints { output_layer_id: output(*output_layer_id), value: *value },
+        PatternDefinitionEdit::SetToneSampleSpacing { output_layer_id, value } => PatternDefinitionEdit::SetToneSampleSpacing { output_layer_id: output(*output_layer_id), value: *value },
+
         PatternDefinitionEdit::SetParametricShape {
             mechanism_id,
             shape,
@@ -14693,6 +14791,27 @@ fn validate_definition_edit(
         validate_property_field_projection(edit.field_projection())?;
     }
     match edit {
+        PatternDefinitionEdit::SetConnectionFinalDegreeLimit { output_layer_id, .. }
+        | PatternDefinitionEdit::SetConnectionMaximumFinalDegree { output_layer_id, .. }
+        | PatternDefinitionEdit::SetConnectionAllowLoops { output_layer_id, .. }
+        | PatternDefinitionEdit::SetConnectionMinimumComponentPoints { output_layer_id, .. } => {
+            let PatternOutputRealization::ConnectionPaths { selection, program, .. } = &validate_output_layer_target(definition, *output_layer_id)?.realization else {
+                return Err(ValidationError::new("connection.selection.target", "selection controls require connection output"));
+            };
+            if matches!(edit, PatternDefinitionEdit::SetConnectionMaximumFinalDegree { .. }) && selection.maximum_final_degree.is_none() {return Err(ValidationError::new("connection.selection.disabled", "enable the final degree limit before editing it"));}
+            if matches!(edit, PatternDefinitionEdit::SetConnectionAllowLoops { .. }) && matches!(program, ConnectionProgram::GridSpanningTree { .. }) {return Err(ValidationError::new("connection.selection.intrinsic_forest", "branching trees are intrinsically loop-free"));}
+            Ok(())
+        }
+        PatternDefinitionEdit::SetToneSampleSpacing { output_layer_id, value } => {
+            value.validate()?;
+            match &validate_output_layer_target(definition, *output_layer_id)?.realization {
+                PatternOutputRealization::GuidePaths { .. }
+                | PatternOutputRealization::ParametricPaths { .. }
+                | PatternOutputRealization::CurveMotifPaths { .. } => Ok(()),
+                _ => Err(ValidationError::new("pattern.tone_sample_spacing.target", "tone sample spacing requires a guide, parametric or motif output")),
+            }
+        }
+
         PatternDefinitionEdit::SetParametricShape { mechanism_id, .. }
         | PatternDefinitionEdit::SetParametricWinding { mechanism_id, .. } => {
             validate_parametric_source_target(definition, *mechanism_id).map(|_| ())
@@ -16041,6 +16160,22 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
     }
     let mut output_ids = HashSet::new();
     for output in &definition.output_layers {
+        match &output.realization {
+            PatternOutputRealization::GuidePaths {
+                tone_sample_spacing,
+                ..
+            }
+            | PatternOutputRealization::ParametricPaths {
+                tone_sample_spacing,
+                ..
+            }
+            | PatternOutputRealization::CurveMotifPaths {
+                tone_sample_spacing,
+                ..
+            } => tone_sample_spacing.validate()?,
+            PatternOutputRealization::ConnectionPaths { selection, .. } => selection.validate()?,
+            _ => {}
+        }
         if !output_ids.insert(output.id) {
             return Err(ValidationError::new(
                 "pattern.output_layers.id",
@@ -16472,6 +16607,7 @@ fn validate_parametric_curve_definition(
         id,
         curve,
         repetition,
+        ..
     }) = definition.mechanisms.first()
     else {
         return Err(ValidationError::new(
@@ -18639,6 +18775,12 @@ pub enum TranslationEditedAxis {
 /// neither current values nor UI policy: callers read those from `Document`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PropertyFieldId {
+    ConnectionFinalDegreeLimit,
+    ConnectionMaximumFinalDegree,
+    ConnectionAllowLoops,
+    ConnectionMinimumComponentPoints,
+
+    ToneSampleSpacing,
     SourceReference,
     Density,
     DensityAspect,
@@ -18760,6 +18902,12 @@ pub enum PropertyFieldId {
 /// enum makes missing or duplicate command-facing schema fields testable
 /// without deriving any ordering from frontend state or allocation order.
 pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
+    PropertyFieldId::ConnectionFinalDegreeLimit,
+    PropertyFieldId::ConnectionMaximumFinalDegree,
+    PropertyFieldId::ConnectionAllowLoops,
+    PropertyFieldId::ConnectionMinimumComponentPoints,
+
+    PropertyFieldId::ToneSampleSpacing,
     PropertyFieldId::SourceReference,
     PropertyFieldId::Density,
     PropertyFieldId::DensityAspect,
@@ -18983,6 +19131,8 @@ pub struct PropertyBounds {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropertyUnit {
+    /// Relative spacing in the shared Feature-size reference metric.
+    FeatureSizeMultiplier,
     None,
     Density,
     Degrees,
@@ -19023,6 +19173,8 @@ pub enum PropertyDependency {
 /// active.  This is capability metadata, not a stored value or UI policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropertyApplicability {
+    /// Structural guide, parametric or motif strokes; excludes point connections and mazes.
+    ToneSampledCurveOutput,
     Always,
     ModeledChannel,
     SolidPaint,
@@ -19094,6 +19246,12 @@ pub enum PropertyChoicePolicy {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropertyCommandKind {
+    SetConnectionFinalDegreeLimit,
+    SetConnectionMaximumFinalDegree,
+    SetConnectionAllowLoops,
+    SetConnectionMinimumComponentPoints,
+
+    SetToneSampleSpacing,
     SetParametricCurve,
     SetSourceReference,
     SetChannelDensityDelta,
@@ -19190,6 +19348,8 @@ pub enum PropertyInheritance {
 /// schema. `choices` uses stable discriminants, never localized labels.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PropertyDescriptor {
+    /// Reports native control sensitivity from the current authored policy and intrinsic mode.
+    pub enabled: bool,
     pub field: PropertyFieldId,
     pub target: PropertyTarget,
     pub value_kind: PropertyValueKind,
@@ -20960,6 +21120,12 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
     PropertyFieldContract {
         field,
         command_kind: match field {
+            PropertyFieldId::ConnectionFinalDegreeLimit => PropertyCommandKind::SetConnectionFinalDegreeLimit,
+            PropertyFieldId::ConnectionMaximumFinalDegree => PropertyCommandKind::SetConnectionMaximumFinalDegree,
+            PropertyFieldId::ConnectionAllowLoops => PropertyCommandKind::SetConnectionAllowLoops,
+            PropertyFieldId::ConnectionMinimumComponentPoints => PropertyCommandKind::SetConnectionMinimumComponentPoints,
+
+            PropertyFieldId::ToneSampleSpacing => PropertyCommandKind::SetToneSampleSpacing,
             PropertyFieldId::ParametricShape
             | PropertyFieldId::ParametricTurns
             | PropertyFieldId::ParametricRadialSpacing
@@ -21131,6 +21297,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             }
         },
         value_kind: match field {
+            PropertyFieldId::ConnectionFinalDegreeLimit | PropertyFieldId::ConnectionAllowLoops => PropertyValueKind::Boolean,
+            PropertyFieldId::ConnectionMaximumFinalDegree | PropertyFieldId::ConnectionMinimumComponentPoints => PropertyValueKind::U32,
+
             PropertyFieldId::SourceReference
             | PropertyFieldId::DefinitionSelection
             | PropertyFieldId::IntersectionDimensions
@@ -21210,6 +21379,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             _ => &[],
         },
         bounds: match field {
+            PropertyFieldId::ConnectionMaximumFinalDegree | PropertyFieldId::ConnectionMinimumComponentPoints => Some(PropertyBounds { minimum: Some(1.0), minimum_inclusive: true, maximum: Some(u32::MAX as f64), maximum_inclusive: true }),
+
+            PropertyFieldId::ToneSampleSpacing => positive_bounds(),
             PropertyFieldId::Density
             | PropertyFieldId::DensityAspect
             | PropertyFieldId::GuideSpacingMultiplier
@@ -21299,6 +21471,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             _ => None,
         },
         unit: match field {
+            PropertyFieldId::ConnectionMaximumFinalDegree | PropertyFieldId::ConnectionMinimumComponentPoints => PropertyUnit::Count,
+
+            PropertyFieldId::ToneSampleSpacing => PropertyUnit::FeatureSizeMultiplier,
             PropertyFieldId::Density
             | PropertyFieldId::DensityAspect
             | PropertyFieldId::GuideSpacingMultiplier
@@ -21358,6 +21533,12 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             _ => PropertyUnit::None,
         },
         applicability: match field {
+            PropertyFieldId::ConnectionFinalDegreeLimit => PropertyApplicability::ConnectionPathOutput,
+            PropertyFieldId::ConnectionMaximumFinalDegree => PropertyApplicability::ConnectionPathOutput,
+            PropertyFieldId::ConnectionAllowLoops => PropertyApplicability::ConnectionPathOutput,
+            PropertyFieldId::ConnectionMinimumComponentPoints => PropertyApplicability::ConnectionPathOutput,
+
+            PropertyFieldId::ToneSampleSpacing => PropertyApplicability::ToneSampledCurveOutput,
             PropertyFieldId::ModeledMappingComponent
             | PropertyFieldId::ModeledMappingPlacement
             | PropertyFieldId::ModeledMappingInverted
@@ -21451,6 +21632,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             _ => PropertyApplicability::Always,
         },
         invalidation: match field {
+            PropertyFieldId::ToneSampleSpacing => InvalidationLevel::Realization,
             PropertyFieldId::SourceReference => InvalidationLevel::Source,
             PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
@@ -21509,7 +21691,13 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
         },
         copy_on_edit_escalates_to_family: matches!(
             field,
-            PropertyFieldId::CoverageGuardSteps
+            PropertyFieldId::ConnectionFinalDegreeLimit |
+            PropertyFieldId::ConnectionMaximumFinalDegree |
+            PropertyFieldId::ConnectionAllowLoops |
+            PropertyFieldId::ConnectionMinimumComponentPoints |
+
+            PropertyFieldId::ToneSampleSpacing
+                | PropertyFieldId::CoverageGuardSteps
                 | PropertyFieldId::CoverageAdditionalMargin
                 | PropertyFieldId::GuideBaselineAngle
                 | PropertyFieldId::GuidePhase
@@ -21759,7 +21947,8 @@ const fn dependency_for_contract(
         | PropertyApplicability::RandomLinkProgram
         | PropertyApplicability::SeededConnectionProgram
         | PropertyApplicability::MazeWallProgram
-        | PropertyApplicability::CurveMotifPathOutput => PropertyDependency::Always,
+        | PropertyApplicability::CurveMotifPathOutput
+        | PropertyApplicability::ToneSampledCurveOutput => PropertyDependency::Always,
         PropertyApplicability::CurrentPaint
         | PropertyApplicability::CurrentDensityModulation
         | PropertyApplicability::CurrentExclusion => dynamic,
@@ -21794,6 +21983,7 @@ const fn descriptor_from_contract(
 ) -> PropertyDescriptor {
     let contract = property_field_contract(field);
     PropertyDescriptor {
+        enabled: true,
         field,
         target,
         value_kind: contract.value_kind,
@@ -21840,6 +22030,7 @@ const fn descriptor_with_runtime_context(
         ),
     };
     PropertyDescriptor {
+        enabled: true,
         field,
         target,
         value_kind: contract.value_kind,
@@ -22133,6 +22324,7 @@ pub enum PatternStructureRecipe {
     /// Materialization retains the allocated output and site-product IDs while replacing only
     /// its mark output; graphs, paths, diagnostics, and limits remain derived-only.
     ConnectionPaths {
+        selection: ConnectionSelectionIntent,
         definition: Box<PatternStructureRecipe>,
         program: ConnectionProgram,
         style: PathStrokeStyle,
@@ -22155,6 +22347,7 @@ pub enum PatternStructureRecipe {
     /// The materializer allocates the resource and output atomically; the cadence remains the
     /// wrapped family site's interval rather than becoming a second motif-size control.
     CurveMotifPaths {
+        tone_sample_spacing: ToneSampleSpacing,
         definition: Box<PatternStructureRecipe>,
         resource_index: usize,
         style: PathStrokeStyle,
@@ -22198,16 +22391,19 @@ pub enum PatternOutputRealizationRecipe {
     },
     /// Emits the family's complete structural guide or parametric paths.
     StructuralPaths {
+        tone_sample_spacing: ToneSampleSpacing,
         style: PathStrokeStyle,
     },
     /// Emits one Curve Motif path output from one root-table authored open path.
     CurveMotifPaths {
+        tone_sample_spacing: ToneSampleSpacing,
         resource_index: usize,
         style: PathStrokeStyle,
         mirror_alternate_rows: bool,
         alternate_row_phase: Option<f64>,
     },
     ConnectionPaths {
+        selection: ConnectionSelectionIntent,
         program: ConnectionProgram,
         style: PathStrokeStyle,
     },
@@ -22464,7 +22660,10 @@ impl PatternDefinitionRecipe {
         for output in &mut parts.outputs {
             match output {
                 PatternOutputRealizationRecipe::MazeWalls { style, .. } => {
-                    *output = PatternOutputRealizationRecipe::StructuralPaths { style: *style };
+                    *output = PatternOutputRealizationRecipe::StructuralPaths {
+                        tone_sample_spacing: Default::default(),
+                        style: *style,
+                    };
                 }
                 PatternOutputRealizationRecipe::GuideFaceRegions { .. } => {
                     *output = PatternOutputRealizationRecipe::VoronoiRegions;
@@ -22817,7 +23016,8 @@ impl PatternDefinitionRecipe {
     ///
     /// Selecting the existing kind is an exact no-op. A kind change resets only that output's
     /// response and site-use filter because values from a different geometry family are not
-    /// compatible. Resource-bearing choices append one fresh recipe-local authored draft.
+    /// compatible. Tone spacing remains authored when switching between applicable structural
+    /// paths and Curve Motif. Resource-bearing choices append one fresh recipe-local authored draft.
     ///
     /// # Errors
     ///
@@ -22838,8 +23038,32 @@ impl PatternDefinitionRecipe {
         if recipe_output_kind(current) == kind {
             return Ok(self.clone());
         }
-        let (output, response) =
+        let retained_tone = match current {
+            PatternOutputRealizationRecipe::StructuralPaths {
+                tone_sample_spacing,
+                ..
+            }
+            | PatternOutputRealizationRecipe::CurveMotifPaths {
+                tone_sample_spacing,
+                ..
+            } => Some(*tone_sample_spacing),
+            _ => None,
+        };
+        let (mut output, response) =
             default_recipe_output(kind, &parts.definition, &mut parts.resources)?;
+        if let Some(retained) = retained_tone {
+            match &mut output {
+                PatternOutputRealizationRecipe::StructuralPaths {
+                    tone_sample_spacing,
+                    ..
+                }
+                | PatternOutputRealizationRecipe::CurveMotifPaths {
+                    tone_sample_spacing,
+                    ..
+                } => *tone_sample_spacing = retained,
+                _ => {}
+            }
+        }
         parts.outputs[output_index] = output;
         parts.settings[output_index] = PatternOutputSettingsRecipe {
             source_filter: SiteUseFilterRecipe::All,
@@ -23374,6 +23598,7 @@ fn replace_site_backed_outputs_with_structural_paths(
             PatternOutputRealizationRecipe::StructuralPaths { .. }
         ) {
             *output = PatternOutputRealizationRecipe::StructuralPaths {
+                tone_sample_spacing: Default::default(),
                 style: PathStrokeStyle::default(),
             };
             *setting = PatternOutputSettingsRecipe {
@@ -23408,12 +23633,17 @@ fn decompose_recipe_outputs(
     };
     let (definition, outputs) = match structure {
         PatternStructureRecipe::ConnectionPaths {
+            selection,
             definition,
             program,
             style,
         } => (
             *definition,
-            vec![PatternOutputRealizationRecipe::ConnectionPaths { program, style }],
+            vec![PatternOutputRealizationRecipe::ConnectionPaths {
+                selection,
+                program,
+                style,
+            }],
         ),
         PatternStructureRecipe::MazeWalls {
             definition,
@@ -23434,6 +23664,7 @@ fn decompose_recipe_outputs(
             }],
         ),
         PatternStructureRecipe::CurveMotifPaths {
+            tone_sample_spacing,
             definition,
             resource_index,
             style,
@@ -23442,6 +23673,7 @@ fn decompose_recipe_outputs(
         } => (
             *definition,
             vec![PatternOutputRealizationRecipe::CurveMotifPaths {
+                tone_sample_spacing,
                 resource_index,
                 style,
                 mirror_alternate_rows,
@@ -23469,6 +23701,7 @@ fn decompose_recipe_outputs(
                 PatternStructureRecipe::ParametricCurve { sites: None, .. }
             ) {
                 PatternOutputRealizationRecipe::StructuralPaths {
+                    tone_sample_spacing: Default::default(),
                     style: PathStrokeStyle::default(),
                 }
             } else {
@@ -23715,6 +23948,7 @@ fn default_recipe_output(
             }
             (
                 PatternOutputRealizationRecipe::StructuralPaths {
+                    tone_sample_spacing: Default::default(),
                     style: PathStrokeStyle::default(),
                 },
                 PatternGeometryResponse::Connected(ConnectedGeometryResponse {
@@ -23726,6 +23960,7 @@ fn default_recipe_output(
         }
         PatternRecipeOutputKind::Connections => (
             PatternOutputRealizationRecipe::ConnectionPaths {
+                selection: Default::default(),
                 program: ConnectionProgram::NearestLinks {
                     adjacency: ConnectionAdjacencyIntent {
                         maximum_degree: 3,
@@ -23774,6 +24009,7 @@ fn default_recipe_output(
             resources.push(motif);
             (
                 PatternOutputRealizationRecipe::CurveMotifPaths {
+                    tone_sample_spacing: Default::default(),
                     resource_index,
                     style: PathStrokeStyle::default(),
                     mirror_alternate_rows: false,
@@ -24153,64 +24389,21 @@ struct MaterializedPatternDefinitionRecipe {
 pub struct PresetRecord {
     pub metadata: PresetMetadata,
     pub recipe: PatternDefinitionRecipe,
-    /// Optional source-independent measurement bound to the concrete reference recipe.
+    /// Optional source-independent measurement bound to exact authored intent and reference producer.
     pub saved_calibration: Option<SavedCalibration>,
-}
-
-/// Materializes only CoverCanvas spiral intent in a cloned recipe for companion comparison.
-/// The stored Preset remains generic; receiving documents still require exact concrete binding.
-///
-/// # Errors
-/// Returns the existing finite spiral diagnostic if the fixed reference cannot be materialized.
-fn materialize_preset_reference_spiral(
-    structure: &mut PatternStructureRecipe,
-) -> Result<(), ValidationError> {
-    match structure {
-        PatternStructureRecipe::ParametricCurve {
-            curve,
-            spiral_coverage,
-            ..
-        } if *spiral_coverage == SpiralCoveragePolicy::CoverCanvas => {
-            let canvas = CanvasSpec {
-                width: CALIBRATION_REFERENCE_CANVAS_SIDE,
-                height: CALIBRATION_REFERENCE_CANVAS_SIDE,
-            };
-            *curve = materialize_recipe_spiral_curve(curve, *spiral_coverage, &canvas)?;
-            validate_parametric_curve(curve)?;
-            *spiral_coverage = SpiralCoveragePolicy::Fixed;
-            Ok(())
-        }
-        PatternStructureRecipe::AuthoredResources { definition, .. }
-        | PatternStructureRecipe::ConnectionPaths { definition, .. }
-        | PatternStructureRecipe::MazeWalls { definition, .. }
-        | PatternStructureRecipe::AuthoredClosedShapeMarks { definition, .. }
-        | PatternStructureRecipe::CurveMotifPaths { definition, .. }
-        | PatternStructureRecipe::VoronoiRegions { definition }
-        | PatternStructureRecipe::GuideFaceRegions { definition, .. }
-        | PatternStructureRecipe::OrderedOutputs { definition, .. } => {
-            materialize_preset_reference_spiral(definition)
-        }
-        PatternStructureRecipe::StraightGrid(_)
-        | PatternStructureRecipe::GeneralizedStraightGuides { .. }
-        | PatternStructureRecipe::GenericGuides { .. }
-        | PatternStructureRecipe::RandomSites { .. }
-        | PatternStructureRecipe::ParametricCurve { .. } => Ok(()),
-    }
 }
 
 /// Validates pure preset metadata and ID-free recipe inputs without allocating
 /// IDs, mutating a document, or publishing history. Full reconstruction still
 /// reuses command validation when a recipe is applied to a document.
-/// A CoverCanvas companion is checked against that recipe's concrete 1024-square reference.
+/// A companion retains the exact authored coverage policy; Fixed measurements never stand in for CoverCanvas.
 ///
 /// # Errors
 /// Returns metadata, recipe, or exact companion-binding validation diagnostics.
 pub fn validate_preset_record(record: &PresetRecord) -> Result<(), ValidationError> {
     if let Some(artifact) = &record.saved_calibration {
-        let mut reference_recipe = record.recipe.clone();
-        materialize_preset_reference_spiral(&mut reference_recipe.structure)?;
         let expected = CalibrationBinding::new(
-            reference_recipe,
+            record.recipe.clone(),
             artifact.binding().density_aspect(),
             artifact.binding().shape_rotation_degrees(),
         )?;
@@ -25304,6 +25497,12 @@ fn materialize_recipe_mark_orientation(
 /// through `DocumentHistory`, which records its exact inverse.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternDefinitionEdit {
+    SetConnectionFinalDegreeLimit { output_layer_id: PatternOutputLayerId, enabled: bool },
+    SetConnectionMaximumFinalDegree { output_layer_id: PatternOutputLayerId, value: u32 },
+    SetConnectionAllowLoops { output_layer_id: PatternOutputLayerId, allow: bool },
+    SetConnectionMinimumComponentPoints { output_layer_id: PatternOutputLayerId, value: u32 },
+
+    SetToneSampleSpacing { output_layer_id: PatternOutputLayerId, value: ToneSampleSpacing },
     SetParametricShape {
         mechanism_id: PatternMechanismId,
         shape: SpiralShape,
@@ -25900,6 +26099,13 @@ impl PatternDefinitionEdit {
         );
         use PatternDefinitionEdit as Edit;
         let (field, value) = match self {
+            Edit::SetConnectionFinalDegreeLimit { enabled, .. } => (PropertyFieldId::ConnectionFinalDegreeLimit, PropertyFieldValue::Boolean(*enabled)),
+            Edit::SetConnectionMaximumFinalDegree { value, .. } => (PropertyFieldId::ConnectionMaximumFinalDegree, PropertyFieldValue::U32(*value)),
+            Edit::SetConnectionAllowLoops { allow, .. } => (PropertyFieldId::ConnectionAllowLoops, PropertyFieldValue::Boolean(*allow)),
+            Edit::SetConnectionMinimumComponentPoints { value, .. } => (PropertyFieldId::ConnectionMinimumComponentPoints, PropertyFieldValue::U32(*value)),
+
+            Edit::SetToneSampleSpacing { value, .. } => (PropertyFieldId::ToneSampleSpacing, PropertyFieldValue::FiniteF64(value.multiplier)),
+
             Edit::SetParametricShape { shape, .. } => (
                 PropertyFieldId::ParametricShape,
                 PropertyFieldValue::EnumChoice(PropertyEnumChoice::SpiralShape(*shape)),
@@ -29923,7 +30129,9 @@ mod history_tests {
         DocumentHistory::new(DocumentSession::new(document).unwrap())
     }
 
-    /// Builds two ordered channels linked to one editable parametric definition.
+    /// Builds two ordered channels linked to one explicitly finite editable parametric definition.
+    /// # Panics
+    /// Panics if the bounded valid history fixture fails domain validation.
     fn parametric_history() -> DocumentHistory {
         let curve_id = PatternMechanismId(41);
         let site_id = PatternMechanismId(42);
@@ -29944,6 +30152,7 @@ mod history_tests {
                         phase_degrees: 0.0,
                         winding: CurveWinding::CounterClockwise,
                     }),
+                    spiral_coverage: SpiralCoveragePolicy::Fixed,
                     repetition: CurveRepetition::Single,
                 },
                 PatternMechanism::AlongParametricCurveSites {

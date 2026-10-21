@@ -56,6 +56,16 @@ pub struct CurvePath {
 }
 
 impl CurvePath {
+    /// Copies immutable validated path storage with cancellation and a checked reserve.
+    /// # Errors
+    /// Returns cancellation or actual storage allocation failure without publishing partial geometry.
+    pub fn try_clone_cancellable(&self, cancelled: &dyn Fn() -> bool) -> Result<Self, CurveError> {
+        let mut segments = Vec::new();
+        reserve_curve(&mut segments, self.segments.len())?;
+        for segment in &self.segments { check_curve_cancelled(cancelled)?; segments.push(*segment); }
+        Ok(Self { segments, closure: self.closure })
+    }
+
     /// Builds a connected finite path without manufacturing a closure segment or smoothing joins.
     ///
     /// # Errors
@@ -286,6 +296,13 @@ impl CurvePath {
     /// Returns arc-length limits or numeric failures without exposing a partial table.
     pub fn measure_arc_length(&self) -> Result<PathArcLength, CurveError> {
         PathArcLength::measure(self)
+    }
+
+    /// Measures reached artistic paths with normal aggregate creative admission and cancellation.
+    /// # Errors
+    /// Returns fallible storage, cancellation, count or unchanged numeric convergence diagnostics.
+    pub fn measure_arc_length_cancellable(&self, limits: super::ArcLengthWorkLimits, cancelled: &dyn Fn() -> bool) -> Result<PathArcLength, CurveError> {
+        PathArcLength::measure_cancellable(self, limits, cancelled)
     }
 
     /// Intersects paths in original canonical order with normal machine-addressable count policy.

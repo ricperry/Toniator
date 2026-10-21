@@ -128,6 +128,18 @@ pub struct SiteAdjacencyNode {
 }
 
 impl SiteAdjacencyNode {
+    /// Copies source facts with fallible provenance storage for retained singleton publication.
+    /// # Errors
+    /// Returns the existing adjacency allocation diagnostic before publishing a partial copy.
+    pub fn try_cloned(&self) -> Result<Self, SiteAdjacencyError> {
+        Ok(Self {
+            id: self.id,
+            position: self.position,
+            scope: self.scope,
+            nominal_cell_basis: self.nominal_cell_basis,
+            provenance: clone_provenance(&self.provenance)?,
+        })
+    }
     /// Copies immutable family-site facts into one topology-only node with fallible provenance allocation.
     ///
     /// # Errors
@@ -376,10 +388,11 @@ pub fn build_site_adjacency_cancellable(
     for index in 0..nodes.len() {
         cancelled(is_cancelled)?;
         for &other_id in &selections[index] {
-            let other = other_id.ordinal;
-            if other >= nodes.len() || !selections[other].contains(&nodes[index].id) {
-                continue;
-            }
+            // Filtered families preserve emission order and stable sparse ordinals; ordinals are not dense slots.
+            let Ok(other) = nodes.binary_search_by_key(&other_id, |node| node.id) else {
+                return Err(SiteAdjacencyError::new("adjacency.identity", "selected neighbor is absent from the filtered family"));
+            };
+            if !selections[other].contains(&nodes[index].id) { continue; }
             let edge = if nodes[index].id < other_id {
                 SiteAdjacencyEdge {
                     first: nodes[index].id,
@@ -418,8 +431,8 @@ pub fn build_site_adjacency_cancellable(
     neighbors.resize_with(nodes.len(), Vec::new);
     for edge in &edges {
         cancelled(is_cancelled)?;
-        let first = edge.first.ordinal;
-        let second = edge.second.ordinal;
+        let first = nodes.binary_search_by_key(&edge.first, |node| node.id).map_err(|_| SiteAdjacencyError::new("adjacency.identity", "edge endpoint is absent"))?;
+        let second = nodes.binary_search_by_key(&edge.second, |node| node.id).map_err(|_| SiteAdjacencyError::new("adjacency.identity", "edge endpoint is absent"))?;
         if neighbors[first].len() == neighbors[first].capacity() {
             reserve(&mut neighbors[first], 1)?;
         }
@@ -728,7 +741,7 @@ fn graph_fingerprint(
 }
 
 /// Copies one truthful provenance payload while checking all caller-sized contributor allocation.
-fn clone_provenance(
+pub(crate) fn clone_provenance(
     provenance: &FamilySiteProvenance,
 ) -> Result<FamilySiteProvenance, SiteAdjacencyError> {
     let allocation =

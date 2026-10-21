@@ -1,6 +1,6 @@
 [package]
 name = "toniator-engine"
-version = "0.4.5"
+version = "0.4.6"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -23,3 +23,15 @@ path = "src/lib.rs"
 toniator-patterns = { path = "../toniator-patterns", features = ["test-evidence"] }
 image.workspace = true
 zip.workspace = true
+
+[features]
+default = []
+prepared-crop-pilot = ["toniator-render/prepared-crop-pilot"]
+
+[[example]]
+name = "prepared_crop_probe"
+required-features = ["prepared-crop-pilot"]
+
+[[example]]
+name = "preview_cache_root_probe"
+required-features = ["prepared-crop-pilot"]

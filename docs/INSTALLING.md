@@ -1,9 +1,16 @@
 # Installing Toniator
 
 Download **one** of the x86_64 Linux packages from the
-[0.4.5 release](https://github.com/ricperry/Toniator/releases/tag/v0.4.5).
+[0.4.6 prerelease](https://github.com/ricperry/Toniator/releases/tag/v0.4.6).
 Both include the graphical app and CLI, with application ID
 `io.github.ricperry.Toniator`.
+
+**Upgrading to 0.4.6:** ordinary `.toniator` projects require current schema 19.
+Older projects, including the 0.4.5 gallery projects, are rejected. Keep 0.4.5 to
+reopen those projects, or open their source artwork in 0.4.6 and create a new
+project. Schema 19 projects from the unpublished app remain valid even if that
+app displayed version 0.4.5. Supported older source-free Document Presets retain deterministic
+conversion with their original bytes preserved. See [format details](USING_TONIATOR.md#046-project-and-preset-formats).
 
 **Upgrading from 0.3.1 or earlier:** the Flatpak ID changed from
 `com.sbdd.Toniator`. The new Flatpak installs separately and uses a new private
@@ -17,8 +24,8 @@ until you have recovered any settings or personal Patterns you need.
 In the folder containing your download:
 
 ```bash
-chmod +x Toniator-0.4.5-x86_64.AppImage
-./Toniator-0.4.5-x86_64.AppImage
+chmod +x Toniator-0.4.6-x86_64.AppImage
+./Toniator-0.4.6-x86_64.AppImage
 ```
 
 The AppImage's recorded minimum glibc version is in the attached
@@ -27,7 +34,7 @@ broad distribution compatibility is not established. If FUSE mounting is
 unavailable, run it with:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.5-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.6-x86_64.AppImage
 ```
 
 ## Flatpak
@@ -35,7 +42,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.5-x86_64.AppImage
 With Flatpak installed, run:
 
 ```bash
-flatpak install --user ./Toniator-0.4.5-x86_64.flatpak
+flatpak install --user ./Toniator-0.4.6-x86_64.flatpak
 flatpak run io.github.ricperry.Toniator
 ```
 
@@ -52,10 +59,11 @@ Download `SHA256SUMS` alongside the packages to verify their integrity with
 
 Windows packages are distributed separately; check the
 [release assets](https://github.com/ricperry/Toniator/releases) for their matching
-versions. To build the 0.4.5 source natively with MSVC and without WSL, follow
-the [Windows build instructions](windows-build.md) and the
-[same-source 0.4.5 handoff](releases/v0.4.5-windows-handoff.md).
-This Linux release does not establish native Windows verification of 0.4.5.
+versions. The [Windows build instructions](windows-build.md) and
+[0.4.5 handoff](releases/v0.4.5-windows-handoff.md) retain their historical scope.
+This Linux release does not establish native Windows verification of 0.4.6.
+A 0.4.6 Windows package requires a separate native build and verification from
+the exact peeled `v0.4.6` source commit, with its own package provenance.
 The checked-in packaging scripts still describe the historical 0.3.2 debug ZIP;
 they require a separately verified recipe for a current release package.
 

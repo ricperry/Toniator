@@ -1,4 +1,4 @@
-//! Immutable texture presentation with a document-sized intrinsic extent.
+//! Fixed-canvas texture presentation with explicitly invalidated viewport-dependent tile content.
 
 use gtk::{gdk, glib, prelude::*, subclass::prelude::*};
 use std::cell::OnceCell;
@@ -6,6 +6,7 @@ use std::cell::OnceCell;
 /// Stores presentation coordinates only; canonical geometry and pixel bytes remain unchanged.
 struct Image {
     texture: gdk::Texture,
+    tiles: Option<crate::preview_cache::Presentation>,
     bounds: (f32, f32, f32, f32),
     fallback: Option<(gdk::Texture, (f32, f32, f32, f32))>,
     width: f64,
@@ -15,7 +16,7 @@ struct Image {
 mod imp {
     use super::*;
 
-    /// Implements a fixed-size, fixed-content texture paintable without retaining a GTK snapshot.
+    /// Implements fixed intrinsic geometry with explicitly invalidated viewport-dependent tile content.
     #[derive(Default)]
     pub struct ViewportPaintable {
         pub(super) image: OnceCell<Image>,
@@ -31,14 +32,35 @@ mod imp {
     impl ObjectImpl for ViewportPaintable {}
 
     impl gdk::subclass::prelude::PaintableImpl for ViewportPaintable {
-        /// Returns this immutable image without creating another render-node snapshot.
+        /// Freezes the current tiled draw into an immutable render-node paintable for GDK consumers.
+        /// Ordinary texture images are already immutable and may return themselves. No GTK snapshot
+        /// retained here observes later scroll/layout/generation changes.
         fn current_image(&self) -> gdk::Paintable {
-            self.obj().clone().upcast()
+            let Some(image) = self.image.get() else {
+                return gdk::Paintable::new_empty(0, 0);
+            };
+            if image.tiles.is_none() {
+                return self.obj().clone().upcast();
+            }
+            let snapshot = gtk::Snapshot::new();
+            self.obj().snapshot(&snapshot, image.width, image.height);
+            snapshot
+                .to_paintable(Some(&gtk::graphene::Size::new(
+                    image.width as f32,
+                    image.height as f32,
+                )))
+                .unwrap_or_else(|| {
+                    gdk::Paintable::new_empty(self.intrinsic_width(), self.intrinsic_height())
+                })
         }
 
-        /// Declares that construction fixes both dimensions and content for this image.
+        /// Declares immutable size; viewport-dependent tiled content changes only with invalidation.
         fn flags(&self) -> gdk::PaintableFlags {
-            gdk::PaintableFlags::STATIC_SIZE | gdk::PaintableFlags::STATIC_CONTENTS
+            if self.image.get().is_some_and(|image| image.tiles.is_some()) {
+                gdk::PaintableFlags::STATIC_SIZE
+            } else {
+                gdk::PaintableFlags::STATIC_SIZE | gdk::PaintableFlags::STATIC_CONTENTS
+            }
         }
 
         /// Reports the document-sized preferred width, independently of proxy resolution.
@@ -62,7 +84,7 @@ mod imp {
                 .map_or(0.0, |image| image.width / image.height)
         }
 
-        /// Appends the texture at paint time, clipping only the requested viewport rectangle.
+        /// Appends certified current-translation tiles and disjoint full-canvas fallback at paint time.
         ///
         /// GDK supplies positive dimensions. No offscreen snapshot is retained across GTK frame
         /// updates, and scaling removes existing preview padding without altering source pixels.
@@ -73,6 +95,16 @@ mod imp {
             let Some(snapshot) = snapshot.downcast_ref::<gtk::Snapshot>() else {
                 return;
             };
+            if let Some(tiles) = &image.tiles {
+                let (fallback, bounds) = image
+                    .fallback
+                    .as_ref()
+                    .map(|(t, b)| (t, *b))
+                    .unwrap_or((&image.texture, image.bounds));
+                if tiles.snapshot(snapshot, width, height, fallback, bounds) {
+                    return;
+                }
+            }
             let scale_x = (width / image.width) as f32;
             let scale_y = (height / image.height) as f32;
             snapshot.push_clip(&gtk::graphene::Rect::new(
@@ -124,11 +156,32 @@ mod imp {
 }
 
 glib::wrapper! {
-    /// Presents one immutable texture at canvas size through GDK's native paintable interface.
+    /// Presents immutable pixel sources at canvas size through GDK's native paintable interface.
+    /// Tiled content explicitly invalidates when live viewport placement changes.
     pub struct ViewportPaintable(ObjectSubclass<imp::ViewportPaintable>) @implements gdk::Paintable;
 }
 
 impl ViewportPaintable {
+    /// Captures engine-certified sparse textures while retaining the ordinary image for holes.
+    pub(super) fn with_tiles(
+        texture: gdk::Texture,
+        width: f64,
+        height: f64,
+        bounds: (f32, f32, f32, f32),
+        fallback: Option<(gdk::Texture, (f32, f32, f32, f32))>,
+        tiles: crate::preview_cache::Presentation,
+    ) -> Self {
+        let object: Self = glib::Object::new();
+        let _ = object.imp().image.set(Image {
+            texture,
+            tiles: Some(tiles),
+            bounds,
+            fallback,
+            width,
+            height,
+        });
+        object
+    }
     /// Captures positive canvas dimensions and one clipped texture rectangle for GTK presentation.
     pub(super) fn new(
         texture: gdk::Texture,
@@ -150,6 +203,7 @@ impl ViewportPaintable {
         let object: Self = glib::Object::new();
         let _ = object.imp().image.set(Image {
             texture,
+            tiles: None,
             bounds,
             fallback,
             width,

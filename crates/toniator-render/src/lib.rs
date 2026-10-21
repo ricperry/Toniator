@@ -6,7 +6,13 @@
 //! pattern settings. Raster compositing happens in linear premultiplied RGBA;
 //! `RasterSurface` exposes only straight sRGBA bytes at the output boundary.
 
+mod materialization;
+pub use materialization::prepare_geometry_for_canvas;
 mod area_raster;
+pub mod preview_tiles;
+#[cfg(feature = "prepared-crop-pilot")]
+pub mod prepared_crop_pilot;
+mod sampled_predicates;
 mod streaming_png;
 pub use streaming_png::{
     PngStreamOptions, PngStreamSummary, StreamingRasterTarget, write_png_streaming,
@@ -516,8 +522,49 @@ pub enum GeometryOutput {
     CircularMarks(Vec<CanonicalCircleMark>),
     CanonicalMarks(Vec<CanonicalMark>),
     CanonicalStrokes(Vec<CanonicalStroke>),
+    /// One connected output shares paint across paths and ordinary isolated-point circles.
+    CanonicalConnections(toniator_geometry::CanonicalConnections),
     /// Geometry-owned, closed positive regions with fixed nonzero fill semantics.
     CanonicalRegions(CanonicalRegionSet),
+}
+
+/// Borrowed primitive batches preserve one output's identity and paint while sharing consumer logic.
+#[derive(Clone, Copy, Debug)]
+pub enum GeometryOutputPart<'a> {
+    CircularMarks(&'a [CanonicalCircleMark]),
+    CanonicalMarks(&'a [CanonicalMark]),
+    CanonicalStrokes(&'a [CanonicalStroke]),
+    CanonicalRegions(&'a CanonicalRegionSet),
+}
+
+impl GeometryOutput {
+    /// Visits retained primitives without cloning geometry, inventing output layers or resampling.
+    /// Connected strokes precede circles inside their single solid-painted output.
+    pub fn parts(&self) -> impl Iterator<Item = GeometryOutputPart<'_>> {
+        let (first, second) = match self {
+            Self::CircularMarks(value) => (GeometryOutputPart::CircularMarks(value), None),
+            Self::CanonicalMarks(value) => (GeometryOutputPart::CanonicalMarks(value), None),
+            Self::CanonicalStrokes(value) => (GeometryOutputPart::CanonicalStrokes(value), None),
+            Self::CanonicalRegions(value) => (GeometryOutputPart::CanonicalRegions(value), None),
+            Self::CanonicalConnections(value) => (
+                GeometryOutputPart::CanonicalStrokes(&value.strokes),
+                Some(GeometryOutputPart::CanonicalMarks(&value.isolated_points)),
+            ),
+        };
+        [Some(first), second].into_iter().flatten()
+    }
+
+    /// Counts all retained primitives across a single canonical output, including isolated points.
+    pub fn primitive_count(&self) -> usize {
+        self.parts().fold(0_usize, |total, part| {
+            total.saturating_add(match part {
+                GeometryOutputPart::CircularMarks(value) => value.len(),
+                GeometryOutputPart::CanonicalMarks(value) => value.len(),
+                GeometryOutputPart::CanonicalStrokes(value) => value.len(),
+                GeometryOutputPart::CanonicalRegions(value) => value.regions().len(),
+            })
+        })
+    }
 }
 
 /// Renderer-owned immutable source-colored circle. Stage 9D may adapt the
@@ -705,6 +752,10 @@ impl RenderScene {
                 GeometryOutput::CircularMarks(marks) => marks.len(),
                 GeometryOutput::CanonicalMarks(marks) => marks.len(),
                 GeometryOutput::CanonicalStrokes(strokes) => strokes.len(),
+                GeometryOutput::CanonicalConnections(value) => value
+                    .strokes
+                    .len()
+                    .saturating_add(value.isolated_points.len()),
                 GeometryOutput::CanonicalRegions(regions) => regions.regions().len(),
             })
             .sum()
@@ -993,7 +1044,10 @@ fn validate_layer(layer: &RenderLayer) -> Result<(), RenderError> {
 fn validate_output_geometry(output: &RenderOutputLayer) -> Result<(), RenderError> {
     validate_geometry(output.geometry())?;
     if let Some(paints) = &output.primitive_paints {
-        if matches!(output.geometry(), GeometryOutput::CanonicalStrokes(_)) {
+        if matches!(
+            output.geometry(),
+            GeometryOutput::CanonicalStrokes(_) | GeometryOutput::CanonicalConnections(_)
+        ) {
             return Err(RenderError::new(
                 "scene.layer.source_color",
                 "canonical strokes require solid channel paint",
@@ -1003,7 +1057,7 @@ fn validate_output_geometry(output: &RenderOutputLayer) -> Result<(), RenderErro
             GeometryOutput::CircularMarks(marks) => marks.len(),
             GeometryOutput::CanonicalMarks(marks) => marks.len(),
             GeometryOutput::CanonicalRegions(regions) => regions.regions().len(),
-            GeometryOutput::CanonicalStrokes(_) => 0,
+            GeometryOutput::CanonicalStrokes(_) | GeometryOutput::CanonicalConnections(_) => 0,
         };
         if paints.len() != primitives {
             return Err(RenderError::new(
@@ -1038,72 +1092,87 @@ fn validate_output_geometry(output: &RenderOutputLayer) -> Result<(), RenderErro
 /// # Errors
 /// Returns the established invalid-circle, mark, stroke, or region diagnostic.
 fn validate_geometry(geometry: &GeometryOutput) -> Result<(), RenderError> {
-    match geometry {
-        GeometryOutput::CircularMarks(marks) => {
-            if marks.iter().any(|mark| {
-                !mark.center.is_finite() || !mark.radius.is_finite() || mark.radius < 0.0
-            }) {
-                return Err(RenderError::new(
-                    "scene.layer.geometry",
-                    "canonical circle geometry must be finite and nonnegative",
-                ));
-            }
-        }
-        GeometryOutput::CanonicalMarks(marks) => {
-            if marks.iter().any(|mark| match mark {
-                CanonicalMark::Circle { center, radius, .. } => {
-                    !center.is_finite() || !radius.is_finite() || *radius < 0.0
+    if let GeometryOutput::CanonicalConnections(value) = geometry
+        && value
+            .isolated_points
+            .iter()
+            .any(|mark| !matches!(mark, CanonicalMark::Circle { .. }))
+    {
+        return Err(RenderError::new(
+            "scene.layer.connections",
+            "isolated connected points must be canonical circles",
+        ));
+    }
+
+    for part in geometry.parts() {
+        match part {
+            GeometryOutputPart::CircularMarks(marks) => {
+                if marks.iter().any(|mark| {
+                    !mark.center.is_finite() || !mark.radius.is_finite() || mark.radius < 0.0
+                }) {
+                    return Err(RenderError::new(
+                        "scene.layer.geometry",
+                        "canonical circle geometry must be finite and nonnegative",
+                    ));
                 }
-                CanonicalMark::ClosedPath(mark) => {
-                    !mark.bounds.min.is_finite() || !mark.bounds.max.is_finite()
+            }
+            GeometryOutputPart::CanonicalMarks(marks) => {
+                if marks.iter().any(|mark| match mark {
+                    CanonicalMark::DeferredPath(mark) => !mark.is_valid(),
+
+                    CanonicalMark::Circle { center, radius, .. } => {
+                        !center.is_finite() || !radius.is_finite() || *radius < 0.0
+                    }
+                    CanonicalMark::ClosedPath(mark) => {
+                        !mark.bounds.min.is_finite() || !mark.bounds.max.is_finite()
+                    }
+                }) {
+                    return Err(RenderError::new(
+                        "scene.layer.geometry",
+                        "canonical mark geometry must be finite",
+                    ));
                 }
-            }) {
-                return Err(RenderError::new(
-                    "scene.layer.geometry",
-                    "canonical mark geometry must be finite",
-                ));
             }
-        }
-        GeometryOutput::CanonicalStrokes(strokes) => {
-            if strokes.iter().any(|stroke| {
-                !stroke.nominal_basis.is_finite()
-                    || stroke.nominal_basis <= 0.0
-                    || stroke.path.bounds().is_err()
-                    || stroke
-                        .outline
-                        .bounds
-                        .is_some_and(|bounds| !bounds.min.is_finite() || !bounds.max.is_finite())
-                    || stroke.profile.iter().any(|sample| {
-                        !sample.center.is_finite()
-                            || !sample.width.is_finite()
-                            || sample.width < 0.0
-                            || !sample.normalized_thickness.is_finite()
-                            || !(0.0..=2.0).contains(&sample.normalized_thickness)
-                    })
-                    || stroke.outline.fill_rule != CanonicalFillRule::NonZero
-                    || stroke
-                        .outline
-                        .contours
-                        .iter()
-                        .any(|contour| contour.segments.is_empty())
-            }) {
-                return Err(RenderError::new(
-                    "scene.layer.geometry",
-                    "canonical stroke geometry must be finite",
-                ));
+            GeometryOutputPart::CanonicalStrokes(strokes) => {
+                if strokes.iter().any(|stroke| {
+                    !stroke.nominal_basis.is_finite()
+                        || stroke.nominal_basis <= 0.0
+                        || stroke.path.bounds().is_err()
+                        || stroke.outline.bounds.is_some_and(|bounds| {
+                            !bounds.min.is_finite() || !bounds.max.is_finite()
+                        })
+                        || stroke.profile.iter().any(|sample| {
+                            !sample.center.is_finite()
+                                || !sample.width.is_finite()
+                                || sample.width < 0.0
+                                || !sample.normalized_thickness.is_finite()
+                                || !(0.0..=2.0).contains(&sample.normalized_thickness)
+                        })
+                        || stroke.outline.fill_rule != CanonicalFillRule::NonZero
+                        || stroke
+                            .outline
+                            .contours
+                            .iter()
+                            .any(|contour| contour.segments.is_empty())
+                }) {
+                    return Err(RenderError::new(
+                        "scene.layer.geometry",
+                        "canonical stroke geometry must be finite",
+                    ));
+                }
             }
-        }
-        GeometryOutput::CanonicalRegions(regions) => {
-            if regions.regions().iter().any(|region| {
-                region.area <= 0.0
-                    || !region.area.is_finite()
-                    || !region.bounds.min.is_finite()
-                    || !region.bounds.max.is_finite()
-            }) {
-                return Err(RenderError::new(
-                    "scene.layer.geometry",
-                    "canonical regions must be finite positive-area geometry",
-                ));
+            GeometryOutputPart::CanonicalRegions(regions) => {
+                if regions.regions().iter().any(|region| {
+                    region.area <= 0.0
+                        || !region.area.is_finite()
+                        || !region.bounds.min.is_finite()
+                        || !region.bounds.max.is_finite()
+                }) {
+                    return Err(RenderError::new(
+                        "scene.layer.geometry",
+                        "canonical regions must be finite positive-area geometry",
+                    ));
+                }
             }
         }
     }
@@ -1156,255 +1225,289 @@ fn scene_fingerprint(
             add_scene_bytes(&mut hash, (layer.outputs.len() as u64).to_le_bytes());
         }
         for output in &layer.outputs {
+            if let GeometryOutput::CanonicalConnections(value) = output.geometry() {
+                add_scene_bytes(&mut hash, [0x43, 0x4e]);
+                add_scene_bytes(&mut hash, (value.strokes.len() as u64).to_le_bytes());
+                add_scene_bytes(
+                    &mut hash,
+                    (value.isolated_points.len() as u64).to_le_bytes(),
+                );
+            }
             if layer.outputs.len() > 1 {
                 add_scene_bytes(&mut hash, output.output_layer_id.0.to_le_bytes());
             }
-            match output.geometry() {
-                GeometryOutput::CircularMarks(marks) => {
-                    add_scene_bytes(&mut hash, (marks.len() as u64).to_le_bytes());
-                    for mark in marks {
-                        add_scene_bytes(
-                            &mut hash,
-                            mark.source_site_id.first_dimension_id.to_le_bytes(),
-                        );
-                        add_scene_bytes(&mut hash, mark.source_site_id.first_index.to_le_bytes());
-                        add_scene_bytes(
-                            &mut hash,
-                            mark.source_site_id.second_dimension_id.to_le_bytes(),
-                        );
-                        add_scene_bytes(&mut hash, mark.source_site_id.second_index.to_le_bytes());
-                        add_scene_bytes(&mut hash, mark.center.x.to_bits().to_le_bytes());
-                        add_scene_bytes(&mut hash, mark.center.y.to_bits().to_le_bytes());
-                        add_scene_bytes(&mut hash, mark.radius.to_bits().to_le_bytes());
-                        add_scene_bytes(
-                            &mut hash,
-                            [match mark.scope {
-                                toniator_geometry::SiteScope::Canvas => 1,
-                                toniator_geometry::SiteScope::Guard => 2,
-                            }],
-                        );
-                        for contributor in &mark.provenance.contributors {
-                            append_scene_guide_instance(&mut hash, *contributor);
-                        }
-                    }
-                }
-                GeometryOutput::CanonicalMarks(marks) => {
-                    add_scene_bytes(&mut hash, (marks.len() as u64).to_le_bytes());
-                    for mark in marks {
-                        match mark {
-                            CanonicalMark::Circle {
-                                source_site_id,
-                                center,
-                                radius,
-                                scope,
-                                provenance,
-                                fill_rule,
-                            } => {
-                                add_scene_bytes(&mut hash, [1]);
-                                append_scene_family_site_id(&mut hash, *source_site_id);
-                                append_scene_scope(&mut hash, *scope);
-                                append_scene_provenance(&mut hash, provenance);
-                                append_scene_fill_rule(&mut hash, *fill_rule);
-                                add_scene_bytes(&mut hash, [1]);
-                                add_scene_bytes(&mut hash, 1_u64.to_le_bytes());
-                                add_scene_bytes(&mut hash, [0]);
-                                add_scene_bytes(&mut hash, center.x.to_bits().to_le_bytes());
-                                add_scene_bytes(&mut hash, center.y.to_bits().to_le_bytes());
-                                add_scene_bytes(&mut hash, radius.to_bits().to_le_bytes());
-                            }
-                            CanonicalMark::ClosedPath(mark) => {
-                                add_scene_bytes(&mut hash, [2]);
-                                append_scene_family_site_id(&mut hash, mark.source_site_id);
-                                append_scene_scope(&mut hash, mark.scope);
-                                append_scene_provenance(&mut hash, &mark.provenance);
-                                append_scene_fill_rule(&mut hash, mark.fill_rule);
-                                add_scene_bytes(&mut hash, [2]);
-                                add_scene_bytes(
-                                    &mut hash,
-                                    u64::try_from(mark.path.segments().len())
-                                        .expect("usize fits u64")
-                                        .to_le_bytes(),
-                                );
-                                add_scene_bytes(
-                                    &mut hash,
-                                    [match mark.path.closure() {
-                                        toniator_geometry::PathClosure::Open => 1,
-                                        toniator_geometry::PathClosure::Closed => 2,
-                                    }],
-                                );
-                                for segment in mark.path.segments() {
-                                    match segment {
-                                        CurveSegment::Line(line) => {
-                                            add_scene_bytes(&mut hash, [1]);
-                                            for point in [line.start(), line.end()] {
-                                                add_scene_bytes(
-                                                    &mut hash,
-                                                    point.x.to_bits().to_le_bytes(),
-                                                );
-                                                add_scene_bytes(
-                                                    &mut hash,
-                                                    point.y.to_bits().to_le_bytes(),
-                                                );
-                                            }
-                                        }
-                                        CurveSegment::CubicBezier(cubic) => {
-                                            add_scene_bytes(&mut hash, [2]);
-                                            for point in [
-                                                cubic.start(),
-                                                cubic.control_1(),
-                                                cubic.control_2(),
-                                                cubic.end(),
-                                            ] {
-                                                add_scene_bytes(
-                                                    &mut hash,
-                                                    point.x.to_bits().to_le_bytes(),
-                                                );
-                                                add_scene_bytes(
-                                                    &mut hash,
-                                                    point.y.to_bits().to_le_bytes(),
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+            for part in output.geometry().parts() {
+                match part {
+                    GeometryOutputPart::CircularMarks(marks) => {
+                        add_scene_bytes(&mut hash, (marks.len() as u64).to_le_bytes());
+                        for mark in marks {
+                            add_scene_bytes(
+                                &mut hash,
+                                mark.source_site_id.first_dimension_id.to_le_bytes(),
+                            );
+                            add_scene_bytes(
+                                &mut hash,
+                                mark.source_site_id.first_index.to_le_bytes(),
+                            );
+                            add_scene_bytes(
+                                &mut hash,
+                                mark.source_site_id.second_dimension_id.to_le_bytes(),
+                            );
+                            add_scene_bytes(
+                                &mut hash,
+                                mark.source_site_id.second_index.to_le_bytes(),
+                            );
+                            add_scene_bytes(&mut hash, mark.center.x.to_bits().to_le_bytes());
+                            add_scene_bytes(&mut hash, mark.center.y.to_bits().to_le_bytes());
+                            add_scene_bytes(&mut hash, mark.radius.to_bits().to_le_bytes());
+                            add_scene_bytes(
+                                &mut hash,
+                                [match mark.scope {
+                                    toniator_geometry::SiteScope::Canvas => 1,
+                                    toniator_geometry::SiteScope::Guard => 2,
+                                }],
+                            );
+                            for contributor in &mark.provenance.contributors {
+                                append_scene_guide_instance(&mut hash, *contributor);
                             }
                         }
                     }
-                }
-                GeometryOutput::CanonicalStrokes(strokes) => {
-                    add_scene_bytes(&mut hash, [3]);
-                    add_scene_bytes(&mut hash, (strokes.len() as u64).to_le_bytes());
-                    for stroke in strokes {
-                        match &stroke.source_id {
-                            toniator_geometry::CanonicalStrokeSourceId::Structural(id) => {
-                                append_scene_structural_path_instance(&mut hash, *id);
-                            }
-                            toniator_geometry::CanonicalStrokeSourceId::Connection(id) => {
-                                add_scene_bytes(&mut hash, [0x43]);
-                                add_scene_bytes(&mut hash, id.output_layer_id.0.to_le_bytes());
-                                add_scene_bytes(
-                                    &mut hash,
-                                    id.component_minimum.mechanism_id.0.to_le_bytes(),
-                                );
-                                add_scene_bytes(
-                                    &mut hash,
-                                    (id.component_minimum.ordinal as u64).to_le_bytes(),
-                                );
-                                add_scene_bytes(&mut hash, id.component_ordinal.to_le_bytes());
-                                add_scene_bytes(
-                                    &mut hash,
-                                    id.first_endpoint.mechanism_id.0.to_le_bytes(),
-                                );
-                                add_scene_bytes(
-                                    &mut hash,
-                                    (id.first_endpoint.ordinal as u64).to_le_bytes(),
-                                );
-                                add_scene_bytes(
-                                    &mut hash,
-                                    id.last_endpoint.mechanism_id.0.to_le_bytes(),
-                                );
-                                add_scene_bytes(
-                                    &mut hash,
-                                    (id.last_endpoint.ordinal as u64).to_le_bytes(),
-                                );
-                                add_scene_bytes(&mut hash, id.ordinal.to_le_bytes());
-                            }
-                            toniator_geometry::CanonicalStrokeSourceId::Maze(id) => {
-                                add_scene_bytes(&mut hash, [0x4d]);
-                                add_scene_bytes(&mut hash, id.output_layer_id.0.to_le_bytes());
-                                add_scene_bytes(&mut hash, id.wall.first.0.to_le_bytes());
-                                add_scene_bytes(&mut hash, id.wall.second.0.to_le_bytes());
-                            }
-                        }
-                        add_scene_bytes(
-                            &mut hash,
-                            stroke
-                                .source_structure_id
-                                .map_or(0, |id| id.0)
-                                .to_le_bytes(),
-                        );
-                        add_scene_bytes(&mut hash, stroke.nominal_basis.to_bits().to_le_bytes());
-                        add_scene_bytes(
-                            &mut hash,
-                            [
-                                match stroke.style.join {
-                                    toniator_domain::StrokeJoin::Round => 1,
-                                },
-                                match stroke.style.cap {
-                                    toniator_domain::StrokeCap::Round => 1,
-                                },
-                            ],
-                        );
-                        add_scene_bytes(
-                            &mut hash,
-                            [match stroke.path.closure() {
-                                toniator_geometry::PathClosure::Open => 1,
-                                toniator_geometry::PathClosure::Closed => 2,
-                            }],
-                        );
-                        add_scene_bytes(
-                            &mut hash,
-                            (stroke.path.segments().len() as u64).to_le_bytes(),
-                        );
-                        for segment in stroke.path.segments() {
-                            match segment {
-                                CurveSegment::Line(line) => {
+                    GeometryOutputPart::CanonicalMarks(marks) => {
+                        add_scene_bytes(&mut hash, (marks.len() as u64).to_le_bytes());
+                        for mark in marks {
+                            match mark {
+CanonicalMark::DeferredPath(mark) => { add_scene_bytes(&mut hash,[3]); append_scene_family_site_id(&mut hash,mark.source_site_id); append_scene_scope(&mut hash,mark.scope); append_scene_provenance(&mut hash,&mark.provenance); append_scene_fill_rule(&mut hash,mark.fill_rule); add_scene_bytes(&mut hash,[1]); add_scene_bytes(&mut hash,(mark.prototype.path().segments().len() as u64).to_le_bytes()); add_scene_bytes(&mut hash,[2]); for value in [mark.scale,mark.orientation_degrees,mark.destination.x,mark.destination.y,mark.prototype.anchor().x,mark.prototype.anchor().y] {add_scene_bytes(&mut hash,value.to_bits().to_le_bytes());} add_scene_bytes(&mut hash,mark.prototype.fingerprint().to_le_bytes()); add_scene_bytes(&mut hash,format!("{:?}",mark.coverage).bytes()); },
+
+                                CanonicalMark::Circle {
+                                    source_site_id,
+                                    center,
+                                    radius,
+                                    scope,
+                                    provenance,
+                                    fill_rule,
+                                } => {
                                     add_scene_bytes(&mut hash, [1]);
-                                    for point in [line.start(), line.end()] {
-                                        add_scene_bytes(&mut hash, point.x.to_bits().to_le_bytes());
-                                        add_scene_bytes(&mut hash, point.y.to_bits().to_le_bytes());
-                                    }
+                                    append_scene_family_site_id(&mut hash, *source_site_id);
+                                    append_scene_scope(&mut hash, *scope);
+                                    append_scene_provenance(&mut hash, provenance);
+                                    append_scene_fill_rule(&mut hash, *fill_rule);
+                                    add_scene_bytes(&mut hash, [1]);
+                                    add_scene_bytes(&mut hash, 1_u64.to_le_bytes());
+                                    add_scene_bytes(&mut hash, [0]);
+                                    add_scene_bytes(&mut hash, center.x.to_bits().to_le_bytes());
+                                    add_scene_bytes(&mut hash, center.y.to_bits().to_le_bytes());
+                                    add_scene_bytes(&mut hash, radius.to_bits().to_le_bytes());
                                 }
-                                CurveSegment::CubicBezier(cubic) => {
+                                CanonicalMark::ClosedPath(mark) => {
                                     add_scene_bytes(&mut hash, [2]);
-                                    for point in [
-                                        cubic.start(),
-                                        cubic.control_1(),
-                                        cubic.control_2(),
-                                        cubic.end(),
-                                    ] {
-                                        add_scene_bytes(&mut hash, point.x.to_bits().to_le_bytes());
-                                        add_scene_bytes(&mut hash, point.y.to_bits().to_le_bytes());
+                                    append_scene_family_site_id(&mut hash, mark.source_site_id);
+                                    append_scene_scope(&mut hash, mark.scope);
+                                    append_scene_provenance(&mut hash, &mark.provenance);
+                                    append_scene_fill_rule(&mut hash, mark.fill_rule);
+                                    add_scene_bytes(&mut hash, [2]);
+                                    add_scene_bytes(
+                                        &mut hash,
+                                        u64::try_from(mark.path.segments().len())
+                                            .expect("usize fits u64")
+                                            .to_le_bytes(),
+                                    );
+                                    add_scene_bytes(
+                                        &mut hash,
+                                        [match mark.path.closure() {
+                                            toniator_geometry::PathClosure::Open => 1,
+                                            toniator_geometry::PathClosure::Closed => 2,
+                                        }],
+                                    );
+                                    for segment in mark.path.segments() {
+                                        match segment {
+                                            CurveSegment::Line(line) => {
+                                                add_scene_bytes(&mut hash, [1]);
+                                                for point in [line.start(), line.end()] {
+                                                    add_scene_bytes(
+                                                        &mut hash,
+                                                        point.x.to_bits().to_le_bytes(),
+                                                    );
+                                                    add_scene_bytes(
+                                                        &mut hash,
+                                                        point.y.to_bits().to_le_bytes(),
+                                                    );
+                                                }
+                                            }
+                                            CurveSegment::CubicBezier(cubic) => {
+                                                add_scene_bytes(&mut hash, [2]);
+                                                for point in [
+                                                    cubic.start(),
+                                                    cubic.control_1(),
+                                                    cubic.control_2(),
+                                                    cubic.end(),
+                                                ] {
+                                                    add_scene_bytes(
+                                                        &mut hash,
+                                                        point.x.to_bits().to_le_bytes(),
+                                                    );
+                                                    add_scene_bytes(
+                                                        &mut hash,
+                                                        point.y.to_bits().to_le_bytes(),
+                                                    );
+                                                }
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                        }
-                        for sample in &stroke.profile {
-                            add_scene_bytes(&mut hash, sample.center.x.to_bits().to_le_bytes());
-                            add_scene_bytes(&mut hash, sample.center.y.to_bits().to_le_bytes());
-                            add_scene_bytes(
-                                &mut hash,
-                                sample.location.segment_index().to_le_bytes(),
-                            );
-                            add_scene_bytes(
-                                &mut hash,
-                                sample.location.parameter().to_bits().to_le_bytes(),
-                            );
-                            add_scene_bytes(
-                                &mut hash,
-                                sample.normalized_thickness.to_bits().to_le_bytes(),
-                            );
-                            add_scene_bytes(&mut hash, sample.width.to_bits().to_le_bytes());
-                        }
-                        append_scene_fill_rule(&mut hash, stroke.outline.fill_rule);
-                        add_scene_bytes(
-                            &mut hash,
-                            (stroke.outline.contours.len() as u64).to_le_bytes(),
-                        );
-                        for contour in &stroke.outline.contours {
-                            add_scene_bytes(
-                                &mut hash,
-                                (contour.segments.len() as u64).to_le_bytes(),
-                            );
-                            for segment in &contour.segments {
-                                append_scene_outline_segment(&mut hash, segment);
                             }
                         }
                     }
-                }
-                GeometryOutput::CanonicalRegions(regions) => {
-                    add_scene_bytes(&mut hash, [4]);
-                    add_scene_bytes(&mut hash, regions.fingerprint().bytes());
+                    GeometryOutputPart::CanonicalStrokes(strokes) => {
+                        add_scene_bytes(&mut hash, [3]);
+                        add_scene_bytes(&mut hash, (strokes.len() as u64).to_le_bytes());
+                        for stroke in strokes {
+                            match &stroke.source_id {
+                                toniator_geometry::CanonicalStrokeSourceId::Structural(id) => {
+                                    append_scene_structural_path_instance(&mut hash, *id);
+                                }
+                                toniator_geometry::CanonicalStrokeSourceId::Connection(id) => {
+                                    add_scene_bytes(&mut hash, [0x43]);
+                                    add_scene_bytes(&mut hash, id.output_layer_id.0.to_le_bytes());
+                                    add_scene_bytes(
+                                        &mut hash,
+                                        id.component_minimum.mechanism_id.0.to_le_bytes(),
+                                    );
+                                    add_scene_bytes(
+                                        &mut hash,
+                                        (id.component_minimum.ordinal as u64).to_le_bytes(),
+                                    );
+                                    add_scene_bytes(&mut hash, id.component_ordinal.to_le_bytes());
+                                    add_scene_bytes(
+                                        &mut hash,
+                                        id.first_endpoint.mechanism_id.0.to_le_bytes(),
+                                    );
+                                    add_scene_bytes(
+                                        &mut hash,
+                                        (id.first_endpoint.ordinal as u64).to_le_bytes(),
+                                    );
+                                    add_scene_bytes(
+                                        &mut hash,
+                                        id.last_endpoint.mechanism_id.0.to_le_bytes(),
+                                    );
+                                    add_scene_bytes(
+                                        &mut hash,
+                                        (id.last_endpoint.ordinal as u64).to_le_bytes(),
+                                    );
+                                    add_scene_bytes(&mut hash, id.ordinal.to_le_bytes());
+                                }
+                                toniator_geometry::CanonicalStrokeSourceId::Maze(id) => {
+                                    add_scene_bytes(&mut hash, [0x4d]);
+                                    add_scene_bytes(&mut hash, id.output_layer_id.0.to_le_bytes());
+                                    add_scene_bytes(&mut hash, id.wall.first.0.to_le_bytes());
+                                    add_scene_bytes(&mut hash, id.wall.second.0.to_le_bytes());
+                                }
+                            }
+                            add_scene_bytes(
+                                &mut hash,
+                                stroke
+                                    .source_structure_id
+                                    .map_or(0, |id| id.0)
+                                    .to_le_bytes(),
+                            );
+                            add_scene_bytes(
+                                &mut hash,
+                                stroke.nominal_basis.to_bits().to_le_bytes(),
+                            );
+                            add_scene_bytes(
+                                &mut hash,
+                                [
+                                    match stroke.style.join {
+                                        toniator_domain::StrokeJoin::Round => 1,
+                                    },
+                                    match stroke.style.cap {
+                                        toniator_domain::StrokeCap::Round => 1,
+                                    },
+                                ],
+                            );
+                            add_scene_bytes(
+                                &mut hash,
+                                [match stroke.path.closure() {
+                                    toniator_geometry::PathClosure::Open => 1,
+                                    toniator_geometry::PathClosure::Closed => 2,
+                                }],
+                            );
+                            add_scene_bytes(
+                                &mut hash,
+                                (stroke.path.segments().len() as u64).to_le_bytes(),
+                            );
+                            for segment in stroke.path.segments() {
+                                match segment {
+                                    CurveSegment::Line(line) => {
+                                        add_scene_bytes(&mut hash, [1]);
+                                        for point in [line.start(), line.end()] {
+                                            add_scene_bytes(
+                                                &mut hash,
+                                                point.x.to_bits().to_le_bytes(),
+                                            );
+                                            add_scene_bytes(
+                                                &mut hash,
+                                                point.y.to_bits().to_le_bytes(),
+                                            );
+                                        }
+                                    }
+                                    CurveSegment::CubicBezier(cubic) => {
+                                        add_scene_bytes(&mut hash, [2]);
+                                        for point in [
+                                            cubic.start(),
+                                            cubic.control_1(),
+                                            cubic.control_2(),
+                                            cubic.end(),
+                                        ] {
+                                            add_scene_bytes(
+                                                &mut hash,
+                                                point.x.to_bits().to_le_bytes(),
+                                            );
+                                            add_scene_bytes(
+                                                &mut hash,
+                                                point.y.to_bits().to_le_bytes(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            for sample in &stroke.profile {
+                                add_scene_bytes(&mut hash, sample.center.x.to_bits().to_le_bytes());
+                                add_scene_bytes(&mut hash, sample.center.y.to_bits().to_le_bytes());
+                                add_scene_bytes(
+                                    &mut hash,
+                                    sample.location.segment_index().to_le_bytes(),
+                                );
+                                add_scene_bytes(
+                                    &mut hash,
+                                    sample.location.parameter().to_bits().to_le_bytes(),
+                                );
+                                add_scene_bytes(
+                                    &mut hash,
+                                    sample.normalized_thickness.to_bits().to_le_bytes(),
+                                );
+                                add_scene_bytes(&mut hash, sample.width.to_bits().to_le_bytes());
+                            }
+                            append_scene_fill_rule(&mut hash, stroke.outline.fill_rule);
+                        if !matches!(stroke.outline.coverage,toniator_geometry::MaterializationCoverage::Complete){add_scene_bytes(&mut hash,format!("{:?}",stroke.outline.coverage).bytes());}
+                            add_scene_bytes(
+                                &mut hash,
+                                (stroke.outline.contours.len() as u64).to_le_bytes(),
+                            );
+                            for contour in &stroke.outline.contours {
+                                add_scene_bytes(
+                                    &mut hash,
+                                    (contour.segments.len() as u64).to_le_bytes(),
+                                );
+                                for segment in &contour.segments {
+                                    append_scene_outline_segment(&mut hash, segment);
+                                }
+                            }
+                        }
+                    }
+                    GeometryOutputPart::CanonicalRegions(regions) => {
+                        add_scene_bytes(&mut hash, [4]);
+                        add_scene_bytes(&mut hash, regions.fingerprint().bytes());
+                    }
                 }
             }
             if model.is_some() {
@@ -1674,13 +1777,16 @@ pub enum RasterAntialiasing {
     Off,
 }
 
-/// Request-local generalized-mark work state shared across all layers and marks.
+/// Request-local edge/AA-Boolean work state shared across layers and marks.
+/// Sample queries preserve these allowances; their bounded target/edge loops poll cancellation.
 struct RasterWork<'a> {
     remaining_edges: usize,
     remaining_boolean_operations: usize,
     antialiasing: RasterAntialiasing,
     is_cancelled: &'a (dyn Fn() -> bool + Sync),
     completed_units: usize,
+    /// Already issued logical units consumed without re-reporting during an exact layer retry.
+    suppressed_retry_units: usize,
     total_units: usize,
     report_progress: &'a (dyn Fn(usize, usize) + Sync),
     preview_clip: Option<PreviewTransform>,
@@ -1720,6 +1826,7 @@ impl<'a> RasterWork<'a> {
             antialiasing,
             is_cancelled,
             completed_units: 0,
+            suppressed_retry_units: 0,
             total_units,
             report_progress,
             preview_clip: None,
@@ -1753,8 +1860,13 @@ impl<'a> RasterWork<'a> {
         Ok(())
     }
 
-    /// Reports completion of one canonical primitive after its pixels are fully composited.
+    /// Reports one logical primitive after private composition, suppressing units already issued
+    /// by a discarded area attempt so a single exact retry cannot duplicate progress.
     fn primitive(&mut self) {
+        if self.suppressed_retry_units != 0 {
+            self.suppressed_retry_units -= 1;
+            return;
+        }
         self.completed_units = self.completed_units.saturating_add(1);
         (self.report_progress)(self.completed_units.min(self.total_units), self.total_units);
     }
@@ -2247,6 +2359,9 @@ pub fn rasterize_cancellable_with_progress(
     is_cancelled: &(dyn Fn() -> bool + Sync),
     report_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<RasterSurface, RenderError> {
+    let prepared_scene = materialization::prepare_scene(scene, is_cancelled)?;
+    let scene = prepared_scene.as_ref();
+
     let total_primitives = raster_progress_unit_count(scene);
     let mut work = RasterWork::with_progress(
         limits,
@@ -2328,8 +2443,9 @@ pub fn rasterize_output_cancellable(
 
 /// Rasterizes a final output target with actual primitive progress and cooperative cancellation.
 ///
-/// Consumer background, dimensions and antialiasing never mutate canonical geometry. Native
-/// antialiased output retains the existing renderer path and its pixel authority.
+/// Consumer background, dimensions and antialiasing never mutate canonical geometry. Explicit
+/// transforms are validated before materialization or pixel allocation. Native antialiased output
+/// retains the existing renderer path and its pixel authority.
 ///
 /// # Errors
 /// Returns cancellation or checked target, flattening, edge-limit, and surface diagnostics.
@@ -2356,6 +2472,9 @@ pub fn rasterize_output_cancellable_with_progress(
         None => native_output_target(scene)?,
     };
     let transform = OutputTransform::for_scene(scene, target);
+    CanonicalRasterTransform::output(transform).validate()?;
+    let prepared_scene = materialization::prepare_scene(scene, is_cancelled)?;
+    let scene = prepared_scene.as_ref();
     let mut work = RasterWork::with_progress(
         limits,
         antialiasing,
@@ -2389,8 +2508,8 @@ pub fn rasterize_output_cancellable_with_progress(
 
 /// Measures the center-sampled opaque union of one canonical output at an explicit target.
 ///
-/// This consumer shares the normal renderer's ellipse, even-odd closed-mark, nonzero region,
-/// and nonzero stroke-outline traversal. Its fixed antialiasing-off mask excludes paint,
+/// This consumer shares the normal renderer's ellipse, canonical closed-mark fill rule,
+/// nonzero region, and nonzero stroke-outline traversal. Its fixed antialiasing-off mask excludes paint,
 /// opacity, channel model, backing, and source sampling. The same geometry validation used by
 /// scene construction runs here; callers keep family and placement frozen across scalar probes.
 ///
@@ -2410,11 +2529,12 @@ pub fn rasterize_geometry_occupancy(
 /// Measures distinct overlapping canonical marks with the production AA-off footprint walker.
 ///
 /// Paint and compositing never enter this source-independent calibration observation. Each
-/// circle or even-odd closed path contributes at most one count to a pixel; the caller may form
-/// an expected random-thinning coverage curve from the returned multiplicities.
+/// circle or closed path with its canonical fill rule contributes at most one count to a pixel;
+/// the caller may form an expected random-thinning coverage curve from the returned multiplicities.
 ///
 /// # Errors
-/// Rejects non-mark geometry, excessive mark counts, raster limits, cancellation, or allocation.
+/// Rejects invalid output transforms, non-mark geometry, excessive mark counts, raster limits,
+/// cancellation, or allocation.
 pub fn rasterize_mark_multiplicity(
     geometry: &GeometryOutput,
     canvas: &CanvasSpec,
@@ -2423,6 +2543,21 @@ pub fn rasterize_mark_multiplicity(
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<MarkMultiplicityMask, RenderError> {
     validate_canvas(canvas)?;
+    let transform = OutputTransform {
+        scale_x: f64::from(target.width) / canvas.width,
+        scale_y: f64::from(target.height) / canvas.height,
+        offset_x: 0.0,
+        offset_y: 0.0,
+    };
+    CanonicalRasterTransform::output(transform).validate()?;
+    let prepared_geometry = prepare_geometry_for_canvas(
+        geometry,
+        canvas,
+        toniator_geometry::CANVAS_MATERIALIZATION_CONTRACT,
+        is_cancelled,
+    )?;
+    let geometry = prepared_geometry.as_ref();
+
     validate_geometry(geometry)?;
     let mark_count = match geometry {
         GeometryOutput::CanonicalMarks(marks) => marks.len(),
@@ -2469,12 +2604,7 @@ pub fn rasterize_mark_multiplicity(
         &mut mask,
         geometry,
         target,
-        OutputTransform {
-            scale_x: f64::from(target.width) / canvas.width,
-            scale_y: f64::from(target.height) / canvas.height,
-            offset_x: 0.0,
-            offset_y: 0.0,
-        },
+        transform,
         RasterAntialiasing::Off,
         &opaque_white,
         1.0,
@@ -2513,6 +2643,7 @@ pub fn rasterize_geometry_occupancy_window(
 }
 
 /// Applies one validated occupancy crop while retaining the shared canonical raster traversal.
+/// The finite positive target frame is validated before materialization or mask allocation.
 ///
 /// # Errors
 /// Returns the same stable diagnostics as the public full-canvas and window consumers.
@@ -2525,7 +2656,6 @@ fn rasterize_geometry_occupancy_in_window(
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<OccupancyMask, RenderError> {
     validate_canvas(canvas)?;
-    validate_geometry(geometry)?;
     if let Some(window) = window
         && (window.origin_x < 0.0
             || window.origin_y < 0.0
@@ -2537,6 +2667,26 @@ fn rasterize_geometry_occupancy_in_window(
             "occupancy window must lie within the document canvas",
         ));
     }
+    let (origin_x, origin_y, extent_x, extent_y) = window.map_or(
+        (0.0, 0.0, canvas.width, canvas.height),
+        OccupancyWindow::components,
+    );
+    let transform = OutputTransform {
+        scale_x: f64::from(target.width) / extent_x,
+        scale_y: f64::from(target.height) / extent_y,
+        offset_x: -origin_x * (f64::from(target.width) / extent_x),
+        offset_y: -origin_y * (f64::from(target.height) / extent_y),
+    };
+    CanonicalRasterTransform::output(transform).validate()?;
+    let prepared_geometry = prepare_geometry_for_canvas(
+        geometry,
+        canvas,
+        toniator_geometry::CANVAS_MATERIALIZATION_CONTRACT,
+        is_cancelled,
+    )?;
+    let geometry = prepared_geometry.as_ref();
+
+    validate_geometry(geometry)?;
     let mut work = RasterWork::with_progress(
         limits,
         RasterAntialiasing::Off,
@@ -2557,26 +2707,6 @@ fn rasterize_geometry_occupancy_in_window(
         pixels,
         covered_pixels: 0,
     };
-    let (origin_x, origin_y, extent_x, extent_y) = window.map_or(
-        (0.0, 0.0, canvas.width, canvas.height),
-        OccupancyWindow::components,
-    );
-    let transform = OutputTransform {
-        scale_x: f64::from(target.width) / extent_x,
-        scale_y: f64::from(target.height) / extent_y,
-        offset_x: -origin_x * (f64::from(target.width) / extent_x),
-        offset_y: -origin_y * (f64::from(target.height) / extent_y),
-    };
-    if !transform.scale_x.is_finite()
-        || !transform.scale_y.is_finite()
-        || !transform.offset_x.is_finite()
-        || !transform.offset_y.is_finite()
-    {
-        return Err(RenderError::new(
-            "raster.output_transform",
-            "occupancy target scale must be finite",
-        ));
-    }
     let opaque_white = ColorValue {
         red: 1.0,
         green: 1.0,
@@ -2601,7 +2731,8 @@ fn rasterize_geometry_occupancy_in_window(
 
 /// Stable consumer-only identity suitable for a PNG cache. It intentionally
 /// includes no source, document, family, realization, or scene mutation: the
-/// scene fingerprint is the complete immutable canonical input.
+/// scene fingerprint is the complete immutable canonical input. AA-on retains its area-v2 identity;
+/// sampled-v3 versions only the changed AA-off decisions, without modifying scene authority.
 pub fn raster_output_identity(
     scene: &RenderScene,
     background: RasterBackground,
@@ -2617,12 +2748,17 @@ pub fn raster_output_identity(
         || "native".to_owned(),
         |target| format!("{}x{}", target.width, target.height),
     );
+    let consumer = if antialiasing == RasterAntialiasing::On {
+        "toniator-raster-output-area-v2"
+    } else {
+        "toniator-raster-output-sampled-v3"
+    };
     let antialiasing = match antialiasing {
         RasterAntialiasing::On => "on",
         RasterAntialiasing::Off => "off",
     };
     format!(
-        "{}:toniator-raster-output-area-v2:{background}:{target}:{antialiasing}",
+        "{}:{consumer}:{background}:{target}:{antialiasing}",
         scene.identity.scene_fingerprint
     )
 }
@@ -2676,6 +2812,9 @@ pub fn rasterize_preview_cancellable_with_progress(
     is_cancelled: &(dyn Fn() -> bool + Sync),
     report_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<RasterSurface, RenderError> {
+    let prepared_scene = materialization::prepare_scene(scene, is_cancelled)?;
+    let scene = prepared_scene.as_ref();
+
     let transform = PreviewTransform::for_scene(scene, target);
     if ![
         transform.scale,
@@ -2800,6 +2939,10 @@ fn raster_progress_unit_count(scene: &RenderScene) -> usize {
                 GeometryOutput::CircularMarks(marks) => marks.len(),
                 GeometryOutput::CanonicalMarks(marks) => marks.len(),
                 GeometryOutput::CanonicalStrokes(strokes) => strokes.len(),
+                GeometryOutput::CanonicalConnections(value) => value
+                    .strokes
+                    .len()
+                    .saturating_add(value.isolated_points.len()),
                 GeometryOutput::CanonicalRegions(regions) => regions.regions().len(),
             };
             total.saturating_add(count)
@@ -3013,6 +3156,27 @@ impl CanonicalRasterTransform {
         }
     }
 
+    /// Validates a resolved output frame before geometry traversal or target-buffer allocation.
+    /// Finite positive independent scales and finite offsets preserve anisotropic pixel phase.
+    /// No minimum document size or additional pixel ceiling is imposed.
+    /// # Errors
+    /// Returns the shared output-transform diagnostic for overflow, nonpositive scale or offset.
+    fn validate(self) -> Result<(), RenderError> {
+        if !self.scale_x.is_finite()
+            || !self.scale_y.is_finite()
+            || self.scale_x <= 0.0
+            || self.scale_y <= 0.0
+            || !self.offset_x.is_finite()
+            || !self.offset_y.is_finite()
+        {
+            return Err(RenderError::new(
+                "raster.output_transform",
+                "output scales must be finite and positive with finite offsets",
+            ));
+        }
+        Ok(())
+    }
+
     /// Maps one finite canonical point into the final raster coordinate system.
     fn point(self, point: Point2) -> Point2 {
         Point2::new(
@@ -3115,126 +3279,129 @@ fn rasterize_output_geometry<P: RasterPixelSink>(
     window: Option<OccupancyWindow>,
     work: &mut RasterWork<'_>,
 ) -> Result<(), RenderError> {
-    match geometry {
-        GeometryOutput::CircularMarks(marks) => {
-            for (index, mark) in marks.iter().enumerate() {
-                if window.is_some_and(|window| {
-                    bounds_outside_occupancy_window(
-                        mark.center.x - mark.radius,
-                        mark.center.y - mark.radius,
-                        mark.center.x + mark.radius,
-                        mark.center.y + mark.radius,
-                        window,
-                    )
-                }) {
-                    continue;
-                }
-                composite_ellipse(
-                    pixels,
-                    target.width,
-                    target.height,
-                    transform.offset_x + mark.center.x * transform.scale_x,
-                    transform.offset_y + mark.center.y * transform.scale_y,
-                    mark.radius * transform.scale_x,
-                    mark.radius * transform.scale_y,
-                    primitive_paints
-                        .and_then(|paints| paints.get(index))
-                        .unwrap_or(color),
-                    opacity,
-                    antialiasing,
-                    if P::IS_OCCUPANCY { Some(work) } else { None },
-                )?;
-            }
-        }
-        GeometryOutput::CanonicalMarks(marks) => {
-            for (index, mark) in marks.iter().enumerate() {
-                let outside = window.is_some_and(|window| match mark {
-                    CanonicalMark::Circle { center, radius, .. } => {
+    for part in geometry.parts() {
+        match part {
+            GeometryOutputPart::CircularMarks(marks) => {
+                for (index, mark) in marks.iter().enumerate() {
+                    if window.is_some_and(|window| {
                         bounds_outside_occupancy_window(
-                            center.x - radius,
-                            center.y - radius,
-                            center.x + radius,
-                            center.y + radius,
+                            mark.center.x - mark.radius,
+                            mark.center.y - mark.radius,
+                            mark.center.x + mark.radius,
+                            mark.center.y + mark.radius,
                             window,
                         )
+                    }) {
+                        continue;
                     }
-                    CanonicalMark::ClosedPath(path) => bounds_outside_occupancy_window(
-                        path.bounds.min.x,
-                        path.bounds.min.y,
-                        path.bounds.max.x,
-                        path.bounds.max.y,
-                        window,
-                    ),
-                });
-                if outside {
-                    continue;
+                    composite_ellipse(
+                        pixels,
+                        target.width,
+                        target.height,
+                        mapped_sampled_ellipse(
+                            mark.center, mark.radius, CanonicalRasterTransform::output(transform),
+                        )?,
+                        primitive_paints
+                            .and_then(|paints| paints.get(index))
+                            .unwrap_or(color),
+                        opacity,
+                        antialiasing,
+                        if P::IS_OCCUPANCY { Some(work) } else { None },
+                    )?;
                 }
-                composite_canonical_mark(
-                    pixels,
-                    target.width,
-                    target.height,
-                    mark,
-                    primitive_paints
-                        .and_then(|paints| paints.get(index))
-                        .unwrap_or(color),
-                    opacity,
-                    CanonicalRasterTransform::output(transform),
-                    work,
-                )?;
             }
-        }
-        GeometryOutput::CanonicalStrokes(strokes) => {
-            for stroke in strokes {
-                if window.is_some_and(|window| {
-                    stroke.outline.bounds.is_some_and(|bounds| {
+            GeometryOutputPart::CanonicalMarks(marks) => {
+                for (index, mark) in marks.iter().enumerate() {
+                    let outside = window.is_some_and(|window| match mark {
+CanonicalMark::DeferredPath(_) => true,
+
+                        CanonicalMark::Circle { center, radius, .. } => {
+                            bounds_outside_occupancy_window(
+                                center.x - radius,
+                                center.y - radius,
+                                center.x + radius,
+                                center.y + radius,
+                                window,
+                            )
+                        }
+                        CanonicalMark::ClosedPath(path) => bounds_outside_occupancy_window(
+                            path.bounds.min.x,
+                            path.bounds.min.y,
+                            path.bounds.max.x,
+                            path.bounds.max.y,
+                            window,
+                        ),
+                    });
+                    if outside {
+                        continue;
+                    }
+                    composite_canonical_mark(
+                        pixels,
+                        target.width,
+                        target.height,
+                        mark,
+                        primitive_paints
+                            .and_then(|paints| paints.get(index))
+                            .unwrap_or(color),
+                        opacity,
+                        CanonicalRasterTransform::output(transform),
+                        work,
+                    )?;
+                }
+            }
+            GeometryOutputPart::CanonicalStrokes(strokes) => {
+                for stroke in strokes {
+                    if window.is_some_and(|window| {
+                        stroke.outline.bounds.is_some_and(|bounds| {
+                            bounds_outside_occupancy_window(
+                                bounds.min.x,
+                                bounds.min.y,
+                                bounds.max.x,
+                                bounds.max.y,
+                                window,
+                            )
+                        })
+                    }) {
+                        continue;
+                    }
+                    composite_canonical_stroke(
+                        pixels,
+                        target.width,
+                        target.height,
+                        stroke,
+                        color,
+                        opacity,
+                        CanonicalRasterTransform::output(transform),
+                        work,
+                    )?;
+                }
+            }
+            GeometryOutputPart::CanonicalRegions(regions) => {
+                for (index, region) in regions.regions().iter().enumerate() {
+                    if window.is_some_and(|window| {
                         bounds_outside_occupancy_window(
-                            bounds.min.x,
-                            bounds.min.y,
-                            bounds.max.x,
-                            bounds.max.y,
+                            region.bounds.min.x,
+                            region.bounds.min.y,
+                            region.bounds.max.x,
+                            region.bounds.max.y,
                             window,
                         )
-                    })
-                }) {
-                    continue;
+                    }) {
+                        continue;
+                    }
+                    composite_canonical_region(
+                        pixels,
+                        target.width,
+                        target.height,
+                        region,
+                        primitive_paints
+                            .and_then(|paints| paints.get(index))
+                            .unwrap_or(color),
+                        opacity,
+                        CanonicalRasterTransform::output(transform),
+                        work,
+                    )?;
                 }
-                composite_canonical_stroke(
-                    pixels,
-                    target.width,
-                    target.height,
-                    stroke,
-                    color,
-                    opacity,
-                    CanonicalRasterTransform::output(transform),
-                    work,
-                )?;
-            }
-        }
-        GeometryOutput::CanonicalRegions(regions) => {
-            for (index, region) in regions.regions().iter().enumerate() {
-                if window.is_some_and(|window| {
-                    bounds_outside_occupancy_window(
-                        region.bounds.min.x,
-                        region.bounds.min.y,
-                        region.bounds.max.x,
-                        region.bounds.max.y,
-                        window,
-                    )
-                }) {
-                    continue;
-                }
-                composite_canonical_region(
-                    pixels,
-                    target.width,
-                    target.height,
-                    region,
-                    primitive_paints
-                        .and_then(|paints| paints.get(index))
-                        .unwrap_or(color),
-                    opacity,
-                    CanonicalRasterTransform::output(transform),
-                    work,
-                )?;
             }
         }
     }
@@ -3570,17 +3737,167 @@ fn composite_circle(
     Ok(())
 }
 
+/// Retains one actually evaluated sampled scalar only when its arithmetic stays finite.
+/// # Errors
+/// Returns a stable sampled-numeric diagnostic instead of accepting an ambiguous comparison/cast.
+fn sampled_finite(value: f64) -> Result<f64, RenderError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(RenderError::new(
+            "raster.sample.numeric",
+            "sampled raster arithmetic is not finite",
+        ))
+    }
+}
+
+/// Validates an actually mapped sampled point without clipping or changing canonical coordinates.
+/// # Errors
+/// Returns the sampled-numeric diagnostic for either nonfinite mapped component.
+fn sampled_point(point: Point2) -> Result<Point2, RenderError> {
+    sampled_finite(point.x)?;
+    sampled_finite(point.y)?;
+    Ok(point)
+}
+
+/// Computes original sampled pixel bounds after validating support and margin arithmetic.
+/// Finite off-canvas coordinates retain their existing floor/clamp/cast behavior.
+/// # Errors
+/// Returns the sampled-numeric diagnostic before NaN or infinity can be masked by a clamp/cast.
+fn sampled_raster_bounds(
+    min: Point2,
+    max: Point2,
+    margin: f64,
+    width: u32,
+    height: u32,
+) -> Result<[u32; 4], RenderError> {
+    sampled_point(min)?;
+    sampled_point(max)?;
+    Ok([
+        sampled_finite(min.x - margin)?.floor().max(0.0) as u32,
+        sampled_finite(min.y - margin)?.floor().max(0.0) as u32,
+        sampled_finite(max.x + margin)?.ceil().min(f64::from(width)) as u32,
+        sampled_finite(max.y + margin)?
+            .ceil()
+            .min(f64::from(height)) as u32,
+    ])
+}
+
+/// Validates mapped ellipse support before the existing sampled bounds or normalized point test.
+/// Callers omit zero-radius ellipses first; tiny positive radii retain their original arithmetic.
+/// # Errors
+/// Returns the sampled-numeric diagnostic for nonfinite center, radii or computed support.
+fn sampled_ellipse_bounds(
+    cx: f64,
+    cy: f64,
+    rx: f64,
+    ry: f64,
+    width: u32,
+    height: u32,
+) -> Result<[u32; 4], RenderError> {
+    for value in [cx, cy, rx, ry] {
+        sampled_finite(value)?;
+    }
+    sampled_raster_bounds(
+        Point2::new(cx - rx, cy - ry),
+        Point2::new(cx + rx, cy + ry),
+        1.0,
+        width,
+        height,
+    )
+}
+
+/// Evaluates the original crossing offset only for an edge that actually crosses the sample row.
+/// Original subtraction, multiplication and division associations remain unchanged.
+/// # Errors
+/// Returns the sampled-numeric diagnostic before an invalid crossing enters a comparison or sort.
+fn sampled_crossing_offset(start: Point2, end: Point2, y: f64) -> Result<f64, RenderError> {
+    let dx = sampled_finite(end.x - start.x)?;
+    let py = sampled_finite(y - start.y)?;
+    let dy = sampled_finite(end.y - start.y)?;
+    sampled_finite(sampled_finite(dx * py)? / dy)
+}
+
+/// Certifies the mapped-edge winding sign only for an edge crossing the sample row.
+/// Original coordinates reach the mature fallback; no Boolean/edge allowance is consumed.
+/// # Errors
+/// Returns cancellation or uncertainty when no exact safe predicate frame exists.
+fn sampled_winding_cross(
+    start: Point2,
+    end: Point2,
+    point: Point2,
+    work: &RasterWork<'_>,
+) -> Result<f64, RenderError> {
+    Ok(f64::from(sampled_predicates::orientation(
+        start, end, point, work,
+    )?))
+}
+
+/// Computes the sampled control-polygon extent with the original hypot and maximum associations.
+/// This stays separate from the AA-on area's existing geometry helpers.
+/// # Errors
+/// Returns the sampled-numeric diagnostic for nonfinite coordinate differences or distances.
+fn sampled_control_polygon_extent(points: [Point2; 4]) -> Result<f64, RenderError> {
+    let mut extent = 0.0_f64;
+    for (index, first) in points.iter().enumerate() {
+        for second in &points[index + 1..] {
+            let dx = sampled_finite(first.x - second.x)?;
+            let dy = sampled_finite(first.y - second.y)?;
+            extent = extent.max(sampled_finite(dx.hypot(dy))?);
+        }
+    }
+    Ok(extent)
+}
+
+/// Evaluates the original sampled chord-distance arithmetic without hiding overflowing divisors.
+/// The caller retains the control-polygon tolerance fast path before computing this expression.
+/// # Errors
+/// Returns the sampled-numeric diagnostic for nonfinite lengths, numerator intermediates or distance.
+fn sampled_point_line_distance(
+    point: Point2,
+    start: Point2,
+    end: Point2,
+) -> Result<f64, RenderError> {
+    let dx = sampled_finite(end.x - start.x)?;
+    let dy = sampled_finite(end.y - start.y)?;
+    let length = sampled_finite(
+        sampled_finite(sampled_finite(dx * dx)? + sampled_finite(dy * dy)?)?.sqrt(),
+    )?;
+    if length == 0.0 {
+        let px = sampled_finite(point.x - start.x)?;
+        let py = sampled_finite(point.y - start.y)?;
+        return sampled_finite(
+            sampled_finite(sampled_finite(px.powi(2))? + sampled_finite(py.powi(2))?)?.sqrt(),
+        );
+    }
+    let first = sampled_finite(sampled_finite(dy * point.x)? - sampled_finite(dx * point.y)?)?;
+    let second = sampled_finite(first + sampled_finite(end.x * start.y)?)?;
+    let numerator = sampled_finite(second - sampled_finite(end.y * start.x)?)?;
+    sampled_finite(numerator.abs() / length)
+}
+
+/// Evaluates the original sampled midpoint, checking its sum before division can hide overflow.
+/// # Errors
+/// Returns the sampled-numeric diagnostic for either nonfinite sum or output component.
+fn sampled_midpoint(a: Point2, b: Point2) -> Result<Point2, RenderError> {
+    sampled_point(Point2::new(
+        sampled_finite(a.x + b.x)? / 2.0,
+        sampled_finite(a.y + b.y)? / 2.0,
+    ))
+}
+
 /// Rasterizes one generalized canonical mark with the active consumer's coverage policy.
 ///
 /// Closed paths are deterministically flattened to at most one sixty-fourth of
-/// an output pixel before even-odd sampling. The normal raster consumer uses
-/// fixed 8x8 antialiasing; occupancy uses its center-sampled Off policy.
+/// an output pixel before sampling with the mark's canonical fill rule. AA-off raster,
+/// occupancy and multiplicity share center sampling; retained reference AA uses fixed 8x8 samples.
 /// Clipping remains the pixel bounds supplied by the final renderer consumer.
 ///
 /// # Errors
 ///
 /// Returns cancellation, numeric flattening, or request-wide edge-limit diagnostics.
 #[allow(clippy::too_many_arguments)]
+/// Returns `raster.sample.numeric` when actually evaluated sampled arithmetic is nonfinite.
 fn composite_canonical_mark<P: RasterPixelSink>(
     pixels: &mut P,
     width: u32,
@@ -3592,15 +3909,13 @@ fn composite_canonical_mark<P: RasterPixelSink>(
     work: &mut RasterWork<'_>,
 ) -> Result<(), RenderError> {
     match mark {
+ CanonicalMark::DeferredPath(_) => Ok(()),
         CanonicalMark::Circle { center, radius, .. } => {
             composite_ellipse(
                 pixels,
                 width,
                 height,
-                transform.offset_x + center.x * transform.scale_x,
-                transform.offset_y + center.y * transform.scale_y,
-                *radius * transform.scale_x,
-                *radius * transform.scale_y,
+                mapped_sampled_ellipse(*center, *radius, transform)?,
                 color,
                 opacity,
                 work.antialiasing,
@@ -3616,14 +3931,15 @@ fn composite_canonical_mark<P: RasterPixelSink>(
             let bounds_min = transform.point(mark.bounds.min);
             let bounds_max = transform.point(mark.bounds.max);
             let tolerance = 1.0 / 64.0;
-            let min_x = (bounds_min.x - tolerance).floor().max(0.0) as u32;
-            let min_y = (bounds_min.y - tolerance).floor().max(0.0) as u32;
-            let max_x = (bounds_max.x + tolerance).ceil().min(f64::from(width)) as u32;
-            let max_y = (bounds_max.y + tolerance).ceil().min(f64::from(height)) as u32;
+            let [min_x, min_y, max_x, max_y] =
+                sampled_raster_bounds(bounds_min, bounds_max, tolerance, width, height)?;
             for y in min_y..max_y {
                 work.check()?;
                 for x in min_x..max_x {
-                    let coverage = polygon_coverage_even_odd(&edges, x, y, work)?;
+                    let coverage = match mark.fill_rule {
+                        CanonicalFillRule::EvenOdd => polygon_coverage_even_odd(&edges, x, y, work)?,
+                        CanonicalFillRule::NonZero => polygon_coverage_nonzero(&edges, x, y, work)?,
+                    };
                     if coverage == 0.0 {
                         continue;
                     }
@@ -3647,6 +3963,7 @@ fn composite_canonical_mark<P: RasterPixelSink>(
 /// Returns cancellation, flattening, or request-wide edge-limit diagnostics without changing the
 /// already-closed region ring or constructing renderer topology.
 #[allow(clippy::too_many_arguments)]
+/// Returns `raster.sample.numeric` when actually evaluated sampled arithmetic is nonfinite.
 fn composite_canonical_region<P: RasterPixelSink>(
     pixels: &mut P,
     width: u32,
@@ -3663,10 +3980,7 @@ fn composite_canonical_region<P: RasterPixelSink>(
     }
     let min = transform.point(region.bounds.min);
     let max = transform.point(region.bounds.max);
-    let min_x = (min.x - 1.0).floor().max(0.0) as u32;
-    let min_y = (min.y - 1.0).floor().max(0.0) as u32;
-    let max_x = (max.x + 1.0).ceil().min(f64::from(width)) as u32;
-    let max_y = (max.y + 1.0).ceil().min(f64::from(height)) as u32;
+    let [min_x, min_y, max_x, max_y] = sampled_raster_bounds(min, max, 1.0, width, height)?;
     for y in min_y..max_y {
         work.check()?;
         for x in min_x..max_x {
@@ -3692,6 +4006,7 @@ fn composite_canonical_region<P: RasterPixelSink>(
 /// Returns cancellation or finite raster bounds errors without changing the
 /// canonical centerline or splitting it at the canvas boundary.
 #[allow(clippy::too_many_arguments)]
+/// Returns `raster.sample.numeric` when actually evaluated sampled arithmetic is nonfinite.
 fn composite_canonical_stroke<P: RasterPixelSink>(
     pixels: &mut P,
     width: u32,
@@ -3707,10 +4022,7 @@ fn composite_canonical_stroke<P: RasterPixelSink>(
     };
     let min = transform.point(bounds.min);
     let max = transform.point(bounds.max);
-    let min_x = (min.x - 1.0).floor().max(0.0) as u32;
-    let min_y = (min.y - 1.0).floor().max(0.0) as u32;
-    let max_x = (max.x + 1.0).ceil().min(f64::from(width)) as u32;
-    let max_y = (max.y + 1.0).ceil().min(f64::from(height)) as u32;
+    let [min_x, min_y, max_x, max_y] = sampled_raster_bounds(min, max, 1.0, width, height)?;
     let edges = flattened_outline_edges(&stroke.outline, transform, work)?;
     if edges.is_empty() {
         return Ok(());
@@ -3721,6 +4033,7 @@ fn composite_canonical_stroke<P: RasterPixelSink>(
     }
     let mut covered = Vec::new();
     let mut crossings = Vec::new();
+    let mut uncertain = Vec::new();
     crossings
         .try_reserve_exact(edges.len().min(256))
         .map_err(|_| {
@@ -3763,6 +4076,7 @@ fn composite_canonical_stroke<P: RasterPixelSink>(
             samples,
             &mut covered,
             &mut crossings,
+            &mut uncertain,
             work,
         )?;
         for (x, covered) in covered.iter().copied() {
@@ -3803,6 +4117,8 @@ struct ScanlineCoverageWork {
     visited_subpixel_samples: usize,
     #[cfg(test)]
     visited_active_edges: usize,
+    #[cfg(test)]
+    uncertain_samples: usize,
 }
 
 /// Bins each flattened outline edge at the first pixel row that can contain one of its samples.
@@ -3887,8 +4203,11 @@ fn advance_outline_edges_for_pixel_row(
 /// Accumulates exact nonzero 8x8 sample coverage for one pixel row from sorted crossings.
 ///
 /// This preserves strict half-open winding tests at every sample center while visiting only the
-/// active spans between nonzero crossings. The sparse caller-owned coverage buffer is reused and
-/// contains only pixels that receive one or more samples; no geometry, clipping, or antialiasing
+/// certified spans between nonzero crossings. Closed uncertain sample ranges are merged, skipped
+/// by nominal spans and classified once through robust nonzero membership; scratch is O(edges).
+/// Target/sample/edge bounds and cancellation govern query work without consuming AA Boolean fees.
+/// Caller-owned coverage and uncertainty buffers retain capacity across rows. Coverage contains
+/// only pixels that receive samples; no geometry, clipping, or antialiasing
 /// authority changes.
 ///
 /// # Errors
@@ -3896,6 +4215,7 @@ fn advance_outline_edges_for_pixel_row(
 /// Returns cancellation or fallible sparse-buffer allocation errors without publishing a partial
 /// surface.
 #[allow(clippy::too_many_arguments)]
+/// Returns `raster.sample.numeric` when actually evaluated sampled arithmetic is nonfinite.
 fn accumulate_nonzero_scanline_coverage(
     edges: &[(Point2, Point2)],
     row: u32,
@@ -3904,13 +4224,18 @@ fn accumulate_nonzero_scanline_coverage(
     samples: u32,
     covered: &mut Vec<(u32, u16)>,
     crossings: &mut Vec<(f64, i32)>,
+    uncertain: &mut Vec<(u64, u64)>,
     work: &RasterWork<'_>,
 ) -> Result<ScanlineCoverageWork, RenderError> {
+    if samples == 0 || samples > SUBPIXEL_GRID {
+        return Err(sampled_predicates::uncertainty());
+    }
     covered.clear();
     let mut coverage_work = ScanlineCoverageWork::default();
     for sub_y in 0..samples {
         work.check()?;
         crossings.clear();
+        uncertain.clear();
         let sample_y = f64::from(row) + (f64::from(sub_y) + 0.5) / f64::from(samples);
         if work
             .preview_clip
@@ -3925,6 +4250,7 @@ fn accumulate_nonzero_scanline_coverage(
                 .saturating_add(edges.len());
         }
         for (start, end) in edges {
+            work.check()?;
             let contribution = if start.y <= sample_y && end.y > sample_y {
                 1
             } else if start.y > sample_y && end.y <= sample_y {
@@ -3933,7 +4259,22 @@ fn accumulate_nonzero_scanline_coverage(
                 continue;
             };
             let intersection_x =
-                start.x + (end.x - start.x) * (sample_y - start.y) / (end.y - start.y);
+                sampled_finite(start.x + sampled_crossing_offset(*start, *end, sample_y)?)?;
+            let bound = sampled_predicates::crossing(*start, *end, sample_y)?;
+            if intersection_x < bound.low || intersection_x > bound.high {
+                return Err(sampled_predicates::uncertainty());
+            }
+            if let Some(range) = uncertain_sample_range(bound, min_x, max_x, samples) {
+                if uncertain.len() == uncertain.capacity() {
+                    uncertain.try_reserve(1).map_err(|_| {
+                        RenderError::new(
+                            "raster.allocation",
+                            "stroke uncertainty range allocation failed",
+                        )
+                    })?;
+                }
+                uncertain.push(range);
+            }
             if crossings.len() == crossings.capacity() {
                 crossings
                     .try_reserve(edges.len().saturating_sub(crossings.len()).clamp(1, 256))
@@ -3949,14 +4290,31 @@ fn accumulate_nonzero_scanline_coverage(
         if crossings.is_empty() {
             continue;
         }
+        work.check()?;
+        uncertain.sort_unstable();
+        work.check()?;
+        let mut retained = 0;
+        for read in 0..uncertain.len() {
+            work.check()?;
+            let range = uncertain[read];
+            if retained > 0 && range.0 <= uncertain[retained - 1].1 {
+                uncertain[retained - 1].1 = uncertain[retained - 1].1.max(range.1);
+            } else {
+                uncertain[retained] = range;
+                retained += 1;
+            }
+        }
+        uncertain.truncate(retained);
         crossings.sort_unstable_by(|first, second| first.0.total_cmp(&second.0));
+        work.check()?;
         let mut winding = crossings
             .iter()
             .map(|(_, contribution)| *contribution)
             .sum::<i32>();
         let mut span_start = (winding != 0).then_some(f64::from(min_x));
-        let mut crossing_index = 0_usize;
+        let mut crossing_index = 0;
         while crossing_index < crossings.len() {
+            work.check()?;
             let crossing_x = crossings[crossing_index].0;
             let prior_winding = winding;
             while crossing_index < crossings.len() && crossings[crossing_index].0 == crossing_x {
@@ -3974,6 +4332,7 @@ fn accumulate_nonzero_scanline_coverage(
                         samples,
                         covered,
                         &mut coverage_work,
+                        uncertain,
                         work,
                     )?;
                     span_start = None;
@@ -3981,27 +4340,83 @@ fn accumulate_nonzero_scanline_coverage(
                 _ => {}
             }
         }
-        if let Some(span_start) = span_start {
+        if let Some(start) = span_start {
             accumulate_nonzero_span_coverage(
-                span_start,
+                start,
                 f64::from(max_x),
                 min_x,
                 max_x,
                 samples,
                 covered,
                 &mut coverage_work,
+                uncertain,
                 work,
             )?;
         }
+        // Merged ranges own these samples exclusively; nominal spans never added them.
+        for &(start, end) in uncertain.iter() {
+            for index in start..end {
+                work.check()?;
+                let x = scanline_sample_x(index, samples);
+                if !work.contains_sample(x, sample_y) {
+                    continue;
+                }
+                #[cfg(test)]
+                {
+                    coverage_work.uncertain_samples += 1;
+                }
+                if point_in_nonzero_outline(edges, Point2::new(x, sample_y), work)? {
+                    record_sparse_coverage(covered, (index / u64::from(samples)) as u32)?;
+                }
+            }
+        }
     }
     Ok(coverage_work)
+}
+
+/// Reconstructs the exact existing dyadic sample coordinate from its global horizontal index.
+/// # Panics
+/// The private callers supply the fixed nonzero1/8 sample grid, so division/remainder are defined.
+fn scanline_sample_x(index: u64, samples: u32) -> f64 {
+    (index / u64::from(samples)) as f64
+        + ((index % u64::from(samples)) as f64 + 0.5) / f64::from(samples)
+}
+
+/// Projects a CLOSED crossing enclosure to exactly the affected global sample-index interval.
+/// Binary searches compare original dyadic sample coordinates, avoiding rounded index projections.
+fn uncertain_sample_range(
+    bound: sampled_predicates::Interval,
+    min_x: u32,
+    max_x: u32,
+    samples: u32,
+) -> Option<(u64, u64)> {
+    let first = u64::from(min_x) * u64::from(samples);
+    let last = u64::from(max_x) * u64::from(samples);
+    let lower_bound = |value: f64, strict: bool| {
+        let mut low = first;
+        let mut high = last;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let x = scanline_sample_x(mid, samples);
+            if x < value || (strict && x == value) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        low
+    };
+    let start = lower_bound(bound.low, false);
+    let end = lower_bound(bound.high, true);
+    (start < end).then_some((start, end))
 }
 
 /// Adds the exact subpixel samples in one active nonzero span to sparse row coverage.
 ///
 /// The span remains half-open (`start <= sample < end`) so its ownership matches the historical
 /// crossing rule. Iteration respects final raster row bounds and the optional preview canvas
-/// rectangle at every sample; canonical outline geometry is not clipped or rewritten.
+/// rectangle at every sample; merged uncertain samples belong exclusively to the robust fallback.
+/// Canonical outline geometry is not clipped or rewritten.
 ///
 /// # Errors
 ///
@@ -4016,6 +4431,7 @@ fn accumulate_nonzero_span_coverage(
     samples: u32,
     covered: &mut Vec<(u32, u16)>,
     coverage_work: &mut ScanlineCoverageWork,
+    uncertain: &[(u64, u64)],
     work: &RasterWork<'_>,
 ) -> Result<(), RenderError> {
     #[cfg(not(test))]
@@ -4043,7 +4459,10 @@ fn accumulate_nonzero_span_coverage(
                     coverage_work.visited_subpixel_samples.saturating_add(1);
             }
             let sample_x = f64::from(x) + (f64::from(sub_x) + 0.5) / f64::from(samples);
-            if sample_x >= clipped_start && sample_x < clipped_end {
+            let index = u64::from(x) * u64::from(samples) + u64::from(sub_x);
+            let range = uncertain.partition_point(|range| range.1 <= index);
+            let is_uncertain = uncertain.get(range).is_some_and(|range| range.0 <= index);
+            if !is_uncertain && sample_x >= clipped_start && sample_x < clipped_end {
                 record_sparse_coverage(covered, x)?;
             }
         }
@@ -4082,6 +4501,7 @@ fn record_sparse_coverage(covered: &mut Vec<(u32, u16)>, x: u32) -> Result<(), R
 /// # Errors
 ///
 /// Returns cancellation, numeric subdivision, request-wide edge limits, or allocation diagnostics.
+/// Returns `raster.sample.numeric` when actually evaluated sampled arithmetic is nonfinite.
 fn flattened_path_edges(
     path: &toniator_geometry::CurvePath,
     transform: CanonicalRasterTransform,
@@ -4095,7 +4515,7 @@ fn flattened_path_edges(
                     points.try_reserve(1).map_err(|_| {
                         RenderError::new("raster.allocation", "path origin allocation failed")
                     })?;
-                    points.push(transform.point(line.start()));
+                    points.push(sampled_point(transform.point(line.start()))?);
                 }
                 push_flattened_point(&mut points, transform.point(line.end()), work)?;
             }
@@ -4104,7 +4524,7 @@ fn flattened_path_edges(
                     points.try_reserve(1).map_err(|_| {
                         RenderError::new("raster.allocation", "path origin allocation failed")
                     })?;
-                    points.push(transform.point(cubic.start()));
+                    points.push(sampled_point(transform.point(cubic.start()))?);
                 }
                 flatten_cubic(
                     transform.point(cubic.start()),
@@ -4132,6 +4552,7 @@ fn flattened_path_edges(
 ///
 /// Returns cancellation, numeric subdivision, edge-limit, or allocation diagnostics without changing
 /// canonical outline topology or applying consumer clipping before raster sampling.
+/// Returns `raster.sample.numeric` when actually evaluated sampled arithmetic is nonfinite.
 fn flattened_outline_edges(
     outline: &toniator_geometry::CanonicalFilledOutline,
     transform: CanonicalRasterTransform,
@@ -4151,7 +4572,7 @@ fn flattened_outline_edges(
                                 "outline origin allocation failed",
                             )
                         })?;
-                        points.push(transform.point(line.start()));
+                        points.push(sampled_point(transform.point(line.start()))?);
                     }
                     push_flattened_point(&mut points, transform.point(line.end()), work)?;
                 }
@@ -4163,7 +4584,7 @@ fn flattened_outline_edges(
                                 "outline origin allocation failed",
                             )
                         })?;
-                        points.push(transform.point(cubic.start()));
+                        points.push(sampled_point(transform.point(cubic.start()))?);
                     }
                     flatten_cubic(
                         transform.point(cubic.start()),
@@ -4186,24 +4607,29 @@ fn flattened_outline_edges(
 }
 
 /// Tests nonzero winding coverage across every ordered outline contour.
-fn point_in_nonzero_outline(edges: &[(Point2, Point2)], point: Point2) -> bool {
+/// # Errors
+/// Returns cancellation or sampled uncertainty rather than comparing an ambiguous determinant.
+fn point_in_nonzero_outline(
+    edges: &[(Point2, Point2)],
+    point: Point2,
+    work: &RasterWork<'_>,
+) -> Result<bool, RenderError> {
     let mut winding = 0_i32;
     for (start, end) in edges {
+        work.check()?;
         if start.y <= point.y && end.y > point.y {
-            let cross =
-                (end.x - start.x) * (point.y - start.y) - (point.x - start.x) * (end.y - start.y);
+            let cross = sampled_winding_cross(*start, *end, point, work)?;
             if cross > 0.0 {
                 winding += 1;
             }
         } else if start.y > point.y && end.y <= point.y {
-            let cross =
-                (end.x - start.x) * (point.y - start.y) - (point.x - start.x) * (end.y - start.y);
+            let cross = sampled_winding_cross(*start, *end, point, work)?;
             if cross < 0.0 {
                 winding -= 1;
             }
         }
     }
-    winding != 0
+    Ok(winding != 0)
 }
 
 /// Recursively appends a deterministic cubic polyline whose control polygon is within 1/64 pixel flatness.
@@ -4211,6 +4637,7 @@ fn point_in_nonzero_outline(edges: &[(Point2, Point2)], point: Point2) -> bool {
 /// # Errors
 ///
 /// Returns cancellation, numeric-stagnation/depth, or request-wide edge-limit diagnostics.
+/// Returns `raster.sample.numeric` when actually evaluated sampled arithmetic is nonfinite.
 fn flatten_cubic(
     a: Point2,
     b: Point2,
@@ -4221,23 +4648,26 @@ fn flatten_cubic(
     work: &mut RasterWork<'_>,
 ) -> Result<(), RenderError> {
     const PIXEL_TOLERANCE: f64 = 1.0 / 64.0;
-    if control_polygon_extent([a, b, c, d]) <= PIXEL_TOLERANCE {
+    for point in [a, b, c, d] {
+        sampled_point(point)?;
+    }
+    if sampled_control_polygon_extent([a, b, c, d])? <= PIXEL_TOLERANCE {
         work.check()?;
         return push_flattened_point(points, d, work);
     }
-    let flatness = point_line_distance(b, a, d).max(point_line_distance(c, a, d));
+    let flatness = sampled_point_line_distance(b, a, d)?.max(sampled_point_line_distance(c, a, d)?);
     work.check()?;
     if flatness <= PIXEL_TOLERANCE {
         return push_flattened_point(points, d, work);
     }
-    let ab = midpoint(a, b);
-    let bc = midpoint(b, c);
-    let cd = midpoint(c, d);
-    let abc = midpoint(ab, bc);
-    let bcd = midpoint(bc, cd);
-    let mid = midpoint(abc, bcd);
+    let ab = sampled_midpoint(a, b)?;
+    let bc = sampled_midpoint(b, c)?;
+    let cd = sampled_midpoint(c, d)?;
+    let abc = sampled_midpoint(ab, bc)?;
+    let bcd = sampled_midpoint(bc, cd)?;
+    let mid = sampled_midpoint(abc, bcd)?;
     if depth >= 60 || mid == a || mid == d {
-        if control_polygon_extent([a, b, c, d]) <= PIXEL_TOLERANCE {
+        if sampled_control_polygon_extent([a, b, c, d])? <= PIXEL_TOLERANCE {
             return push_flattened_point(points, d, work);
         }
         return Err(RenderError::new(
@@ -4267,13 +4697,14 @@ fn control_polygon_extent(points: [Point2; 4]) -> f64 {
 /// # Errors
 ///
 /// Returns cancellation or the exact request-wide flattened-edge limit diagnostic.
+/// Returns `raster.sample.numeric` when actually evaluated sampled arithmetic is nonfinite.
 fn push_flattened_point(
     points: &mut Vec<Point2>,
     point: Point2,
     work: &mut RasterWork<'_>,
 ) -> Result<(), RenderError> {
     work.edge()?;
-    points.push(point);
+    points.push(sampled_point(point)?);
     Ok(())
 }
 
@@ -4293,11 +4724,12 @@ fn midpoint(a: Point2, b: Point2) -> Point2 {
     Point2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
 }
 
-/// Computes accepted 8x8 even-odd coverage for one output pixel.
+/// Computes fixed-grid even-odd coverage with certified signs and the original half-open right ray.
 ///
 /// # Errors
 ///
 /// Returns cancellation while sampling subpixels or traversing flattened edges.
+/// Returns `raster.sample.numeric` when actually evaluated sampled arithmetic is nonfinite.
 fn polygon_coverage_even_odd(
     edges: &[(Point2, Point2)],
     x: u32,
@@ -4322,10 +4754,11 @@ fn polygon_coverage_even_odd(
             let mut crossings = 0usize;
             for (a, b) in edges {
                 work.check()?;
-                if (a.y > point.y) != (b.y > point.y)
-                    && point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x
-                {
-                    crossings += 1;
+                if (a.y > point.y) != (b.y > point.y) {
+                    let sign = sampled_predicates::orientation(*a, *b, point, work)?;
+                    if (b.y > a.y && sign > 0) || (b.y < a.y && sign < 0) {
+                        crossings += 1;
+                    }
                 }
             }
             if crossings % 2 == 1 {
@@ -4341,6 +4774,7 @@ fn polygon_coverage_even_odd(
 /// # Errors
 ///
 /// Returns cancellation while visiting finite subpixel and edge work.
+/// Returns `raster.sample.numeric` when actually evaluated sampled arithmetic is nonfinite.
 fn polygon_coverage_nonzero(
     edges: &[(Point2, Point2)],
     x: u32,
@@ -4360,7 +4794,9 @@ fn polygon_coverage_nonzero(
                 f64::from(x) + (f64::from(sub_x) + 0.5) / f64::from(samples),
                 f64::from(y) + (f64::from(sub_y) + 0.5) / f64::from(samples),
             );
-            if work.contains_sample(point.x, point.y) && point_in_nonzero_outline(edges, point) {
+            if work.contains_sample(point.x, point.y)
+                && point_in_nonzero_outline(edges, point, work)?
+            {
                 inside += 1;
             }
         }
@@ -4368,94 +4804,150 @@ fn polygon_coverage_nonzero(
     Ok(f64::from(inside) / f64::from(samples * samples))
 }
 
-/// Composites one native or anisotropically transformed ellipse under optional shared cancellation.
-///
+/// Carries nominal ellipse arithmetic and conservative original canonical-axis support.
+/// Unavailable exclusion proofs use[-Inf,+Inf] sentinels ONLY as comparison bounds; these are
+/// never mapped geometry, normalized-distance operands or accepted finite-coordinate authority.
+#[derive(Clone, Copy, Debug)]
+struct MappedSampledEllipse {
+    center: Point2,
+    radius_x: f64,
+    radius_y: f64,
+    support: [f64; 4],
+}
+
+/// Maps a positive authored circle without interpreting underflow as authored emptiness.
+/// Canonical support is enclosed BEFORE mapping, preserving exact left/right cancellation.
+/// An uncertain support axis supplies no exclusion proof; it never changes the nominal conic test.
 /// # Errors
-///
-/// Returns cancellation while traversing bounded rows or subpixel samples.
+/// Returns sampled numeric errors for nonfinite mapping or positive-derived-zero radii.
+fn mapped_sampled_ellipse(
+    center: Point2,
+    radius: f64,
+    transform: CanonicalRasterTransform,
+) -> Result<Option<MappedSampledEllipse>, RenderError> {
+    if radius == 0.0 {
+        return Ok(None);
+    }
+    sampled_finite(radius)?;
+    let mapped = sampled_point(transform.point(center))?;
+    let rx = sampled_finite(radius * transform.scale_x)?;
+    let ry = sampled_finite(radius * transform.scale_y)?;
+    if radius < 0.0 || rx <= 0.0 || ry <= 0.0 {
+        return Err(sampled_predicates::uncertainty());
+    }
+    let axis = |position: f64, scale: f64, offset: f64| {
+        use sampled_predicates::Interval;
+        let c = Interval::point(position)?;
+        let r = Interval::point(radius)?;
+        let s = Interval::point(scale)?;
+        let o = Interval::point(offset)?;
+        let low = c.sub(r)?.mul(s)?.add(o)?;
+        let high = c.add(r)?.mul(s)?.add(o)?;
+        Some(Interval {
+            low: low.low,
+            high: high.high,
+        })
+    };
+    let unknown = sampled_predicates::Interval {
+        low: f64::NEG_INFINITY,
+        high: f64::INFINITY,
+    };
+    let x = axis(center.x, transform.scale_x, transform.offset_x).unwrap_or(unknown);
+    let y = axis(center.y, transform.scale_y, transform.offset_y).unwrap_or(unknown);
+    Ok(Some(MappedSampledEllipse {
+        center: mapped,
+        radius_x: rx,
+        radius_y: ry,
+        support: [x.low, y.low, x.high, y.high],
+    }))
+}
+
+/// Composites one mapped ellipse with bounded rows, optional cancellation and unchanged normalized math.
+/// Authored exact-zero circles remain empty; no partial surface escapes an error.
+/// # Errors
+/// Returns cancellation or numeric/allocation diagnostics before accepting the local surface.
 #[allow(clippy::too_many_arguments)]
 fn composite_ellipse<P: RasterPixelSink>(
     pixels: &mut P,
     width: u32,
     height: u32,
-    center_x: f64,
-    center_y: f64,
-    radius_x: f64,
-    radius_y: f64,
+    ellipse: Option<MappedSampledEllipse>,
     color: &ColorValue,
     opacity: f64,
     antialiasing: RasterAntialiasing,
     work: Option<&RasterWork<'_>>,
 ) -> Result<(), RenderError> {
-    let min_x = (center_x - radius_x - 1.0).floor().max(0.0) as u32;
-    let min_y = (center_y - radius_y - 1.0).floor().max(0.0) as u32;
-    let max_x = (center_x + radius_x + 1.0).ceil().min(f64::from(width)) as u32;
-    let max_y = (center_y + radius_y + 1.0).ceil().min(f64::from(height)) as u32;
+    if let Some(work) = work {
+        work.check()?;
+    }
+    let Some(ellipse) = ellipse else {
+        return Ok(());
+    };
+    let [min_x, min_y, max_x, max_y] = sampled_ellipse_bounds(
+        ellipse.center.x,
+        ellipse.center.y,
+        ellipse.radius_x,
+        ellipse.radius_y,
+        width,
+        height,
+    )?;
     for y in min_y..max_y {
         if let Some(work) = work {
             work.check()?;
         }
         for x in min_x..max_x {
-            let coverage = ellipse_coverage(
-                center_x,
-                center_y,
-                radius_x,
-                radius_y,
-                x,
-                y,
-                antialiasing,
-                work,
-            )?;
-            if coverage == 0.0 {
-                continue;
+            let coverage = ellipse_coverage(ellipse, x, y, antialiasing, work)?;
+            if coverage != 0.0 {
+                pixels.paint_ellipse(
+                    y as usize * width as usize + x as usize,
+                    coverage,
+                    color,
+                    opacity,
+                );
             }
-            pixels.paint_ellipse(
-                y as usize * width as usize + x as usize,
-                coverage,
-                color,
-                opacity,
-            );
         }
     }
     Ok(())
 }
 
-/// Measures one ellipse's selected AA coverage at a concrete output pixel.
-///
+/// Samples the original ellipse norm only after excluding provably outside canonical support.
+/// Positive-infinite squared distance remains safely outside; uncertain conic boundary conditioning
+/// is deliberately not claimed solved by this axis-support proof.
 /// # Errors
-///
-/// Returns cancellation while traversing the selected subpixel grid.
-#[allow(clippy::too_many_arguments)]
+/// Returns cancellation while traversing the fixed1/8 sample grid.
 fn ellipse_coverage(
-    center_x: f64,
-    center_y: f64,
-    radius_x: f64,
-    radius_y: f64,
+    ellipse: MappedSampledEllipse,
     x: u32,
     y: u32,
     antialiasing: RasterAntialiasing,
     work: Option<&RasterWork<'_>>,
 ) -> Result<f64, RenderError> {
-    if radius_x <= 0.0 || radius_y <= 0.0 {
-        return Ok(0.0);
-    }
-    let samples = match antialiasing {
-        RasterAntialiasing::On => SUBPIXEL_GRID,
-        RasterAntialiasing::Off => 1,
+    let samples = if antialiasing == RasterAntialiasing::On {
+        SUBPIXEL_GRID
+    } else {
+        1
     };
-    let mut inside = 0_u32;
+    let mut inside = 0;
     for sample_y in 0..samples {
         for sample_x in 0..samples {
             if let Some(work) = work {
                 work.check()?;
             }
-            let point_x = f64::from(x) + (f64::from(sample_x) + 0.5) / f64::from(samples);
-            let point_y = f64::from(y) + (f64::from(sample_y) + 0.5) / f64::from(samples);
-            let dx = (point_x - center_x) / radius_x;
-            let dy = (point_y - center_y) / radius_y;
-            if work.is_none_or(|work| work.contains_sample(point_x, point_y))
-                && dx.mul_add(dx, dy * dy) <= 1.0
+            let px = f64::from(x) + (f64::from(sample_x) + 0.5) / f64::from(samples);
+            let py = f64::from(y) + (f64::from(sample_y) + 0.5) / f64::from(samples);
+            if work.is_some_and(|w| !w.contains_sample(px, py)) {
+                continue;
+            }
+            if px < ellipse.support[0]
+                || py < ellipse.support[1]
+                || px > ellipse.support[2]
+                || py > ellipse.support[3]
             {
+                continue;
+            }
+            let dx = (px - ellipse.center.x) / ellipse.radius_x;
+            let dy = (py - ellipse.center.y) / ellipse.radius_y;
+            if dx.mul_add(dx, dy * dy) <= 1.0 {
                 inside += 1;
             }
         }
@@ -4754,6 +5246,13 @@ pub fn write_svg_cancellable_with_limits(
     limits: SvgSerializationLimits,
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<String, RenderError> {
+    let prepared_scene = materialization::prepare_scene_with_contract(
+        scene,
+        "toniator-svg-complete-normalization-v1",
+        cancelled,
+    )?;
+    let scene = prepared_scene.as_ref();
+
     let mut join = svg_join::SvgJoin::new(scene.canvas(), limits.max_edges, cancelled)?;
     let document = match scene.model {
         None => write_stage5_svg(scene, &mut join),
@@ -4795,8 +5294,9 @@ fn write_stage5_svg(
 
 /// Serializes one modeled scene as deterministic editable SVG with its fixed model compositor.
 ///
-/// RGB retains its accepted editable screen-blend structure, CMYK emits explicit linear-light
-/// same-document filter inputs, and SourceColorAlpha retains ordinary ordered source-over.
+/// RGB adds premultiplied linear channel colors and alpha with saturation; CMYK applies its
+/// fixed-transmittance equations. Both reference live unfiltered channels in the original frame.
+/// SourceColorAlpha retains ordinary ordered source-over geometry.
 ///
 /// # Errors
 /// Returns shared SVG cancellation, precision, allocation, or explicit work-limit diagnostics.
@@ -4812,41 +5312,41 @@ fn write_modeled_svg(
         HalftoneChannelModel::Cmyk => "Toniator CMYK halftone",
         HalftoneChannelModel::SourceColorAlpha => "Toniator source-colored halftone",
     };
+    let filtered = model != HalftoneChannelModel::SourceColorAlpha;
+    let reference_namespace = if filtered {
+        " xmlns:xlink=\"http://www.w3.org/1999/xlink\""
+    } else {
+        ""
+    };
     let mut document = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">\n<title>{title}</title>\n<metadata>family={};realization={};scene={}</metadata>\n<defs><clipPath id=\"canvas-clip\"><rect x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\"/></clipPath>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"{reference_namespace} width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">\n<title>{title}</title>\n<metadata>family={};realization={};scene={}</metadata>\n<defs><clipPath id=\"canvas-clip\"><rect x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\"/></clipPath>\n",
         xml_escape(&scene.identity.family_fingerprint),
         xml_escape(&scene.identity.realization_fingerprint),
         xml_escape(&scene.identity.scene_fingerprint),
     );
-    if model == HalftoneChannelModel::Cmyk {
-        write_cmyk_svg_filter_definitions(&mut document, scene);
+    match model {
+        HalftoneChannelModel::Rgb => write_rgb_svg_filter_definitions(&mut document, scene),
+        HalftoneChannelModel::Cmyk => write_cmyk_svg_filter_definitions(&mut document, scene),
+        HalftoneChannelModel::SourceColorAlpha => {}
     }
     document.push_str("</defs>\n");
     document.push_str(
         "<g id=\"canvas\" clip-path=\"url(#canvas-clip)\" style=\"isolation:isolate\">\n",
     );
-    let blend_mode = match model {
-        HalftoneChannelModel::Rgb => Some("screen"),
-        HalftoneChannelModel::Cmyk | HalftoneChannelModel::SourceColorAlpha => None,
-    };
-    if model == HalftoneChannelModel::Cmyk {
-        document
-            .push_str("<g id=\"cmyk-composition\" filter=\"url(#cmyk-fixed-transmittance)\">\n");
+    if filtered {
+        let (id, filter) = match model {
+            HalftoneChannelModel::Rgb => ("rgb-composition", "rgb-fixed-addition"),
+            HalftoneChannelModel::Cmyk => ("cmyk-composition", "cmyk-fixed-transmittance"),
+            HalftoneChannelModel::SourceColorAlpha => {
+                unreachable!("source alpha has no channel-input filter")
+            }
+        };
+        document.push_str(&format!("<g id=\"{id}\" filter=\"url(#{filter})\">\n"));
     }
     for layer in &scene.layers {
-        let filter_id = (model == HalftoneChannelModel::Cmyk)
-            .then(|| format!("channel-{}-atlas-slot", layer.channel_id.0));
-        write_svg_channel_group(
-            &mut document,
-            layer,
-            blend_mode,
-            filter_id.as_deref(),
-            model == HalftoneChannelModel::Cmyk,
-            &scene.canvas,
-            join,
-        )?;
+        write_svg_channel_group(&mut document, layer, &scene.canvas, join)?;
     }
-    if model == HalftoneChannelModel::Cmyk {
+    if filtered {
         document.push_str("</g>\n");
     }
     document.push_str("</g>\n");
@@ -4854,48 +5354,51 @@ fn write_modeled_svg(
     Ok(document)
 }
 
-/// Appends the same-document CMYK channel atlas and fixed-transmittance filter graph.
-///
-/// Each live channel group remains in canvas coordinates and uses a nested filter to move only
-/// its rendered layer-local result into a disjoint atlas slot. The parent filter extracts those
-/// slots from one `SourceGraphic`, restores them to the canvas origin, and applies the protected
-/// linear-light transmittance and coverage-union equations. This avoids fragment `feImage`
-/// references, embedded rasters, viewer blend modes, and duplicate proxy geometry.
-fn write_cmyk_svg_filter_definitions(document: &mut String, scene: &RenderScene) {
-    let column_count = scene.layers.len().min(2);
-    let row_count = scene.layers.len().div_ceil(column_count);
-    let atlas_width = scene.canvas.width * column_count as f64;
-    let atlas_height = scene.canvas.height * row_count as f64;
+/// References every live unfiltered channel in the original canvas frame exactly once.
+/// RGB/CMYK ordinary scenes have three/four channels; all admitted ordered layer counts remain
+/// supported. The parent filter never consumes SourceGraphic or moves canonical geometry.
+fn write_svg_channel_inputs(document: &mut String, scene: &RenderScene) {
     let width = compact_number(scene.canvas.width);
     let height = compact_number(scene.canvas.height);
-    let atlas_width = compact_number(atlas_width);
-    let atlas_height = compact_number(atlas_height);
-
-    for (index, layer) in scene.layers.iter().enumerate() {
-        let slot_x = scene.canvas.width * (index % column_count) as f64;
-        let slot_y = scene.canvas.height * (index / column_count) as f64;
-        document.push_str(&format!(
-            "<filter id=\"channel-{}-atlas-slot\" filterUnits=\"userSpaceOnUse\" primitiveUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"{atlas_width}\" height=\"{atlas_height}\" color-interpolation-filters=\"linearRGB\"><feOffset in=\"SourceGraphic\" dx=\"{}\" dy=\"{}\"/></filter>\n",
-            layer.channel_id.0,
-            compact_number(slot_x),
-            compact_number(slot_y),
-        ));
+    for layer in &scene.layers {
+        let id = layer.channel_id.0;
+        document.push_str(&format!("<feImage x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" href=\"#channel-{id}\" xlink:href=\"#channel-{id}\" result=\"channel-{id}-layer\"/>\n"));
     }
+}
 
-    document.push_str(&format!(
-        "<filter id=\"cmyk-fixed-transmittance\" filterUnits=\"userSpaceOnUse\" primitiveUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"{atlas_width}\" height=\"{atlas_height}\" color-interpolation-filters=\"linearRGB\">\n<feFlood x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" flood-color=\"#ffffff\" result=\"canvas-white\"/>\n"
-    ));
-    for (index, layer) in scene.layers.iter().enumerate() {
-        let slot_x = scene.canvas.width * (index % column_count) as f64;
-        let slot_y = scene.canvas.height * (index / column_count) as f64;
+/// Adds the captured RGB layers with linear premultiplied arithmetic, including saturated alpha.
+/// Every layer first resolves its local source-over paint before capture. Filter arithmetic adds
+/// the layer P and A components; it never screens colors or unions alpha with source-over.
+/// # Panics
+/// Requires the validated scene's nonempty ordered layer list.
+fn write_rgb_svg_filter_definitions(document: &mut String, scene: &RenderScene) {
+    let width = compact_number(scene.canvas.width);
+    let height = compact_number(scene.canvas.height);
+    document.push_str(&format!("<filter id=\"rgb-fixed-addition\" filterUnits=\"userSpaceOnUse\" primitiveUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" color-interpolation-filters=\"linearRGB\">\n"));
+    write_svg_channel_inputs(document, scene);
+    let mut sum = format!("channel-{}-layer", scene.layers[0].channel_id.0);
+    for (index, layer) in scene.layers.iter().enumerate().skip(1) {
+        let next = format!("rgb-addition-{index}");
+        document.push_str(&format!("<feComposite in=\"{sum}\" in2=\"channel-{}-layer\" operator=\"arithmetic\" k2=\"1\" k3=\"1\" result=\"{next}\"/>\n", layer.channel_id.0));
+        sum = next;
+    }
+    document.push_str("</filter>\n");
+}
+
+/// Applies fixed linear transmittance and coverage union to live same-document channel inputs.
+/// Every input keeps its original canvas position, local source-over paints and editable IDs;
+/// no atlas extent multiplication, offset capture or SourceGraphic composition participates.
+/// # Panics
+/// Requires the validated scene's nonempty ordered layer list.
+fn write_cmyk_svg_filter_definitions(document: &mut String, scene: &RenderScene) {
+    let width = compact_number(scene.canvas.width);
+    let height = compact_number(scene.canvas.height);
+    document.push_str(&format!("<filter id=\"cmyk-fixed-transmittance\" filterUnits=\"userSpaceOnUse\" primitiveUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" color-interpolation-filters=\"linearRGB\">\n"));
+    write_svg_channel_inputs(document, scene);
+    document.push_str(&format!("<feFlood x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" flood-color=\"#ffffff\" result=\"canvas-white\"/>\n"));
+    for layer in &scene.layers {
         let channel_id = layer.channel_id.0;
-        document.push_str(&format!(
-            "<feFlood x=\"{}\" y=\"{}\" width=\"{width}\" height=\"{height}\" flood-color=\"#ffffff\" result=\"channel-{channel_id}-slot\"/>\n<feComposite in=\"SourceGraphic\" in2=\"channel-{channel_id}-slot\" operator=\"in\" result=\"channel-{channel_id}-atlas\"/>\n<feOffset in=\"channel-{channel_id}-atlas\" dx=\"{}\" dy=\"{}\" result=\"channel-{channel_id}-layer\"/>\n<feComposite in=\"channel-{channel_id}-layer\" in2=\"canvas-white\" operator=\"over\" result=\"channel-{channel_id}-factor\"/>\n<feComposite in=\"canvas-white\" in2=\"channel-{channel_id}-layer\" operator=\"in\" result=\"channel-{channel_id}-coverage\"/>\n",
-            compact_number(slot_x),
-            compact_number(slot_y),
-            compact_number(if slot_x == 0.0 { 0.0 } else { -slot_x }),
-            compact_number(if slot_y == 0.0 { 0.0 } else { -slot_y }),
-        ));
+        document.push_str(&format!("<feComposite in=\"channel-{channel_id}-layer\" in2=\"canvas-white\" operator=\"over\" result=\"channel-{channel_id}-factor\"/>\n<feComposite in=\"canvas-white\" in2=\"channel-{channel_id}-layer\" operator=\"in\" result=\"channel-{channel_id}-coverage\"/>\n"));
     }
 
     let first_channel = scene.layers[0].channel_id.0;
@@ -4916,46 +5419,29 @@ fn write_cmyk_svg_filter_definitions(document: &mut String, scene: &RenderScene)
     ));
 }
 
-/// Appends one modeled channel group with immutable presentation and per-mark paint semantics.
-///
-/// An optional filter moves only the rendered group result into a same-document model-compositor
-/// input while all child geometry retains its canonical canvas coordinates and stable IDs. The
-/// optional inner canvas clip bounds a CMYK layer before the filter moves it into its atlas slot.
-///
+/// Serializes one live unfiltered modeled channel with unchanged local paint and visibility.
+/// Original-frame pointwise RGB/CMYK inputs are bounded by their explicit filter regions and the
+/// final outer canvas clip; no redundant per-channel clip resamples coverage. SourceColorAlpha
+/// keeps its existing unfiltered markup and per-mark opacity.
 /// # Errors
 /// Returns shared SVG cancellation, precision, allocation, or explicit work-limit diagnostics.
 fn write_svg_channel_group(
     document: &mut String,
     layer: &RenderLayer,
-    blend_mode: Option<&str>,
-    filter_id: Option<&str>,
-    clip_layer_to_canvas: bool,
     canvas: &CanvasSpec,
     join: &mut svg_join::SvgJoin<'_>,
 ) -> Result<(), RenderError> {
     let mut styles = Vec::new();
-    if let Some(mode) = blend_mode {
-        styles.push(format!("mix-blend-mode:{mode}"));
-    }
     if !layer.visible {
         styles.push("display:none".to_owned());
     }
-    let filter = filter_id.map_or_else(String::new, |filter_id| {
-        format!(" filter=\"url(#{filter_id})\"")
-    });
     let style = (!styles.is_empty()).then(|| format!(" style=\"{}\"", styles.join(";")));
     document.push_str(&format!(
-        "<g id=\"channel-{}\"{filter}{}>\n",
+        "<g id=\"channel-{}\"{}>\n",
         layer.channel_id.0,
         style.unwrap_or_default(),
     ));
-    if clip_layer_to_canvas {
-        document.push_str("<g clip-path=\"url(#canvas-clip)\">\n");
-    }
     write_svg_outputs(document, layer, true, canvas, join)?;
-    if clip_layer_to_canvas {
-        document.push_str("</g>\n");
-    }
     document.push_str("</g>\n");
     Ok(())
 }
@@ -4963,7 +5449,8 @@ fn write_svg_channel_group(
 /// Appends maximal eligible opaque output runs as one editable filled path.
 ///
 /// Paint-bearing or translucent outputs flush the current run before their
-/// original ordered serializer is called.
+/// original ordered serializer is called. Every output retains its ordered ordinal in primitive
+/// IDs, including empty outputs; paint and primitive enumeration remain local to that output.
 ///
 /// # Errors
 /// Returns cancellation, work-limit, precision, or geometry diagnostics.
@@ -4976,7 +5463,7 @@ fn write_svg_outputs(
 ) -> Result<(), RenderError> {
     let mut run = Vec::new();
     let mut run_ordinal = 0_usize;
-    for output in &layer.outputs {
+    for (output_ordinal, output) in layer.outputs.iter().enumerate() {
         join.check()?;
         let eligible =
             layer.color.alpha == 1.0 && layer.opacity == 1.0 && output.primitive_paints.is_none();
@@ -4999,6 +5486,7 @@ fn write_svg_outputs(
             document,
             output.geometry(),
             layer.channel_id.0,
+            output_ordinal,
             modeled.then_some(layer),
             modeled.then_some(output),
             canvas,
@@ -5020,166 +5508,178 @@ fn write_svg_outputs(
 /// Serializes validated canonical geometry without resolving document resources.
 ///
 /// This final consumer intersects closed fills with the canvas, omits empty/zero-radius
-/// geometry, and preserves original enumeration IDs, paint indices, fill rules, and order.
+/// geometry, and preserves output-ordinal/primitive-index IDs, paint indices, fill rules, and order.
 /// Curve coordinates retain roundtrip precision and canonical cubic controls;
 /// partial circles retain their original radius in local relative arcs.
 ///
 /// # Errors
 /// Returns cancellation, work-limit, allocation, closure, or precision diagnostics before publication.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "ordered SVG serialization keeps output identity, paint, canvas and work authority explicit"
+)]
 fn write_svg_geometry(
     document: &mut String,
     geometry: &GeometryOutput,
     channel_id: u64,
+    output_ordinal: usize,
     layer: Option<&RenderLayer>,
     output: Option<&RenderOutputLayer>,
     canvas: &CanvasSpec,
     join: &mut svg_join::SvgJoin<'_>,
 ) -> Result<(), RenderError> {
-    match geometry {
-        GeometryOutput::CircularMarks(marks) => {
-            for (index, mark) in marks.iter().enumerate() {
-                join.check()?;
-                if mark.radius == 0.0 || !join.circle_intersects_canvas(mark.center, mark.radius) {
-                    continue;
-                }
-                let paint = layer.map_or_else(String::new, |layer| {
-                    format!(
-                        " fill=\"{}\"",
-                        color_hex(output_primitive_paint(layer, output, index))
-                    )
-                });
-                let opacity = layer.map_or_else(
-                    || "".to_owned(),
-                    |layer| {
-                        format!(
-                            " fill-opacity=\"{}\"",
-                            compact_number(
-                                output_primitive_paint(layer, output, index).alpha * layer.opacity
-                            )
-                        )
-                    },
-                );
-                let id = layer.map_or_else(String::new, |_| {
-                    format!(" id=\"channel-{channel_id}-mark-{index}\"")
-                });
-                write_svg_circle_geometry(
-                    document,
-                    mark.center,
-                    mark.radius,
-                    &format!("{id}{paint}{opacity}"),
-                    join,
-                )?;
-            }
-        }
-        GeometryOutput::CanonicalMarks(marks) => {
-            for (index, mark) in marks.iter().enumerate() {
-                join.check()?;
-                if matches!(mark, CanonicalMark::Circle { center, radius, .. } if *radius == 0.0 || !join.circle_intersects_canvas(*center, *radius))
-                {
-                    continue;
-                }
-                let paint = layer.map_or_else(String::new, |layer| {
-                    format!(
-                        " fill=\"{}\"",
-                        color_hex(output_primitive_paint(layer, output, index))
-                    )
-                });
-                let opacity = layer.map_or_else(
-                    || "".to_owned(),
-                    |layer| {
-                        format!(
-                            " fill-opacity=\"{}\"",
-                            compact_number(
-                                output_primitive_paint(layer, output, index).alpha * layer.opacity
-                            )
-                        )
-                    },
-                );
-                match mark {
-                    CanonicalMark::Circle { center, radius, .. } => {
-                        let id = layer.map_or_else(String::new, |_| {
-                            format!(" id=\"channel-{channel_id}-mark-{index}\"")
-                        });
-                        write_svg_circle_geometry(
-                            document,
-                            *center,
-                            *radius,
-                            &format!("{id}{paint} fill-rule=\"evenodd\"{opacity}"),
-                            join,
-                        )?;
+    for part in geometry.parts() {
+        match part {
+            GeometryOutputPart::CircularMarks(marks) => {
+                for (index, mark) in marks.iter().enumerate() {
+                    join.check()?;
+                    if mark.radius == 0.0
+                        || !join.circle_intersects_canvas(mark.center, mark.radius)
+                    {
+                        continue;
                     }
-                    CanonicalMark::ClosedPath(mark) => {
-                        if !join.contour_intersects_canvas(mark.path.segments()) {
-                            continue;
+                    let paint = layer.map_or_else(String::new, |layer| {
+                        format!(
+                            " fill=\"{}\"",
+                            color_hex(output_primitive_paint(layer, output, index))
+                        )
+                    });
+                    let opacity = layer.map_or_else(
+                        || "".to_owned(),
+                        |layer| {
+                            format!(
+                                " fill-opacity=\"{}\"",
+                                compact_number(
+                                    output_primitive_paint(layer, output, index).alpha
+                                        * layer.opacity
+                                )
+                            )
+                        },
+                    );
+                    let id = layer.map_or_else(String::new, |_| {
+                        format!(" id=\"channel-{channel_id}-output-{output_ordinal}-mark-{index}\"")
+                    });
+                    write_svg_circle_geometry(
+                        document,
+                        mark.center,
+                        mark.radius,
+                        &format!("{id}{paint}{opacity}"),
+                        join,
+                    )?;
+                }
+            }
+            GeometryOutputPart::CanonicalMarks(marks) => {
+                for (index, mark) in marks.iter().enumerate() {
+                    join.check()?;
+                    if matches!(mark, CanonicalMark::Circle { center, radius, .. } if *radius == 0.0 || !join.circle_intersects_canvas(*center, *radius))
+                    {
+                        continue;
+                    }
+                    let paint = layer.map_or_else(String::new, |layer| {
+                        format!(
+                            " fill=\"{}\"",
+                            color_hex(output_primitive_paint(layer, output, index))
+                        )
+                    });
+                    let opacity = layer.map_or_else(
+                        || "".to_owned(),
+                        |layer| {
+                            format!(
+                                " fill-opacity=\"{}\"",
+                                compact_number(
+                                    output_primitive_paint(layer, output, index).alpha
+                                        * layer.opacity
+                                )
+                            )
+                        },
+                    );
+                    match mark {
+ CanonicalMark::DeferredPath(_) => {},
+                        CanonicalMark::Circle { center, radius, .. } => {
+                            let id = layer.map_or_else(String::new, |_| {
+                                format!(" id=\"channel-{channel_id}-output-{output_ordinal}-mark-{index}\"")
+                            });
+                            write_svg_circle_geometry(
+                                document,
+                                *center,
+                                *radius,
+                                &format!("{id}{paint} fill-rule=\"evenodd\"{opacity}"),
+                                join,
+                            )?;
                         }
-                        let mut data = String::new();
-                        join.curve_data(&mut data, mark.path.segments(), false)?;
-                        if data.is_empty() {
-                            continue;
-                        }
-                        let id = layer.map_or_else(String::new, |_| {
-                            format!(" id=\"channel-{channel_id}-mark-{index}\"")
-                        });
-                        document.push_str(&format!(
-                            "<path{id} d=\"{data}\"{paint} fill-rule=\"{}\"{opacity}/>\n",
-                            match mark.fill_rule {
-                                CanonicalFillRule::EvenOdd => "evenodd",
-                                CanonicalFillRule::NonZero => "nonzero",
+                        CanonicalMark::ClosedPath(mark) => {
+                            if !join.contour_intersects_canvas(mark.path.segments()) {
+                                continue;
                             }
-                        ));
+                            let mut data = String::new();
+                            join.curve_data(&mut data, mark.path.segments(), false)?;
+                            if data.is_empty() {
+                                continue;
+                            }
+                            let id = layer.map_or_else(String::new, |_| {
+                                format!(" id=\"channel-{channel_id}-output-{output_ordinal}-mark-{index}\"")
+                            });
+                            document.push_str(&format!(
+                                "<path{id} d=\"{data}\"{paint} fill-rule=\"{}\"{opacity}/>\n",
+                                match mark.fill_rule {
+                                    CanonicalFillRule::EvenOdd => "evenodd",
+                                    CanonicalFillRule::NonZero => "nonzero",
+                                }
+                            ));
+                        }
                     }
                 }
             }
-        }
-        GeometryOutput::CanonicalStrokes(strokes) => {
-            for (index, stroke) in strokes.iter().enumerate() {
-                join.check()?;
-                let id = format!("channel-{channel_id}-stroke-{index}");
-                if stroke.outline.contours.is_empty() {
-                    continue;
+            GeometryOutputPart::CanonicalStrokes(strokes) => {
+                for (index, stroke) in strokes.iter().enumerate() {
+                    join.check()?;
+                    let id = format!("channel-{channel_id}-output-{output_ordinal}-stroke-{index}");
+                    if stroke.outline.contours.is_empty() {
+                        continue;
+                    }
+                    if !outline_intersects_canvas(&stroke.outline, canvas) {
+                        continue;
+                    }
+                    let data = svg_outline_path_data(&stroke.outline, join)?;
+                    if data.is_empty() {
+                        continue;
+                    }
+                    let paint = layer.map_or_else(String::new, |value| {
+                        format!(
+                            " fill=\"{}\" fill-opacity=\"{}\"",
+                            color_hex(&value.color),
+                            compact_number(value.color.alpha * value.opacity)
+                        )
+                    });
+                    document.push_str(&format!(
+                        "<path id=\"{id}\" d=\"{data}\" fill-rule=\"nonzero\"{paint}/>\n"
+                    ));
                 }
-                if !outline_intersects_canvas(&stroke.outline, canvas) {
-                    continue;
-                }
-                let data = svg_outline_path_data(&stroke.outline, join)?;
-                if data.is_empty() {
-                    continue;
-                }
-                let paint = layer.map_or_else(String::new, |value| {
-                    format!(
-                        " fill=\"{}\" fill-opacity=\"{}\"",
-                        color_hex(&value.color),
-                        compact_number(value.color.alpha * value.opacity)
-                    )
-                });
-                document.push_str(&format!(
-                    "<path id=\"{id}\" d=\"{data}\" fill-rule=\"nonzero\"{paint}/>\n"
-                ));
             }
-        }
-        GeometryOutput::CanonicalRegions(regions) => {
-            for (index, region) in regions.regions().iter().enumerate() {
-                join.check()?;
-                if region.bounds.max.x < 0.0
-                    || region.bounds.max.y < 0.0
-                    || region.bounds.min.x > canvas.width
-                    || region.bounds.min.y > canvas.height
-                {
-                    continue;
+            GeometryOutputPart::CanonicalRegions(regions) => {
+                for (index, region) in regions.regions().iter().enumerate() {
+                    join.check()?;
+                    if region.bounds.max.x < 0.0
+                        || region.bounds.max.y < 0.0
+                        || region.bounds.min.x > canvas.width
+                        || region.bounds.min.y > canvas.height
+                    {
+                        continue;
+                    }
+                    let data = svg_curve_path_data(&region.ring, join)?;
+                    if data.is_empty() {
+                        continue;
+                    }
+                    let paint = layer.map_or_else(String::new, |value| {
+                        let paint = output_primitive_paint(value, output, index);
+                        format!(
+                            " fill=\"{}\" fill-opacity=\"{}\"",
+                            color_hex(paint),
+                            compact_number(paint.alpha * value.opacity)
+                        )
+                    });
+                    document.push_str(&format!("<path id=\"channel-{channel_id}-output-{output_ordinal}-region-{index}\" d=\"{data}\" fill-rule=\"nonzero\"{paint}/>\n"));
                 }
-                let data = svg_curve_path_data(&region.ring, join)?;
-                if data.is_empty() {
-                    continue;
-                }
-                let paint = layer.map_or_else(String::new, |value| {
-                    let paint = output_primitive_paint(value, output, index);
-                    format!(
-                        " fill=\"{}\" fill-opacity=\"{}\"",
-                        color_hex(paint),
-                        compact_number(paint.alpha * value.opacity)
-                    )
-                });
-                document.push_str(&format!("<path id=\"channel-{channel_id}-region-{index}\" d=\"{data}\" fill-rule=\"nonzero\"{paint}/>\n"));
             }
         }
     }
@@ -5396,6 +5896,7 @@ mod ton013_svg_circle_serialization_tests {
             &mut svg,
             output.geometry(),
             layer.channel_id.0,
+            0,
             Some(layer),
             Some(output),
             &canvas,
@@ -5435,13 +5936,13 @@ mod ton013_svg_circle_serialization_tests {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         assert_eq!(circles.len(), 3);
-        assert!(circles[0].contains("id=\"channel-9-mark-1\""));
+        assert!(circles[0].contains("id=\"channel-9-output-0-mark-1\""));
         assert!(circles[0].contains("r=\"1.25\""));
         assert!(circles[0].contains("fill=\"#00ff00\""));
-        assert!(circles[1].contains("id=\"channel-9-mark-3\""));
+        assert!(circles[1].contains("id=\"channel-9-output-0-mark-3\""));
         assert!(circles[1].contains("r=\"0.0000001\""));
         assert!(circles[1].contains("fill=\"#ffff00\""));
-        assert!(circles[2].contains("id=\"channel-9-mark-4\""));
+        assert!(circles[2].contains("id=\"channel-9-output-0-mark-4\""));
         assert!(circles[2].contains("r=\"0.0000004\""));
         assert!(circles[2].contains("fill=\"#00ffff\""));
     }
@@ -5474,13 +5975,13 @@ mod ton013_svg_circle_serialization_tests {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         assert_eq!(circles.len(), 3);
-        assert!(circles[0].contains("id=\"channel-9-mark-1\""));
+        assert!(circles[0].contains("id=\"channel-9-output-0-mark-1\""));
         assert!(circles[0].contains("r=\"1.25\""));
         assert!(circles[0].contains("fill=\"#00ff00\""));
-        assert!(circles[1].contains("id=\"channel-9-mark-3\""));
+        assert!(circles[1].contains("id=\"channel-9-output-0-mark-3\""));
         assert!(circles[1].contains("r=\"0.0000001\""));
         assert!(circles[1].contains("fill=\"#ffff00\""));
-        assert!(circles[2].contains("id=\"channel-9-mark-4\""));
+        assert!(circles[2].contains("id=\"channel-9-output-0-mark-4\""));
         assert!(circles[2].contains("r=\"0.0000004\""));
         assert!(circles[2].contains("fill=\"#00ffff\""));
     }
@@ -5793,6 +6294,8 @@ mod stage20e2_limit_tests {
 
     /// Proves scanline winding coverage matches full-outline membership at every subpixel sample.
     #[test]
+    /// # Panics
+    /// Panics if finite fixture arithmetic fails or sampled and scanline winding observations differ.
     fn scanline_nonzero_coverage_preserves_exact_subpixel_membership() {
         let edges = vec![
             (Point2::new(1.0, 1.0), Point2::new(7.0, 2.0)),
@@ -5808,6 +6311,7 @@ mod stage20e2_limit_tests {
         );
         let mut covered = Vec::new();
         let mut crossings = Vec::with_capacity(edges.len());
+        let mut uncertain = Vec::new();
         for row in 0..8 {
             accumulate_nonzero_scanline_coverage(
                 &edges,
@@ -5817,6 +6321,7 @@ mod stage20e2_limit_tests {
                 SUBPIXEL_GRID,
                 &mut covered,
                 &mut crossings,
+                &mut uncertain,
                 &work,
             )
             .expect("finite scanline coverage succeeds");
@@ -5828,7 +6333,7 @@ mod stage20e2_limit_tests {
                             f64::from(x) + (f64::from(sub_x) + 0.5) / f64::from(SUBPIXEL_GRID),
                             f64::from(row) + (f64::from(sub_y) + 0.5) / f64::from(SUBPIXEL_GRID),
                         );
-                        direct += u16::from(point_in_nonzero_outline(&edges, point));
+                        direct += u16::from(point_in_nonzero_outline(&edges, point, &work).expect("finite fixture winding"));
                     }
                 }
                 assert_eq!(
@@ -5879,6 +6384,8 @@ mod stage20e2_limit_tests {
     /// always receives the complete unmodified outline. The returned test-only work counts expose
     /// edge-row traversal without affecting production pixels or identities.
     #[allow(clippy::too_many_arguments)]
+    /// # Panics
+    /// Panics if finite fixture arithmetic fails or sampled and scanline winding observations differ.
     fn assert_row_active_coverage_matches_point_membership(
         edges: &[(Point2, Point2)],
         min_row: u32,
@@ -5901,6 +6408,7 @@ mod stage20e2_limit_tests {
             .expect("finite fixture schedules rows");
         let mut covered = Vec::new();
         let mut crossings = Vec::with_capacity(edges.len());
+        let mut uncertain = Vec::new();
         let mut active_edges = Vec::with_capacity(row_starts.len());
         let mut active_edge_end_rows = Vec::with_capacity(row_starts.len());
         let mut next_row_start = 0_usize;
@@ -5921,6 +6429,7 @@ mod stage20e2_limit_tests {
                 samples,
                 &mut covered,
                 &mut crossings,
+                &mut uncertain,
                 &work,
             )
             .expect("finite row coverage succeeds");
@@ -5944,7 +6453,7 @@ mod stage20e2_limit_tests {
                             f64::from(x) + (f64::from(sub_x) + 0.5) / f64::from(samples),
                             f64::from(row) + (f64::from(sub_y) + 0.5) / f64::from(samples),
                         );
-                        direct += u16::from(point_in_nonzero_outline(edges, point));
+                        direct += u16::from(point_in_nonzero_outline(edges, point, &work).expect("finite fixture winding"));
                     }
                 }
                 assert_eq!(
@@ -6025,6 +6534,8 @@ mod stage20e2_limit_tests {
     /// Proves a rotated thin outline visits only crossing-derived spans while retaining exact
     /// nonzero 8x8 coverage across its much wider axis-aligned raster bounding box.
     #[test]
+    /// # Panics
+    /// Panics if finite fixture arithmetic fails or sampled and scanline winding observations differ.
     fn rotated_thin_stroke_scanline_visits_only_active_crossing_spans() {
         let edges = vec![
             (Point2::new(0.0, 0.0), Point2::new(2.0, 0.0)),
@@ -6040,6 +6551,7 @@ mod stage20e2_limit_tests {
         );
         let mut covered = Vec::new();
         let mut crossings = Vec::with_capacity(edges.len());
+        let mut uncertain = Vec::new();
         let scanline_work = accumulate_nonzero_scanline_coverage(
             &edges,
             100,
@@ -6048,6 +6560,7 @@ mod stage20e2_limit_tests {
             SUBPIXEL_GRID,
             &mut covered,
             &mut crossings,
+            &mut uncertain,
             &work,
         )
         .expect("finite diagonal outline scanline succeeds");
@@ -6060,7 +6573,7 @@ mod stage20e2_limit_tests {
                         f64::from(x) + (f64::from(sub_x) + 0.5) / f64::from(SUBPIXEL_GRID),
                         100.0 + (f64::from(sub_y) + 0.5) / f64::from(SUBPIXEL_GRID),
                     );
-                    direct += u16::from(point_in_nonzero_outline(&edges, point));
+                    direct += u16::from(point_in_nonzero_outline(&edges, point, &work).expect("finite fixture winding"));
                 }
             }
             assert_eq!(
@@ -6447,5 +6960,222 @@ mod preview_buffer_diagnostic_tests {
             "raster.buffer.allocation"
         );
         assert_eq!(allocate_raster_bytes(2, 3).unwrap(), vec![0; 24]);
+    }
+}
+
+#[cfg(test)]
+mod sampled_finite_tests {
+    use super::*;
+    /// Computes independent mature winding on ordinary safe-domain dyadic fixtures.
+    fn direct(edges: &[(Point2, Point2)], point: Point2) -> bool {
+        let mut winding = 0;
+        for &(a, b) in edges {
+            let sign = robust::orient2d(
+                robust::Coord { x: a.x, y: a.y },
+                robust::Coord { x: b.x, y: b.y },
+                robust::Coord {
+                    x: point.x,
+                    y: point.y,
+                },
+            );
+            if a.y <= point.y && b.y > point.y && sign > 0.0 {
+                winding += 1;
+            } else if a.y > point.y && b.y <= point.y && sign < 0.0 {
+                winding -= 1;
+            }
+        }
+        winding != 0
+    }
+    /// Builds exact dyadic closed paths without flattening or changing contour order.
+    fn edges(points: &[(f64, f64)]) -> Vec<(Point2, Point2)> {
+        points
+            .windows(2)
+            .map(|p| (Point2::new(p[0].0, p[0].1), Point2::new(p[1].0, p[1].1)))
+            .collect()
+    }
+    /// Proves sampled stroke construction agrees with an independent robust oracle atS1 and privateS8.
+    /// Holes, shared vertices, self-crossings, reversals and exact boundary ties retain half-open rules.
+    /// # Panics
+    /// Panics on any per-pixel count mismatch or malformed bounded scratch result.
+    #[test]
+    fn scanline_intervals_match_direct_s1_and_s8() {
+        let fixtures = [
+            vec![
+                (0., 0.),
+                (8., 0.),
+                (8., 8.),
+                (0., 8.),
+                (0., 0.),
+                (2., 2.),
+                (2., 6.),
+                (6., 6.),
+                (6., 2.),
+                (2., 2.),
+                (0., 0.),
+            ],
+            vec![(0., 0.), (8., 8.), (0., 8.), (8., 0.), (0., 0.)],
+            vec![
+                (0., 0.),
+                (4., 0.),
+                (4., 4.),
+                (0., 4.),
+                (0., 0.),
+                (4., 4.),
+                (8., 4.),
+                (8., 8.),
+                (4., 8.),
+                (4., 4.),
+                (0., 0.),
+            ],
+        ];
+        let work = RasterWork::new(
+            RasterizationLimits::new(100)
+                .unwrap()
+                .with_max_boolean_operations(0),
+            RasterAntialiasing::Off,
+            &|| false,
+        );
+        for points in fixtures {
+            for reverse in [false, true] {
+                let mut e = edges(&points);
+                if reverse {
+                    e = e.into_iter().rev().map(|(a, b)| (b, a)).collect();
+                }
+                for samples in [1, SUBPIXEL_GRID] {
+                    let mut covered = Vec::new();
+                    let mut crossings = Vec::new();
+                    let mut uncertain = Vec::new();
+                    for row in 0..8 {
+                        accumulate_nonzero_scanline_coverage(
+                            &e,
+                            row,
+                            0,
+                            8,
+                            samples,
+                            &mut covered,
+                            &mut crossings,
+                            &mut uncertain,
+                            &work,
+                        )
+                        .unwrap();
+                        for x in 0..8 {
+                            let mut expected = 0;
+                            for sy in 0..samples {
+                                for sx in 0..samples {
+                                    expected += u16::from(direct(
+                                        &e,
+                                        Point2::new(
+                                            f64::from(x)
+                                                + (f64::from(sx) + 0.5) / f64::from(samples),
+                                            f64::from(row)
+                                                + (f64::from(sy) + 0.5) / f64::from(samples),
+                                        ),
+                                    ));
+                                }
+                            }
+                            let actual = covered
+                                .iter()
+                                .find(|(px, _)| *px == x)
+                                .map_or(0, |(_, n)| *n);
+                            assert_eq!(
+                                actual, expected,
+                                "row{row} x{x} grid{samples} reverse{reverse}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(work.remaining_boolean_operations, 0);
+        assert_eq!(work.remaining_edges, 100);
+    }
+
+    /// Proves duplicate closed crossing enclosures merge and each uncertain sample is classified once.
+    /// # Panics
+    /// Panics on dense fallback, duplicate paint or a deviation from direct robust sample membership.
+    #[test]
+    fn ordinary_diagonal_fallback_is_sparse_and_merged() {
+        let mut e = edges(&[(0., 0.), (8., 8.), (8., 0.), (0., 0.)]);
+        e.extend(e.clone());
+        let work = RasterWork::new(
+            RasterizationLimits::new(100).unwrap(),
+            RasterAntialiasing::Off,
+            &|| false,
+        );
+        for samples in [1, SUBPIXEL_GRID] {
+            let mut covered = Vec::new();
+            let mut crossings = Vec::new();
+            let mut uncertain = Vec::new();
+            for row in 0..8 {
+                let statistics = accumulate_nonzero_scanline_coverage(
+                    &e,
+                    row,
+                    0,
+                    8,
+                    samples,
+                    &mut covered,
+                    &mut crossings,
+                    &mut uncertain,
+                    &work,
+                )
+                .unwrap();
+                assert_eq!(
+                    statistics.uncertain_samples, samples as usize,
+                    "duplicate contours must not duplicate fallback"
+                );
+                assert!(
+                    covered
+                        .iter()
+                        .all(|(_, n)| *n <= u16::try_from(samples * samples).unwrap())
+                );
+            }
+        }
+    }
+
+    /// Preserves authored-zero emptiness and rejects positive underflow before another axis can hide it.
+    /// # Panics
+    /// Panics if a positive mapped-zero radius bypasses invalid mapping or exact-zero semantics change.
+    #[test]
+    fn mapped_ellipse_zero_authority_and_exact_boundary_controls() {
+        let transform = CanonicalRasterTransform {
+            scale_x: 5e-201,
+            scale_y: 4.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+        };
+        let point = Point2::new(1e200, 1e308);
+        assert!(
+            mapped_sampled_ellipse(point, 0.0, transform)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            mapped_sampled_ellipse(point, 1e-200, transform)
+                .unwrap_err()
+                .path(),
+            "raster.sample.numeric"
+        );
+        let circle = mapped_sampled_ellipse(
+            Point2::new(0.5, 0.5),
+            1.0,
+            CanonicalRasterTransform::native(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            ellipse_coverage(circle, 1, 0, RasterAntialiasing::Off, None).unwrap(),
+            1.0
+        );
+        let tiny = mapped_sampled_ellipse(
+            Point2::new(0., 0.),
+            1e-200,
+            CanonicalRasterTransform::native(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            ellipse_coverage(tiny, 0, 0, RasterAntialiasing::Off, None).unwrap(),
+            0.0
+        );
     }
 }

@@ -792,8 +792,8 @@ fn append_binding(
                 && matches!(value.mode, toniator_domain::ColorEndMode::HueRotation { .. }))
         });
     let editable = endpoint == temporal_preview::Endpoint::Start || !hue_controls_rgb;
-    row.set_sensitive(editable);
-    input.set_sensitive(editable);
+    row.set_sensitive(editable && descriptor.enabled);
+    input.set_sensitive(editable && descriptor.enabled);
     parent.append(&row);
     let animation = if endpoint == temporal_preview::Endpoint::End
         && temporal_edit::eligible(&descriptor)
@@ -913,6 +913,28 @@ fn refresh_values(state: &Rc<RefCell<AppState>>, epoch: u64, discard_pending: bo
         else {
             continue;
         };
+        if current.descriptor.field == PropertyFieldId::ToneSampleSpacing {
+            let help = tone_spacing_help(
+                &document,
+                binding.target,
+                current.descriptor.field,
+                &current.value,
+                advanced_field_help(current.descriptor.field, Some(&current.descriptor)),
+            );
+            binding.input.set_tooltip_text(Some(&help));
+            binding
+                .input
+                .update_property(&[gtk::accessible::Property::Description(&help)]);
+            if let Some(label) = binding
+                .row
+                .first_child()
+                .and_then(|container| container.first_child())
+                .and_downcast::<gtk::Label>()
+            {
+                label.set_tooltip_text(Some(&help));
+                label.update_property(&[gtk::accessible::Property::Description(&help)]);
+            }
+        }
         let channel = binding.target.channel_id();
         let visible = match current.descriptor.field {
             PropertyFieldId::MarkMinimumFill | PropertyFieldId::MarkMaximumFill => {
@@ -930,10 +952,10 @@ fn refresh_values(state: &Rc<RefCell<AppState>>, epoch: u64, discard_pending: bo
         });
         binding
             .row
-            .set_sensitive(binding.editable && !mask_disabled);
+            .set_sensitive(binding.editable && current.descriptor.enabled && !mask_disabled);
         binding
             .input
-            .set_sensitive(binding.editable && !mask_disabled);
+            .set_sensitive(binding.editable && current.descriptor.enabled && !mask_disabled);
         if let Some(entry) = binding.input.downcast_ref::<gtk::Entry>()
             && (discard_pending || !entry.has_focus())
         {

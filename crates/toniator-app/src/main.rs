@@ -25,6 +25,7 @@ mod personal_pattern_management;
 mod png_export_size;
 mod prepared_paintable;
 mod preview_backdrop;
+mod preview_cache;
 mod preview_coordinator;
 mod preview_diagnostics;
 mod preview_diagnostics_view;
@@ -54,7 +55,7 @@ mod wizard_workflow_tests;
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    env,
     path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::{
@@ -64,6 +65,9 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(test)]
+use std::fs;
 
 use app_events::AppEvent;
 use automation::AutomationSink;
@@ -1637,10 +1641,17 @@ struct AdvancedSettingsSurface {
     preview_bridge_stop: Arc<AtomicBool>,
 }
 
-/// Retains one exact private Advanced Settings calibration request on the GTK thread.
+/// Selects private forced measurement or missing-only preparation followed by atomic Apply.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdvancedCalibrationPublication {
+    DraftOnly,
+    Apply,
+}
+
+/// Retains one exact private Advanced calibration request and its publication intent.
 ///
-/// The worker receives only the immutable candidate and cancellation token. This guard accepts a
-/// result only for the original modal epoch, base workspace, draft revision, and exact document.
+/// The worker receives an immutable candidate and cancellation token. Its result is accepted only
+/// for the original modal epoch, workspace root, draft revision and exact candidate document.
 struct AdvancedCalibrationTask {
     id: calibration_preparation::TaskId,
     epoch: u64,
@@ -1650,6 +1661,7 @@ struct AdvancedCalibrationTask {
     candidate_document: Document,
     candidate_revision: Revision,
     cancelled: Arc<AtomicBool>,
+    publication: AdvancedCalibrationPublication,
 }
 
 /// Holds one modal Pattern Wizard clone and its independent canonical preview route.
@@ -1825,6 +1837,7 @@ enum WizardTextInputKind {
 /// callbacks from stale controls. Raw text stays in the live entry until a validated commit succeeds.
 #[derive(Clone)]
 struct WizardTextInput {
+    label: gtk::Label,
     entry: gtk::Entry,
     displayed_text: String,
     error: gtk::Label,
@@ -2134,7 +2147,11 @@ fn wizard_page_for_descriptor(
         | OutputAuthoredClosedShape
         | OutputOrientation
         | OutputOrientationDimension => WizardRoutePage::Marks,
-        ConnectionProgram
+        ConnectionFinalDegreeLimit
+        |         ConnectionMaximumFinalDegree
+        |         ConnectionAllowLoops
+        |         ConnectionMinimumComponentPoints
+        | ConnectionProgram
         | ConnectionMaximumDegree
         | ConnectionMaximumDistance
         | ConnectionMinimumDegree
@@ -2143,6 +2160,7 @@ fn wizard_page_for_descriptor(
         ConnectedMinimumThickness
         | ConnectedMaximumThickness
         | CurveResponseBias
+        | ToneSampleSpacing
         | CurveMotifMirrorAlternateRows
         | CurveMotifAlternateRowPhase => WizardRoutePage::Paths,
         RegionResizeAlgorithm | RegionSampling | RegionMinimumFill | RegionMaximumFill => {
@@ -2329,7 +2347,11 @@ fn wizard_control_section(page: WizardRoutePage, field: PropertyFieldId) -> Wiza
             _ => WizardControlSection::FamilyStructure,
         },
         WizardRoutePage::SiteGeneration => match field {
-            PropertyFieldId::ConnectionProgram
+            PropertyFieldId::ConnectionFinalDegreeLimit
+            |             PropertyFieldId::ConnectionMaximumFinalDegree
+            |             PropertyFieldId::ConnectionAllowLoops
+            |             PropertyFieldId::ConnectionMinimumComponentPoints
+            | PropertyFieldId::ConnectionProgram
             | PropertyFieldId::ConnectionMaximumDegree
             | PropertyFieldId::ConnectionMaximumDistance
             | PropertyFieldId::ConnectionMinimumDegree
@@ -2346,7 +2368,11 @@ fn wizard_control_section(page: WizardRoutePage, field: PropertyFieldId) -> Wiza
             | PropertyFieldId::AlongParametricInterval
             | PropertyFieldId::AlongParametricPhase
             | PropertyFieldId::OutputSiteProduct => WizardControlSection::SitePlacement,
-            PropertyFieldId::ConnectionProgram
+            PropertyFieldId::ConnectionFinalDegreeLimit
+            |             PropertyFieldId::ConnectionMaximumFinalDegree
+            |             PropertyFieldId::ConnectionAllowLoops
+            |             PropertyFieldId::ConnectionMinimumComponentPoints
+            | PropertyFieldId::ConnectionProgram
             | PropertyFieldId::ConnectionMaximumDegree
             | PropertyFieldId::ConnectionMaximumDistance
             | PropertyFieldId::ConnectionMinimumDegree
@@ -4080,7 +4106,7 @@ struct AppState {
     syncing_endpoint: Rc<Cell<bool>>,
     view_state: MainViewState,
     source_texture: Option<gtk::gdk::Texture>,
-    source_texture_generation: Option<u64>,
+    source_texture_frame: Option<(u64, u64, u64)>,
     presented_texture: Option<(gtk::gdk::Texture, MainViewMode, f64, f64)>,
     preview_progress: gtk::Box,
     preview_error: gtk::Box,
@@ -4145,6 +4171,7 @@ struct AppState {
     pattern_wizard: Option<PatternWizardSurface>,
     wizard_epoch: u64,
     pattern_library_surface: Option<PatternLibrarySurface>,
+    spatial_preview: preview_cache::Controller,
     preview: Option<gtk::gdk::Texture>,
     preview_target: Option<toniator_engine::PreviewRasterTarget>,
     accepted_preview_target: Option<toniator_engine::PreviewRasterTarget>,
@@ -4550,6 +4577,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     let error = shell.error();
     let picture = shell.picture();
     let viewer = shell.viewer();
+    let background_progress = build_background_progress(&viewer);
     let (preview_error, preview_error_label, retry_preview, preview_details, dismiss_preview_error) =
         build_preview_error_overlay(&viewer);
     let viewport_scroll = shell.viewport_scroll();
@@ -4691,7 +4719,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         syncing_endpoint: Rc::new(Cell::new(false)),
         view_state: MainViewState::default(),
         source_texture: None,
-        source_texture_generation: None,
+        source_texture_frame: None,
         presented_texture: None,
         preview_progress,
         preview_error,
@@ -4751,6 +4779,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         pattern_wizard: None,
         wizard_epoch: 0,
         pattern_library_surface: None,
+        spatial_preview: preview_cache::Controller::new(),
         preview: None,
         preview_target: None,
         accepted_preview_target: None,
@@ -4873,6 +4902,60 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         });
     }
     connect_main_view_controls(&state);
+    {
+        let weak = Rc::downgrade(&state);
+        glib::timeout_add_local(Duration::from_millis(16), move || {
+            let Some(state) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let mut state = state.borrow_mut();
+            if state.spatial_preview.poll() {
+                state.presented_texture = None;
+                if !try_spatial_preview(&mut state) {
+                    let preserve = main_preview_frame_identity(&state)
+                        .zip(main_viewport_target(&state))
+                        .is_some_and(|(frame, target)| {
+                            state.preview_coordinator.preserve_ordinary(
+                                PreviewIntent { frame, target },
+                                state.spatial_preview.ordinary_required,
+                            )
+                        });
+                    if !preserve {
+                        state.preview_target = None;
+                    }
+                    set_preview_pending(&mut state);
+                    submit_if_viewport_ready(&mut state);
+                }
+                sync_main_preview_pending(&state);
+                emit_automation_state(&mut state, "preview_cache_changed", None);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    {
+        let weak = Rc::downgrade(&state);
+        let mut observed = (0, 0, false);
+        glib::timeout_add_local(Duration::from_millis(100), move || {
+            let Some(state) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let progress = state.borrow().spatial_preview.background_progress();
+            if progress != observed {
+                observed = progress;
+                let fraction = if progress.1 == 0 {
+                    0.
+                } else {
+                    progress.0 as f64 / progress.1 as f64
+                };
+                background_progress.set_fraction(fraction.clamp(0., 1.));
+                background_progress.set_visible(progress.2 && progress.0 < progress.1);
+                background_progress.set_tooltip_text(Some(&format!("Background rendering progress · {:.0}%", fraction * 100.)));
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
     {
         let state = Rc::clone(&state);
         window.connect_close_request(move |_| {
@@ -5564,6 +5647,7 @@ fn handle_main_worker_failure(state: &Rc<RefCell<AppState>>, diagnostic: Preview
 /// untouched. Accepted navigation mutates only `Workspace::history`; GTK work
 /// and scheduler submission occur after the callback's mutable borrow ends.
 fn apply_history_navigation(state: &Rc<RefCell<AppState>>, redo: bool) {
+    let old_artwork = main_preview_frame_identity(&state.borrow());
     let result = {
         let mut app_state = state.borrow_mut();
         let Some(workspace) = app_state.workspace.as_mut() else {
@@ -5576,7 +5660,10 @@ fn apply_history_navigation(state: &Rc<RefCell<AppState>>, redo: bool) {
         }
     };
     match result {
-        Ok(Some(_)) => {
+        Ok(Some(result)) => {
+            if result.invalidation.is_none() {
+                rebind_unchanged_spatial(&mut state.borrow_mut(), old_artwork);
+            }
             {
                 let mut app = state.borrow_mut();
                 app.scatter_memory = scatter_memory::Memory::default();
@@ -5606,10 +5693,12 @@ fn apply_print_preparation_settings(
     if main_document_edits_blocked(&app) {
         return Err("Document edits are currently unavailable.".into());
     }
+    let old_artwork = main_preview_frame_identity(&app);
     let workspace = app.workspace.as_mut().ok_or("No document is open.")?;
     if !print_preparation::apply_settings(&mut workspace.history, settings)? {
         return Ok(false);
     }
+    rebind_unchanged_spatial(&mut app, old_artwork);
     app.print_preparation.invalidate();
     set_preview_pending(&mut app);
     sync_ui(&mut app);
@@ -5682,6 +5771,7 @@ fn connect_main_view_controls(state: &Rc<RefCell<AppState>>) {
             }
             state.borrow_mut().view_state.set_mode(mode);
             apply_main_view_presentation(&mut state.borrow_mut());
+            queue_main_viewport_refresh(&state);
         });
     }
     // Allocation and device-scale changes have no reliable size notification in GTK4. Observe
@@ -5705,6 +5795,9 @@ fn connect_main_view_controls(state: &Rc<RefCell<AppState>>) {
         let weak = Rc::downgrade(state);
         adjustment.connect_value_changed(move |_| {
             if let Some(state) = weak.upgrade() {
+                // GTK may translate a retained child node before the next layout. Tile content
+                // depends on that viewport, so explicitly invalidate before scheduling its redraw.
+                invalidate_main_view_content(&state.borrow().picture);
                 refresh_main_viewport_if_changed(&state);
             }
         });
@@ -5833,21 +5926,6 @@ fn connect_main_view_pan_gesture(state: &Rc<RefCell<AppState>>) {
     scroll.add_controller(gesture);
 }
 
-/// Returns the worker-prepared source comparison image for the current workspace.
-///
-/// GTK performs no source I/O or decoding here and never substitutes a pattern preview.
-///
-/// # Errors
-///
-/// Returns a pending-source diagnostic until a matching worker result is available.
-fn source_texture_for_workspace(state: &AppState) -> Result<gtk::gdk::Texture, String> {
-    state
-        .source_texture
-        .clone()
-        .filter(|_| state.source_texture_generation == Some(state.workspace_generation))
-        .ok_or_else(|| "Source frame is still being prepared.".to_owned())
-}
-
 /// Connects the two endpoint buttons to presentation selection and cancellable preview intent.
 ///
 /// First End selection captures missing End values in history; later switches only select.
@@ -5972,21 +6050,6 @@ fn sync_endpoint_controls(state: &AppState) {
 /// Switching modes reuses the same scroll adjustments. It never changes the
 /// document, history cursor, accepted preview, or evaluation scheduler.
 fn apply_main_view_presentation(state: &mut AppState) {
-    if state.view_state.mode() == MainViewMode::Source
-        && state.source_texture_generation != Some(state.workspace_generation)
-    {
-        match source_texture_for_workspace(state) {
-            Ok(texture) => {
-                state.source_texture = Some(texture);
-                state.source_texture_generation = Some(state.workspace_generation);
-            }
-            Err(error) => {
-                state.view_state.set_mode(MainViewMode::Preview);
-                state.shell.set_banner(Some(&error));
-            }
-        }
-    }
-
     let paintable = match state.view_state.mode() {
         MainViewMode::Preview => state.preview.as_ref(),
         MainViewMode::Source => state.source_texture.as_ref(),
@@ -6055,6 +6118,18 @@ fn apply_main_view_presentation(state: &mut AppState) {
                     })
                 })
                 .flatten();
+                if *mode == MainViewMode::Preview
+                    && let Some(tiles) = state.spatial_preview.presentation.clone()
+                {
+                    return Some(viewport_paintable::ViewportPaintable::with_tiles(
+                        texture.clone(),
+                        width,
+                        height,
+                        texture_rect,
+                        fallback,
+                        tiles,
+                    ));
+                }
                 Some(match fallback {
                     Some(fallback) => viewport_paintable::ViewportPaintable::with_fallback(
                         texture.clone(),
@@ -6954,6 +7029,7 @@ fn main_inspector_container(state: &AppState, section: MainInspectorSection) -> 
 /// state; the domain descriptor remains authoritative for those boundaries.
 fn inspector_field_label(field: PropertyFieldId) -> String {
     match field {
+        PropertyFieldId::ToneSampleSpacing => "Tone sample spacing".into(),
         PropertyFieldId::SourceReference => "Source artwork".into(),
         PropertyFieldId::Density => "Feature size".into(),
         PropertyFieldId::DensityAspect => "Stretch X / Y".into(),
@@ -7049,8 +7125,12 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::OutputOrientationDimension => "Guide for shape direction".into(),
         PropertyFieldId::OutputSiteUseFilterKind => "Which points?".into(),
         PropertyFieldId::OutputSiteUseFilterReference => "Reference drawing layer".into(),
+        PropertyFieldId::ConnectionFinalDegreeLimit => "Limit links per point".into(),
+        PropertyFieldId::ConnectionMaximumFinalDegree => "Maximum links per point".into(),
+        PropertyFieldId::ConnectionAllowLoops => "Allow loops".into(),
+        PropertyFieldId::ConnectionMinimumComponentPoints => "Minimum path length (points)".into(),
         PropertyFieldId::ConnectionProgram => "How to join points".into(),
-        PropertyFieldId::ConnectionMaximumDegree => "Most links per point".into(),
+        PropertyFieldId::ConnectionMaximumDegree => "Candidate neighbors per point".into(),
         PropertyFieldId::ConnectionMaximumDistance => "Longest link".into(),
         PropertyFieldId::ConnectionMinimumDegree => "Fewest links per point".into(),
         PropertyFieldId::ConnectionSeed => "Line variation".into(),
@@ -7145,6 +7225,7 @@ fn authority_numeric_value(
 /// this exhaustive mapping supplies only shared wizard, inspector, and transition vocabulary.
 fn inspector_field_guidance(field: PropertyFieldId) -> &'static str {
     match field {
+        PropertyFieldId::ToneSampleSpacing => "Spaces artwork tone samples along smooth curves relative to Feature size. Larger values simplify tonal detail; smaller values retain more detail. Curve shape and numerical accuracy stay unchanged.",
         PropertyFieldId::SourceReference => "Chooses the artwork sampled by this channel.",
         PropertyFieldId::Density => {
             "Controls pattern fineness, including guide spacing, curve spacing, and scatter distances. Smaller values make a finer, denser pattern; larger values make a coarser pattern. Minimum: 0.01."
@@ -7381,11 +7462,15 @@ fn inspector_field_guidance(field: PropertyFieldId) -> &'static str {
         PropertyFieldId::OutputSiteUseFilterReference => {
             "Chooses the earlier output whose used or unused points are selected."
         }
+        PropertyFieldId::ConnectionFinalDegreeLimit => "Enables a limit on the final links meeting at each point, including automatic short-group joins. Enabling starts at two links.",
+        PropertyFieldId::ConnectionMaximumFinalDegree => "Limits final graph degree independently of candidate neighbors. Two prevents branching; one permits disjoint pairs. Disabled until Limit links per point is enabled.",
+        PropertyFieldId::ConnectionAllowLoops => "Allows graph cycles where the selected algorithm forms them. Visual line crossings are not graph junctions. Branching tree is always loop-free; its stored preference returns when switching programs.",
+        PropertyFieldId::ConnectionMinimumComponentPoints => "Counts distinct points in each connected group, including branches. Singletons and short groups try nearby noncrossing joins before smaller groups are hidden. At one, unresolved single points become circles using the connected source response. Separate groups can remain.",
         PropertyFieldId::ConnectionProgram => {
-            "Nearest links favors nearby neighbors. Random links varies the connections. Branching tree creates a network without loops."
+            "Nearest links favors nearby neighbors. Random links varies the connections. Branching tree stays loop-free; final degree limits can leave separate trees."
         }
         PropertyFieldId::ConnectionMaximumDegree => {
-            "Limits how many lines meet at one point. Lower values simplify the network; higher values allow more branches."
+            "Chooses how many nearby candidates each point considers before final degree and loop restrictions. Automatic short-group joins may use other existing points within the connection distance."
         }
         PropertyFieldId::ConnectionMaximumDistance => {
             "Sets the longest allowed link. Lower it to keep connections local; raise it to allow longer bridges between points."
@@ -7407,7 +7492,7 @@ fn inspector_field_guidance(field: PropertyFieldId) -> &'static str {
         }
         PropertyFieldId::ParametricShape => "Chooses a round or square spiral.",
         PropertyFieldId::ParametricTurns => {
-            "Sets how many times the spiral winds around its center. More revolutions extend it farther outward; fewer make a smaller spiral."
+            "Sets the authored spiral revolutions. Canvas-covering spirals use this as a minimum and add outer turns as needed; finite spirals use the authored extent."
         }
         PropertyFieldId::ParametricRadialSpacing => {
             "Sets the gap between successive turns. Increase it for a more open spiral; decrease it for a tighter coil."
@@ -7478,6 +7563,157 @@ fn inspector_field_detail(descriptor: &PropertyDescriptor) -> String {
         }
     }
     guidance
+}
+
+/// Adds actual extent-policy or resolved tone-distance guidance to descriptor-owned field help.
+/// Visible product names and values remain descriptor authority; derived coverage adds no control.
+fn tone_spacing_help(
+    document: &Document,
+    target: InspectorTarget,
+    field: PropertyFieldId,
+    value: &PropertyCurrentValueKind,
+    mut help: String,
+) -> String {
+    if field == PropertyFieldId::ParametricTurns {
+        let channels = target
+            .channel_id()
+            .map_or_else(|| authoritative_channel_ids(document), |id| vec![id]);
+        let policies = channels
+            .iter()
+            .filter_map(|id| document.pattern_definition_for(*id))
+            .flat_map(|definition| definition.mechanisms.iter())
+            .filter_map(|mechanism| match mechanism {
+                toniator_domain::PatternMechanism::ParametricCurveSource {
+                    spiral_coverage, ..
+                } => Some(*spiral_coverage),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if !policies.is_empty()
+            && policies.iter().all(|policy| {
+                *policy == toniator_domain::SpiralCoveragePolicy::CoverCanvas
+            })
+        {
+            return "Sets the minimum authored revolutions. Toniator adds outer turns as needed to cover the canvas after positioning the spiral. Reducing this value may leave its visible extent unchanged.".to_owned();
+        }
+        if !policies.is_empty()
+            && policies.iter().all(|policy| {
+                *policy == toniator_domain::SpiralCoveragePolicy::Fixed
+            })
+        {
+            return "Sets the authored revolutions of the finite spiral. More extend it farther outward; fewer reduce its extent.".to_owned();
+        }
+        return help;
+    }
+    if field != PropertyFieldId::ToneSampleSpacing {
+        return help;
+    }
+    let PropertyCurrentValueKind::FiniteF64(_) = *value else {
+        return help;
+    };
+    let channels = target
+        .channel_id()
+        .map_or_else(|| authoritative_channel_ids(document), |id| vec![id]);
+    let mut distances = Vec::new();
+    for id in channels {
+        let Some(definition) = document.pattern_definition_for(id) else {
+            continue;
+        };
+        let mut spacings =
+            definition
+                .output_layers
+                .iter()
+                .filter_map(|output| match output.realization {
+                    toniator_domain::PatternOutputRealization::GuidePaths {
+                        tone_sample_spacing,
+                        ..
+                    }
+                    | toniator_domain::PatternOutputRealization::ParametricPaths {
+                        tone_sample_spacing,
+                        ..
+                    }
+                    | toniator_domain::PatternOutputRealization::CurveMotifPaths {
+                        tone_sample_spacing,
+                        ..
+                    } => Some(tone_sample_spacing),
+                    _ => None,
+                });
+        let Some(spacing) = spacings.next().filter(|_| spacings.next().is_none()) else {
+            help.push_str(
+                " Unit: × Feature size. Current spacing varies by channel or drawing output.",
+            );
+            return help;
+        };
+        if let Ok(effective) = document.effective_channel_pattern(id)
+            && let Ok(distance) = spacing.resolve(document.canvas(), &effective.density)
+        {
+            distances.push(distance);
+        }
+    }
+    if let Some(&distance) = distances.first() {
+        if distances
+            .iter()
+            .all(|other| other.to_bits() == distance.to_bits())
+        {
+            help.push_str(&format!(
+                " Unit: × Feature size. Current spacing: {distance:.6} document units."
+            ));
+        } else {
+            help.push_str(" Unit: × Feature size. Current spacing varies with each channel’s Feature size or tone sampling.");
+        }
+    }
+
+    help
+}
+
+/// Refreshes retained tone help from the current private document without replacing text or focus.
+/// Keeps error semantics and stored guidance synchronized; preview projection never supplies units.
+fn refresh_wizard_tone_help(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let mut app = state.borrow_mut();
+    let Some(surface) = app
+        .pattern_wizard
+        .as_mut()
+        .filter(|surface| surface.epoch == epoch)
+    else {
+        return;
+    };
+    let draft = surface.draft.borrow();
+    for input in &mut surface.text_inputs {
+        let WizardTextInputKind::DescriptorFinite(descriptor) = &input.kind else {
+            continue;
+        };
+        if descriptor.field != PropertyFieldId::ToneSampleSpacing {
+            continue;
+        }
+        let Some(current) = draft
+            .document()
+            .property_values()
+            .into_iter()
+            .find(|value| {
+                value.descriptor.target == descriptor.target
+                    && value.descriptor.field == descriptor.field
+            })
+        else {
+            continue;
+        };
+        input.description = tone_spacing_help(
+            draft.document(),
+            surface.target,
+            descriptor.field,
+            &current.value,
+            inspector_field_detail(&current.descriptor),
+        );
+        input.entry.set_tooltip_text(Some(&input.description));
+        input.label.set_tooltip_text(Some(&input.description));
+        input
+            .label
+            .update_property(&[gtk::accessible::Property::Description(&input.description)]);
+        let error = input
+            .error
+            .is_visible()
+            .then(|| input.error.text().to_string());
+        set_wizard_text_input_error(input, error.as_deref());
+    }
 }
 
 /// Composes Advanced help from shared field meaning, descriptor bounds, and response role.
@@ -13297,7 +13533,24 @@ fn probe_wizard_descriptor_input(
     }
     let mut probe = DocumentHistory::new_draft(&draft);
     drop(draft);
-    apply_wizard_descriptor_edit(&mut probe, surface.target, descriptor, input.clone()).map(|_| ())
+    apply_wizard_descriptor_edit(&mut probe, surface.target, descriptor, input.clone())
+        .map(|_| ())
+        .map_err(|message| {
+            if matches!(
+                descriptor.field,
+                PropertyFieldId::ToneSampleSpacing
+                    | PropertyFieldId::ConnectionMaximumFinalDegree
+                    | PropertyFieldId::ConnectionMinimumComponentPoints
+            ) && message.starts_with("command.field:")
+            {
+                let detail = inspector_field_detail(descriptor);
+                detail
+                    .find(" Use a value")
+                    .map_or(message.clone(), |offset| detail[offset..].trim().to_owned())
+            } else {
+                message
+            }
+        })
 }
 
 /// Updates one entry's local visible and native accessible error state.
@@ -13538,7 +13791,7 @@ fn append_wizard_numeric_control(
         entry.set_text(&format!("{value:.4}"));
     }
     label.set_mnemonic_widget(Some(&entry));
-    let description = inspector_field_detail(&descriptor);
+    let description = state.borrow().pattern_wizard.as_ref().map(|surface|tone_spacing_help(surface.draft.borrow().document(),surface.target,descriptor.field,&PropertyCurrentValueKind::FiniteF64(value),inspector_field_detail(&descriptor))).unwrap_or_else(||inspector_field_detail(&descriptor));
     entry.set_tooltip_text(Some(&description));
     let error = configure_wizard_text_input_accessibility(&entry, &label, &description);
     row.append(&label);
@@ -13556,6 +13809,7 @@ fn append_wizard_numeric_control(
         state,
         epoch,
         WizardTextInput {
+            label,
             entry,
             displayed_text: String::new(),
             error,
@@ -13641,6 +13895,7 @@ fn append_wizard_u32_control(
     entry.set_input_purpose(gtk::InputPurpose::Digits);
     entry.set_width_chars(10);
     entry.set_text(&value.to_string());
+    entry.set_sensitive(descriptor.enabled);
     label.set_mnemonic_widget(Some(&entry));
     let description = inspector_field_detail(&descriptor);
     entry.set_tooltip_text(Some(&description));
@@ -13654,6 +13909,7 @@ fn append_wizard_u32_control(
         state,
         epoch,
         WizardTextInput {
+            label,
             entry,
             displayed_text: String::new(),
             error,
@@ -13680,6 +13936,7 @@ fn append_wizard_boolean_control(
     label.set_hexpand(true);
     let control = gtk::Switch::new();
     control.set_active(value);
+    control.set_sensitive(descriptor.enabled);
     label.set_mnemonic_widget(Some(&control));
     let description = inspector_field_detail(&descriptor);
     label.set_tooltip_text(Some(&description));
@@ -13768,6 +14025,7 @@ fn append_wizard_optional_finite_control(
         state,
         epoch,
         WizardTextInput {
+            label,
             entry,
             displayed_text: String::new(),
             error,
@@ -15479,6 +15737,7 @@ fn append_wizard_transition_field(
                 state,
                 epoch,
                 WizardTextInput {
+                    label,
                     entry: control,
                     displayed_text: String::new(),
                     error,
@@ -15509,6 +15768,7 @@ fn append_wizard_transition_field(
                 state,
                 epoch,
                 WizardTextInput {
+                    label,
                     entry: control,
                     displayed_text: String::new(),
                     error,
@@ -16144,6 +16404,7 @@ fn update_wizard_preview_backdrop(picture: &gtk::Picture, document: &Document) {
 /// The neutral picture never certifies full-document construction or blocks main preview state.
 /// Its native RGBA stays transparent; forced-black studies receive white backing only in GTK presentation.
 fn submit_wizard_preview(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    refresh_wizard_tone_help(state, epoch);
     let editing = state
         .borrow()
         .pattern_wizard
@@ -17753,6 +18014,7 @@ fn advanced_settings_values(
                     | PropertyFieldId::ConnectedMinimumThickness
                     | PropertyFieldId::ConnectedMaximumThickness
                     | PropertyFieldId::CurveResponseBias
+                    | PropertyFieldId::ToneSampleSpacing
                     | PropertyFieldId::RegionSampling
                     | PropertyFieldId::RegionMinimumFill
                     | PropertyFieldId::RegionMaximumFill
@@ -18164,41 +18426,14 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
     let window_for_cancel = window.clone();
     cancel.connect_clicked(move |_| window_for_cancel.close());
     let state_for_apply = Rc::clone(state);
-    let draft_for_apply = Rc::clone(&draft);
-    let window_for_apply = window.clone();
-    let status_for_apply = status.clone();
     apply.connect_clicked(move |_| {
         if let Err(error) = advanced_temporal::commit_pending(&state_for_apply, epoch) {
-            status_for_apply.set_label(&format!("Couldn’t apply these changes: {error}"));
+            if let Some(surface) = state_for_apply.borrow().advanced_settings.as_ref() {
+                surface.status.set_label(&format!("Couldn’t apply these changes: {error}"));
+            }
             return;
         }
-        let result = {
-            let mut app_state = state_for_apply.borrow_mut();
-            let Some(workspace) = app_state.workspace.as_mut() else {
-                return;
-            };
-            workspace.history.squash_draft(&draft_for_apply.borrow())
-        };
-        match result {
-            Ok(result) => {
-                if !result.unchanged {
-                    let mut app_state = state_for_apply.borrow_mut();
-                    set_preview_pending(&mut app_state);
-                    set_inspector_status(
-                        &mut app_state,
-                        "Advanced Settings applied as one change.",
-                    );
-                    sync_ui(&mut app_state);
-                    drop(app_state);
-                    rebuild_inspector(&state_for_apply);
-                    schedule_main_preview_submission(&state_for_apply);
-                }
-                window_for_apply.close();
-            }
-            Err(error) => {
-                status_for_apply.set_label(&format!("Couldn’t apply these changes: {error}"))
-            }
-        }
+        start_advanced_preparation(&state_for_apply, epoch, AdvancedCalibrationPublication::Apply);
     });
     window.set_child(Some(&shell));
     status.set_label("Preparing preview…");
@@ -18367,7 +18602,7 @@ fn advanced_descriptor_row(
     current: PropertyCurrentValue,
 ) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let help = advanced_field_help(current.descriptor.field, Some(&current.descriptor));
+    let help = tone_spacing_help(draft.borrow().document(),target,current.descriptor.field,&current.value,advanced_field_help(current.descriptor.field,Some(&current.descriptor)));
     let label_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
     label_box.set_hexpand(true);
     let label = gtk::Label::new(Some(&inspector_field_label(current.descriptor.field)));
@@ -18703,6 +18938,17 @@ impl AdvancedCommitContext {
 /// Manual Recalibrate is the only path that forces an otherwise reusable exact binding. It blocks
 /// edits in this modal while a worker measures the captured candidate and workspace root.
 fn start_advanced_recalibration(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    start_advanced_preparation(state, epoch, AdvancedCalibrationPublication::DraftOnly);
+}
+
+/// Prepares exact missing bindings before Apply or forces measurement for manual Recalibrate.
+///
+/// Results retain the modal, root and candidate guards; only Apply publishes main history.
+fn start_advanced_preparation(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    publication: AdvancedCalibrationPublication,
+) {
     let capture = {
         let app = state.borrow();
         let Some(surface) = app
@@ -18717,12 +18963,18 @@ fn start_advanced_recalibration(state: &Rc<RefCell<AppState>>, epoch: u64) {
             return;
         };
         let candidate = surface.draft.borrow();
-        let channel_ids = match surface.target {
-            InspectorTarget::Channel(channel) => vec![channel],
-            InspectorTarget::DocumentAll => authoritative_channel_ids(candidate.document()),
+        let channel_ids = if publication == AdvancedCalibrationPublication::Apply {
+            authoritative_channel_ids(candidate.document())
+        } else {
+            match surface.target {
+                InspectorTarget::Channel(channel) => vec![channel],
+                InspectorTarget::DocumentAll => authoritative_channel_ids(candidate.document()),
+            }
         };
         if channel_ids.is_empty() {
-            surface.status.set_label("There is no Pattern to recalibrate.");
+            surface
+                .status
+                .set_label("There is no Pattern to recalibrate.");
             return;
         }
         (
@@ -18732,7 +18984,8 @@ fn start_advanced_recalibration(state: &Rc<RefCell<AppState>>, epoch: u64) {
             workspace.history.revision(),
             app.workspace_generation,
             channel_ids,
-            matches!(surface.target, InspectorTarget::DocumentAll),
+            publication == AdvancedCalibrationPublication::DraftOnly
+                && matches!(surface.target, InspectorTarget::DocumentAll),
         )
     };
     let (
@@ -18744,11 +18997,27 @@ fn start_advanced_recalibration(state: &Rc<RefCell<AppState>>, epoch: u64) {
         channels,
         force_baseline,
     ) = capture;
+    if publication == AdvancedCalibrationPublication::Apply {
+        match calibration_preparation::plan_to_prepare(&candidate_document, &channels, false, false)
+        {
+            Ok(plan) if plan.is_empty() => {
+                publish_advanced_draft(state, epoch);
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                if let Some(surface) = state.borrow().advanced_settings.as_ref() {
+                    surface.status.set_label(&error.to_string());
+                }
+                return;
+            }
+        }
+    }
     let (id, cancelled) = match start_calibration_preparation(
         state,
         &candidate_document,
         &channels,
-        true,
+        publication == AdvancedCalibrationPublication::DraftOnly,
         force_baseline,
     ) {
         Ok(task) => task,
@@ -18785,11 +19054,18 @@ fn start_advanced_recalibration(state: &Rc<RefCell<AppState>>, epoch: u64) {
                     candidate_document,
                     candidate_revision,
                     cancelled: Arc::clone(&cancelled),
+                    publication,
                 });
                 surface.fields.set_sensitive(false);
                 surface.recalibrate.set_sensitive(false);
                 surface.apply.set_sensitive(false);
-                surface.status.set_label("Recalibrating Pattern…");
+                surface
+                    .status
+                    .set_label(if publication == AdvancedCalibrationPublication::Apply {
+                        "Measuring Pattern calibration before applying…"
+                    } else {
+                        "Recalibrating Pattern…"
+                    });
                 true
             }
         } else {
@@ -18798,6 +19074,58 @@ fn start_advanced_recalibration(state: &Rc<RefCell<AppState>>, epoch: u64) {
     };
     if !installed {
         cancelled.store(true, Ordering::Release);
+    }
+}
+
+/// Publishes one fully calibrated private Advanced draft as one main-history change.
+///
+/// Missing authority leaves the dialog open; the current modal owns the only publishable draft.
+fn publish_advanced_draft(state: &Rc<RefCell<AppState>>, epoch: u64) {
+    let captured = {
+        let app = state.borrow();
+        app.advanced_settings
+            .as_ref()
+            .filter(|surface| surface.epoch == epoch)
+            .map(|surface| {
+                (
+                    Rc::clone(&surface.draft),
+                    surface.window.clone(),
+                    surface.status.clone(),
+                )
+            })
+    };
+    let Some((draft, window, status)) = captured else {
+        return;
+    };
+    if let Err(error) = draft
+        .borrow()
+        .document()
+        .require_saved_calibration_authority()
+    {
+        status.set_label(&format!("Couldn’t apply these changes: {error}"));
+        return;
+    }
+    let result = {
+        let mut app = state.borrow_mut();
+        let Some(workspace) = app.workspace.as_mut() else {
+            return;
+        };
+        workspace.history.squash_draft(&draft.borrow())
+    };
+    match result {
+        Ok(result) => {
+            if !result.unchanged {
+                let mut app = state.borrow_mut();
+                set_preview_pending(&mut app);
+                set_inspector_status(&mut app, "Advanced Settings applied as one change.");
+                sync_ui(&mut app);
+                drop(app);
+                rebuild_inspector(state);
+                schedule_main_preview_submission(state);
+            }
+            window.close();
+        }
+        Err(error) => status.set_label(&format!("Couldn’t apply these changes: {error}")),
     }
 }
 
@@ -22402,6 +22730,7 @@ fn append_draft_descriptor_control(
             controls.upcast()
         }
     };
+    control.set_sensitive(saved_current.descriptor.enabled);
     DraftDescriptorComponent {
         row,
         control,
@@ -23227,6 +23556,8 @@ fn main_numeric_focus_leave_should_commit(
 /// frontend-only, while successful commands flow through history and scheduler
 /// handling. Baseline-backed ALL Start entries suppress untouched focus-leave commits, while
 /// Enter remains explicit. No widget value is independently persisted or evaluated.
+/// # Panics
+/// Debug builds assert that the caller supplies a descriptor with an existing typed control route.
 fn append_descriptor_control(
     state: &Rc<RefCell<AppState>>,
     current: PropertyCurrentValue,
@@ -23384,7 +23715,9 @@ fn append_descriptor_control(
             {
                 control.set_text(&displayed_text);
                 control.set_width_chars(8);
-                control.set_tooltip_text(Some(&inspector_field_detail(&descriptor)));
+                let help = state.borrow().workspace.as_ref().map(|workspace|tone_spacing_help(workspace.document(),audience,current.descriptor.field,&current.value,inspector_field_detail(&descriptor))).unwrap_or_else(||inspector_field_detail(&descriptor));
+                control.set_tooltip_text(Some(&help));
+                control.update_property(&[gtk::accessible::Property::Description(&help)]);
                 label.set_mnemonic_widget(Some(&control));
                 let state_for_callback = Rc::clone(state);
                 let descriptor_for_callback = descriptor.clone();
@@ -23439,7 +23772,9 @@ fn append_descriptor_control(
                 }
                 control.set_input_purpose(gtk::InputPurpose::Number);
                 control.set_width_chars(8);
-                control.set_tooltip_text(Some(&inspector_field_detail(&descriptor)));
+                let help = state.borrow().workspace.as_ref().map(|workspace|tone_spacing_help(workspace.document(),audience,current.descriptor.field,&current.value,inspector_field_detail(&descriptor))).unwrap_or_else(||inspector_field_detail(&descriptor));
+                control.set_tooltip_text(Some(&help));
+                control.update_property(&[gtk::accessible::Property::Description(&help)]);
                 label.set_mnemonic_widget(Some(&control));
                 let state_for_callback = Rc::clone(state);
                 let descriptor_for_callback = descriptor.clone();
@@ -23494,7 +23829,9 @@ fn append_descriptor_control(
             if let Some(control) = bounded_numeric_spin_button(&descriptor, *value as f64, 1.0, 0) {
                 control.set_text(&displayed_text);
                 control.set_width_chars(8);
-                control.set_tooltip_text(Some(&inspector_field_detail(&descriptor)));
+                let help = state.borrow().workspace.as_ref().map(|workspace|tone_spacing_help(workspace.document(),audience,current.descriptor.field,&current.value,inspector_field_detail(&descriptor))).unwrap_or_else(||inspector_field_detail(&descriptor));
+                control.set_tooltip_text(Some(&help));
+                control.update_property(&[gtk::accessible::Property::Description(&help)]);
                 label.set_mnemonic_widget(Some(&control));
                 let state_for_callback = Rc::clone(state);
                 let descriptor_for_callback = descriptor.clone();
@@ -23536,7 +23873,9 @@ fn append_descriptor_control(
                 control.set_text(&displayed_text);
                 control.set_input_purpose(gtk::InputPurpose::Digits);
                 control.set_width_chars(8);
-                control.set_tooltip_text(Some(&inspector_field_detail(&descriptor)));
+                let help = state.borrow().workspace.as_ref().map(|workspace|tone_spacing_help(workspace.document(),audience,current.descriptor.field,&current.value,inspector_field_detail(&descriptor))).unwrap_or_else(||inspector_field_detail(&descriptor));
+                control.set_tooltip_text(Some(&help));
+                control.update_property(&[gtk::accessible::Property::Description(&help)]);
                 label.set_mnemonic_widget(Some(&control));
                 let state_for_callback = Rc::clone(state);
                 let descriptor_for_callback = descriptor.clone();
@@ -23671,6 +24010,7 @@ fn append_descriptor_control(
             control.upcast()
         }
     };
+    control.set_sensitive(current.descriptor.enabled);
     if let Some(entry) = control.downcast_ref::<gtk::Entry>() {
         entry.set_width_chars(8);
         entry.set_max_width_chars(8);
@@ -23940,9 +24280,227 @@ fn remember_inspector_draft(
         .insert(inspector_key(descriptor), text);
 }
 
+/// Rebinds cached derived data only after explicit successful None-invalidation command authority.
+/// Old evaluator/document tokens remain stale; unobserved transitions invalidate normally.
+fn rebind_unchanged_spatial(state: &mut AppState, old: Option<(u64, u64, u64)>) {
+    if let (Some(old), Some(new)) = (old, main_preview_frame_identity(state))
+        && old.0 == new.0
+        && old.2 == new.2
+    {
+        state.spatial_preview.rebind_unchanged(old, new);
+        if state.preview_full_identity == Some(old) {
+            state.preview_full_identity = Some(new);
+        }
+        if state.source_texture_frame == Some(old) {
+            state.source_texture_frame = Some(new);
+        }
+        state.media_epoch = state.media_epoch.saturating_add(1);
+        state.media_preview_key = None;
+        if let Some(worker) = state.media_worker.as_mut() {
+            worker.cancel();
+        }
+        state.scheduler.cancel_pending();
+        state.preview_coordinator.clear_submission();
+    }
+}
+
+/// Adds a noninteractive three-pixel viewport-bottom indicator for accepted-artwork background work.
+/// GTK owns its native progress role/value; worker cache counts supply the fraction, independently of
+/// foreground evaluation, tile presentation notifications and document authority. It takes no input.
+fn build_background_progress(viewer: &gtk::Overlay) -> gtk::ProgressBar {
+    let progress = gtk::ProgressBar::new();
+    progress.add_css_class("toniator-background-render-progress");
+    progress.set_halign(gtk::Align::Fill);
+    progress.set_valign(gtk::Align::End);
+    progress.set_focusable(false);
+    progress.set_show_text(false);
+    progress.set_visible(false);
+    progress.set_tooltip_text(Some("Background rendering progress"));
+    progress.update_property(&[gtk::accessible::Property::Label(
+        "Background rendering progress",
+    )]);
+    let css = gtk::CssProvider::new();
+    css.load_from_string(".toniator-background-render-progress trough, .toniator-background-render-progress progress { min-height: 3px; border: 0; border-radius: 0; padding: 0; margin: 0; }");
+    gtk::style_context_add_provider_for_display(
+        &viewer.display(),
+        &css,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    viewer.add_overlay(&progress);
+    progress
+}
+/// Reuses only accepted current-frame pixels before source cloning, decoding, tickets or pending.
+/// Cache admission failures return to the existing viewport renderer without a software-error overlay.
+fn try_spatial_preview(state: &mut AppState) -> bool {
+    state.spatial_preview.ordinary_required = false;
+    let handled = try_spatial_preview_inner(state);
+    if !handled && !state.spatial_preview.ordinary_required {
+        state.spatial_preview.decline();
+    }
+    handled
+}
+/// Projects current cached scales before ordinary work; unsupported exact rendering retains only a
+/// validated current coarse projection while the ordinary requested-target route runs.
+fn try_spatial_preview_inner(state: &mut AppState) -> bool {
+    let Some(artwork) = main_preview_frame_identity(state) else {
+        return false;
+    };
+    let Some(target) = main_viewport_target(state) else {
+        return false;
+    };
+    state.spatial_preview.require_artwork(artwork);
+    if state.view_state.mode() == MainViewMode::Source {
+        state.spatial_preview.suspend();
+        if state.source_texture_frame != Some(artwork) {
+            if state
+                .media_preview_key
+                .is_none_or(|key| key.frame_identity() != artwork)
+            {
+                state.media_epoch = state.media_epoch.saturating_add(1);
+                state.media_preview_key = None;
+                if let Some(worker) = state.media_worker.as_mut() {
+                    worker.cancel();
+                }
+                state.scheduler.cancel_pending();
+                state.preview_coordinator.clear_submission();
+                state.preview_coordinator.queue_intent(Some(PreviewIntent {
+                    frame: artwork,
+                    target,
+                }));
+                if let Err(error) = submit_current_source(state, target) {
+                    show_preview_error(state, error);
+                }
+            }
+        } else if state.preview_coordinator.is_pending() {
+            state.media_epoch = state.media_epoch.saturating_add(1);
+            state.media_preview_key = None;
+            if let Some(worker) = state.media_worker.as_mut() {
+                worker.cancel();
+            }
+            state.scheduler.cancel_pending();
+            state.preview_coordinator.clear_submission();
+        }
+        state.preview_target = Some(target);
+        sync_main_preview_pending(state);
+        return true;
+    }
+    if let Some(texture) = state.spatial_preview.fallback(artwork, target) {
+        state.spatial_preview.visit_zoom(artwork, target);
+        state.preview = Some(texture);
+        state.accepted_preview_target = Some(target);
+        if target.viewport().is_none() {
+            state.preview_full = state.preview.clone();
+            state.preview_full_identity = Some(artwork);
+            retire_crop_observation_after_fit(
+                &mut state.viewport_observed_target,
+                state.view_state.is_fit(),
+            );
+        }
+        state.preview_target = Some(target);
+        state.spatial_preview.presentation = None;
+        state.spatial_preview.pending = false;
+        state.preview_coordinator.cache_view(
+            PreviewIntent {
+                frame: artwork,
+                target,
+            },
+            true,
+        );
+        state.presented_texture = None;
+        apply_main_view_presentation(state);
+        sync_main_preview_pending(state);
+        emit_automation_state(state, "preview_exact_target_hit", None);
+        return true;
+    }
+    let Some((_, _, scale)) = target.viewport() else {
+        return false;
+    };
+    let Some(workspace) = &state.workspace else {
+        return false;
+    };
+    let canvas = workspace.document().canvas();
+    let Some(origin) = state
+        .picture
+        .compute_point(&state.viewport_scroll, &gtk::graphene::Point::new(0., 0.))
+    else {
+        return false;
+    };
+    let Some(transform) = state.picture.compute_transform(&state.viewport_scroll) else {
+        return false;
+    };
+    let Some((xx, yx, xy, yy, _, _)) = transform.to_2d() else {
+        return false;
+    };
+    if [xx, yx, xy, yy] != [1., 0., 0., 1.] {
+        return false;
+    }
+    let zoom = state.view_state.zoom();
+    let Some(layout) = preview_cache::Layout::new(
+        [canvas.width, canvas.height],
+        [canvas.width * zoom, canvas.height * zoom],
+        [
+            f64::from(state.picture.width()),
+            f64::from(state.picture.height()),
+        ],
+        [f64::from(origin.x()), f64::from(origin.y())],
+        [
+            state.viewport_scroll.hadjustment().page_size(),
+            state.viewport_scroll.vadjustment().page_size(),
+        ],
+        state.viewport_scroll.scale_factor(),
+        scale,
+    )
+    .and_then(|layout| layout.with_viewport(&state.viewport_scroll)) else {
+        return false;
+    };
+    if !state.spatial_preview.request(artwork, target, layout) {
+        // Provisional coarse coverage stays visible while the ordinary exact-target route runs.
+        if state.spatial_preview.presentation.is_some() {
+            state
+                .spatial_preview
+                .bind_geometry(&state.picture, &state.viewport_scroll);
+            state.presented_texture = None;
+            apply_main_view_presentation(state);
+        }
+        return false;
+    }
+    state
+        .spatial_preview
+        .bind_geometry(&state.picture, &state.viewport_scroll);
+    state.preview_target = Some(target);
+    let complete = state.spatial_preview.exact_complete;
+    state.preview_coordinator.cache_view(
+        PreviewIntent {
+            frame: artwork,
+            target,
+        },
+        complete,
+    );
+    state.presented_texture = None;
+    if state.spatial_preview.pending {
+        state.preview_progress_label.set_label("Preview updating…");
+        state
+            .preview_overall_progress_label
+            .set_label("Preview updating…");
+        state.preview_progress_bar.set_text(None);
+        state.preview_stage_progress_bar.set_text(None);
+        state.preview_progress_bar.set_fraction(0.);
+        state.preview_stage_progress_bar.set_fraction(0.);
+        state.preview_progress_bar.pulse();
+        state.preview_stage_progress_bar.pulse();
+    }
+    apply_main_view_presentation(state);
+    sync_main_preview_pending(state);
+    emit_automation_state(state, "preview_cache_plan", None);
+    true
+}
+
 /// Invalidates the accepted preview target and records queued work before idle submission.
 /// Source-less documents retain the empty artwork action and never queue an impossible preview.
 fn set_preview_pending(state: &mut AppState) {
+    if try_spatial_preview(state) {
+        return;
+    }
     let intent = main_preview_intent(state);
     if state
         .workspace
@@ -23990,12 +24548,15 @@ fn set_preview_pending(state: &mut AppState) {
     set_page(state, page_while_preview_pending(state.preview.is_some()));
 }
 
-/// Projects pending work and concise truthful failure status without measuring the overlay.
-/// Full coordinator diagnostics remain available through the status tooltip and accessibility
-/// description; visible text depends only on whether accepted pixels remain available.
+/// Projects pending work and truthful failures without obscuring current certified cache pixels.
+/// Initial evaluation retains progress; refinement over valid current-artwork cache coverage stays
+/// unobtrusive. Failure details and enabled Retry authority remain coordinator-owned.
+/// The canvas has no status hover hint; visible progress and error controls carry that information.
 fn sync_main_preview_pending(state: &AppState) {
-    let pending = state.preview_coordinator.is_pending();
-    state.preview_progress.set_visible(pending);
+    let pending = state.preview_coordinator.is_pending() || state.spatial_preview.pending;
+    state
+        .preview_progress
+        .set_visible(pending && !state.spatial_preview.has_current_pixels());
     let failure = state.preview_coordinator.failure();
     state
         .preview_error
@@ -24036,13 +24597,8 @@ fn sync_main_preview_pending(state: &AppState) {
         .preview_details
         .button
         .set_sensitive(failure.is_some());
-    state.picture.set_tooltip_text(Some(if failure.is_some() {
-        "Preview unavailable. Retry preview or open Details for the diagnostic."
-    } else {
-        preview_tooltip(pending, state.preview.is_some())
-    }));
+    state.picture.set_tooltip_text(None);
 }
-
 /// Returns concise artist-facing text for one engine-owned evaluation phase.
 ///
 /// The mapping changes presentation only; stage ordering, progress weights,
@@ -24071,17 +24627,6 @@ fn main_preview_failure_message(error: Option<&toniator_engine::EvaluationError>
         || "Evaluation did not produce a result.".to_owned(),
         ToString::to_string,
     )
-}
-
-/// Selects the canvas tooltip from queued/submitted work and last-success identity.
-const fn preview_tooltip(pending: bool, has_accepted_preview: bool) -> &'static str {
-    if pending {
-        "Rendering preview…"
-    } else if has_accepted_preview {
-        "Preview updated."
-    } else {
-        "No preview yet"
-    }
 }
 
 /// Synchronizes the private editor spinner with its independent newest pending ticket only.
@@ -24159,7 +24704,18 @@ fn queue_main_viewport_refresh(state: &Rc<RefCell<AppState>>) {
     schedule_main_preview_submission(state);
 }
 
-/// Observes changed pan, allocation, or HiDPI transforms without requeuing identical redraws.
+/// Invalidates only dynamic viewport-dependent content; static Source/ordinary images retain GDK's
+/// immutable-content contract. This queues GTK drawing without evaluating or locking cache roots.
+fn invalidate_main_view_content(picture: &gtk::Picture) {
+    if let Some(paintable) = picture.paintable()
+        && !paintable.flags().contains(gtk::gdk::PaintableFlags::STATIC_CONTENTS)
+    {
+        paintable.invalidate_contents();
+    }
+}
+
+/// Observes changed pan/allocation/device authority and invalidates viewport-dependent tile content.
+/// Identical targets do not request recurring redraws; scroll signals cover pre-layout translations.
 fn refresh_main_viewport_if_changed(state: &Rc<RefCell<AppState>>) {
     {
         let Ok(mut app_state) = state.try_borrow_mut() else {
@@ -24184,6 +24740,7 @@ fn refresh_main_viewport_if_changed(state: &Rc<RefCell<AppState>>) {
         ) {
             return;
         }
+        invalidate_main_view_content(&app_state.picture);
     }
     queue_main_viewport_refresh(state);
 }
@@ -24277,11 +24834,15 @@ fn apply_inspector_command(
     if main_document_edits_blocked(&app_state) {
         return false;
     }
+    let old_artwork = main_preview_frame_identity(&app_state);
     let Some(workspace) = app_state.workspace.as_mut() else {
         return false;
     };
     match workspace.history.apply(command) {
-        Ok(_) => {
+        Ok(result) => {
+            if result.invalidation.is_none() {
+                rebind_unchanged_spatial(&mut app_state, old_artwork);
+            }
             if let Some(descriptor) = accepted_descriptor {
                 app_state
                     .inspector_runtime
@@ -25499,6 +26060,15 @@ fn structural_command_for_input(
         _ => Err("This setting requires an active guide.".to_owned()),
     };
     let edit = match descriptor.field {
+        PropertyFieldId::ConnectionFinalDegreeLimit => PatternDefinitionEdit::SetConnectionFinalDegreeLimit { output_layer_id: output_layer_id()?, enabled: boolean(input)? },
+        PropertyFieldId::ConnectionMaximumFinalDegree => PatternDefinitionEdit::SetConnectionMaximumFinalDegree { output_layer_id: output_layer_id()?, value: count(input)? },
+        PropertyFieldId::ConnectionAllowLoops => PatternDefinitionEdit::SetConnectionAllowLoops { output_layer_id: output_layer_id()?, allow: boolean(input)? },
+        PropertyFieldId::ConnectionMinimumComponentPoints => PatternDefinitionEdit::SetConnectionMinimumComponentPoints { output_layer_id: output_layer_id()?, value: count(input)? },
+
+        PropertyFieldId::ToneSampleSpacing => PatternDefinitionEdit::SetToneSampleSpacing {
+            output_layer_id: output_layer_id()?, value: toniator_domain::ToneSampleSpacing { multiplier: number(input)? },
+        },
+
         PropertyFieldId::ParametricShape => match choice(input)? {
             PropertyEnumChoice::SpiralShape(shape) => PatternDefinitionEdit::SetParametricShape {
                 mechanism_id: mechanism_id()?,
@@ -29552,14 +30122,22 @@ impl std::fmt::Display for StillExportError {
     }
 }
 
-/// Projects still-export failure status with publication truth preceding late cancellation.
+/// Projects format-aware still-export failure status with publication truth before late cancellation.
 fn still_export_failure_status(
     error: &StillExportError,
     cancelled: bool,
     prepared: bool,
+    format: ExportFormat,
 ) -> Option<&'static str> {
     if error.published {
-        Some("PNG exported; final folder synchronization failed. See error log.")
+        Some(match format {
+            ExportFormat::Png => {
+                "PNG exported; final folder synchronization failed. See error log."
+            }
+            ExportFormat::Svg => {
+                "SVG exported; final folder synchronization failed. See error log."
+            }
+        })
     } else if cancelled {
         Some("Export cancelled.")
     } else if prepared {
@@ -29644,8 +30222,8 @@ fn export_snapshot_frame_cancellable(
 ///
 /// # Errors
 /// Rejects source, timing, evaluation, rasterization, cleanup admission or filesystem failures
-/// without editing history or consulting a later live document. PNG publishes only completed staging;
-/// a postpublication folder-sync failure reports that the PNG was written.
+/// without editing history or consulting a later live document. PNG and SVG publish only completed
+/// staging; postpublication folder-sync failure retains the actual format and publication truth.
 fn export_captured_frame_cancellable(
     capture: print_preparation::ExportCapture,
     path: PathBuf,
@@ -29774,11 +30352,26 @@ fn export_captured_frame_cancellable(
     if cancelled.load(Ordering::Acquire) {
         return Err("Export cancelled.".into());
     }
-    fs::write(&path, output).map_err(|error| {
-        StillExportError::from(format!(
-            "output.write: could not write {}: {error}",
-            path.display()
-        ))
+    publish_captured_svg_bytes(&path, &output, cancelled)
+}
+
+/// Publishes the captured complete SVG buffer through the existing retained-handle atomic service.
+/// Earlier source/frame evaluation remains immutable; this helper never consults live GTK state.
+/// # Errors
+/// Returns atomic cancellation/write/publication errors, preserving truthful published() state.
+fn publish_captured_svg_bytes(
+    path: &Path,
+    bytes: &[u8],
+    cancelled: &AtomicBool,
+) -> Result<(), StillExportError> {
+    toniator_io::atomic_output::write_atomic_output(
+        path,
+        &|| cancelled.load(Ordering::Acquire),
+        |file| std::io::Write::write_all(file, bytes),
+    )
+    .map_err(|error| StillExportError {
+        published: error.published(),
+        message: error.to_string(),
     })
 }
 
@@ -29927,6 +30520,7 @@ fn export_snapshot(
 /// Successful loads/saves update recent metadata; errors preserve the document and release any
 /// pending quit request. Save recovery clears only its captured presentation-error identity.
 /// Stale results never replace the workspace or populate Recent Files.
+/// Published still-output warnings retain captured format and precede late cancellation.
 fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
     match event {
         AppEvent::PrintPngPreview {
@@ -30057,7 +30651,7 @@ fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
                 }
                 Err(error) => {
                     if let Some(status) =
-                        still_export_failure_status(&error, cancelled, prepare_for_print)
+                        still_export_failure_status(&error, cancelled, prepare_for_print, format)
                     {
                         if error.published || !cancelled {
                             eprintln!("still export: {error}");
@@ -30462,7 +31056,7 @@ fn handle_pattern_editor_calibration(
     }
 }
 
-/// Accepts forced calibration only into the still-current Advanced Settings private draft.
+/// Accepts guarded calibration into the private draft and publishes only an Apply request.
 ///
 /// The exact workspace root and draft snapshot are checked before artifacts attach. Apply remains
 /// the sole boundary that can publish this private history into the main document.
@@ -30473,16 +31067,14 @@ fn handle_advanced_calibration(
 ) {
     let task = {
         let mut app = state.borrow_mut();
-        app.advanced_settings
-            .as_mut()
-            .and_then(|surface| {
-                surface
-                    .calibration_task
-                    .as_ref()
-                    .is_some_and(|task| task.id == id)
-                    .then(|| surface.calibration_task.take())
-                    .flatten()
-            })
+        app.advanced_settings.as_mut().and_then(|surface| {
+            surface
+                .calibration_task
+                .as_ref()
+                .is_some_and(|task| task.id == id)
+                .then(|| surface.calibration_task.take())
+                .flatten()
+        })
     };
     let Some(task) = task else {
         return;
@@ -30542,8 +31134,14 @@ fn handle_advanced_calibration(
             }
         }
     };
-    if accepted {
-        let epoch = state.borrow().advanced_settings.as_ref().map(|surface| surface.epoch);
+    if accepted && task.publication == AdvancedCalibrationPublication::Apply {
+        publish_advanced_draft(state, task.epoch);
+    } else if accepted {
+        let epoch = state
+            .borrow()
+            .advanced_settings
+            .as_ref()
+            .map(|surface| surface.epoch);
         if let Some(epoch) = epoch {
             advanced_temporal::refresh(state, epoch);
             submit_advanced_preview(state, epoch);
@@ -31008,7 +31606,7 @@ fn handle_preview_progress(
     let fraction = progress.fraction().clamp(0.0, 1.0);
     let stage_fraction = progress.stage_fraction().clamp(0.0, 1.0);
     let stage = preview_progress_stage_label(progress.stage());
-    app_state.preview_progress.set_visible(true);
+    sync_main_preview_pending(&app_state);
     app_state
         .preview_overall_progress_label
         .set_label(&format!("Overall preview · {:.1}%", fraction * 100.0));
@@ -31071,6 +31669,19 @@ fn handle_preview_completion(
                 .map_or_else(|| texture_from_surface(result.raster()), Err)
             {
                 Ok(texture) => {
+                    if let (Some(artwork), Some(target)) = (
+                        main_preview_frame_identity(&app_state),
+                        app_state.preview_target,
+                    ) {
+                        app_state
+                            .spatial_preview
+                            .accept(artwork, result.shared_scene());
+                        app_state.spatial_preview.remember_fallback(
+                            artwork,
+                            target,
+                            texture.clone(),
+                        );
+                    }
                     app_state
                         .preview_coordinator
                         .accept(workspace_generation, ticket);
@@ -31085,6 +31696,11 @@ fn handle_preview_completion(
                     {
                         app_state.preview_full = app_state.preview.clone();
                         app_state.preview_full_identity = identity;
+                        let is_fit = app_state.view_state.is_fit();
+                        retire_crop_observation_after_fit(
+                            &mut app_state.viewport_observed_target,
+                            is_fit,
+                        );
                     } else if app_state.preview_full_identity != identity {
                         app_state.preview_full = None;
                         app_state.preview_full_identity = None;
@@ -31460,6 +32076,7 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
         state.pending_png_export_surface_epoch = None;
         state.workspace_generation = state.workspace_generation.saturating_add(1);
         state.preview_coordinator.clear_workspace();
+        state.spatial_preview.clear();
         sync_main_preview_pending(&state);
         state.inspector_runtime.reset_for_workspace();
         let pattern_editor_window = state.pattern_editor.take().map(|surface| {
@@ -31582,6 +32199,7 @@ fn clear_workspace(state: &Rc<RefCell<AppState>>) {
         state.generation = state.generation.saturating_add(1);
         state.workspace_generation = state.workspace_generation.saturating_add(1);
         state.preview_coordinator.clear_workspace();
+        state.spatial_preview.clear();
         state.media_preview_key = None;
         if let Some(worker) = state.media_worker.as_mut() {
             worker.cancel();
@@ -31732,8 +32350,16 @@ fn replace_model_topology(
     Ok(())
 }
 
-/// Transfers queued preview work to the scheduler once a concrete viewport target exists.
+/// Rechecks cache reuse after GTK allocation, before ordinary source preparation or scheduler submission.
+/// Only an unsupported/uncovered cache query reaches the existing queued preview route.
 fn submit_if_viewport_ready(state: &mut AppState) {
+    // GTK allocation may have changed since the early pending hook (notably after zoom).
+    if try_spatial_preview(state) {
+        return;
+    }
+    if state.view_state.mode() == MainViewMode::Source {
+        return;
+    }
     let Some(target) = requested_main_viewport_target(state) else {
         return;
     };
@@ -31836,7 +32462,9 @@ fn handle_media_preview_completion(
     completion: temporal_preview::Completion,
 ) {
     let mut state = state.borrow_mut();
-    if main_viewport_target(&state) != state.preview_target {
+    if state.view_state.mode() != MainViewMode::Source
+        && main_viewport_target(&state) != state.preview_target
+    {
         return;
     }
     if !state.workspace.as_ref().is_some_and(|workspace| {
@@ -31890,6 +32518,14 @@ fn handle_media_preview_completion(
         {
             return Ok(());
         }
+        state.source_texture = Some(texture.upcast());
+        state.source_texture_frame = Some(completion.key.frame_identity());
+        if state.view_state.mode() == MainViewMode::Source {
+            state.preview_coordinator.clear_submission();
+            apply_main_view_presentation(&mut state);
+            emit_automation_state(&mut state, "source_only_accepted", None);
+            return Ok(());
+        }
         if let Some(error) = injected_preview_error(&mut state, "submit") {
             return Err(error);
         }
@@ -31897,8 +32533,6 @@ fn handle_media_preview_completion(
             .scheduler
             .submit(prepared.request)
             .map_err(PreviewDiagnostic::scheduler)?;
-        state.source_texture = Some(texture.upcast());
-        state.source_texture_generation = Some(state.workspace_generation);
         let generation = state.workspace_generation;
         state.preview_coordinator.submit(generation, ticket.value());
         apply_main_view_presentation(&mut state);
@@ -31957,7 +32591,12 @@ fn emit_automation_state(state: &mut AppState, event: &str, ticket: Option<u64>)
         "has_savepoint": savepoint,
         "lifecycle": lifecycle,
         "viewport_raster": state.preview_target.map(|target| serde_json::json!({"width": target.width(), "height": target.height(), "crop": target.viewport(), "fit": state.view_state.is_fit(), "zoom": state.view_state.zoom(), "picture_width": state.picture.width(), "picture_height": state.picture.height(), "page_width": state.viewport_scroll.hadjustment().page_size(), "page_height": state.viewport_scroll.vadjustment().page_size(), "device_scale": state.viewport_scroll.scale_factor()})),
-        "preview_pending": state.preview_coordinator.is_pending(),
+        "preview_pending": state.preview_coordinator.is_pending()||state.spatial_preview.pending,
+        "preview_cache": format!("{:?}",state.spatial_preview.statistics()),
+        "preview_frame": main_preview_frame_identity(state),
+        "full_preview_frame": state.preview_full_identity,
+        "source_texture_frame": state.source_texture_frame,
+        "view_mode": format!("{:?}",state.view_state.mode()),
         "preview_failed": state.preview_coordinator.failure().is_some(),
         "preview_error_visible": state.preview_coordinator.failure().is_some_and(|failure|failure.visible),
         "preview_failure_diagnostic": state.preview_coordinator.failure().map(|failure|failure.diagnostic.as_str()),
@@ -32018,8 +32657,21 @@ fn main_viewport_target(state: &AppState) -> Option<toniator_engine::PreviewRast
     }
 }
 
+/// Selects one current-frame full fallback before crop refinement without changing the displayed zoom.
+/// Frame identity is the existing workspace/revision/project-frame tuple; Source-only decoding and
+/// authoritative None rebinds retain their existing ownership and do not invent another render key.
+fn current_frame_fit_required(
+    mode: MainViewMode,
+    current: Option<(u64, u64, u64)>,
+    full: Option<(u64, u64, u64)>,
+) -> bool {
+    mode == MainViewMode::Preview && current.is_some() && current != full
+}
+
 /// Resolves actual GTK allocation into typed Ready/Unallocated/Rejected authority without side effects.
-/// Scroll translation and contain centering remain presentation facts, never document authority.
+/// A Preview frame first acquires a complete Fit fallback even at a retained zoom; the displayed
+/// zoom/scroll do not change. After acceptance, the same selector resolves its exact crop. Source
+/// comparison bypasses bootstrap. Translation remains presentation, never document authority.
 fn main_viewport_resolution(state: &AppState) -> viewport_request::Resolution {
     let Some(workspace) = state.workspace.as_ref() else {
         return viewport_request::Resolution::Unallocated;
@@ -32044,7 +32696,12 @@ fn main_viewport_resolution(state: &AppState) -> viewport_request::Resolution {
         ),
         (f64::from(origin.x()), f64::from(origin.y())),
         scroll.scale_factor(),
-        state.view_state.is_fit(),
+        state.view_state.is_fit()
+            || current_frame_fit_required(
+                state.view_state.mode(),
+                main_preview_frame_identity(state),
+                state.preview_full.as_ref().and(state.preview_full_identity),
+            ),
     ) {
         viewport_request::Resolution::Ready(target) => viewport_request::Resolution::Ready(
             target.with_background(preview_backdrop::raster_background_for_document(document)),
@@ -32080,6 +32737,18 @@ fn retire_rejected_viewport(
     *observed = None;
     *submitted = None;
     coordinator.clear_submission();
+}
+
+/// Retires the prior crop observation after accepting a full Fit fallback at a retained zoom.
+/// Both ordinary acceptance and exact-memo promotion use this handoff, so a fast bootstrap cannot
+/// hide refinement merely because GTK never observed its temporary Fit request on an intervening tick.
+fn retire_crop_observation_after_fit(
+    observed: &mut Option<toniator_engine::PreviewRasterTarget>,
+    displayed_fit: bool,
+) {
+    if !displayed_fit {
+        *observed = None;
+    }
 }
 
 /// Observes a concrete changed target once, without resubmitting an already owned current target.
@@ -32275,7 +32944,7 @@ fn clear_preview(state: &mut AppState) {
     state.viewport_observed_target = None;
     state.rejected_viewport = None;
     state.source_texture = None;
-    state.source_texture_generation = None;
+    state.source_texture_frame = None;
     state.view_state.set_mode(MainViewMode::Preview);
 }
 
@@ -32466,6 +33135,7 @@ fn print_preparation_live_authority(state: &AppState) -> Option<print_preparatio
 ///
 /// The projection updates labels and enabled state; changed PNG pixel identity schedules
 /// a debounced, cancellable exact preview without changing workspace or document authority.
+/// Status stays on visible controls; the canvas does not inherit a generic window hover hint.
 fn sync_ui(state: &mut AppState) {
     if let Some(workspace) = state.workspace.as_ref() {
         state.endpoint = state.endpoint.for_document(workspace.document());
@@ -32496,7 +33166,7 @@ fn sync_ui(state: &mut AppState) {
             artist_pattern_name(&selected_property_values(workspace.document(), channel))
         })
     });
-    let (document_vm, _channel_vm, preview_vm) =
+    let (_document_vm, _channel_vm, _preview_vm) =
         project_document(state, selected_name, active_pattern);
     state.actions.new.set_enabled(policy.new_enabled);
     state.actions.open.set_enabled(policy.open_enabled);
@@ -32555,17 +33225,10 @@ fn sync_ui(state: &mut AppState) {
         if lifecycle_vm.dirty { "*" } else { "" }
     ));
     state.window_title.set_tooltip_text(Some(identity));
-    state
-        .window
-        .set_tooltip_text(Some(if lifecycle_vm.has_workspace && lifecycle_vm.dirty {
-            "Unsaved changes"
-        } else {
-            &document_vm.title
-        }));
-    state.picture.set_tooltip_text(Some(preview_tooltip(
-        preview_vm.pending,
-        preview_vm.accepted_ticket.is_some(),
-    )));
+    // A window tooltip would otherwise be inherited by the tooltip-free canvas.
+    // The document identity remains available on the visible title label itself.
+    state.window.set_tooltip_text(None);
+    state.picture.set_tooltip_text(None);
     apply_main_view_presentation(state);
     document_presets::sync_controls(state);
     sync_endpoint_controls(state);
@@ -32574,6 +33237,66 @@ fn sync_ui(state: &mut AppState) {
 
 #[cfg(test)]
 mod tests {
+    /// Requires a real current-frame full fallback before nonFit refinement; Source and None aliases
+    /// retain their established authority, and static source-frame bytes cannot alias project frames.
+    /// # Panics
+    /// Panics if a missing/stale full frame skips bootstrap, or Source/current full frames require it.
+    #[test]
+    fn current_frame_crop_bootstraps_fit_without_changing_source_mode() {
+        let frame = Some((1, 2, 3));
+        assert!(super::current_frame_fit_required(
+            super::MainViewMode::Preview,
+            frame,
+            None
+        ));
+        for old in [(0, 2, 3), (1, 1, 3), (1, 2, 2)] {
+            assert!(super::current_frame_fit_required(
+                super::MainViewMode::Preview,
+                frame,
+                Some(old)
+            ));
+        }
+        assert!(!super::current_frame_fit_required(
+            super::MainViewMode::Preview,
+            frame,
+            frame
+        ));
+        assert!(!super::current_frame_fit_required(
+            super::MainViewMode::Source,
+            frame,
+            None
+        ));
+        assert!(!super::current_frame_fit_required(
+            super::MainViewMode::Preview,
+            None,
+            None
+        ));
+    }
+
+    /// Admits the actual crop once after a fast full-Fit acceptance or memo promotion at retained zoom.
+    /// # Panics
+    /// Panics if an old observed crop suppresses refinement, or an unchanged displayed Fit is dirtied.
+    #[test]
+    fn full_fit_handoff_reobserves_retained_crop_once() {
+        let crop = toniator_engine::PreviewRasterTarget::for_viewport(64, 48, 10., 20., 8.).unwrap();
+        let fit = toniator_engine::PreviewRasterTarget::new(64, 48).unwrap();
+        let mut observed = Some(crop);
+        super::retire_crop_observation_after_fit(&mut observed, false);
+        assert!(super::viewport_change_requires_submission(
+            &mut observed,
+            Some(fit),
+            crop
+        ));
+        assert!(!super::viewport_change_requires_submission(
+            &mut observed,
+            Some(fit),
+            crop
+        ));
+        observed = Some(fit);
+        super::retire_crop_observation_after_fit(&mut observed, true);
+        assert_eq!(observed, Some(fit));
+    }
+
     /// Coalesces rapid valid edits into the latest timer and holds it behind one busy worker.
     ///
     /// # Panics
@@ -33699,6 +34422,7 @@ mod tests {
         definition.output_layers = vec![toniator_domain::PatternOutputLayer::all(
             PatternOutputLayerId(33),
             toniator_domain::PatternOutputRealization::ConnectionPaths {
+                selection: toniator_domain::ConnectionSelectionIntent::default(),
                 site_mechanism_id: PatternMechanismId(32),
                 program: toniator_domain::ConnectionProgram::RandomLinks {
                     adjacency: toniator_domain::ConnectionAdjacencyIntent {
@@ -37269,10 +37993,6 @@ mod tests {
     /// Panics if pending labels or the unchanged evaluator diagnostic are misrepresented.
     #[test]
     fn preview_status_text_tracks_queued_work_and_specific_failures() {
-        assert_eq!(preview_tooltip(true, true), "Rendering preview…");
-        assert_eq!(preview_tooltip(true, false), "Rendering preview…");
-        assert_eq!(preview_tooltip(false, true), "Preview updated.");
-        assert_eq!(preview_tooltip(false, false), "No preview yet");
         assert_eq!(
             preview_progress_stage_label(
                 toniator_engine::EvaluationProgressStage::GeneratingGeometry
@@ -37419,137 +38139,115 @@ mod tests {
         assert_eq!(workspace.history.revision().0, 0);
     }
 
-    /// Reuses an exact gallery companion and skips a stale CoverCanvas measurement for fitting.
-    ///
-    /// The strict catalog API continues to reject a 1024-recipe companion on a 900×620 receiver;
-    /// app candidate materialization omits that artifact, then exposes its changed binding for
-    /// preparation. Matching companions remain attached and require no preparation.
-    ///
+    /// Materializes every real catalog recipe with zero missing active or hidden ALL fit targets.
+    /// Persistent CoverCanvas intent keeps exact identity across receiving artwork dimensions.
+    /// A real custom structural bias retains the guarded preparation path instead of borrowing
+    /// an incompatible catalog artifact. This test invokes the actual app materializer/planner.
     /// # Panics
-    /// Panics if private candidate materialization forwards an incompatible measurement, loses a
-    /// compatible one, or fails to identify the concrete changed binding.
+    /// Panics if a bundled Apply schedules a measurement or a custom structural edit skips it.
     #[test]
     fn wizard_candidate_materialization_reuses_exact_and_skips_mismatched_companions() {
-        let make_companion = |recipe: &PatternDefinitionRecipe| {
-            toniator_domain::SavedCalibration::new(
-                CalibrationBinding::new(recipe.clone(), 1.0, 0.0)
-                    .expect("synthetic recipe binding validates"),
-                vec![
-                    toniator_domain::CalibrationKnot {
-                        input: 0.0,
-                        coverage: 0.0,
-                    },
-                    toniator_domain::CalibrationKnot {
-                        input: 2.0,
-                        coverage: 0.5,
-                    },
-                ],
-                None,
+        let registry = PresetRegistry::bundled();
+        assert_eq!(registry.entries().len(), 16);
+        let catalog = LayeredPresetCatalog::new(&registry, Vec::new()).unwrap();
+        for (width, height) in [(1024.0, 1024.0), (900.0, 620.0)] {
+            let base = Document::new_default_document(
+                CanvasSpec { width, height },
+                SourceReference::Unassigned,
             )
-            .expect("synthetic finite measurement validates")
-        };
-        let canvas = CanvasSpec {
-            width: 900.0,
-            height: 620.0,
-        };
-        let base = Document::new_default_document(canvas, SourceReference::Unassigned)
-            .expect("synthetic receiver document validates");
-
-        let mut exact_record = PresetRegistry::bundled()
-            .find("one-guide-lines")
-            .expect("exact companion recipe exists")
-            .clone();
-        exact_record.saved_calibration = Some(make_companion(&exact_record.recipe));
-        let exact_registry =
-            PresetRegistry::new(3, vec![exact_record]).expect("exact synthetic registry validates");
-        let exact_catalog = LayeredPresetCatalog::new(&exact_registry, Vec::new())
-            .expect("exact synthetic catalog validates");
-        let mut exact_history = DocumentHistory::new(
-            DocumentSession::new(base.clone()).expect("exact synthetic session validates"),
-        );
+            .unwrap();
+            for entry in registry.entries() {
+                let mut history = DocumentHistory::new(DocumentSession::new(base.clone()).unwrap());
+                for _ in 0..2 {
+                    let before = history.document().clone();
+                    apply_catalog_pattern_candidate(
+                        &mut history,
+                        &catalog,
+                        InspectorTarget::DocumentAll,
+                        &entry.metadata.id,
+                    )
+                    .unwrap();
+                    let changed =
+                        calibration_preparation::changed_channels(&before, history.document())
+                            .unwrap();
+                    let plan = calibration_preparation::plan_to_prepare(
+                        history.document(),
+                        &changed,
+                        false,
+                        false,
+                    )
+                    .unwrap();
+                    assert!(plan.is_empty(), "{}: {:?}", entry.metadata.id, plan);
+                    history
+                        .document()
+                        .require_saved_calibration_authority()
+                        .unwrap();
+                }
+                let alternate = if entry.metadata.id == "straight-grid-circles" {
+                    "one-guide-lines"
+                } else {
+                    "straight-grid-circles"
+                };
+                apply_catalog_pattern_candidate(
+                    &mut history,
+                    &catalog,
+                    InspectorTarget::DocumentAll,
+                    alternate,
+                )
+                .unwrap();
+                apply_catalog_pattern_candidate(
+                    &mut history,
+                    &catalog,
+                    InspectorTarget::DocumentAll,
+                    &entry.metadata.id,
+                )
+                .unwrap();
+                let channels = authoritative_channel_ids(history.document());
+                assert!(
+                    calibration_preparation::plan_to_prepare(
+                        history.document(),
+                        &channels,
+                        false,
+                        false
+                    )
+                    .unwrap()
+                    .is_empty()
+                );
+            }
+        }
+        let mut changed = registry.find("one-guide-lines").unwrap().clone();
+        if let toniator_domain::PatternGeometryResponse::Connected(response) =
+            &mut changed.recipe.output_settings[0].response
+        {
+            response.bias = 0.25;
+        } else {
+            panic!("connected fixture");
+        }
+        changed.saved_calibration = None;
+        let custom_registry = PresetRegistry::new(3, vec![changed]).unwrap();
+        let custom_catalog = LayeredPresetCatalog::new(&custom_registry, Vec::new()).unwrap();
+        let base = Document::new_default_document(
+            CanvasSpec {
+                width: 1024.0,
+                height: 1024.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .unwrap();
+        let mut history = DocumentHistory::new(DocumentSession::new(base.clone()).unwrap());
         apply_catalog_pattern_candidate(
-            &mut exact_history,
-            &exact_catalog,
+            &mut history,
+            &custom_catalog,
             InspectorTarget::DocumentAll,
             "one-guide-lines",
         )
-        .expect("matching companion applies atomically");
-        let exact_channels = authoritative_channel_ids(exact_history.document());
-        assert!(exact_channels.iter().all(|channel_id| {
-            exact_history
-                .document()
-                .saved_calibration_for(*channel_id)
-                .expect("matching binding is valid")
-                .is_some()
-        }));
-        assert!(
-            calibration_preparation::representatives_to_prepare(
-                exact_history.document(),
-                &exact_channels,
-                false,
-            )
-            .expect("exact companion bindings reconstruct")
-            .is_empty()
-        );
-
-        let mut cover_record = PresetRegistry::bundled()
-            .find("round-spiral-line")
-            .expect("CoverCanvas recipe exists")
-            .clone();
-        let generic_companion = make_companion(&cover_record.recipe);
-        cover_record.saved_calibration = Some(generic_companion.clone());
-        let cover_registry = PresetRegistry::new(3, vec![cover_record])
-            .expect("synthetic CoverCanvas registry validates");
-        let cover_catalog = LayeredPresetCatalog::new(&cover_registry, Vec::new())
-            .expect("synthetic CoverCanvas catalog validates");
-        let mut strict_history = DocumentHistory::new(
-            DocumentSession::new(base.clone()).expect("strict synthetic session validates"),
-        );
-        assert!(
-            cover_catalog
-                .apply_to_document_base(&mut strict_history, "round-spiral-line")
-                .is_err()
-        );
-        assert_eq!(strict_history.document(), &base);
-
-        let mut cover_history = DocumentHistory::new(
-            DocumentSession::new(base.clone()).expect("private synthetic session validates"),
-        );
-        apply_catalog_pattern_candidate(
-            &mut cover_history,
-            &cover_catalog,
-            InspectorTarget::DocumentAll,
-            "round-spiral-line",
-        )
-        .expect("app candidate materialization omits the incompatible companion");
-        let channels = authoritative_channel_ids(cover_history.document());
-        assert!(channels.iter().all(|channel_id| {
-            cover_history
-                .document()
-                .saved_calibration_for(*channel_id)
-                .expect("candidate channel binding is valid")
-                .is_none()
-        }));
-        assert_ne!(
-            CalibrationBinding::for_channel(cover_history.document(), channels[0])
-                .expect("concrete CoverCanvas binding reconstructs"),
-            *generic_companion.binding(),
-        );
-        let changed = calibration_preparation::changed_channels(&base, cover_history.document())
-            .expect("changed bindings reconstruct");
-        let representatives = calibration_preparation::representatives_to_prepare(
-            cover_history.document(),
-            &changed,
-            false,
-        )
-        .expect("missing CoverCanvas companion is selectable for preparation");
-        assert!(!changed.is_empty());
-        assert_eq!(
-            representatives.len(),
-            1,
-            "equivalent bindings share one fit"
-        );
-        assert!(changed.contains(&representatives[0]));
+        .unwrap();
+        let changed = calibration_preparation::changed_channels(&base, history.document()).unwrap();
+        let plan =
+            calibration_preparation::plan_to_prepare(history.document(), &changed, false, false)
+                .unwrap();
+        assert_eq!(plan.active.len(), 1);
+        assert!(!plan.baseline);
     }
 
     /// Crosses every channel model with private ALL and named wizard materialization safely.
@@ -41390,6 +42088,7 @@ mod tests {
             structure: PatternStructureRecipe::AuthoredResources {
                 resources: vec![resource],
                 definition: Box::new(PatternStructureRecipe::CurveMotifPaths {
+                    tone_sample_spacing: toniator_domain::ToneSampleSpacing::default(),
                     definition: Box::new(PatternStructureRecipe::GenericGuides {
                         name: "Shared guide motif preview".into(),
                         coverage: CoveragePolicy {
@@ -43029,5 +43728,64 @@ mod preview_failure_logging_tests {
             );
         }
         assert_eq!(records(&path).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod svg_publication_tests {
+    use super::*;
+
+    /// Proves SVG publication retains captured serialized bytes and a cancelled destination.
+    /// # Panics
+    /// Panics on owned staging I/O, byte changes or cancellation replacing the approved output.
+    #[test]
+    fn svg_atomic_captured_bytes_overwrite_and_cancel() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/validation/test-scratch")
+            .join(format!("app-svg-publication-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("retained.svg");
+        let bytes =
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"1\" cy=\"1\" r=\"1\"/></svg>\n";
+        fs::write(&path, b"prior sentinel").unwrap();
+        publish_captured_svg_bytes(&path, bytes, &AtomicBool::new(false)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        let error =
+            publish_captured_svg_bytes(&path, b"replacement", &AtomicBool::new(true)).unwrap_err();
+        assert!(!error.published);
+        assert_eq!(fs::read(path).unwrap(), bytes);
+        assert_eq!(fs::read_dir(root).unwrap().count(), 1);
+    }
+
+    /// Proves format-aware published-output warnings precede cancellation and prepared-output wording.
+    /// # Panics
+    /// Panics if late cancellation or prepared mode takes precedence over already-published output.
+    #[test]
+    fn published_warning_precedes_late_cancel_and_prepared_failure() {
+        let published = StillExportError {
+            message: "injected postpublication directory sync failure".into(),
+            published: true,
+        };
+        for cancelled in [false, true] {
+            for prepared in [false, true] {
+                assert_eq!(
+                    still_export_failure_status(&published, cancelled, prepared, ExportFormat::Png),
+                    Some("PNG exported; final folder synchronization failed. See error log.")
+                );
+            }
+        }
+        assert_eq!(
+            still_export_failure_status(&published, true, false, ExportFormat::Svg),
+            Some("SVG exported; final folder synchronization failed. See error log.")
+        );
+        let unpublished: StillExportError = "prepublication failure".into();
+        assert_eq!(
+            still_export_failure_status(&unpublished, true, true, ExportFormat::Png),
+            Some("Export cancelled.")
+        );
+        assert_eq!(
+            still_export_failure_status(&unpublished, false, true, ExportFormat::Png),
+            Some("Print PNG export failed; see error log.")
+        );
     }
 }

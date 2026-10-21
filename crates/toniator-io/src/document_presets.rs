@@ -142,6 +142,8 @@ enum ArchiveKind {
 pub enum StagedDocumentPreset {
     Current(DocumentConfiguration),
     PendingRaw(PendingRawPresetImport),
+    /// Desired coverage is already current; only changed geometry companions need preparation.
+    PendingCalibration(DocumentConfiguration),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -679,9 +681,11 @@ pub fn load_document_preset(
 ) -> Result<DocumentConfiguration, DocumentPresetError> {
     match load_document_preset_staged(path, destination)? {
         StagedDocumentPreset::Current(configuration) => Ok(configuration),
-        StagedDocumentPreset::PendingRaw(_) => Err(DocumentPresetError::Version {
-            context: "former raw-response Preset requires explicit calibration preparation".into(),
-        }),
+        StagedDocumentPreset::PendingRaw(_) | StagedDocumentPreset::PendingCalibration(_) => {
+            Err(DocumentPresetError::Version {
+                context: "Preset requires explicit calibration preparation".into(),
+            })
+        }
     }
 }
 
@@ -971,18 +975,28 @@ pub(super) fn load_source_free_preset<R: Read + Seek>(
             context: format!("unsupported resource kind {:?}", metadata.kind),
         });
     }
-    let pending_raw = metadata.document_schema_version < DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION;
+    // Schema 16 already owns desired coverage; schema 15 retains the prior explicit raw route.
+    let pending_raw = matches!(
+        (
+            metadata.document_preset_format_version,
+            metadata.document_schema_version
+        ),
+        (1, 7 | 8) | (3, 10..=15)
+    );
+    let pending_calibration =
+        metadata.document_preset_format_version == 3 && metadata.document_schema_version == 16;
     let migrated = if metadata.document_preset_format_version == DOCUMENT_PRESET_FORMAT_VERSION
         && metadata.document_schema_version == DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION
     {
         migrate_former_calibration_profile(&bytes)?
     } else if metadata.document_preset_format_version == DOCUMENT_PRESET_FORMAT_VERSION
-        && metadata.document_schema_version + 1 == DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION
+        && matches!(metadata.document_schema_version, 15..=17)
     {
         let normalized = migrate_former_calibration_profile(&bytes)?.unwrap_or(bytes.clone());
-        let mut root: Value = serde_json::from_slice(&normalized).map_err(|error| DocumentPresetError::Json {
-            context: error.to_string(),
-        })?;
+        let mut root: Value =
+            serde_json::from_slice(&normalized).map_err(|error| DocumentPresetError::Json {
+                context: error.to_string(),
+            })?;
         root["document_schema_version"] = json!(DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION);
         let normalized = serde_json::to_vec(&root).map_err(|error| DocumentPresetError::Json {
             context: error.to_string(),
@@ -996,7 +1010,23 @@ pub(super) fn load_source_free_preset<R: Read + Seek>(
     } else {
         Some(migrate_legacy_preset(&bytes, &metadata)?)
     };
-    let decoded = migrated.as_deref().unwrap_or(&bytes);
+    let artistic_migration = if metadata.document_schema_version < 17 {
+        Some(migrate_artistic_geometry_defaults(
+            migrated.as_deref().unwrap_or(&bytes),
+        )?)
+    } else {
+        None
+    };
+    let previous = artistic_migration
+        .as_deref()
+        .or(migrated.as_deref())
+        .unwrap_or(&bytes);
+    let coverage_migration = if metadata.document_schema_version < 18 {
+        Some(migrate_persistent_coverage_defaults(previous)?)
+    } else {
+        None
+    };
+    let decoded = coverage_migration.as_deref().unwrap_or(previous);
     let mut ignored = Vec::new();
     let mut deserializer = serde_json::Deserializer::from_slice(decoded);
     let envelope: DocumentPresetEnvelopeDto =
@@ -1024,14 +1054,164 @@ pub(super) fn load_source_free_preset<R: Read + Seek>(
         DOCUMENT_PRESET_CONFIGURATION_SCHEMA_VERSION
     );
     if pending_raw {
-        envelope.configuration.into_pending_raw_import(destination)
+        envelope
+            .configuration
+            .into_pending_raw_import(destination)
             .map(StagedDocumentPreset::PendingRaw)
-            .map_err(|error| DocumentPresetError::DomainValidation { context: error.to_string() })
+            .map_err(|error| DocumentPresetError::DomainValidation {
+                context: error.to_string(),
+            })
+    } else if pending_calibration {
+        envelope
+            .configuration
+            .into_domain_configuration(destination)
+            .map(StagedDocumentPreset::PendingCalibration)
+            .map_err(|error| DocumentPresetError::DomainValidation {
+                context: error.to_string(),
+            })
     } else {
-        envelope.configuration.into_domain_configuration(destination)
+        envelope
+            .configuration
+            .into_domain_configuration(destination)
             .map(StagedDocumentPreset::Current)
-            .map_err(|error| DocumentPresetError::DomainValidation { context: error.to_string() })
+            .map_err(|error| DocumentPresetError::DomainValidation {
+                context: error.to_string(),
+            })
     }
+}
+
+/// Makes lost finite-extent intent explicit only for recognized former source-free configurations.
+/// Stored generic recipes retain their policy; missing mechanism policy becomes Fixed without inference.
+/// Original bytes, artwork-independent settings, tone controls and valid Fixed measurements remain intact.
+/// # Errors
+/// Returns bounded JSON diagnostics without modifying the selected archive.
+fn migrate_persistent_coverage_defaults(bytes: &[u8]) -> Result<Vec<u8>, DocumentPresetError> {
+    /// Adds only the required mechanism field and never rewrites existing authored recipe policy.
+    fn insert_fixed(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                if object.get("kind").and_then(Value::as_str) == Some("parametric_curve_source") {
+                    object
+                        .entry("spiral_coverage")
+                        .or_insert_with(|| json!("fixed"));
+                }
+                for child in object.values_mut() {
+                    insert_fixed(child);
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    insert_fixed(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut root: Value =
+        serde_json::from_slice(bytes).map_err(|error| DocumentPresetError::Json {
+            context: error.to_string(),
+        })?;
+    let configuration = root
+        .get_mut("configuration")
+        .ok_or_else(|| DocumentPresetError::Json {
+            context: "Preset configuration is missing".into(),
+        })?;
+    insert_fixed(configuration);
+    let result = serde_json::to_vec(&root).map_err(|error| DocumentPresetError::Json {
+        context: error.to_string(),
+    })?;
+    if result.len() as u64 > MAX_DOCUMENT_BYTES {
+        return Err(DocumentPresetError::Limits {
+            context: "converted coverage-intent Preset exceeds size limit".into(),
+        });
+    }
+    Ok(result)
+}
+
+/// Adds approved new defaults only to recognized former source-free Preset configurations.
+/// Affected numeric artifacts are removed without changing desired Start/End coverage or donors
+/// for unrelated mark/region geometry. Ordinary project and Pattern decoders never call this.
+/// # Errors
+/// Returns JSON/size diagnostics without changing the original archive bytes.
+fn migrate_artistic_geometry_defaults(bytes: &[u8]) -> Result<Vec<u8>, DocumentPresetError> {
+    /// Identifies artifacts whose typed output construction changes at this schema transition.
+    fn affected(value: &Value) -> bool {
+        match value {
+            Value::Object(object) => {
+                matches!(
+                    object.get("kind").and_then(Value::as_str),
+                    Some(
+                        "guide_paths"
+                            | "parametric_paths"
+                            | "structural_paths"
+                            | "curve_motif_paths"
+                            | "connection_paths"
+                    )
+                ) || object.values().any(affected)
+            }
+            Value::Array(values) => values.iter().any(affected),
+            _ => false,
+        }
+    }
+    /// Inserts only required current intent fields, leaving every authored former field intact.
+    fn insert_defaults(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                match object.get("kind").and_then(Value::as_str) {
+                    Some(
+                        "guide_paths" | "parametric_paths" | "structural_paths"
+                        | "curve_motif_paths",
+                    ) => {
+                        object.insert("tone_sample_spacing".into(), json!({"multiplier":1.0}));
+                    }
+                    Some("connection_paths") => {
+                        object.insert("selection".into(), json!({"maximum_final_degree":null,"cycles":"allow","minimum_component_points":1}));
+                    }
+                    _ => {}
+                }
+                for child in object.values_mut() {
+                    insert_defaults(child);
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    insert_defaults(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut root: Value =
+        serde_json::from_slice(bytes).map_err(|error| DocumentPresetError::Json {
+            context: error.to_string(),
+        })?;
+    let configuration = root
+        .get_mut("configuration")
+        .ok_or_else(|| DocumentPresetError::Json {
+            context: "Preset configuration is missing".into(),
+        })?;
+    if let Some(entries) = configuration
+        .get_mut("saved_calibrations")
+        .and_then(Value::as_array_mut)
+    {
+        entries.retain(|entry| !affected(entry));
+    }
+    if configuration
+        .get("baseline_saved_calibration")
+        .is_some_and(affected)
+    {
+        configuration["baseline_saved_calibration"] = Value::Null;
+    }
+    insert_defaults(configuration);
+    let result = serde_json::to_vec(&root).map_err(|error| DocumentPresetError::Json {
+        context: error.to_string(),
+    })?;
+    if result.len() as u64 > MAX_DOCUMENT_BYTES {
+        return Err(DocumentPresetError::Limits {
+            context: "converted artistic geometry Preset exceeds size limit".into(),
+        });
+    }
+    Ok(result)
 }
 
 /// Opens one path once without following a final symlink and enforces a real byte limit.

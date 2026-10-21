@@ -9,7 +9,7 @@ mod tests;
 
 use super::*;
 use toniator_domain::{FrameRate, ProjectTiming};
-use toniator_io::video_output::{RenderWorkspace, VideoOutput};
+use toniator_io::video_output::{RenderWorkspace, VideoOutput, VideoStorageError};
 
 /// Captures the exact encoded stream expected from a job without redefining project timing.
 #[derive(Clone, Copy)]
@@ -69,7 +69,7 @@ pub struct VideoExportJob {
     options: VideoExportOptions,
 }
 
-/// Identifies a successfully finalized video and any actual temporary-cleanup limitation.
+/// Identifies published video with separate durability and temporary-cleanup warnings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VideoExportResult {
     pub file: PathBuf,
@@ -77,6 +77,17 @@ pub struct VideoExportResult {
     pub width: u32,
     pub height: u32,
     pub retained_intermediates: Option<PathBuf>,
+    pub cleanup_warning: Option<String>,
+    /// Reports a post-rename durability failure separately from owned temporary cleanup.
+    pub publication_warning: Option<String>,
+}
+
+/// Identifies a saved complete PNG copy with independent durability and recovery-cleanup warnings.
+/// Cleanup failure retains any remaining owned recovery workspace; it cannot undo publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PngSequenceRecoveryResult {
+    pub directory: PathBuf,
+    pub publication_warning: Option<String>,
     pub cleanup_warning: Option<String>,
 }
 
@@ -315,7 +326,8 @@ impl VideoRecovery {
     ///
     /// # Errors
     /// Returns cancellation, tool, file validation, storage or publication failures while retaining
-    /// PNGs. Successful publication reports any actual cleanup failure separately from file success.
+    /// PNGs. A post-rename durability warning follows the successful published-file/cleanup path;
+    /// it never offers Retry against an existing file. Cleanup warnings remain separate.
     pub fn retry(
         &mut self,
         tools: MediaTools,
@@ -372,7 +384,7 @@ impl VideoRecovery {
             cancelled,
         )?;
         check_cancelled(cancelled)?;
-        let file = output.publish().map_err(storage_error)?;
+        let (file, publication_warning) = resolve_video_publication(output.publish())?;
         let cleanup_warning = self.discard().err().map(|error| error.to_string());
         let retained_intermediates = self.frames_path();
         report(progress(
@@ -388,20 +400,23 @@ impl VideoRecovery {
             height: self.height,
             retained_intermediates,
             cleanup_warning,
+            publication_warning,
         })
     }
 
     /// Copies retained PNGs into a new ordinary sequence directory before releasing temporary files.
     ///
     /// # Errors
-    /// Retains originals on cancellation/copy/publication failure. A cleanup diagnostic identifies
-    /// the finalized destination when copying succeeds but original temporary files cannot be removed.
+    /// Rechecks cancellation after the final synchronous SavingPngs callback and retains originals
+    /// on cancellation/copy/prepublication failure. Complete publication returns saved success even
+    /// if the final durability barrier or cleanup fails, with independent warnings. Cleanup can be
+    /// partial; any remaining workspace is retained, without promising every original survives.
     pub fn save_png_sequence(
         &mut self,
         destination: &Path,
         cancelled: &AtomicBool,
         report: &(dyn Fn(VideoProgress) + Sync),
-    ) -> Result<PathBuf, ExportError> {
+    ) -> Result<PngSequenceRecoveryResult, ExportError> {
         check_cancelled(cancelled)?;
         let workspace = self.workspace.as_ref().ok_or_else(|| {
             ExportError::new("export.recovery", "rendered frames were already released")
@@ -426,12 +441,15 @@ impl VideoRecovery {
                 0,
             ));
         }
-        let path = writer.finish().map_err(|error| {
-            ExportError::new("export.finalize", error).at(None, Some(destination))
-        })?;
-        self.discard()
-            .map_err(|error| error.at(None, Some(destination)))?;
-        Ok(path)
+        check_cancelled(cancelled).map_err(|error| error.at(None, Some(destination)))?;
+        let (directory, publication_warning) =
+            resolve_sequence_publication(writer.finish(), destination)?;
+        let cleanup_warning = self.discard().err().map(|error| error.to_string());
+        Ok(PngSequenceRecoveryResult {
+            directory,
+            publication_warning,
+            cleanup_warning,
+        })
     }
 
     /// Explicitly removes only this job's known intermediate files and releases recovery state.
@@ -488,4 +506,70 @@ fn validate_destination(path: &Path, codec: VideoCodec) -> Result<(), ExportErro
         ));
     }
     Ok(())
+}
+
+
+/// Resolves actual storage publication truth before recovery cleanup and Complete reporting.
+/// # Errors
+/// Returns an ordinary storage failure only when the final file is not published.
+fn resolve_video_publication(
+    result: Result<PathBuf, VideoStorageError>,
+) -> Result<(PathBuf, Option<String>), ExportError> {
+    match result {
+        Ok(path) => Ok((path, None)),
+        Err(error) => resolve_video_publication_failure(
+            error.path().to_path_buf(),
+            error.published(),
+            error.to_string(),
+        ),
+    }
+}
+
+/// Projects the service's concrete final path, publication fact and diagnostic without a new policy.
+/// Published directory-sync failures remain success-with-warning; prepublication failures retain recovery.
+/// # Errors
+/// Returns export.storage with the original path when publication has not occurred.
+fn resolve_video_publication_failure(
+    path: PathBuf,
+    published: bool,
+    detail: String,
+) -> Result<(PathBuf, Option<String>), ExportError> {
+    if published {
+        Ok((path, Some(detail)))
+    } else {
+        Err(ExportError::new("export.storage", detail).at(None, Some(&path)))
+    }
+}
+
+#[cfg(test)]
+mod publication_projection_tests {
+    use super::*;
+    /// Exercises the actual production classifier's normal, late-published and prepublication paths.
+    /// IO source-host tests independently supply the real rename/sync-failure state authority.
+    /// # Panics
+    /// Panics on a warning/error classification that loses publication truth or its actual path.
+    #[test]
+    fn published_video_warning_preserves_actual_final_path() {
+        let path = PathBuf::from("owned-final-video.mkv");
+        assert_eq!(
+            resolve_video_publication(Ok(path.clone())).unwrap(),
+            (path.clone(), None)
+        );
+        let (file, warning) = resolve_video_publication_failure(
+            path.clone(),
+            true,
+            "injected final directory sync".into(),
+        )
+        .unwrap();
+        assert_eq!(file, path);
+        assert_eq!(warning.as_deref(), Some("injected final directory sync"));
+        let error = resolve_video_publication_failure(
+            path.clone(),
+            false,
+            "injected prepublication failure".into(),
+        )
+        .unwrap_err();
+        assert_eq!(error.stage, "export.storage");
+        assert_eq!(error.output.as_deref(), Some(path.as_path()));
+    }
 }

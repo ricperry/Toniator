@@ -25,7 +25,7 @@ use std::{
 use toniator_domain::{Document, DocumentSession, SourceReference};
 use toniator_io::{
     SourceBundle,
-    sequence::{SequenceFormat, SequenceManifest, SequenceWriter},
+    sequence::{SequenceError, SequenceFormat, SequenceManifest, SequenceWriter},
 };
 
 /// Describes job phases independently of preview tickets or authored document state.
@@ -66,13 +66,15 @@ pub struct SequenceExportJob {
     options: SequenceExportOptions,
 }
 
-/// Describes a fully finalized sequence; incomplete jobs return an error carrying their path.
+/// Describes a published complete sequence, optionally warning that final directory durability failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SequenceExportResult {
     pub directory: PathBuf,
     pub frame_count: u64,
     pub width: u32,
     pub height: u32,
+    /// Reports a failed durability barrier after the complete manifest is already published.
+    pub publication_warning: Option<String>,
 }
 
 /// Carries a stable export phase/frame diagnostic and any retained incomplete sequence location.
@@ -187,11 +189,14 @@ impl SequenceExportJob {
     ///
     /// The caller owns its worker and permits only one active job. This synchronous method never
     /// edits history; cancellation retains completed sequence frames under an incomplete manifest.
+    /// The synchronous Finalizing callback can cancel before the final publication boundary.
     /// Constructing the media provider inside this call keeps native decoders on their owner thread.
     ///
     /// # Errors
     /// Returns document/frame/source/storage/render/publication failures with the absolute frame
     /// and retained output path when applicable. No output directory is created before preflight.
+    /// A late sync failure after complete-manifest publication returns saved success plus a warning;
+    /// no cancellation/error is returned after that publication boundary.
     pub fn run(
         &self,
         tools: MediaTools,
@@ -264,7 +269,8 @@ impl SequenceExportJob {
                         request.raster_request = RasterRequest::Output {
                             background: RasterBackground::Transparent,
                             target: Some(
-                                OutputRasterTarget::new(1, 1).map_err(|error| ExportError::new("export.svg", error))?,
+                                OutputRasterTarget::new(1, 1)
+                                    .map_err(|error| ExportError::new("export.svg", error))?,
                             ),
                             antialiasing: RasterAntialiasing::Off,
                         };
@@ -287,7 +293,8 @@ impl SequenceExportJob {
                 let bytes = match self.options.format {
                     SequenceFormat::Png => encode_png(evaluated.result.raster())
                         .map_err(|error| ExportError::new("export.png", error))?,
-                    SequenceFormat::Svg => write_svg_cancellable_with_limits(evaluated.result.scene(),
+                    SequenceFormat::Svg => write_svg_cancellable_with_limits(
+                        evaluated.result.scene(),
                         SvgSerializationLimits::new(
                             self.options.limits.max_flattened_raster_edges(),
                         )
@@ -300,7 +307,8 @@ impl SequenceExportJob {
                         } else {
                             ExportError::new("export.svg", error)
                         }
-                    })?.into_bytes(),
+                    })?
+                    .into_bytes(),
                 };
                 check_cancelled(cancelled)?;
                 writer
@@ -331,9 +339,9 @@ impl SequenceExportJob {
             },
             true,
         );
-        let directory = writer
-            .finish()
-            .map_err(|error| ExportError::new("export.finalize", error).at(None, Some(&output)))?;
+        check_cancelled(cancelled).map_err(|error| error.at(None, Some(&output)))?;
+        let (directory, publication_warning) =
+            resolve_sequence_publication(writer.finish(), &output)?;
         observer.emit(
             ExportProgress {
                 phase: ExportPhase::Complete,
@@ -346,6 +354,7 @@ impl SequenceExportJob {
         );
         Ok(SequenceExportResult {
             directory,
+            publication_warning,
             frame_count: total,
             width,
             height,
@@ -499,5 +508,76 @@ fn source_failure(cancelled: &AtomicBool, error: crate::SourceError) -> ExportEr
         ExportError::new("export.cancelled", error)
     } else {
         ExportError::new("export.source", error)
+    }
+}
+
+
+/// Resolves actual complete-manifest publication for both direct sequence export and PNG recovery.
+/// # Errors
+/// Returns ordinary finalization failures only before completion is published, retaining the
+/// requested sequence directory as diagnostic metadata rather than a temporary manifest filename.
+fn resolve_sequence_publication(
+    result: Result<PathBuf, SequenceError>,
+    directory: &Path,
+) -> Result<(PathBuf, Option<String>), ExportError> {
+    match result {
+        Ok(path) => Ok((path, None)),
+        Err(error) => resolve_sequence_publication_failure(
+            error.path().to_path_buf(),
+            error.completion_published(),
+            error.to_string(),
+            directory,
+        ),
+    }
+}
+
+/// Projects storage-owned completion facts without inventing publication or rolling visible files back.
+/// # Errors
+/// Returns a finalization error with the requested directory only when completion is not published.
+fn resolve_sequence_publication_failure(
+    path: PathBuf,
+    completion_published: bool,
+    detail: String,
+    directory: &Path,
+) -> Result<(PathBuf, Option<String>), ExportError> {
+    if completion_published {
+        Ok((path, Some(detail)))
+    } else {
+        Err(ExportError::new("export.finalize", detail).at(None, Some(directory)))
+    }
+}
+
+#[cfg(test)]
+mod sequence_publication_tests {
+    use super::*;
+    /// Keeps actual publication path/warning facts separate from prepublication incomplete metadata.
+    /// # Panics
+    /// Panics if either classifier branch loses completion truth or changes the healthy result.
+    #[test]
+    fn complete_manifest_publication_is_saved_with_durability_warning() {
+        let directory = PathBuf::from("owned-sequence");
+        assert_eq!(
+            resolve_sequence_publication(Ok(directory.clone()), &directory).unwrap(),
+            (directory.clone(), None)
+        );
+        let (published, warning) = resolve_sequence_publication_failure(
+            directory.clone(),
+            true,
+            "directory sync detail".into(),
+            &directory,
+        )
+        .unwrap();
+        assert_eq!(published, directory);
+        assert_eq!(warning.as_deref(), Some("directory sync detail"));
+        let error = resolve_sequence_publication_failure(
+            directory.join(".manifest.partial"),
+            false,
+            "occupied metadata".into(),
+            &directory,
+        )
+        .unwrap_err();
+        assert_eq!(error.stage, "export.finalize");
+        assert_eq!(error.output, Some(directory));
+        assert!(!error.is_cancelled());
     }
 }

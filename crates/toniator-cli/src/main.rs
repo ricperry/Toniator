@@ -950,13 +950,14 @@ fn render_media(
 ///
 /// SVG serializes unchanged canonical geometry with a caller-owned work bound.
 /// PNG uses the earlier captured streaming consumer and cannot enter this vector write path.
-/// Cancellation is checked through serialization and again before file I/O.
+/// Cancellation is checked through serialization and retained-handle atomic publication.
+/// A published directory-sync failure is reported truthfully without claiming rollback.
 ///
 /// # Errors
 ///
 /// Returns stable rasterization, encoding, or filesystem output diagnostics.
 fn write_render_result(
-    output: &PathBuf,
+    output: &std::path::Path,
     format: OutputFormat,
     result: &toniator_engine::EvaluationResult,
     limits: EvaluationLimits,
@@ -978,8 +979,7 @@ fn write_render_result(
             )
             .map_err(render_error)?;
             check_cli_cancelled(cancelled)?;
-            std::fs::write(output, svg)
-                .map_err(|_| CliError::new("output", "could not write SVG output"))?;
+            publish_svg_output(output, svg.as_bytes(), cancelled)?;
         }
         OutputFormat::Video(_) => {
             return Err(CliError::new(
@@ -990,6 +990,57 @@ fn write_render_result(
     }
     Ok(())
 }
+
+/// Publishes already serialized SVG bytes through the shared adjacent-staging output authority.
+/// The immutable complete buffer is written to the retained handle; cancellation cannot truncate
+/// the prior destination. A directory-sync failure after rename remains explicitly published.
+/// # Errors
+/// Returns precise atomic output diagnostics, including truthful late synchronization warnings.
+fn publish_svg_output(
+    output: &std::path::Path,
+    bytes: &[u8],
+    cancelled: &AtomicBool,
+) -> Result<(), CliError> {
+    toniator_io::atomic_output::write_atomic_output(
+        output,
+        &|| cancelled.load(Ordering::Acquire),
+        |file| std::io::Write::write_all(file, bytes),
+    )
+    .map_err(|error| {
+        CliError::new(
+            "output",
+            if error.published() {
+                format!("SVG was written, but final folder synchronization failed: {error}")
+            } else {
+                error.to_string()
+            },
+        )
+    })
+}
+
+#[cfg(test)]
+mod svg_publication_tests {
+    use super::*;
+    /// Preserves complete serialized SVG bytes on overwrite and the prior file on cancellation.
+    /// # Panics
+    /// Panics on staging I/O, byte changes, or cancellation publishing a replacement.
+    #[test]
+    fn svg_atomic_overwrite_and_cancel_preserve_exact_bytes() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/validation/test-scratch")
+            .join(format!("cli-svg-publication-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("retained.svg");
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0 0L1 0L0 1Z\"/></svg>\n";
+        std::fs::write(&path, b"prior sentinel").unwrap();
+        publish_svg_output(&path, svg, &AtomicBool::new(false)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), svg);
+        assert!(publish_svg_output(&path, b"replacement", &AtomicBool::new(true)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), svg);
+        assert_eq!(std::fs::read_dir(root).unwrap().count(), 1);
+    }
+}
+
 
 fn is_toniator_path(path: &std::path::Path) -> bool {
     path.extension()

@@ -16,14 +16,15 @@ use toniator_render::GeometryOutput;
 
 use crate::{
     Bounds, CanvasSpec, DocumentRealization, EvaluationError, EvaluationLimits, GridInspectRequest,
-    Point2, RegionProducerCacheDiagnostics, SourceField, cache_stroke_realization,
+    Point2, RegionProducerCacheDiagnostics, SourceField, cache_stroke_realization, cache_connection_realization,
     completed_region_diagnostics, shared_sampled_paints, voronoi_region_site_usage,
 };
 
 /// Original source-derived topology retained intact across constant probes and the final sample.
 pub(crate) enum PreparedCoverageOutput {
     Motif {
-        rows: Vec<CurvePath>,
+        rows: Vec<toniator_patterns::CurveMotifToneRow>,
+        tone_interval: f64,
         motif_segment_count: usize,
         structure_id: toniator_domain::AuthoredStructureId,
         style: toniator_domain::PathStrokeStyle,
@@ -114,7 +115,7 @@ pub(crate) fn prepare(
                 guide_mechanism_id,
                 dimensions,
             } => {
-                if definition.coverage.guard_steps == 0 {
+                if definition.coverage.guard_steps == 0 && family.family().generic_guides.is_some() {
                     return Err(EvaluationError::new(
                         "region.guide_faces.coverage.guard_steps",
                         "guide-face regions require guard coverage",
@@ -185,12 +186,12 @@ pub(crate) fn prepare(
                 definition.coverage.guard_steps,
                 &plan.ordered_outputs,
             )?,
-            support_radius: crate::required_support_radius_for_outputs(
+            support_radius: crate::required_support_radius_for_output(
                 document.canvas(),
                 effective,
                 definition,
                 &plan.family,
-                &plan.ordered_outputs,
+                capability,
             )?,
             max_family_candidates: limits.max_family_candidates(),
         };
@@ -203,20 +204,8 @@ pub(crate) fn prepare(
             is_cancelled,
         )
         .map_err(EvaluationError::from_pipeline)?;
-        let members = maze
-            .source_sites
-            .iter()
-            .map(|site| (site.id, site.source.id))
-            .collect::<BTreeMap<_, _>>();
-        let usage = SiteUsageSet::new(
-            family.site_set().product_mechanism_id(),
-            maze.retained_walls
-                .iter()
-                .flat_map(|wall| [wall.id.first, wall.id.second])
-                .filter_map(|vertex| members.get(&vertex).copied())
-                .collect(),
-        )
-        .map_err(EvaluationError::from_pipeline)?;
+        let usage = toniator_patterns::maze_site_usage_for_family_cancellable(family, &maze, is_cancelled)
+            .map_err(EvaluationError::from_pipeline)?;
         return Ok(Some(PreparedCoverageOutput::Maze {
             maze: Box::new(maze),
             style,
@@ -250,21 +239,18 @@ pub(crate) fn prepare(
             is_cancelled,
         )
         .map_err(EvaluationError::from_pipeline)?;
-        let paths = toniator_patterns::build_connection_paths_cancellable(
+        let paths = toniator_patterns::build_connection_paths_with_selection_cancellable(
             capability.layer_id,
             &graph,
             &resolved_program,
+            capability.connection_selection().expect("connection capability owns selection"),
             limits.connection_path_limits(),
             is_cancelled,
         )
         .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
         let usage = SiteUsageSet::new(
             family.site_set().product_mechanism_id(),
-            paths
-                .selected_edges
-                .iter()
-                .flat_map(|edge| [edge.first, edge.second])
-                .collect(),
+            paths.used_site_ids_cancellable(is_cancelled).map_err(|error| EvaluationError::new(error.path(), error.message()))?,
         )
         .map_err(EvaluationError::from_pipeline)?;
         return Ok(Some(PreparedCoverageOutput::Connection {
@@ -301,16 +287,18 @@ pub(crate) fn prepare(
                 "Curve Motif requires a valid open path",
             )
         })?;
-        let rows = toniator_patterns::chain_curve_motif_rows_cancellable(
-            family.site_set(),
+        let rows = toniator_patterns::prepare_curve_motif_tone_rows_cancellable(
+            family,
             &motif,
             mirror_alternate_rows,
             alternate_row_phase,
             is_cancelled,
+            &|_,_|{},
         )
         .map_err(EvaluationError::from_pipeline)?;
         return Ok(Some(PreparedCoverageOutput::Motif {
             rows,
+            tone_interval: family.tone_sample_interval(capability.tone_sample_spacing().ok_or(EvaluationError::new("realization.tone.applicability","motif requires tone spacing"))?).map_err(EvaluationError::from_pipeline)?,
             motif_segment_count: motif.segments().len(),
             structure_id,
             style,
@@ -344,6 +332,7 @@ impl PreparedCoverageOutput {
         match self {
             Self::Motif {
                 rows,
+                tone_interval,
                 motif_segment_count,
                 structure_id,
                 style,
@@ -357,8 +346,8 @@ impl PreparedCoverageOutput {
                         "motif needs connected response",
                     ));
                 };
-                let output = toniator_patterns::realize_prechained_curve_motif_strokes_with_response_cancellable(
-                    family_fingerprint, rows, *motif_segment_count, *structure_id, *style,
+                let output = toniator_patterns::realize_prepared_curve_motif_tone_strokes_with_response_cancellable(
+                    family_fingerprint, rows, *tone_interval, *motif_segment_count, *structure_id, *style,
                     *mirror_alternate_rows, *alternate_row_phase, source, canvas, mapping,
                     StrokeResponse { minimum_thickness: response.minimum_thickness,
                         maximum_thickness: response.maximum_thickness, bias: response.bias },
@@ -408,7 +397,12 @@ impl PreparedCoverageOutput {
                     }, *style, limits.max_stroke_profile_samples(),
                     limits.max_stroke_outline_segments(), input, is_cancelled,
                 ).map_err(EvaluationError::from_pipeline)?;
-                Ok(GeometryOutput::CanonicalStrokes(output.strokes))
+                Ok(GeometryOutput::CanonicalConnections(
+                    toniator_patterns::CanonicalConnections {
+                        strokes: output.strokes,
+                        isolated_points: output.isolated_points,
+                    },
+                ))
             }
             Self::Regions {
                 untreated,
@@ -470,6 +464,7 @@ impl PreparedCoverageOutput {
         match self {
             Self::Motif {
                 rows,
+                tone_interval,
                 motif_segment_count,
                 structure_id,
                 style,
@@ -483,8 +478,8 @@ impl PreparedCoverageOutput {
                         "motif needs connected response",
                     ));
                 };
-                let output = toniator_patterns::realize_prechained_curve_motif_strokes_with_response_cancellable(
-                    family_fingerprint, rows, *motif_segment_count, *structure_id, *style,
+                let output = toniator_patterns::realize_prepared_curve_motif_tone_strokes_with_response_cancellable(
+                    family_fingerprint, rows, *tone_interval, *motif_segment_count, *structure_id, *style,
                     *mirror_alternate_rows, *alternate_row_phase, source, canvas, mapping,
                     StrokeResponse { minimum_thickness: response.minimum_thickness,
                         maximum_thickness: response.maximum_thickness, bias: response.bias },
@@ -541,7 +536,7 @@ impl PreparedCoverageOutput {
                     }, *style, limits.max_stroke_profile_samples(),
                     limits.max_stroke_outline_segments(), input, is_cancelled,
                 ).map_err(EvaluationError::from_pipeline)?;
-                Ok((cache_stroke_realization(output), usage.clone()))
+                Ok((cache_connection_realization(output), usage.clone()))
             }
             Self::Regions {
                 untreated,

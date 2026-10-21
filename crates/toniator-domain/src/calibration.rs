@@ -63,16 +63,150 @@ impl CalibrationBinding {
         format!("{reference_profile}{suffix}")
     }
 
+    /// Reports persistent canvas-covering intent through structural wrappers without deriving geometry.
+    /// This participates in producer provenance and exact donor eligibility, never labels or IDs.
+    pub fn requires_canvas_coverage(&self) -> bool {
+        /// Reads the single structural source through every accepted recipe wrapper.
+        fn covers(structure: &PatternStructureRecipe) -> bool {
+            match structure {
+                PatternStructureRecipe::ParametricCurve {
+                    spiral_coverage, ..
+                } => *spiral_coverage == SpiralCoveragePolicy::CoverCanvas,
+                PatternStructureRecipe::AuthoredResources { definition, .. }
+                | PatternStructureRecipe::ConnectionPaths { definition, .. }
+                | PatternStructureRecipe::MazeWalls { definition, .. }
+                | PatternStructureRecipe::AuthoredClosedShapeMarks { definition, .. }
+                | PatternStructureRecipe::CurveMotifPaths { definition, .. }
+                | PatternStructureRecipe::VoronoiRegions { definition }
+                | PatternStructureRecipe::GuideFaceRegions { definition, .. }
+                | PatternStructureRecipe::OrderedOutputs { definition, .. } => covers(definition),
+                _ => false,
+            }
+        }
+        covers(&self.recipe.structure)
+    }
+
+    /// Identifies actual Maze drawing outputs through typed wrappers, independent of product labels.
+    pub fn uses_maze_walls(&self) -> bool {
+        /// Visits accepted structural/output wrappers without deriving geometry or changing recipe intent.
+        fn maze(structure: &PatternStructureRecipe) -> bool {
+            match structure {
+                PatternStructureRecipe::MazeWalls { .. } => true,
+                PatternStructureRecipe::OrderedOutputs {
+                    definition,
+                    outputs,
+                } => {
+                    maze(definition)
+                        || outputs.iter().any(|output| {
+                            matches!(output, PatternOutputRealizationRecipe::MazeWalls { .. })
+                        })
+                }
+                PatternStructureRecipe::AuthoredResources { definition, .. }
+                | PatternStructureRecipe::ConnectionPaths { definition, .. }
+                | PatternStructureRecipe::AuthoredClosedShapeMarks { definition, .. }
+                | PatternStructureRecipe::CurveMotifPaths { definition, .. }
+                | PatternStructureRecipe::VoronoiRegions { definition }
+                | PatternStructureRecipe::GuideFaceRegions { definition, .. } => maze(definition),
+                _ => false,
+            }
+        }
+        maze(&self.recipe.structure)
+    }
+
+    /// Identifies authored open guide cores whose derived exterior uses the current ray coverage producer.
+    /// Fixed parametric sources and authored marks/motifs do not acquire this revision.
+    pub fn uses_authored_guide_coverage(&self) -> bool {
+        /// Reads only structural guide prototypes through accepted recipe wrappers.
+        fn authored(structure: &PatternStructureRecipe) -> bool {
+            match structure {
+                PatternStructureRecipe::GenericGuides { dimensions, .. } => {
+                    dimensions.iter().any(|dimension| {
+                        matches!(
+                            dimension.prototype,
+                            crate::GenericGuidePrototypeDraft::AuthoredOpenPathReference { .. }
+                        )
+                    })
+                }
+                PatternStructureRecipe::AuthoredResources { definition, .. }
+                | PatternStructureRecipe::ConnectionPaths { definition, .. }
+                | PatternStructureRecipe::MazeWalls { definition, .. }
+                | PatternStructureRecipe::AuthoredClosedShapeMarks { definition, .. }
+                | PatternStructureRecipe::CurveMotifPaths { definition, .. }
+                | PatternStructureRecipe::VoronoiRegions { definition }
+                | PatternStructureRecipe::GuideFaceRegions { definition, .. }
+                | PatternStructureRecipe::OrderedOutputs { definition, .. } => authored(definition),
+                _ => false,
+            }
+        }
+        authored(&self.recipe.structure)
+    }
+
+    /// Identifies only ordinary Voronoi outputs backed by a complete typed straight intersection family.
+    /// Curved, finite parametric, Along Guides and stochastic populations keep their own contracts.
+    pub fn uses_straight_intersection_voronoi(&self) -> bool {
+        /// Reads the actual structural source without inferring topology from output names.
+        fn straight(structure: &PatternStructureRecipe) -> bool {
+            match structure {
+                PatternStructureRecipe::StraightGrid(_) => true,
+                PatternStructureRecipe::GeneralizedStraightGuides {
+                    product: crate::GeneralizedSiteProductDraft::Intersections { .. },
+                    ..
+                } => true,
+                PatternStructureRecipe::AuthoredResources { definition, .. }
+                | PatternStructureRecipe::ConnectionPaths { definition, .. }
+                | PatternStructureRecipe::MazeWalls { definition, .. }
+                | PatternStructureRecipe::AuthoredClosedShapeMarks { definition, .. }
+                | PatternStructureRecipe::CurveMotifPaths { definition, .. }
+                | PatternStructureRecipe::VoronoiRegions { definition }
+                | PatternStructureRecipe::GuideFaceRegions { definition, .. }
+                | PatternStructureRecipe::OrderedOutputs { definition, .. } => straight(definition),
+                _ => false,
+            }
+        }
+        /// Reads active drawing output authority through resource/output wrappers.
+        fn voronoi(structure: &PatternStructureRecipe) -> bool {
+            match structure {
+                PatternStructureRecipe::VoronoiRegions { .. } => true,
+                PatternStructureRecipe::OrderedOutputs { outputs, .. } => outputs
+                    .iter()
+                    .any(|output| matches!(output, PatternOutputRealizationRecipe::VoronoiRegions)),
+                PatternStructureRecipe::AuthoredResources { definition, .. } => voronoi(definition),
+                _ => false,
+            }
+        }
+        straight(&self.recipe.structure) && voronoi(&self.recipe.structure)
+    }
+
     /// Recognizes former numeric companions affected by a corrected typed geometry producer.
     ///
-    /// Only known unmarked reference profiles qualify; malformed bindings and unknown future
-    /// profile identifiers never authorize removal or conversion.
+    /// Only recognized reference tiers and exact prior guide/inset suffixes qualify;
+    /// malformed bindings, partial artistic markers and unknown future strings never authorize removal.
     pub fn is_obsolete_geometry_profile(&self, profile: &str) -> bool {
-        !self.geometry_profile_suffix().is_empty()
-            && (self.supports_strict_reference_profile(profile)
-                || (profile == CALIBRATION_PROFILE_MEAN
+        let current = self.geometry_profile_suffix();
+        if current.is_empty() {
+            return false;
+        }
+        let former_suffix = self.base_geometry_profile_suffix();
+        let previous_suffix = self.geometry_profile_suffix_before_coverage();
+        let recognized = [
+            CALIBRATION_PROFILE,
+            CALIBRATION_PROFILE_64,
+            CALIBRATION_PROFILE_GUIDE_FACES,
+            CALIBRATION_PROFILE_GUIDE_FACES_64,
+            CALIBRATION_PROFILE_SEEDED,
+            CALIBRATION_PROFILE_SEEDED_64,
+            CALIBRATION_PROFILE_ROUND_INTERIOR,
+            CALIBRATION_PROFILE_MEAN,
+        ];
+        recognized.into_iter().any(|base| {
+            let tier = self.supports_strict_reference_profile(base)
+                || (base == CALIBRATION_PROFILE_MEAN
                     && self.has_variation_seed()
-                    && self.supports_stochastic_mean()))
+                    && self.supports_stochastic_mean());
+            tier && (profile == base
+                || (current != former_suffix && profile == format!("{base}{former_suffix}"))
+                || (current != previous_suffix && profile == format!("{base}{previous_suffix}")))
+        })
     }
 
     /// Classifies strict reference tiers by their existing typed producer and window authority.
@@ -91,33 +225,70 @@ impl CalibrationBinding {
         }
     }
 
-    /// Derives corrected producer provenance from the authoritative typed recipe once.
-    fn geometry_profile_suffix(&self) -> &'static str {
-        /// Finds authored guide prototypes through typed structural wrappers without using labels.
-        fn authored_guides(structure: &PatternStructureRecipe) -> bool {
+    /// Derives current output-producer provenance from the normalized typed recipe.
+    /// Existing guide/inset markers remain in order before the artistic producer revision.
+    fn geometry_profile_suffix_before_coverage(&self) -> String {
+        /// Reads actual drawing outputs without treating the structural family as a drawing mode.
+        fn artistic(structure: &PatternStructureRecipe) -> (bool, bool) {
             match structure {
-                PatternStructureRecipe::GenericGuides { dimensions, .. } => {
-                    dimensions.iter().any(|dimension| {
+                PatternStructureRecipe::AuthoredResources { definition, .. } => artistic(definition),
+                PatternStructureRecipe::ConnectionPaths { .. } => (false, true),
+                PatternStructureRecipe::CurveMotifPaths { .. }
+                | PatternStructureRecipe::ParametricCurve { sites: None, .. } => (true, false),
+                PatternStructureRecipe::OrderedOutputs { outputs, .. } => (
+                    outputs.iter().any(|output| {
                         matches!(
-                            dimension.prototype,
-                            crate::GenericGuidePrototypeDraft::AuthoredOpenPathReference { .. }
+                            output,
+                            PatternOutputRealizationRecipe::StructuralPaths { .. }
+                                | PatternOutputRealizationRecipe::CurveMotifPaths { .. }
                         )
-                    })
-                }
-                PatternStructureRecipe::AuthoredResources { definition, .. }
-                | PatternStructureRecipe::ConnectionPaths { definition, .. }
-                | PatternStructureRecipe::MazeWalls { definition, .. }
-                | PatternStructureRecipe::AuthoredClosedShapeMarks { definition, .. }
-                | PatternStructureRecipe::CurveMotifPaths { definition, .. }
-                | PatternStructureRecipe::VoronoiRegions { definition }
-                | PatternStructureRecipe::GuideFaceRegions { definition, .. }
-                | PatternStructureRecipe::OrderedOutputs { definition, .. } => {
-                    authored_guides(definition)
-                }
-                _ => false,
+                    }),
+                    outputs.iter().any(|output| {
+                        matches!(
+                            output,
+                            PatternOutputRealizationRecipe::ConnectionPaths { .. }
+                        )
+                    }),
+                ),
+                _ => (false, false),
             }
         }
-        let guide = authored_guides(&self.recipe.structure);
+        let (tone, connections) = artistic(&self.recipe.structure);
+        let mut suffix = self.base_geometry_profile_suffix().to_owned();
+        if tone {
+            suffix.push_str("+anchored-tone-v1");
+        }
+        if connections {
+            suffix.push_str("+connection-selection-v2");
+        }
+        suffix
+    }
+
+    /// Adds all current typed coverage producers to the single existing artistic/base suffix authority.
+    /// Exact prior suffix recognition excludes these coverage revisions together, including mixed outputs.
+    fn geometry_profile_suffix(&self) -> String {
+        let mut suffix = self.geometry_profile_suffix_before_coverage();
+        if self.requires_canvas_coverage() {
+            suffix.push_str("+cover-envelope-v1");
+        }
+        if self.uses_maze_walls() {
+            suffix.push_str("+maze-guard-topology-v2");
+        }
+        if self.uses_guide_faces() {
+            suffix.push_str("+cell-reach-v1");
+        }
+        if self.uses_authored_guide_coverage() {
+            suffix.push_str("+guide-ray-coverage-v1");
+        }
+        if self.uses_straight_intersection_voronoi() {
+            suffix.push_str("+voronoi-cell-reach-v1");
+        }
+        suffix
+    }
+
+    /// Derives previously current guide/inset provenance for exact source-free cache recognition.
+    fn base_geometry_profile_suffix(&self) -> &'static str {
+        let guide = self.uses_authored_guide_coverage();
         let inset = self.recipe.output_settings.iter().any(|setting| matches!(&setting.response,
             PatternGeometryResponse::Regions(response) if response.algorithm == crate::RegionResizeAlgorithm::UniformOffset));
         match (guide, inset) {

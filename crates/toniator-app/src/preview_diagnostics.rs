@@ -69,7 +69,9 @@ impl Diagnostic {
     /// Classifies only exact audited producer codes; limits/numerics/unknown aliases are software failures.
     pub(crate) fn cause(&self) -> Cause {
         match self.code.as_str() {
-            "curve.path.allocation" | "coverage.curved_guides.intersections.allocation" => {
+            "curve.path.allocation" | "coverage.curved_guides.intersections.allocation"
+            | "realization.tone.allocation" | "curve.offset.allocation"
+            | "connection.selection.allocation" | "connection.singleton.allocation" => {
                 Cause::GeometryMemory
             }
             "source.allocation"
@@ -353,6 +355,8 @@ mod tests {
         for code in [
             "raster.allocation",
             "curve.path.count_overflow",
+            "realization.tone.count_overflow",
+            "curve.offset.count_overflow",
             "coverage.curved_guides.intersections.addressability",
             "raster.flatten.numeric",
             "source.decode",
@@ -364,6 +368,8 @@ mod tests {
         }
         for (code, cause) in [
             ("curve.path.allocation", Cause::GeometryMemory),
+            ("realization.tone.allocation", Cause::GeometryMemory),
+            ("curve.offset.allocation", Cause::GeometryMemory),
             ("source.allocation", Cause::SourceMemory),
             ("raster.buffer.allocation", Cause::PreviewMemory),
         ] {
