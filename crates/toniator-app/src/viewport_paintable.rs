@@ -20,6 +20,7 @@ mod imp {
     #[derive(Default)]
     pub struct ViewportPaintable {
         pub(super) image: OnceCell<Image>,
+        pub(super) observed: OnceCell<crate::preview_measurement::Target>,
     }
 
     #[glib::object_subclass]
@@ -43,7 +44,9 @@ mod imp {
                 return self.obj().clone().upcast();
             }
             let snapshot = gtk::Snapshot::new();
-            self.obj().snapshot(&snapshot, image.width, image.height);
+            crate::preview_measurement::offscreen(|| {
+                self.obj().snapshot(&snapshot, image.width, image.height)
+            });
             snapshot
                 .to_paintable(Some(&gtk::graphene::Size::new(
                     image.width as f32,
@@ -151,6 +154,9 @@ mod imp {
                 &gtk::graphene::Rect::new(x * scale_x, y * scale_y, w * scale_x, h * scale_y),
             );
             snapshot.pop();
+            if let Some(target) = self.observed.get() {
+                crate::preview_measurement::draw(crate::preview_measurement::Draw::Exact(*target));
+            }
         }
     }
 }
@@ -162,6 +168,10 @@ glib::wrapper! {
 }
 
 impl ViewportPaintable {
+    /// Associates immutable exact-texture acceptance facts for opt-in live Canvas observation only.
+    pub(super) fn observe_exact(&self, target: crate::preview_measurement::Target) {
+        let _ = self.imp().observed.set(target);
+    }
     /// Captures engine-certified sparse textures while retaining the ordinary image for holes.
     pub(super) fn with_tiles(
         texture: gdk::Texture,

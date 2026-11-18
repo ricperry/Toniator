@@ -28,6 +28,23 @@ For development, `cargo run -p toniator-app` builds and launches the application
 For a headless build, use `cargo build --release --locked -p toniator-cli`;
 GTK and Blueprint are unnecessary, but the native `dav1d` dependency still applies.
 
+The app enables the `fast-preview` Cargo feature by default. This
+builds the pinned Vello/wgpu Vulkan consumer; GPU initialization is lazy, and each
+window still starts with Accurate CPU preview. Fast needs a supported Vulkan
+adapter/driver and an eligible scene/target; refusal uses Accurate CPU fallback.
+To build the GTK app without Vello/wgpu support:
+
+```bash
+cargo build --release --locked -p toniator-app --no-default-features
+```
+
+Build the CLI separately with the headless command above to retain its independent
+CPU-only dependency boundary. The production GPU dependencies are pinned by
+Cargo.lock, including the Vello git revision. Run `cargo fetch --locked` while
+network access is available before an offline build; retain both Cargo's registry
+and git caches. The GNOME SDK packaging build uses that complete Cargo home.
+See [preview measurements and limits](PERFORMANCE.md#2026-11-02-development-fast--accurate-preview).
+
 For the verified native Windows development build and its current limits, see
 [Windows build notes](windows-build.md).
 
@@ -48,7 +65,7 @@ Use an `.svg` output filename for vector export. Render a saved project using
 its stored settings with `toniator render -i artwork.toniator -o artwork.svg`.
 Run `toniator --help` or `toniator render --help` for the supported commands.
 
-In an AppImage, prepend `./Toniator-0.4.6-x86_64.AppImage --cli` in place of
+In an AppImage, prepend `./Toniator-0.4.7-x86_64.AppImage --cli` in place of
 `toniator`. The Flatpak CLI is available through
 `flatpak run --command=toniator io.github.ricperry.Toniator`; direct CLI file paths must be
 accessible inside its sandbox.

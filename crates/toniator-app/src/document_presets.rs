@@ -350,6 +350,7 @@ pub(crate) fn choose_builtin(state: &Rc<RefCell<AppState>>) {
         (id, capture, app.window.clone())
     };
     let window = gtk::Window::builder()
+        .destroy_with_parent(true)
         .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Select document preset")
         .transient_for(&parent)
@@ -1092,6 +1093,8 @@ fn confirm_overwrite(
 /// Shows cancellable read/preparation progress in a transient native GTK window.
 fn show_progress(state: &Rc<RefCell<AppState>>, id: RequestId, message: &str) {
     let window = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title(message)
         .transient_for(&state.borrow().window)
         .modal(true)

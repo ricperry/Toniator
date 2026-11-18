@@ -1082,6 +1082,78 @@ fn area_grid_readback_bounds(
     mapped.iter().all(|v| v.is_finite()).then_some(mapped)
 }
 
+/// Builds owned integer-segment storage with the existing checked area options and solver.
+/// The caller supplies the already-authoritative common adapter and original capacity policy.
+fn area_overlay_builder(
+    adapter: FloatPointAdapter<AreaPoint, i64>,
+    capacity: usize,
+) -> FloatOverlay<AreaPoint, i64> {
+    let mut options = OverlayOptions::<f64, i64>::default();
+    options.min_output_area = 0.0;
+    options.clean_result = false;
+    FloatOverlay::<AreaPoint, i64>::new_custom(
+        adapter,
+        options,
+        Solver {
+            precision: Precision::ABSOLUTE,
+            ..Solver::AUTO
+        },
+        capacity,
+    )
+}
+
+/// Creates the original clipped-run builder with capacity four on the same common grid.
+/// # Errors
+/// Returns the existing clip-grid precision diagnostic without changing the adapter or tolerance.
+fn clipped_area_overlay(rect: FloatRect<f64>) -> Result<FloatOverlay<AreaPoint, i64>, RenderError> {
+    let adapter =
+        FloatPointAdapter::<AreaPoint, i64>::try_with_scale_conservative(rect, AREA_BOOLEAN_SCALE)
+            .map_err(|_| {
+                area_error(
+                    "raster.area.precision",
+                    "clip grid cannot represent area bounds",
+                )
+            })?;
+    Ok(area_overlay_builder(adapter, 4))
+}
+
+/// Copies a completed positive fill to the original global union builder, then releases floats.
+/// Contour order, exact edge-count reservation/overflow and the single checked certificate remain unchanged.
+/// # Errors
+/// Returns the original cancellation, precision, edge-count or checked Boolean diagnostic.
+fn area_owned_union(
+    shapes: AreaShapes,
+    rect: FloatRect<f64>,
+    work: &mut RasterWork<'_>,
+    omissions: &mut AreaOmissionBudget,
+) -> Result<AreaShapes, RenderError> {
+    work.check()?;
+    let adapter =
+        FloatPointAdapter::<AreaPoint, i64>::try_with_scale_conservative(rect, AREA_BOOLEAN_SCALE)
+            .map_err(|_| {
+                area_error(
+                    "raster.area.precision",
+                    "area Boolean grid cannot represent geometry bounds",
+                )
+            })?;
+    let edge_count = shapes
+        .iter()
+        .flat_map(|part| part.iter())
+        .try_fold(0_usize, |sum, contour| sum.checked_add(contour.len()))
+        .ok_or(area_error("raster.area.work", "area edge count overflows"))?;
+    let mut overlay =
+        area_overlay_builder(adapter, edge_count).unsafe_add_source(&shapes, ShapeType::Subject);
+    drop(shapes);
+    area_checked_overlay(
+        &mut overlay,
+        OverlayRule::Subject,
+        FillRule::NonZero,
+        work,
+        omissions,
+        None,
+    )
+}
+
 /// Applies one typed fill with bounded checked retries on the run's common integer grid.
 ///
 /// # Errors
@@ -1104,13 +1176,6 @@ fn area_overlay(
                     "area Boolean grid cannot represent geometry bounds",
                 )
             })?;
-    let mut options = OverlayOptions::<f64, i64>::default();
-    options.min_output_area = 0.0;
-    options.clean_result = false;
-    let solver = Solver {
-        precision: Precision::ABSOLUTE,
-        ..Solver::AUTO
-    };
     let edge_count = shape
         .iter()
         .flat_map(|part| part.iter())
@@ -1122,8 +1187,7 @@ fn area_overlay(
         visible,
     });
     let mut overlay =
-        FloatOverlay::<AreaPoint, i64>::new_custom(adapter, options, solver, edge_count)
-            .unsafe_add_source(shape, ShapeType::Subject);
+        area_overlay_builder(adapter, edge_count).unsafe_add_source(shape, ShapeType::Subject);
     area_checked_overlay(
         &mut overlay,
         OverlayRule::Subject,
@@ -1219,7 +1283,11 @@ fn area_checked_overlay(
     Ok(shapes)
 }
 
-/// Normalizes every primitive independently, then unions their already-positive fills.
+/// Consumes temporary contours through the unchanged common-grid normalization and global overlay.
+///
+/// Raw contours are released after normalization. Clipped consumers copy normalized contours into
+/// one owned global builder in original order; unclipped consumers preserve exact reservation and
+/// release positive floats after their integer edges are copied. No graph, certificate or debt is reset.
 ///
 /// Independently grid-collapsed contours consume the layer's absolute fill-error budget even
 /// beside retained paint. Checked split-mutation certificates share that same cumulative budget.
@@ -1233,35 +1301,40 @@ fn area_checked_overlay(
 /// Returns cancellation, precision, allocation or Boolean diagnostics without painting partial pixels.
 /// Already incurred local recovery debt is charged once for every primitive, independently of
 /// healthy geometry or holes; potential circle/subgrid loss retains its existing separate semantics.
-fn normalize_and_union(
-    raw: &[RawAreaPrimitive],
+fn normalize_owned_and_union(
+    mut raw: impl AsMut<[RawAreaPrimitive]>,
     clip: Option<[f64; 4]>,
     work: &mut RasterWork<'_>,
     omissions: &mut AreaOmissionBudget,
     visible: Option<[f64; 4]>,
 ) -> Result<AreaShapes, RenderError> {
-    if raw.is_empty() {
+    let raw_slice = raw.as_mut();
+    if raw_slice.is_empty() {
         return Ok(Vec::new());
     }
-    for primitive in raw {
+    for primitive in raw_slice.iter() {
         omissions.record_incurred(primitive.incurred_area_error_bound)?;
     }
     let mut omitted = AreaSum::default();
-    for primitive in raw.iter().filter(|primitive| primitive.shape.is_empty()) {
+    for primitive in raw_slice.iter().filter(|primitive| primitive.shape.is_empty()) {
         omitted.add(primitive.omitted_area_bound);
     }
-    if !raw.iter().any(|primitive| !primitive.shape.is_empty()) {
+    if !raw_slice.iter().any(|primitive| !primitive.shape.is_empty()) {
         omissions.record(omitted.value())?;
         return Ok(Vec::new());
     }
-    let rect = area_adapter(raw, clip, work)?;
+    let rect = area_adapter(raw_slice, clip, work)?;
     let mut positive = Vec::new();
-    for primitive in raw.iter().filter(|primitive| !primitive.shape.is_empty()) {
+    let mut combined = None;
+    for primitive in raw_slice
+        .iter_mut()
+        .filter(|primitive| !primitive.shape.is_empty())
+    {
+        let shape = std::mem::take(&mut primitive.shape);
         work.check()?;
-        let mut bound =
-            area_collapsed_contour_bound(&primitive.shape, primitive.fill_rule, rect, work)?;
+        let mut bound = area_collapsed_contour_bound(&shape, primitive.fill_rule, rect, work)?;
         let normalized = area_overlay(
-            std::slice::from_ref(&primitive.shape),
+            std::slice::from_ref(&shape),
             rect,
             primitive.fill_rule,
             work,
@@ -1269,27 +1342,31 @@ fn normalize_and_union(
             visible,
         )?;
         let exact_empty = normalized.is_empty()
-            && primitive.shape.len() == 2
-            && exact_contours_cancel(
-                &primitive.shape[0],
-                &primitive.shape[1],
-                primitive.fill_rule,
-                work,
-            )?;
+            && shape.len() == 2
+            && exact_contours_cancel(&shape[0], &shape[1], primitive.fill_rule, work)?;
         if normalized.is_empty() && !exact_empty {
             bound = bound
                 .max(primitive.omitted_area_bound)
-                .max(area_perturbation_bound(&primitive.shape, work)?);
+                .max(area_perturbation_bound(&shape, work)?);
         }
         omitted.add(bound);
-        positive.try_reserve(normalized.len()).map_err(|_| {
-            area_error(
-                "raster.allocation",
-                "normalized area shape allocation failed",
-            )
-        })?;
-        positive.extend(normalized);
+        if clip.is_some() {
+            let overlay = match combined.take() {
+                Some(overlay) => overlay,
+                None => clipped_area_overlay(rect)?,
+            };
+            combined = Some(overlay.unsafe_add_source(&normalized, ShapeType::Subject));
+        } else {
+            positive.try_reserve(normalized.len()).map_err(|_| {
+                area_error(
+                    "raster.allocation",
+                    "normalized area shape allocation failed",
+                )
+            })?;
+            positive.extend(normalized);
+        }
     }
+    drop(raw);
     omissions.record(omitted.value())?;
     work.check()?;
     if let Some([left, top, right, bottom]) = clip {
@@ -1300,30 +1377,11 @@ fn normalize_and_union(
             [right, bottom],
             [left, bottom],
         ]]];
-        let adapter = FloatPointAdapter::<AreaPoint, i64>::try_with_scale_conservative(
-            rect,
-            AREA_BOOLEAN_SCALE,
-        )
-        .map_err(|_| {
-            area_error(
-                "raster.area.precision",
-                "clip grid cannot represent area bounds",
-            )
-        })?;
-        let mut options = OverlayOptions::<f64, i64>::default();
-        options.min_output_area = 0.0;
-        options.clean_result = false;
-        let mut overlay = FloatOverlay::<AreaPoint, i64>::new_custom(
-            adapter,
-            options,
-            Solver {
-                precision: Precision::ABSOLUTE,
-                ..Solver::AUTO
-            },
-            4,
-        )
-        .unsafe_add_source(&positive, ShapeType::Subject)
-        .unsafe_add_source(&rectangle, ShapeType::Clip);
+        let overlay = match combined {
+            Some(overlay) => overlay,
+            None => clipped_area_overlay(rect)?,
+        };
+        let mut overlay = overlay.unsafe_add_source(&rectangle, ShapeType::Clip);
         area_checked_overlay(
             &mut overlay,
             OverlayRule::Intersect,
@@ -1333,7 +1391,7 @@ fn normalize_and_union(
             None,
         )
     } else {
-        area_overlay(&positive, rect, FillRule::NonZero, work, omissions, None)
+        area_owned_union(positive, rect, work, omissions)
     }
 }
 
@@ -1675,8 +1733,8 @@ fn paint_ordered_primitive(
     work: &mut RasterWork<'_>,
     omissions: &mut AreaOmissionBudget,
 ) -> Result<(), RenderError> {
-    let shapes = normalize_and_union(
-        &[raw],
+    let shapes = normalize_owned_and_union(
+        [raw],
         clip,
         work,
         omissions,
@@ -1777,7 +1835,7 @@ fn prepare_opaque_run(
                 "opaque primitive progress count overflows",
             ))?;
     }
-    let unioned = normalize_and_union(&raw, clip, work, omissions, Some(visible))?;
+    let unioned = normalize_owned_and_union(raw, clip, work, omissions, Some(visible))?;
     Ok((unioned, units))
 }
 
@@ -2194,8 +2252,8 @@ fn prepare_area_layer_once(
             area_visible_bounds(width, height, clip),
             work,
             |index, raw, work| {
-                let shapes = normalize_and_union(
-                    &[raw],
+                let shapes = normalize_owned_and_union(
+                    [raw],
                     clip,
                     work,
                     omissions,
@@ -2370,6 +2428,33 @@ fn rasterize_area_layer_preallocated(
     )?;
     Ok(pixels)
 }
+
+/// Copies borrowed test inputs into the owned normalization path without changing product authority.
+/// # Errors
+/// Returns the same geometry, cancellation, precision or resource diagnostic as production.
+#[cfg(test)]
+fn normalize_and_union(
+    raw: &[RawAreaPrimitive],
+    clip: Option<[f64; 4]>,
+    work: &mut RasterWork<'_>,
+    omissions: &mut AreaOmissionBudget,
+    visible: Option<[f64; 4]>,
+) -> Result<AreaShapes, RenderError> {
+    let owned = raw
+        .iter()
+        .map(|primitive| RawAreaPrimitive {
+            shape: primitive.shape.clone(),
+            fill_rule: primitive.fill_rule,
+            omitted_area_bound: primitive.omitted_area_bound,
+            incurred_area_error_bound: primitive.incurred_area_error_bound,
+        })
+        .collect::<Vec<_>>();
+    normalize_owned_and_union(owned, clip, work, omissions, visible)
+}
+
+#[cfg(test)]
+#[path = "area_raster_lifetime_tests.rs"]
+mod lifetime_tests;
 
 #[cfg(test)]
 mod allocation_lifetime_tests {

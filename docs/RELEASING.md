@@ -21,39 +21,41 @@ source used to build the packages. This does not submit the app to Flathub.
 4. Check packaged CLI versions, icons, desktop metadata, relevant output,
    and GUI startup. Verify the JPEG XL dependency notices and provenance are
    present under `share/licenses/io.github.ricperry.Toniator/jpegxl/` in both
-   bundles, and exercise still/animation decoding from each package.
+   bundles, and exercise still/animation decoding from each package. Verify the
+   Vello/wgpu notices and provenance under the adjacent `fast-preview/` subtree;
+   check Accurate, eligible Fast and CPU fallback in each packaged GUI.
    Run `sha256sum -c SHA256SUMS` from `dist/` after both
    bundles finish. Keep local evidence under `target/validation/`.
 
 The existing Windows development ZIP is a separately versioned 0.3.2 package
-built from its verified debug binaries. Do not attach or relabel it as a 0.4.6
+built from its verified debug binaries. Do not attach or relabel it as a 0.4.7
 Windows build; a current Windows package needs its own native build and checks.
 
 ## Publish
 
 After publication is authorized, push the source and a new annotated tag.
-For version 0.4.6:
+For version 0.4.7:
 
-The prior 0.4.5 release notes remain available at
-[docs/releases/v0.4.5.md](releases/v0.4.5.md).
+The prior 0.4.6 release notes remain available at
+[docs/releases/v0.4.6.md](releases/v0.4.6.md).
 
 ```sh
 git push origin main
-git tag -a v0.4.6 -m 'Toniator 0.4.6'
-git push origin refs/tags/v0.4.6
-gh release create v0.4.6 \
-  dist/Toniator-0.4.6-x86_64.AppImage \
-  dist/Toniator-0.4.6-x86_64.flatpak \
+git tag -a v0.4.7 -m 'Toniator 0.4.7'
+git push origin refs/tags/v0.4.7
+gh release create v0.4.7 \
+  dist/Toniator-0.4.7-x86_64.AppImage \
+  dist/Toniator-0.4.7-x86_64.flatpak \
   dist/SHA256SUMS dist/build-info.json \
   --verify-tag --draft --prerelease \
-  --title 'Toniator 0.4.6 — Artistic controls and background preview' \
-  --notes-file docs/releases/v0.4.6.md
+  --title 'Toniator 0.4.7 — Fast preview and native workflow' \
+  --notes-file docs/releases/v0.4.7.md
 ```
 
 Review the draft and attachments, then publish:
 
 ```sh
-gh release edit v0.4.6 --draft=false
+gh release edit v0.4.7 --draft=false
 ```
 
 Download all four published assets into a fresh directory, verify their hashes,
@@ -67,8 +69,8 @@ Historical releases retain their original assets and identifiers.
 ## Append a Windows build later
 
 The tracked [0.4.5 Windows handoff](releases/v0.4.5-windows-handoff.md) is
-historical; do not use its source/version commands for 0.4.6. A later 0.4.6 build
-must use exactly the peeled `v0.4.6` source commit and compare it with that Linux
+historical; do not use its source/version commands for 0.4.7. A later 0.4.7 build
+must use exactly the peeled `v0.4.7` source commit and compare it with that Linux
 release's `build-info.json`; do not move the tag or relabel the old debug ZIP.
 Native Windows release build, portable-package smoke checks and complete notices
 are required before attachment. Current Windows packaging scripts remain tied

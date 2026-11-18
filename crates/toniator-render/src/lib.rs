@@ -9,6 +9,10 @@
 mod materialization;
 pub use materialization::prepare_geometry_for_canvas;
 mod area_raster;
+/// Optional approximate circle-only GPU final consumer; never an Accurate raster authority.
+#[cfg(feature = "fast-preview")]
+pub mod fast_preview;
+
 pub mod preview_tiles;
 #[cfg(feature = "prepared-crop-pilot")]
 pub mod prepared_crop_pilot;

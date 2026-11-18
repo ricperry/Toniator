@@ -185,7 +185,127 @@ pub struct SourceField {
     pixels: Vec<SourcePixel>,
 }
 
+/// Interpolates one validated scalar field without changing map-axis or mul_add ordering.
+///
+/// Dimensions are nonzero source-owned bounds; callers supply finite points and valid canvases.
+/// # Errors
+/// Returns the ordinary nonfinite sampled-value diagnostic.
+fn sample_stretch_scalar(
+    point: Point2,
+    canvas: &CanvasSpec,
+    width: u32,
+    height: u32,
+    value: impl Fn(u32, u32) -> f64,
+) -> Result<f64, SamplingError> {
+    let x = map_axis(point.x, canvas.width, width);
+    let y = map_axis(point.y, canvas.height, height);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(width - 1);
+    let y1 = (y0 + 1).min(height - 1);
+    let tx = x - f64::from(x0);
+    let ty = y - f64::from(y0);
+    let top = value(x0, y0).mul_add(1.0 - tx, value(x1, y0) * tx);
+    let bottom = value(x0, y1).mul_add(1.0 - tx, value(x1, y1) * tx);
+    let sampled = top.mul_add(1.0 - ty, bottom * ty);
+    if sampled.is_finite() {
+        Ok(sampled.clamp(0.0, 1.0))
+    } else {
+        Err(SamplingError::new(
+            "sampling.value",
+            "sampled value must be finite",
+        ))
+    }
+}
+
+/// Borrows one immutable mapping and optionally retains its exact per-pixel scalar values.
+/// The optional plane changes storage only; cutoff and consumer response remain downstream.
+pub struct PreparedMappingResponse<'a> {
+    source: &'a SourceField,
+    canvas: &'a CanvasSpec,
+    mapping: SourceMapping,
+    values: Option<Vec<f64>>,
+}
+
+impl PreparedMappingResponse<'_> {
+    /// Samples the validated immutable mapping with the ordinary edge and bilinear arithmetic.
+    ///
+    /// # Errors
+    /// Returns the ordinary nonfinite point or sampled-value diagnostic. Construction validates
+    /// the borrowed canvas and mapping, which cannot change during this sampler's lifetime.
+    pub fn sample(&self, point: Point2) -> Result<f64, SamplingError> {
+        if !point.is_finite() {
+            return Err(SamplingError::new("sampling.point", "point must be finite"));
+        }
+        if let Some(values) = &self.values {
+            sample_stretch_scalar(
+                point,
+                self.canvas,
+                self.source.identity.width,
+                self.source.identity.height,
+                |x, y| values[y as usize * self.source.identity.width as usize + x as usize],
+            )
+        } else {
+            self.source
+                .sample_stretch_with(point, self.canvas, |pixel| {
+                    mapped_response(pixel, self.mapping)
+                })
+        }
+    }
+}
+
 impl SourceField {
+    /// Prepares exact mapped scalars inside an optional caller-owned byte budget.
+    ///
+    /// Over-budget sources and failed reservations retain direct sampling at full source quality.
+    /// The operation borrows its source/canvas, polls cancellation during preparation, and creates
+    /// no persistent cache or source identity. A zero budget selects validation-only direct reuse.
+    ///
+    /// # Errors
+    /// Returns canvas/mapping validation or cancellation without publishing a partial sampler.
+    pub fn prepare_mapping_response<'a>(
+        &'a self,
+        canvas: &'a CanvasSpec,
+        mapping: SourceMapping,
+        maximum_bytes: usize,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<PreparedMappingResponse<'a>, SamplingError> {
+        validate_canvas(canvas)?;
+        validate_mapping(mapping)?;
+        let mut values = None;
+        if self
+            .pixels
+            .len()
+            .checked_mul(std::mem::size_of::<f64>())
+            .is_some_and(|bytes| bytes <= maximum_bytes)
+        {
+            let mut plane = Vec::new();
+            if plane.try_reserve_exact(self.pixels.len()).is_ok() {
+                for (index, pixel) in self.pixels.iter().copied().enumerate() {
+                    if index % 1024 == 0 && is_cancelled() {
+                        return Err(SamplingError::new(
+                            "evaluation.cancelled",
+                            "evaluation was cancelled",
+                        ));
+                    }
+                    plane.push(mapped_response(pixel, mapping));
+                }
+                values = Some(plane);
+            }
+        }
+        if is_cancelled() {
+            return Err(SamplingError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        Ok(PreparedMappingResponse {
+            source: self,
+            canvas,
+            mapping,
+            values,
+        })
+    }
     /// Constructs an immutable decoded field directly from straight 8-bit sRGB RGBA samples.
     ///
     /// This is the decoded-frame boundary used by moving-media providers; it deliberately avoids
@@ -351,6 +471,12 @@ impl SourceField {
         }
     }
 
+    /// Interpolates transformed source pixels with the shared exact edge and arithmetic policy.
+    ///
+    /// # Errors
+    /// Returns a nonfinite sampled-value diagnostic; callers validate canvas and point first.
+    /// # Panics
+    /// Source construction guarantees each mapped pixel lies inside the retained dimensions.
     fn sample_stretch_with<F>(
         &self,
         point: Point2,
@@ -360,26 +486,13 @@ impl SourceField {
     where
         F: Fn(SourcePixel) -> f64,
     {
-        let x = map_axis(point.x, canvas.width, self.identity.width);
-        let y = map_axis(point.y, canvas.height, self.identity.height);
-        let x0 = x.floor() as u32;
-        let y0 = y.floor() as u32;
-        let x1 = (x0 + 1).min(self.identity.width - 1);
-        let y1 = (y0 + 1).min(self.identity.height - 1);
-        let tx = x - f64::from(x0);
-        let ty = y - f64::from(y0);
-        let sampled_value = |x, y| value(self.pixel(x, y).expect("mapped pixel"));
-        let top = sampled_value(x0, y0).mul_add(1.0 - tx, sampled_value(x1, y0) * tx);
-        let bottom = sampled_value(x0, y1).mul_add(1.0 - tx, sampled_value(x1, y1) * tx);
-        let sampled = top.mul_add(1.0 - ty, bottom * ty);
-        if sampled.is_finite() {
-            Ok(sampled.clamp(0.0, 1.0))
-        } else {
-            Err(SamplingError::new(
-                "sampling.value",
-                "sampled value must be finite",
-            ))
-        }
+        sample_stretch_scalar(
+            point,
+            canvas,
+            self.identity.width,
+            self.identity.height,
+            |x, y| value(self.pixel(x, y).expect("mapped pixel")),
+        )
     }
 
     fn sample_stretch_associated_rgb(
@@ -3332,6 +3445,102 @@ mod tests {
             "straight hidden RGB remains inspectable before association"
         );
         assert_eq!(mapped_response(hidden_red, mapping), 0.0);
+    }
+
+    /// Proves optional mapped storage preserves every component's exact interpolation bits.
+    ///
+    /// Exercises transparent hidden color, tone transforms, edge clamps, singleton dimensions,
+    /// and the zero-budget direct fallback; consumer cutoff remains unapplied in both paths.
+    /// # Panics
+    /// Panics if preparation changes any scalar bit or ignores budget/cancellation authority.
+    #[test]
+    fn prepared_mapping_response_matches_direct_bits_and_bounds() {
+        let canvas = CanvasSpec {
+            width: 7.0,
+            height: 5.0,
+        };
+        for (width, height) in [(1, 1), (1, 3), (4, 3)] {
+            let rgba = (0..width * height)
+                .flat_map(|index| {
+                    [
+                        (index * 51 + 17) as u8,
+                        (index * 29 + 103) as u8,
+                        (index * 71 + 211) as u8,
+                        (index * 85) as u8,
+                    ]
+                })
+                .collect();
+            let field = SourceField::from_straight_rgba8(width, height, rgba).unwrap();
+            for component in [
+                SourceMappingComponent::Red,
+                SourceMappingComponent::Green,
+                SourceMappingComponent::Blue,
+                SourceMappingComponent::Cyan,
+                SourceMappingComponent::Magenta,
+                SourceMappingComponent::Yellow,
+                SourceMappingComponent::Black,
+                SourceMappingComponent::Luminance,
+                SourceMappingComponent::Alpha,
+            ] {
+                for tone in [
+                    SourceTone::identity(),
+                    SourceTone {
+                        black_point: 0.07,
+                        white_point: 0.91,
+                        gamma: 1.7,
+                        contrast: 0.63,
+                        cutoff: 0.2,
+                    },
+                ] {
+                    let mapping = SourceMapping {
+                        component,
+                        placement: SourcePlacement::StretchToCanvas,
+                        inverted: true,
+                        gain: 0.73,
+                        bias: 0.11,
+                        tone,
+                    };
+                    let prepared = field
+                        .prepare_mapping_response(&canvas, mapping, 16 * 1024 * 1024, &|| false)
+                        .unwrap();
+                    assert!(prepared.values.is_some());
+                    let direct = field
+                        .prepare_mapping_response(&canvas, mapping, 0, &|| false)
+                        .unwrap();
+                    assert!(direct.values.is_none());
+                    for point in [
+                        Point2::new(-2.0, -1.0),
+                        Point2::new(0.0, 0.0),
+                        Point2::new(0.71, 2.34),
+                        Point2::new(3.27, 1.39),
+                        Point2::new(7.0, 5.0),
+                        Point2::new(9.0, 8.0),
+                    ] {
+                        let expected = field
+                            .sample_mapping_response(point, &canvas, mapping)
+                            .unwrap()
+                            .to_bits();
+                        assert_eq!(prepared.sample(point).unwrap().to_bits(), expected);
+                        assert_eq!(direct.sample(point).unwrap().to_bits(), expected);
+                    }
+                    assert_eq!(
+                        prepared
+                            .sample(Point2::new(f64::NAN, 0.0))
+                            .unwrap_err()
+                            .path(),
+                        "sampling.point"
+                    );
+                    assert_eq!(
+                        field
+                            .prepare_mapping_response(&canvas, mapping, usize::MAX, &|| true)
+                            .err()
+                            .unwrap()
+                            .path(),
+                        "evaluation.cancelled"
+                    );
+                }
+            }
+        }
     }
 
     /// Proves the legacy gain/bias transform still associates color once and leaves alpha independent.

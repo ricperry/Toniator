@@ -6,8 +6,11 @@ an entry does not authorize a later stage or change an accepted contract.
 
 ## TON-010 — Scatter choices need greater artistic variety and clearer priorities
 
-- Status: Open; development paused at the user's request (2026-09-20).
-  This entry records follow-up work only; resume development when requested.
+- Status: Planning/research resumed at the user's request (2026-11-02); product
+  implementation remains paused pending a separately approved scope. The user
+  gives faithful artwork reproduction and expressive texture equal priority.
+  See the [research and planning proposal](docs/TON010_STIPPLING_RESEARCH_PLAN.md)
+  and [current source/UI evidence](target/validation/ton010-planning-20261102/report.md).
 - Report: Clustered produces blotchy coverage that can compete with the artwork.
   It has artistic uses, but receives too much prominence relative to choices
   intended for image reproduction. The available algorithms remain too limited.
@@ -19,7 +22,7 @@ an entry does not authorize a later stage or change an accepted contract.
   With Uniform initial density those centers do not follow the artwork. Lower
   strength or broader spread softens the effect, but a few weighted Lloyd steps
   do not globally redistribute the clusters into faithful image stippling.
-- Proposed direction, pending design review: Prioritize even blue-noise stippling,
+- Earlier proposed direction (2026-09-20), pending design review: Prioritize even blue-noise stippling,
   genuinely artwork-adaptive spacing, and a coherent artwork-weighted relaxed
   stippling workflow. Retain Random and Clustered as secondary texture effects.
   Distinguish initial placement, artwork-density control, and subsequent relaxation
@@ -159,19 +162,42 @@ an entry does not authorize a later stage or change an accepted contract.
 
 ## TON-002 — First personal Pattern thumbnail can block the gallery
 
-- Status: Open; follow-up performance work.
-- Evidence: Gate 21B-4 private GTK checks observed a first gallery open taking
-  more than three seconds with two saved curved-motif Patterns. Rendering a
-  thumbnail for a new recipe/fingerprint currently runs synchronously.
-- Current mitigation: Repeated opens reuse a cache keyed by recipe/fingerprint;
-  stale entries are evicted when the catalog changes.
-- Next step: Schedule bounded thumbnail generation off the GTK thread, retain
-  revision/cancellation checks, and verify responsiveness on first open and
-  after external edits. Do not change canonical rendering to speed up thumbnails.
+- Status: Provisionally accepted by the user for the verified bounded-worker
+  improvement, 2026-10-31. The verification limits below remain recorded.
+- Current implementation: All canonical personal-thumbnail request preparation and
+  evaluation runs off GTK through one worker with one queued job. Main-thread
+  admission remains nonblocking; close/cancellation, catalog generation,
+  fingerprint and weak-card checks reject obsolete results. Cache reuse remains,
+  and unavailable optional worker startup leaves cards/actions usable.
+- Verified boundary: The matched ordinary two-record cold gallery's synchronous
+  append falls from 89.57 to 75.13 ms; maximum heartbeat gap falls from 89.73 to
+  75.18 ms. Warm append remains about 77 ms. Serial thumbnail completion takes
+  323.54 rather than 222.78 ms. Private normal-app checks cover Cancel, reopen,
+  external recipe edits/Refresh, stale-title rejection and current card selection.
+  Requested-card keyboard targeting remains unverified; existing keyboard setup
+  is unchanged. This is private Sway evidence, not GNOME/Mutter acceptance.
+- Historical evidence: Gate 21B-4 observed a first gallery open over three seconds
+  with two saved curved-motif Patterns. That multi-second delay is not reproduced
+  by the matched ordinary current fixtures and is not a measured speedup claim.
+- Evidence and remaining costs: [Performance](docs/PERFORMANCE.md#2026-10-31-personal-gallery-and-dense-pattern-previews)
+  and the [scoped report](target/validation/ton002-ton003-20261031/report.md).
 
 ## TON-003 — Fine Pattern sizes have slow full-resolution previews
 
-- Status: Open; follow-up performance work.
+- Status: Provisionally accepted by the user for the verified CPU improvements,
+  2026-10-31; substantial fine native-resolution cost remains open for followup.
+- 2026-10-31 verified improvement: Exact operation-local mapped sampling,
+  streamed Lloyd cells and shorter temporary geometry lifetimes preserve density,
+  four weighted iterations, calibration and canonical output. Three serial
+  vector 0.2 fresh-process pairs reduce complete-command wall mean from 22.533 to
+  17.128 seconds and mean peak RSS by 7.9%. Single native evaluator pairs improve
+  raster 0.2 from 35.604 to 26.714 seconds and finer vector 0.1 from 97.577 to
+  76.525 seconds. The latter still peaks near 7.1 GiB cgroup memory. These are
+  distinct measurement boundaries, not universal latency or memory guarantees.
+  Both immutable artworks' baseline/current cold/warm native PNG bytes match;
+  supported PNG/SVG exports and both private GTK source workflows are inspected.
+  The user provisionally accepts this bounded improvement; see
+  [performance results and limits](docs/PERFORMANCE.md#2026-10-31-personal-gallery-and-dense-pattern-previews).
 - 2026-09-20 wizard regression: `vector-sample.svg`, Clustered with four
   artwork-weighted Lloyd steps, then Poisson disk at Feature size `0.1`.
   The new GTK workflow exceeded its 90-second Review watchdog. Normal Poisson
@@ -196,9 +222,17 @@ an entry does not authorize a later stage or change an accepted contract.
 - Evidence: `ui-run-20260904-205109-212917/pattern-size-0.2-rendered.png` under
   `.codex-work/evidence/`. Exact smaller entries and history are checked separately
   from render completion; this does not claim usable rendering speed at `0.05`.
-- Next step: Profile dense-site construction and preview rendering at 0.2 and
-  below, including cancellation and both source formats. Preserve canonical
-  geometry/export fidelity and truthful preview state when scoping an optimization.
+- Remaining work: Fine dense native latency/memory remains open. The authorized
+  [GPU/Vulkan diagnostic screen](target/validation/gpu-vulkan-20261031/report.md)
+  measures71–75% lower complete0.2 native-consumer workflow latency and a17.8x
+  speed ratio for the refined-circle consumer in a
+  retained-geometry4x panning cache-miss trace, with unchanged canonical scenes/
+  calibration/density. Full native CPU/GPU artwork and zoomed-region files expose
+  meaningful coverage/tone differences; one bounded finer-circle adapter reduces
+  tested4x-view alpha MAE to0.259–0.758 bytes, with local/union errors remaining. An approximate live-preview/precise CPU-export
+  split is a research proposal, not an implemented backend or accuracy waiver.
+  Actual GTK upload, other patterns, cancellation/fallback and user perceptual
+  acceptance remain open; preserve exact CPU authority and truthful preview state.
 
 ## TON-011 — Optional garment PNG preparation
 
@@ -677,3 +711,94 @@ an entry does not authorize a later stage or change an accepted contract.
 - Scope: Keep this future construction optimization separate from TON-003's
   general preview latency and TON-018's current final-SVG clipping. This entry
   changes neither engine construction nor canonical geometry.
+
+## TON-022 — Support premultiplied-alpha JPEG XL sources correctly
+
+- Status: Open; user-requested (2026-10-14); implementation deferred explicitly.
+  Tracking only; this entry does not authorize implementation or a release.
+- Current limitation: Toniator 0.4.3 rejects JPEG XL stills and animations whose
+  primary alpha channel is associated/premultiplied, with `source.jpegxl.alpha`.
+  This is an integration limitation, not an inherent inability to recover
+  straight-alpha colors from nonzero-alpha samples.
+- Expected behavior when authorized: Accept these sources when a verified
+  decoding path can unpremultiply in the color representation where association
+  occurred. Preserve high precision through division and color conversion;
+  normalize afterward to the existing straight-sRGB8 source representation.
+  Define zero-alpha RGB deterministically and handle very small alpha without
+  nonfinite values or avoidable quantization artifacts. Preserve original encoded
+  bytes in saved projects and existing animation timing/blending semantics.
+- Candidate approach, not yet validated: Use jxl-oxide's separate color-management
+  path and rendered ICC profile, or another supported decoder path, to obtain
+  appropriate samples before nonlinear conversion. Dividing already converted
+  sRGB samples by alpha is not generally equivalent. Verify the exact decoder
+  output representation and animation composition order before choosing a fix.
+  See [decoder color-management documentation](https://docs.rs/jxl-oxide/0.12.6/jxl_oxide/#not-using-set_cms-for-color-management).
+- Verification when authorized: Compare equivalent associated/straight-alpha
+  sources with opaque, fractional, near-zero and zero alpha, nontrivial ICC/transfer
+  conversions and higher bit depth. Cover stills, cropped/reference/blended
+  animation frames, backward frame selection, project byte-preserving roundtrips,
+  and native preview/export output; inspect color and alpha separately for fringes.
+  Retain source limits, cancellation boundaries, and both immutable baseline checks.
+
+## TON-023 — Add along-curve resolution controls for parametric curves, spirals and grid Patterns
+
+- Status: Open; user-requested (2026-10-18); tracking only. No implementation
+  is authorized by this entry.
+- Scope: Parametric curves and spirals, and grid-family Patterns.
+- Report: Curve-style Patterns currently produce overly dense output along
+  their length, leaving insufficient artistic control over fineness/detail.
+  This is the user's observed limitation, not an independently measured cause.
+- Expected behavior when authorized: Provide an adjustable along-curve
+  resolution/fineness control so artists can deliberately choose coarser,
+  lower-detail output or finer, denser output. Cover parametric/spiral and
+  grid-family Patterns consistently and distinguish this artistic setting from output
+  pixel resolution, spacing between curves, and numerical accuracy tolerances.
+- Design question: Determine how the setting governs curve segmentation,
+  placement of marks/samples along a curve, or both for each affected family;
+  this entry does not select an algorithm or change existing geometry policy.
+  Keep this separate from TON-021's off-canvas construction optimization and
+  the existing SVG node-count reduction.
+- Verification when authorized: Compare coarse, medium and fine settings at
+  unchanged canvas/output dimensions across parametric/spiral and grid families and
+  both immutable sample artworks. Inspect the artistic difference and agreement
+  between preview, PNG and SVG; verify saved settings and Undo/Redo retain intent.
+
+## TON-024 — Control branching and closed loops in connected-points Patterns
+
+- Status: Open; user-requested (2026-10-18); tracking only. No implementation
+  is authorized by this entry.
+- Scope: Connected-points Patterns across families, including connected graph
+  dispersion Patterns. Assess which connection modes can meaningfully support
+  these controls; applicability is not restricted to the dispersion family.
+- Request: Add optional artistic controls to limit or entirely prevent branching
+  and closed-loop connections. Artists need control over connection topology,
+  with the existing unrestricted behavior remaining available.
+- Design when authorized: Define the branching and loop limits, their interaction,
+  and applicability across connected-points modes and families. Clearly distinguish graph
+  junctions and cycles from lines that merely cross visually. This entry does
+  not select a graph-construction algorithm or require one continuous path.
+- Verification when authorized: Exercise unrestricted, branching-limited,
+  branch-free and loop-free settings, including combined restrictions. Check
+  actual graph connectivity and visible preview/PNG/SVG agreement across seeds,
+  densities and both immutable sample artworks. Verify saved settings and
+  Undo/Redo preserve the chosen limits without changing unrelated site controls.
+
+## TON-025 — Reevaluate CPU/GPU preview defaults at a later stage
+
+- Status: Open; user-requested (2026-11-02), deferred to a later stage.
+  Tracking only; this entry does not authorize a default change.
+- Context: The user accepts the current Fast/Accurate Preview Toggle and finds
+  GPU/CPU preview differences exceedingly difficult to discern optically. The
+  approximate GPU preview is good enough for the current work.
+- Current policy: New windows default to Accurate CPU preview; Fast GPU preview
+  is optional and unsupported scenes/targets use whole CPU fallback. Exports
+  retain independent CPU precision.
+- Later decision: Reevaluate whether eligible GPU previews should become the
+  default, retaining the Accurate option and automatic CPU fallback.
+- Evidence and verification when resumed: Start with the
+  [current qualification and image comparisons](target/validation/fast-accurate-preview-20261102/report.md).
+  Compare ordinary cached pans, newly exposed regions, preparation/startup,
+  memory use and visual quality on representative artwork and available hardware.
+  Account for supported scene/zoom limits and ordinary installation behavior;
+  retain CPU output precision. The current user's visual acceptance does not
+  change the recorded numerical differences.

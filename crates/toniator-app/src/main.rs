@@ -22,6 +22,7 @@ mod document_presets;
 mod main_view_state;
 mod paint_editor;
 mod personal_pattern_management;
+mod personal_thumbnails;
 mod png_export_size;
 mod prepared_paintable;
 mod preview_backdrop;
@@ -29,6 +30,7 @@ mod preview_cache;
 mod preview_coordinator;
 mod preview_diagnostics;
 mod preview_diagnostics_view;
+mod preview_measurement;
 mod print_cleanup;
 mod print_preparation;
 mod print_preparation_view;
@@ -39,7 +41,10 @@ mod source_notice;
 #[cfg(test)]
 mod source_response_ui_tests;
 mod stage20f_editor;
+#[cfg(test)]
+mod stage4_probe;
 mod startup;
+mod suite_interface;
 mod temporal_edit;
 mod temporal_export;
 mod temporal_preview;
@@ -4001,6 +4006,7 @@ fn main_preview_intent(state: &AppState) -> Option<PreviewIntent> {
             viewport_request::Resolution::Unallocated => state.preview_target?,
             viewport_request::Resolution::Rejected { .. } => return None,
         },
+        provenance: state.spatial_preview.provenance(),
     })
 }
 
@@ -4097,6 +4103,11 @@ struct AppState {
     zoom_label: gtk::Label,
     zoom_in: gtk::Button,
     fit: gtk::ToggleButton,
+    fast_preview: gtk::Switch,
+    preview_quality_label: gtk::Label,
+    accepted_preview_metadata:
+        Option<((u64, u64, u64), toniator_engine::preview_cache::Provenance)>,
+    pending_scene: Option<(u64, u64, u64)>,
     preview_view: gtk::ToggleButton,
     source_view: gtk::ToggleButton,
     endpoint_controls: gtk::Box,
@@ -4188,6 +4199,8 @@ struct AppState {
     personal_library_paths: Option<PersonalLibraryPaths>,
     personal_fingerprints: BTreeMap<String, PersonalLibraryFingerprint>,
     personal_thumbnail_cache: BTreeMap<String, (String, gtk::gdk::Texture)>,
+    personal_thumbnail_worker: Option<personal_thumbnails::Worker>,
+    personal_catalog_generation: u64,
     wizard_preview_scheduler: Option<Arc<EvaluationScheduler>>,
     automation: Option<AutomationSink>,
     event_sender: async_channel::Sender<AppEvent>,
@@ -4531,7 +4544,7 @@ fn parse_args(arguments: Vec<std::ffi::OsString>) -> Result<Option<PathBuf>, Str
 /// widget lifetime and notification wiring, but never directly mutates a
 /// document outside the existing command paths.
 /// # Panics
-/// Panics when required worker infrastructure cannot start or compiled GTK resources are invalid.
+/// Panics when compiled GTK resources or required widget construction are invalid.
 fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     let theme_bridge = main_view_state::inherit_system_color_scheme();
     install_css();
@@ -4542,14 +4555,8 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         .default_height(720)
         .build();
     window.set_size_request(480, 360);
-    let file_menu = gio::Menu::new();
-    for entries in MAIN_MENU_SECTIONS {
-        let section = gio::Menu::new();
-        for &(label, action) in *entries {
-            section.append(Some(label), Some(action));
-        }
-        file_menu.append_section(None, &section);
-    }
+    let file_menu = suite_interface::main_menu();
+    window.add_css_class("creative-suite");
     let shell = components::ToniatorMainShell::new();
     let titlebar = shell.detach_titlebar();
     window.set_titlebar(Some(&titlebar));
@@ -4667,7 +4674,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
     app.set_accels_for_action("app.close", &["<Primary>w"]);
     app.set_accels_for_action("app.exit", &["<Primary>q"]);
     app.set_accels_for_action("app.undo", &["<Primary>z"]);
-    app.set_accels_for_action("app.redo", &["<Primary><Shift>z"]);
+    app.set_accels_for_action("app.redo", &["<Primary><Shift>z", "<Primary>y"]);
     app.set_accels_for_action("app.help", &["F1"]);
     let (event_sender, event_receiver) = async_channel::unbounded();
     let presets = PresetRegistry::bundled();
@@ -4710,6 +4717,10 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         zoom_label,
         zoom_in,
         fit,
+        fast_preview: shell.fast_preview(),
+        preview_quality_label: shell.preview_quality(),
+        accepted_preview_metadata: None,
+        pending_scene: None,
         preview_view,
         source_view,
         endpoint_controls: shell.endpoint_controls().0,
@@ -4796,6 +4807,10 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         personal_library_paths: catalog_state.default_paths,
         personal_fingerprints: catalog_state.fingerprints,
         personal_thumbnail_cache: BTreeMap::new(),
+        personal_thumbnail_worker: personal_thumbnails::Worker::new()
+            .inspect_err(|error| eprintln!("Personal Pattern thumbnails are unavailable: {error}"))
+            .ok(),
+        personal_catalog_generation: 0,
         still_export_cancel: None,
         still_export_progress: None,
         wizard_preview_scheduler: None,
@@ -4902,6 +4917,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         });
     }
     connect_main_view_controls(&state);
+    suite_interface::connect(app, &state);
     {
         let weak = Rc::downgrade(&state);
         glib::timeout_add_local(Duration::from_millis(16), move || {
@@ -4916,7 +4932,11 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
                         .zip(main_viewport_target(&state))
                         .is_some_and(|(frame, target)| {
                             state.preview_coordinator.preserve_ordinary(
-                                PreviewIntent { frame, target },
+                                PreviewIntent {
+                                    frame,
+                                    target,
+                                    provenance: state.spatial_preview.provenance(),
+                                },
                                 state.spatial_preview.ordinary_required,
                             )
                         });
@@ -4935,12 +4955,20 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
 
     {
         let weak = Rc::downgrade(&state);
-        let mut observed = (0, 0, false);
+        let mut observed = (0, 0, false, false);
         glib::timeout_add_local(Duration::from_millis(100), move || {
             let Some(state) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
-            let progress = state.borrow().spatial_preview.background_progress();
+            let app = state.borrow();
+            let p = app.spatial_preview.background_progress();
+            let retained_pending = (app.preview_coordinator.is_pending()
+                || app.spatial_preview.pending)
+                && app.preview.is_some();
+            let progress = (p.0, p.1, p.2, retained_pending);
+            if retained_pending {
+                background_progress.pulse();
+            }
             if progress != observed {
                 observed = progress;
                 let fraction = if progress.1 == 0 {
@@ -4949,8 +4977,16 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
                     progress.0 as f64 / progress.1 as f64
                 };
                 background_progress.set_fraction(fraction.clamp(0., 1.));
-                background_progress.set_visible(progress.2 && progress.0 < progress.1);
-                background_progress.set_tooltip_text(Some(&format!("Background rendering progress · {:.0}%", fraction * 100.)));
+                background_progress
+                    .set_visible(progress.3 || (progress.2 && progress.0 < progress.1));
+                if progress.3 {
+                    background_progress.set_tooltip_text(Some("Preview updating…"));
+                } else {
+                    background_progress.set_tooltip_text(Some(&format!(
+                        "Background rendering progress · {:.0}%",
+                        fraction * 100.
+                    )));
+                }
             }
             glib::ControlFlow::Continue
         });
@@ -4999,8 +5035,90 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         });
         glib::ControlFlow::Break
     });
+    install_main_preview_measurement(&state);
     window.present();
     state
+}
+
+/// Installs opt-in weak Canvas observation without adding document or scheduling authority.
+/// Successful tile draws have already passed live geometry/primary coverage checks; exact textures
+/// additionally match accepted full-target metadata. Borrow conflicts simply omit an observation.
+fn install_main_preview_measurement(state: &Rc<RefCell<AppState>>) {
+    if !preview_measurement::enabled() {
+        return;
+    }
+    let weak = Rc::downgrade(state);
+    preview_measurement::install(move |draw| {
+        let Some(state) = weak.upgrade() else {
+            return;
+        };
+        let Ok(state) = state.try_borrow() else {
+            return;
+        };
+        if state.view_state.mode() != MainViewMode::Preview {
+            return;
+        }
+        let (Some(artwork), Some(raster), Some(clock)) = (
+            main_preview_frame_identity(&state),
+            main_viewport_target(&state),
+            state.picture.frame_clock(),
+        ) else {
+            return;
+        };
+        let target = preview_measurement::Target {
+            artwork,
+            raster,
+            provenance: state.spatial_preview.provenance(),
+        };
+        let matches = match draw {
+            preview_measurement::Draw::Tiles {
+                artwork,
+                provenance,
+                scale,
+                background,
+            } => {
+                artwork == target.artwork
+                    && provenance == target.provenance
+                    && raster.background() == background
+                    && raster.viewport().is_some_and(|(_, _, s)| s == scale)
+            }
+            preview_measurement::Draw::Exact(accepted) => {
+                accepted == target
+                    && state.accepted_preview_metadata == Some((artwork, target.provenance))
+                    && state.accepted_preview_target == Some(raster)
+            }
+        };
+        if matches {
+            preview_measurement::canvas(
+                target,
+                &clock,
+                format!("{:?}", state.spatial_preview.statistics()),
+            );
+        }
+    });
+}
+
+/// Arms the current exact Main target at its request boundary; observation never changes work.
+fn observe_main_preview_request(state: &AppState) {
+    if !preview_measurement::enabled() || state.view_state.mode() != MainViewMode::Preview {
+        return;
+    }
+    if let Some(clock) = state.picture.frame_clock() {
+        preview_measurement::track_clock(&clock);
+    }
+    if let (Some(artwork), Some(raster)) = (
+        main_preview_frame_identity(state),
+        main_viewport_target(state),
+    ) {
+        preview_measurement::request(
+            preview_measurement::Target {
+                artwork,
+                raster,
+                provenance: state.spatial_preview.provenance(),
+            },
+            format!("{:?}", state.spatial_preview.statistics()),
+        );
+    }
 }
 
 /// Returns the visible welcome window or editor as the parent for startup-capable dialogs.
@@ -5276,7 +5394,7 @@ fn connect_actions(state: &Rc<RefCell<AppState>>) {
 
 /// Presents bounded application help without changing workspace or view authority.
 fn show_main_help(parent: &gtk::Window) {
-    about::present(parent);
+    suite_interface::present_help(parent);
 }
 
 /// Dispatches a typed header intent through the authoritative history boundary.
@@ -5707,7 +5825,17 @@ fn apply_print_preparation_settings(
     Ok(true)
 }
 
+/// Installs the vendored suite baseline before the application-specific native-theme rules.
 fn install_css() {
+    let shared = gtk::CssProvider::new();
+    shared.load_from_resource(&format!("{RESOURCE_PREFIX}/creative-suite.css"));
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &shared,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION - 1,
+        );
+    }
     let provider = gtk::CssProvider::new();
     provider.load_from_resource(&format!("{RESOURCE_PREFIX}/toniator.css"));
     if let Some(display) = gtk::gdk::Display::default() {
@@ -5724,6 +5852,42 @@ fn install_css() {
 /// These callbacks never apply document commands; zoom submits only derived raster work.
 /// Preview and Source share the same scrolled viewport and its adjustments.
 fn connect_main_view_controls(state: &Rc<RefCell<AppState>>) {
+    {
+        let weak = Rc::downgrade(state);
+        let switch = state.borrow().fast_preview.clone();
+        switch.connect_active_notify(move |switch| {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            let Ok(mut app) = state.try_borrow_mut() else {
+                return;
+            };
+            let quality = if switch.is_active() {
+                toniator_engine::preview_cache::Quality::Fast
+            } else {
+                toniator_engine::preview_cache::Quality::Accurate
+            };
+            if !app.view_state.set_quality(quality) {
+                return;
+            }
+            app.spatial_preview.set_quality(quality);
+            if app.pending_scene.is_none() {
+                app.media_epoch = app.media_epoch.saturating_add(1);
+                app.media_preview_key = None;
+                if let Some(worker) = app.media_worker.as_mut() {
+                    worker.cancel();
+                }
+                app.scheduler.cancel_pending();
+                app.preview_coordinator.clear_submission();
+            }
+            set_preview_pending(&mut app);
+            app.presented_texture = None;
+            apply_main_view_presentation(&mut app);
+            emit_automation_state(&mut app, "preview_quality_requested", None);
+            drop(app);
+            schedule_main_preview_submission(&state);
+        });
+    }
     for (button, zoom_in) in [
         (state.borrow().zoom_out.clone(), false),
         (state.borrow().zoom_in.clone(), true),
@@ -6052,6 +6216,7 @@ fn sync_endpoint_controls(state: &AppState) {
 /// Pan instructions remain in the viewport's accessible description without
 /// adding canvas hover hints.
 fn apply_main_view_presentation(state: &mut AppState) {
+    sync_main_preview_quality(state);
     let paintable = match state.view_state.mode() {
         MainViewMode::Preview => state.preview.as_ref(),
         MainViewMode::Source => state.source_texture.as_ref(),
@@ -6148,6 +6313,19 @@ fn apply_main_view_presentation(state: &mut AppState) {
                     ),
                 })
             });
+        if let Some(paintable) = logical_paintable.as_ref()
+            && state.view_state.mode() == MainViewMode::Preview
+            && let (Some((artwork, provenance)), Some(raster)) = (
+                state.accepted_preview_metadata,
+                state.accepted_preview_target,
+            )
+        {
+            paintable.observe_exact(preview_measurement::Target {
+                artwork,
+                raster,
+                provenance,
+            });
+        }
         state.picture.set_paintable(logical_paintable.as_ref());
         state.presented_texture = presentation;
     }
@@ -6204,7 +6382,7 @@ fn apply_main_view_presentation(state: &mut AppState) {
     state.viewport_scroll.update_property(&[
         gtk::accessible::Property::Label("Canvas viewport"),
         gtk::accessible::Property::Description(
-            "Scroll or drag with the left mouse button to pan when the artwork is larger than the viewport.",
+            "F6 focuses the Canvas viewport. Arrow keys, scroll, or left-button drag pan when artwork is larger than the viewport. Ctrl+0 fits.",
         ),
     ]);
     state.picture.update_property(&[
@@ -8754,6 +8932,8 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
         )
     };
     let window = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Pattern Wizard")
         .transient_for(&parent)
         .modal(true)
@@ -9249,10 +9429,11 @@ fn append_wizard_gallery(
     current_pattern: &gtk::ToggleButton,
 ) -> BTreeMap<String, gtk::ToggleButton> {
     let mut cards = BTreeMap::new();
+    let thumbnail_catalog = Arc::new(catalog.clone());
     for entry in catalog.entries() {
         let family = wizard_family_label(entry.preset.recipe.family_kind());
         let card = components::ToniatorPatternWizardCard::new();
-        populate_wizard_card_thumbnail(&card, state, catalog, entry);
+        populate_wizard_card_thumbnail(&card, state, &thumbnail_catalog, entry);
         card.set_name(&entry.preset.metadata.name);
         card.relate_accessible_name_to_card_title();
         card.set_category(family);
@@ -9433,7 +9614,10 @@ fn select_wizard_preset_candidate(
     show_wizard_gallery_page(state, epoch);
 }
 
-/// Populates one static wizard-card thumbnail without changing renderer or ordinary SVG policy.
+/// Populates one card through a single bounded worker without canonical work on GTK.
+///
+/// Pending cards honor queue backpressure; detached cards, changed catalog generations and stale
+/// fingerprints cancel before publication. Only current native textures enter the existing cache.
 ///
 /// Every authorized built-in uses its exact GResource SVG. Personal entries use a normal
 /// synthetic-source recipe evaluation and reuse it only while the scanned file fingerprint
@@ -9441,7 +9625,7 @@ fn select_wizard_preset_candidate(
 fn populate_wizard_card_thumbnail(
     card: &components::ToniatorPatternWizardCard,
     state: &Rc<RefCell<AppState>>,
-    catalog: &LayeredPresetCatalog,
+    catalog: &Arc<LayeredPresetCatalog>,
     entry: &toniator_patterns::LayeredPresetEntry,
 ) {
     if entry.origin == PresetOrigin::BuiltIn {
@@ -9467,21 +9651,24 @@ fn populate_wizard_card_thumbnail(
         card.set_thumbnail_paintable(Some(&texture));
         return;
     }
-    let Some(request) = synthetic_catalog_thumbnail_request(catalog, &entry.preset.metadata.id)
+    let Some(worker) = state
+        .borrow()
+        .personal_thumbnail_worker
+        .as_ref()
+        .map(personal_thumbnails::Worker::sender)
     else {
         return;
     };
     let cancelled = Arc::new(AtomicBool::new(false));
-    let worker_cancelled = cancelled.clone();
     let (sender, receiver) = std::sync::mpsc::channel();
-    thread::spawn(move || {
-        let result = toniator_engine::evaluate_cancellable_with_limits(
-            request,
-            EvaluationLimits::default(),
-            &worker_cancelled,
-        );
-        let _ = sender.send(result);
-    });
+    let catalog = Arc::clone(catalog);
+    let thumbnail_id = entry.preset.metadata.id.clone();
+    let mut pending = Some(personal_thumbnails::Job::new(
+        move || synthetic_catalog_thumbnail_request(&catalog, &thumbnail_id),
+        cancelled.clone(),
+        sender,
+    ));
+    let generation = state.borrow().personal_catalog_generation;
     let card = card.downgrade();
     let state = Rc::downgrade(state);
     let id = entry.preset.metadata.id.clone();
@@ -9495,13 +9682,32 @@ fn populate_wizard_card_thumbnail(
             .personal_fingerprints
             .get(&id)
             .map(|value| value.as_str().to_owned());
-        if current != fingerprint {
+        let open_card = card
+            .root()
+            .and_downcast::<gtk::Window>()
+            .is_some_and(|window| window.is_visible());
+        if current != fingerprint
+            || state.borrow().personal_catalog_generation != generation
+            || !open_card
+        {
             cancelled.store(true, Ordering::Release);
             return glib::ControlFlow::Break;
         }
+        if let Some(job) = pending.take() {
+            match worker.try_send(job) {
+                Ok(()) => {}
+                Err(std::sync::mpsc::TrySendError::Full(job)) => {
+                    pending = Some(job);
+                    return glib::ControlFlow::Continue;
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    return glib::ControlFlow::Break;
+                }
+            }
+        }
         match receiver.try_recv() {
             Ok(Ok(result)) => {
-                if let Ok(texture) = texture_from_surface(result.raster()) {
+                if let Ok(texture) = texture_from_surface(&result) {
                     card.set_thumbnail_paintable(Some(&texture));
                     if let Some(fingerprint) = &fingerprint {
                         state
@@ -9705,6 +9911,7 @@ fn install_personal_catalog_snapshot(
         app_state.personal_authored_insertions = initialization.insertions;
         app_state.personal_library = initialization.library;
         app_state.personal_fingerprints = initialization.fingerprints;
+        app_state.personal_catalog_generation = app_state.personal_catalog_generation.wrapping_add(1);
         let current_fingerprints = app_state.personal_fingerprints.clone();
         app_state
             .personal_thumbnail_cache
@@ -9977,6 +10184,8 @@ fn open_pattern_library_manager(state: &Rc<RefCell<AppState>>, _wizard_epoch: Op
         .map(|surface| surface.window.clone())
         .unwrap_or_else(|| state.borrow().window.clone().upcast());
     let window = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Pattern Library")
         .transient_for(&parent)
         .modal(true)
@@ -10208,6 +10417,8 @@ fn open_pattern_rename_dialog(state: &Rc<RefCell<AppState>>, id: &str) {
         .map(|surface| surface.window.clone())
         .unwrap_or_else(|| state.borrow().window.clone().upcast());
     let dialog = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Rename Pattern")
         .transient_for(&parent)
         .modal(true)
@@ -10380,6 +10591,8 @@ fn confirm_delete_personal_pattern(state: &Rc<RefCell<AppState>>, id: &str) {
         .map(|surface| surface.window.clone())
         .unwrap_or_else(|| state.borrow().window.clone().upcast());
     let dialog = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Delete Pattern?")
         .default_width(520)
         .transient_for(&parent)
@@ -10741,6 +10954,8 @@ fn confirm_save_pattern_changes(
     actions: &gtk::Box,
 ) {
     let confirmation = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Confirm Save Changes")
         .transient_for(dialog)
         .modal(true)
@@ -11115,6 +11330,8 @@ fn open_pattern_save_dialog(state: &Rc<RefCell<AppState>>, epoch: u64) {
         .map(|surface| surface.window.clone())
         .unwrap_or_else(|| state.borrow().window.clone().upcast());
     let dialog = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Save Pattern")
         .transient_for(&parent)
         .modal(true)
@@ -17807,6 +18024,8 @@ fn request_wizard_discard(state: &Rc<RefCell<AppState>>, epoch: u64) {
         return;
     }
     let dialog = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Discard pattern changes?")
         .transient_for(&parent)
         .modal(true)
@@ -18325,6 +18544,8 @@ fn open_advanced_settings(state: &Rc<RefCell<AppState>>) {
     };
     let preview_source = AdvancedPreviewSource::Pending;
     let window = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Advanced Settings")
         .transient_for(&parent)
         .modal(true)
@@ -19375,6 +19596,8 @@ fn start_wizard_preview_event_bridge(
 #[allow(dead_code)] // Retained for Stage 21B shared-definition publication choices.
 fn choose_shared_preset_choice(state: &Rc<RefCell<AppState>>) {
     let dialog = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Choose a shared pattern")
         .transient_for(&state.borrow().window)
         .modal(true)
@@ -19460,6 +19683,8 @@ fn choose_shared_preset_replacement(
             .join(", ")
     };
     let dialog = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Replace the shared pattern?")
         .transient_for(&state.borrow().window)
         .modal(true)
@@ -20059,6 +20284,8 @@ fn open_pattern_editor_with_launch(
     };
     let initial_width = parent.width().clamp(560, 980);
     let window = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title(purpose.title())
         .default_width(initial_width)
         .default_height(760)
@@ -21092,6 +21319,8 @@ fn show_shared_resource_choice(
         .map(|surface| surface.window.clone())
         .expect("shared resource choice belongs to a live Pattern Editor");
     let dialog = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Shared curve")
         .transient_for(&parent)
         .modal(true)
@@ -22021,6 +22250,8 @@ fn show_custom_along_guide_confirmation(state: &Rc<RefCell<AppState>>) {
         .map(|surface| surface.window.clone())
         .expect("guide confirmation belongs to a live Grid Pattern Editor");
     let dialog = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Create a custom guide layout?")
         .transient_for(&parent)
         .modal(true)
@@ -23301,6 +23532,8 @@ fn request_draft_discard(state: &Rc<RefCell<AppState>>) {
         return;
     }
     let dialog = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Discard pattern changes?")
         .transient_for(&parent)
         .modal(true)
@@ -24287,7 +24520,15 @@ fn rebind_unchanged_spatial(state: &mut AppState, old: Option<(u64, u64, u64)>) 
         && old.0 == new.0
         && old.2 == new.2
     {
-        state.spatial_preview.rebind_unchanged(old, new);
+        let rebound = state.spatial_preview.rebind_unchanged(old, new);
+        if rebound
+            && let Some((artwork, _)) = state
+                .accepted_preview_metadata
+                .as_mut()
+                .filter(|(artwork, _)| *artwork == old)
+        {
+            *artwork = new;
+        }
         if state.preview_full_identity == Some(old) {
             state.preview_full_identity = Some(new);
         }
@@ -24329,6 +24570,102 @@ fn build_background_progress(viewer: &gtk::Overlay) -> gtk::ProgressBar {
     viewer.add_overlay(&progress);
     progress
 }
+/// Chooses a genuine raster-free Main evaluation until a current accepted scene has selected CPU fallback.
+/// Other preview/export schedulers retain their own existing raster policies.
+fn main_scene_only(state: &AppState) -> bool {
+    state.view_state.mode() == MainViewMode::Preview
+        && state.view_state.quality() == toniator_engine::preview_cache::Quality::Fast
+        && !(main_preview_frame_identity(state)
+            .is_some_and(|a| state.spatial_preview.has_artwork(a))
+            && state.spatial_preview.provenance().effective
+                == toniator_engine::preview_cache::Quality::Accurate
+            && state.spatial_preview.fallback_reason().is_some())
+}
+/// Projects requested applicability and actual accepted pixels independently, without changing authored state.
+fn sync_main_preview_quality(state: &AppState) {
+    let requested = state.view_state.quality() == toniator_engine::preview_cache::Quality::Fast;
+    state.fast_preview.set_active(requested);
+    state.fast_preview.set_sensitive(
+        state.view_state.mode() == MainViewMode::Preview
+            && state
+                .workspace
+                .as_ref()
+                .is_some_and(workspace_requires_initial_preview),
+    );
+    let label = if state.view_state.mode() == MainViewMode::Preview && state.preview.is_some() {
+        state
+            .accepted_preview_metadata
+            .map(|(_, p)| main_view_state::quality_label(p))
+            .unwrap_or("")
+    } else {
+        ""
+    };
+    state.preview_quality_label.set_label(label);
+    let help=state.spatial_preview.fallback_reason().filter(|_|requested).map(|(_,reason)|match reason {
+        toniator_engine::preview_cache::FallbackReason::Unsupported(_)=>"Fast preview does not support this artwork yet. Falling back to Accurate preview.",
+        toniator_engine::preview_cache::FallbackReason::Resource(_)=>"Fast preview is unavailable at this size or zoom. Falling back to Accurate preview.",
+        toniator_engine::preview_cache::FallbackReason::Unavailable(_)|toniator_engine::preview_cache::FallbackReason::Device(_)=>"Fast preview is unavailable on this system. Falling back to Accurate preview. Switch it off and on to retry.",
+        toniator_engine::preview_cache::FallbackReason::Cancelled=>"Preview updating…",
+    }).unwrap_or("Fast preview is approximate. Accurate preview uses the CPU renderer.");
+    state.fast_preview.set_tooltip_text(Some(help));
+    state.preview_quality_label.set_tooltip_text(Some(help));
+}
+/// Publishes only a current complete uploaded Fast frame; canonical readiness alone never reaches here.
+fn accept_main_fast_pixels(
+    state: &mut AppState,
+    artwork: (u64, u64, u64),
+    target: toniator_engine::PreviewRasterTarget,
+) -> bool {
+    let Some(frame) = state
+        .spatial_preview
+        .accepted_frame()
+        .filter(|frame| {
+            frame.artwork == artwork
+                && frame.target == target
+                && frame.provenance == state.spatial_preview.provenance()
+        })
+        .cloned()
+    else {
+        return false;
+    };
+    if frame.provenance.effective != toniator_engine::preview_cache::Quality::Fast {
+        return false;
+    }
+    state.preview = Some(frame.texture);
+    state.accepted_preview_target = Some(frame.image_target);
+    state.accepted_preview_metadata = Some((frame.artwork, frame.provenance));
+    if target.viewport().is_none() {
+        state.preview_full = state.preview.clone();
+        publish_full_preview_identity(
+            &mut state.preview_full_identity,
+            &mut state.viewport_observed_target,
+            artwork,
+            state.view_state.is_fit(),
+        );
+    }
+    state.preview_details.clear();
+    state.presented_texture = None;
+    set_page(state, Page::Success);
+    set_inspector_status(state, "Preview updated.");
+    emit_automation_state(state, "preview_fast_pixels_accepted", None);
+    true
+}
+/// Keeps native preparation visibly pending after canonical completion, without a false 100% view claim.
+fn fast_preparation_pending(state: &AppState) {
+    state
+        .preview_progress_label
+        .set_label("Preparing Fast preview…");
+    state
+        .preview_overall_progress_label
+        .set_label("Preview updating…");
+    state.preview_progress_bar.set_text(None);
+    state.preview_stage_progress_bar.set_text(None);
+    state.preview_progress_bar.set_fraction(0.);
+    state.preview_stage_progress_bar.set_fraction(0.);
+    state.preview_progress_bar.pulse();
+    state.preview_stage_progress_bar.pulse();
+}
+
 /// Reuses only accepted current-frame pixels before source cloning, decoding, tickets or pending.
 /// Cache admission failures return to the existing viewport renderer without a software-error overlay.
 fn try_spatial_preview(state: &mut AppState) -> bool {
@@ -24342,6 +24679,7 @@ fn try_spatial_preview(state: &mut AppState) -> bool {
 /// Projects current cached scales before ordinary work; unsupported exact rendering retains only a
 /// validated current coarse projection while the ordinary requested-target route runs.
 fn try_spatial_preview_inner(state: &mut AppState) -> bool {
+    observe_main_preview_request(state);
     let Some(artwork) = main_preview_frame_identity(state) else {
         return false;
     };
@@ -24351,6 +24689,7 @@ fn try_spatial_preview_inner(state: &mut AppState) -> bool {
     state.spatial_preview.require_artwork(artwork);
     if state.view_state.mode() == MainViewMode::Source {
         state.spatial_preview.suspend();
+        state.pending_scene = None;
         if state.source_texture_frame != Some(artwork) {
             if state
                 .media_preview_key
@@ -24363,9 +24702,11 @@ fn try_spatial_preview_inner(state: &mut AppState) -> bool {
                 }
                 state.scheduler.cancel_pending();
                 state.preview_coordinator.clear_submission();
+                let provenance = state.spatial_preview.provenance();
                 state.preview_coordinator.queue_intent(Some(PreviewIntent {
                     frame: artwork,
                     target,
+                    provenance,
                 }));
                 if let Err(error) = submit_current_source(state, target) {
                     show_preview_error(state, error);
@@ -24384,9 +24725,66 @@ fn try_spatial_preview_inner(state: &mut AppState) -> bool {
         sync_main_preview_pending(state);
         return true;
     }
-    if let Some(texture) = state.spatial_preview.fallback(artwork, target) {
+    if state.view_state.quality() == toniator_engine::preview_cache::Quality::Fast
+        && state.spatial_preview.has_artwork(artwork)
+        && target.viewport().is_none()
+    {
+        let ready = state
+            .spatial_preview
+            .request_fast_exact(artwork, target)
+            .is_some();
+        if ready {
+            accept_main_fast_pixels(state, artwork, target);
+        }
+        if ready
+            || state.spatial_preview.provenance().effective
+                == toniator_engine::preview_cache::Quality::Fast
+        {
+            state.preview_target = Some(target);
+            let provenance = state.spatial_preview.provenance();
+            state.preview_coordinator.cache_view(
+                PreviewIntent {
+                    frame: artwork,
+                    target,
+                    provenance,
+                },
+                ready,
+            );
+            if !ready {
+                fast_preparation_pending(state);
+            }
+            apply_main_view_presentation(state);
+            sync_main_preview_pending(state);
+            return true;
+        }
+    }
+    if state.spatial_preview.requires_cpu_base(artwork) {
+        state.spatial_preview.ordinary_required = true;
+        if state.spatial_preview.statistics().fast_reserved_bytes > 0 {
+            state.spatial_preview.pending = true;
+            state.preview_target = Some(target);
+            let provenance = state.spatial_preview.provenance();
+            state.preview_coordinator.cache_view(
+                PreviewIntent {
+                    frame: artwork,
+                    target,
+                    provenance,
+                },
+                false,
+            );
+            apply_main_view_presentation(state);
+            sync_main_preview_pending(state);
+            return true;
+        }
+        return false;
+    }
+    if (state.view_state.quality() == toniator_engine::preview_cache::Quality::Accurate
+        || target.viewport().is_none())
+        && let Some(texture) = state.spatial_preview.fallback(artwork, target)
+    {
         state.spatial_preview.visit_zoom(artwork, target);
         state.preview = Some(texture);
+        state.accepted_preview_metadata = Some((artwork, state.spatial_preview.provenance()));
         state.accepted_preview_target = Some(target);
         if target.viewport().is_none() {
             state.preview_full = state.preview.clone();
@@ -24399,10 +24797,12 @@ fn try_spatial_preview_inner(state: &mut AppState) -> bool {
         state.preview_target = Some(target);
         state.spatial_preview.presentation = None;
         state.spatial_preview.pending = false;
+        let provenance = state.spatial_preview.provenance();
         state.preview_coordinator.cache_view(
             PreviewIntent {
                 frame: artwork,
                 target,
+                provenance,
             },
             true,
         );
@@ -24469,13 +24869,25 @@ fn try_spatial_preview_inner(state: &mut AppState) -> bool {
         .bind_geometry(&state.picture, &state.viewport_scroll);
     state.preview_target = Some(target);
     let complete = state.spatial_preview.exact_complete;
-    state.preview_coordinator.cache_view(
-        PreviewIntent {
-            frame: artwork,
-            target,
-        },
-        complete,
-    );
+    if complete
+        && !accept_main_fast_pixels(state, artwork, target)
+        && !state.spatial_preview.requires_cpu_base(artwork)
+    {
+        state.accepted_preview_metadata = Some((artwork, state.spatial_preview.provenance()));
+    }
+    let needs_cpu_base = complete && state.spatial_preview.requires_cpu_base(artwork);
+    let provenance = state.spatial_preview.provenance();
+    let intent = PreviewIntent {
+        frame: artwork,
+        target,
+        provenance,
+    };
+    if !state
+        .preview_coordinator
+        .preserve_ordinary(intent, needs_cpu_base)
+    {
+        state.preview_coordinator.cache_view(intent, complete);
+    }
     state.presented_texture = None;
     if state.spatial_preview.pending {
         state.preview_progress_label.set_label("Preview updating…");
@@ -24489,19 +24901,36 @@ fn try_spatial_preview_inner(state: &mut AppState) -> bool {
         state.preview_progress_bar.pulse();
         state.preview_stage_progress_bar.pulse();
     }
+    observe_main_preview_request(state);
     apply_main_view_presentation(state);
     sync_main_preview_pending(state);
     emit_automation_state(state, "preview_cache_plan", None);
+    if needs_cpu_base {
+        state.spatial_preview.ordinary_required = true;
+        return false;
+    }
     true
 }
 
 /// Invalidates the accepted preview target and records queued work before idle submission.
 /// Source-less documents retain the empty artwork action and never queue an impossible preview.
+/// Same-artwork canonical-only work retargets without cancelling its accepted-source/ticket authority.
 fn set_preview_pending(state: &mut AppState) {
     if try_spatial_preview(state) {
         return;
     }
     let intent = main_preview_intent(state);
+    if state.pending_scene == main_preview_frame_identity(state)
+        && state.pending_scene.is_some()
+        && state.view_state.mode() == MainViewMode::Preview
+        && let Some(intent) = intent
+        && state.preview_coordinator.retarget_scene(intent)
+    {
+        state.preview_target = Some(intent.target);
+        sync_main_preview_pending(state);
+        return;
+    }
+    state.pending_scene = None;
     if state
         .workspace
         .as_ref()
@@ -24553,6 +24982,7 @@ fn set_preview_pending(state: &mut AppState) {
 /// unobtrusive. Failure details and enabled Retry authority remain coordinator-owned.
 /// The canvas has no status hover hint; visible progress and error controls carry that information.
 fn sync_main_preview_pending(state: &AppState) {
+    sync_main_preview_quality(state);
     let pending = state.preview_coordinator.is_pending() || state.spatial_preview.pending;
     state
         .preview_progress
@@ -24640,12 +25070,28 @@ fn sync_draft_preview_pending(surface: &PatternEditorSurface) {
     }
 }
 
+/// Records at most 64 opt-in startup/submission gate snapshots; evidence never controls product behavior.
+fn trace_main_submission_gate(state: &mut AppState, gate: &str) {
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    if std::env::var_os("TONIATOR_PREVIEW_CACHE_TRACE").is_none_or(|v| v != "1")
+        || COUNT.fetch_add(1, Ordering::Relaxed) >= 64
+    {
+        return;
+    }
+    let facts = serde_json::json!({"event":"preview_submission_gate","gate":gate,"resolved":match main_viewport_resolution(state){viewport_request::Resolution::Ready(target)=>format!("Ready {target:?}"),viewport_request::Resolution::Unallocated=>"Unallocated".into(),viewport_request::Resolution::Rejected{error,..}=>format!("Rejected {}",error.path())},"target":format!("{:?}",state.preview_target),"frame":main_preview_frame_identity(state),"pending_scene":state.pending_scene,"coordinator_intent":format!("{:?}",state.preview_coordinator.intent()),"coordinator_submission":format!("{:?}",state.preview_coordinator.submission()),"coordinator_pending":state.preview_coordinator.is_pending(),"media_key":format!("{:?}",state.media_preview_key),"window_visible":state.window.is_visible(),"picture":[state.picture.width(),state.picture.height()],"page":[state.viewport_scroll.hadjustment().page_size(),state.viewport_scroll.vadjustment().page_size()]});
+    eprintln!("toniator-main-preview-gate {facts}");
+    if let Some(sink) = state.automation.as_mut() {
+        sink.emit(&facts);
+    }
+}
+
 /// Schedules one main preview submission after GTK allocates the visible workspace.
 ///
 /// A generation check cancels old callbacks after Close/replacement. Two equal positive allocation
 /// samples let GTK finish the startup-to-workspace layout before choosing raster resolution. The scheduler
 /// remains ticket authority; this helper never changes document/history state.
 fn schedule_main_preview_submission(state: &Rc<RefCell<AppState>>) {
+    trace_main_submission_gate(&mut state.borrow_mut(), "schedule");
     if let Some(source) = state.borrow_mut().preview_debounce.take() {
         source.remove();
     }
@@ -24657,6 +25103,7 @@ fn schedule_main_preview_submission(state: &Rc<RefCell<AppState>>) {
             return glib::ControlFlow::Break;
         };
         let mut app_state = state.borrow_mut();
+        trace_main_submission_gate(&mut app_state, "allocation-timeout");
         if app_state.workspace_generation != generation
             || !app_state.window.is_visible()
             || !app_state
@@ -26501,7 +26948,7 @@ fn choose_unsaved_resolution(state: &Rc<RefCell<AppState>>, action: LifecycleAct
         .build();
     dialog.set_buttons(&["Cancel", "Discard", "Save"]);
     dialog.set_cancel_button(0);
-    dialog.set_default_button(2);
+    dialog.set_default_button(0);
     let state = Rc::clone(state);
     let window = state.borrow().window.clone();
     dialog.choose(Some(&window), None::<&gio::Cancellable>, move |response| {
@@ -30064,6 +30511,8 @@ fn still_export_progress_window(
     cancelled: Arc<AtomicBool>,
 ) -> gtk::Window {
     let progress = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Export Image")
         .transient_for(parent)
         .default_width(320)
@@ -31603,7 +32052,11 @@ fn handle_preview_progress(
     ) {
         return;
     }
-    let fraction = progress.fraction().clamp(0.0, 1.0);
+    let fraction = if app_state.pending_scene.is_some() {
+        progress.fraction().clamp(0.0, 0.9)
+    } else {
+        progress.fraction().clamp(0.0, 1.0)
+    };
     let stage_fraction = progress.stage_fraction().clamp(0.0, 1.0);
     let stage = preview_progress_stage_label(progress.stage());
     sync_main_preview_pending(&app_state);
@@ -31639,8 +32092,9 @@ fn handle_preview_progress(
         .set_tooltip_text(Some(&format!("Rendering preview: {stage}")));
 }
 
-/// Accepts a scheduler completion only for its still-current workspace token and prepares its
-/// transparent canonical raster for the document model's viewer-only linear-light backdrop.
+/// Accepts latest-ticket/session-token canonical or raster work without conflating scene readiness with pixels.
+/// Canonical-only intent can retarget its viewport; raster publication still requires the exact target.
+/// Only complete uploaded pixels update accepted quality, while old whole frames remain truthful history.
 fn handle_preview_completion(
     state: &Rc<RefCell<AppState>>,
     completion: toniator_engine::EvaluationCompletion,
@@ -31649,7 +32103,16 @@ fn handle_preview_completion(
     let workspace_generation = app_state.workspace_generation;
     let ticket = completion.ticket().value();
     if main_viewport_target(&app_state) != app_state.preview_target {
-        return;
+        if app_state.pending_scene.is_some()
+            && app_state.pending_scene == main_preview_frame_identity(&app_state)
+        {
+            if let Some(intent) = main_preview_intent(&app_state) {
+                app_state.preview_coordinator.retarget_scene(intent);
+                app_state.preview_target = Some(intent.target);
+            }
+        } else {
+            return;
+        }
     }
     if !accepts_submission(
         workspace_generation,
@@ -31664,11 +32127,51 @@ fn handle_preview_completion(
             .accept_completion(&completion, workspace.history.session())
     });
     match accepted {
+        Ok(true) if completion.scene_result().is_some() => {
+            let scene_result = completion.scene_result().expect("guarded scene payload");
+            let Some(artwork) = main_preview_frame_identity(&app_state) else {
+                return;
+            };
+            let facts = serde_json::json!({"event":"preview_scene_ready","workspace_generation":workspace_generation,"ticket":ticket,"frame":artwork,"scene":scene_result.scene().identity().scene_fingerprint(),"canonical_primitives":scene_result.scene().circular_mark_count(),"source_identity":format!("{:?}",scene_result.source_identity()),"cache":format!("{:?}",completion.scene_cache_diagnostics()),"raster_allocated":false});
+            app_state
+                .spatial_preview
+                .accept(artwork, scene_result.shared_scene());
+            #[cfg(test)]
+            stage4_probe::accepted_scene(scene_result.shared_scene());
+            app_state
+                .preview_coordinator
+                .accept(workspace_generation, ticket);
+            app_state.pending_scene = None;
+            if let Some(sink) = app_state.automation.as_mut() {
+                sink.emit(&facts);
+            }
+            app_state.preview_target = None;
+            set_page(&mut app_state, Page::Success);
+            set_preview_pending(&mut app_state);
+            submit_if_viewport_ready(&mut app_state);
+            if app_state.spatial_preview.pending {
+                fast_preparation_pending(&app_state);
+            }
+            apply_main_view_presentation(&mut app_state);
+            sync_main_preview_pending(&app_state);
+        }
         Ok(true) => match completion.result() {
             Some(result) => match injected_preview_error(&mut app_state, "texture")
                 .map_or_else(|| texture_from_surface(result.raster()), Err)
             {
                 Ok(texture) => {
+                    if let Some(sink)=app_state.automation.as_mut() {
+                        sink.emit(&serde_json::json!({"event":"preview_raster_ready","ticket":ticket,"workspace_generation":workspace_generation,"scene":result.scene().identity().scene_fingerprint(),"canonical_primitives":result.scene().circular_mark_count(),"source_identity":format!("{:?}",result.source_identity()),"cache":format!("{:?}",completion.cache_diagnostics()),"raster_dimensions":[result.raster().width(),result.raster().height()]}));
+                    }
+
+                    app_state.pending_scene = None;
+                    let accepted_provenance = app_state
+                        .preview_coordinator
+                        .intent()
+                        .map(|i| i.provenance)
+                        .unwrap_or_else(|| app_state.spatial_preview.provenance());
+                    app_state.accepted_preview_metadata = main_preview_frame_identity(&app_state)
+                        .map(|artwork| (artwork, accepted_provenance));
                     if let (Some(artwork), Some(target)) = (
                         main_preview_frame_identity(&app_state),
                         app_state.preview_target,
@@ -31676,6 +32179,8 @@ fn handle_preview_completion(
                         app_state
                             .spatial_preview
                             .accept(artwork, result.shared_scene());
+                        #[cfg(test)]
+                        stage4_probe::accepted_scene(result.shared_scene());
                         app_state.spatial_preview.remember_fallback(
                             artwork,
                             target,
@@ -31715,6 +32220,7 @@ fn handle_preview_completion(
                 }
             },
             None => {
+                app_state.pending_scene = None;
                 let message = completion.error().map_or_else(
                     || {
                         PreviewDiagnostic::new(
@@ -31739,6 +32245,7 @@ fn handle_preview_completion(
             }
         },
         Ok(false) => {
+            app_state.pending_scene = None;
             app_state
                 .preview_coordinator
                 .cancel(workspace_generation, ticket);
@@ -32076,6 +32583,7 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
         state.pending_png_export_surface_epoch = None;
         state.workspace_generation = state.workspace_generation.saturating_add(1);
         state.preview_coordinator.clear_workspace();
+        state.pending_scene = None;
         state.spatial_preview.clear();
         sync_main_preview_pending(&state);
         state.inspector_runtime.reset_for_workspace();
@@ -32199,6 +32707,7 @@ fn clear_workspace(state: &Rc<RefCell<AppState>>) {
         state.generation = state.generation.saturating_add(1);
         state.workspace_generation = state.workspace_generation.saturating_add(1);
         state.preview_coordinator.clear_workspace();
+        state.pending_scene = None;
         state.spatial_preview.clear();
         state.media_preview_key = None;
         if let Some(worker) = state.media_worker.as_mut() {
@@ -32353,6 +32862,7 @@ fn replace_model_topology(
 /// Rechecks cache reuse after GTK allocation, before ordinary source preparation or scheduler submission.
 /// Only an unsupported/uncovered cache query reaches the existing queued preview route.
 fn submit_if_viewport_ready(state: &mut AppState) {
+    trace_main_submission_gate(state, "submit-if-ready");
     // GTK allocation may have changed since the early pending hook (notably after zoom).
     if try_spatial_preview(state) {
         return;
@@ -32366,10 +32876,11 @@ fn submit_if_viewport_ready(state: &mut AppState) {
     let Some(frame) = main_preview_frame_identity(state) else {
         return;
     };
-    if state
-        .preview_coordinator
-        .is_failed(PreviewIntent { frame, target })
-        || state.preview_target == Some(target)
+    if state.preview_coordinator.is_failed(PreviewIntent {
+        frame,
+        target,
+        provenance: state.spatial_preview.provenance(),
+    }) || state.preview_target == Some(target)
     {
         return;
     }
@@ -32405,6 +32916,7 @@ fn submit_current_source(
     let intent = PreviewIntent {
         frame: key.frame_identity(),
         target,
+        provenance: state.spatial_preview.provenance(),
     };
     if !state.preview_coordinator.prepare(intent) {
         return Ok(());
@@ -32445,6 +32957,7 @@ fn submit_current_source(
         .ok_or(unavailable)?
         .submit(key, session, sources, target)?;
     state.media_preview_key = Some(key);
+    state.pending_scene = main_scene_only(state).then_some(key.frame_identity());
     emit_automation_state(state, "preview_source_preparation_started", None);
     sync_main_preview_pending(state);
     set_inspector_status(state, "Preparing source frame…");
@@ -32464,6 +32977,7 @@ fn handle_media_preview_completion(
     let mut state = state.borrow_mut();
     if state.view_state.mode() != MainViewMode::Source
         && main_viewport_target(&state) != state.preview_target
+        && state.pending_scene != main_preview_frame_identity(&state)
     {
         return;
     }
@@ -32529,15 +33043,26 @@ fn handle_media_preview_completion(
         if let Some(error) = injected_preview_error(&mut state, "submit") {
             return Err(error);
         }
-        let ticket = state
-            .scheduler
-            .submit(prepared.request)
-            .map_err(PreviewDiagnostic::scheduler)?;
+        let scene_only = state.pending_scene == Some(completion.key.frame_identity());
+        let ticket = if scene_only {
+            state.scheduler.submit_scene(prepared.request)
+        } else {
+            state.scheduler.submit(prepared.request)
+        }
+        .map_err(PreviewDiagnostic::scheduler)?;
         let generation = state.workspace_generation;
         state.preview_coordinator.submit(generation, ticket.value());
         apply_main_view_presentation(&mut state);
         set_inspector_status(&mut state, "Preview updating…");
-        emit_automation_state(&mut state, "preview_submitted", Some(ticket.value()));
+        emit_automation_state(
+            &mut state,
+            if scene_only {
+                "preview_scene_submitted"
+            } else {
+                "preview_submitted"
+            },
+            Some(ticket.value()),
+        );
         Ok(())
     });
     if let Err(error) = result {
@@ -32597,6 +33122,10 @@ fn emit_automation_state(state: &mut AppState, event: &str, ticket: Option<u64>)
         "full_preview_frame": state.preview_full_identity,
         "source_texture_frame": state.source_texture_frame,
         "view_mode": format!("{:?}",state.view_state.mode()),
+        "requested_preview_quality":format!("{:?}",state.view_state.quality()),
+        "accepted_preview":state.accepted_preview_metadata.map(|(frame,p)|serde_json::json!({"frame":frame,"provenance":format!("{:?}",p),"label":main_view_state::quality_label(p)})),
+        "canonical_only_pending":state.pending_scene,
+        "fast_fallback":state.spatial_preview.fallback_reason().map(|(_,reason)|format!("{:?}",reason)),
         "preview_failed": state.preview_coordinator.failure().is_some(),
         "preview_error_visible": state.preview_coordinator.failure().is_some_and(|failure|failure.visible),
         "preview_failure_diagnostic": state.preview_coordinator.failure().map(|failure|failure.diagnostic.as_str()),
@@ -32737,6 +33266,39 @@ fn retire_rejected_viewport(
     *observed = None;
     *submitted = None;
     coordinator.clear_submission();
+}
+
+/// Verifies Fast full-frame bootstrap reopens an equal previous crop without changing its requested camera.
+/// # Panics
+/// Panics if the temporary full frame suppresses the retained zoom's next exact crop.
+#[cfg(test)]
+#[test]
+fn stage3_fast_full_publication_reopens_equal_crop() {
+    let crop = toniator_engine::PreviewRasterTarget::for_viewport(120, 80, 4., 8., 2.).unwrap();
+    let fit = toniator_engine::PreviewRasterTarget::new(120, 80).unwrap();
+    let mut observed = Some(crop);
+    let mut full = None;
+    publish_full_preview_identity(&mut full, &mut observed, (1, 2, 3), false);
+    assert_eq!(full, Some((1, 2, 3)));
+    assert!(observed.is_none());
+    assert!(viewport_change_requires_submission(
+        &mut observed,
+        Some(fit),
+        crop
+    ));
+    assert_eq!(observed, Some(crop));
+}
+
+/// Records a complete accepted full frame and reopens cropped demand at a retained manual zoom.
+/// It changes only accepted metadata/observation, never camera, endpoint or authored state.
+fn publish_full_preview_identity(
+    full: &mut Option<(u64, u64, u64)>,
+    observed: &mut Option<toniator_engine::PreviewRasterTarget>,
+    artwork: (u64, u64, u64),
+    displayed_fit: bool,
+) {
+    *full = Some(artwork);
+    retire_crop_observation_after_fit(observed, displayed_fit);
 }
 
 /// Retires the prior crop observation after accepting a full Fit fallback at a retained zoom.
@@ -32938,6 +33500,8 @@ fn clear_preview(state: &mut AppState) {
     state.picture.set_paintable(None::<&gtk::gdk::Paintable>);
     state.presented_texture = None;
     state.preview = None;
+    state.accepted_preview_metadata = None;
+    state.pending_scene = None;
     state.accepted_preview_target = None;
     state.preview_full = None;
     state.preview_full_identity = None;
@@ -43575,6 +44139,7 @@ mod preview_failure_logging_tests {
         let intent = PreviewIntent {
             frame: (1, 2, 3),
             target,
+            provenance: Default::default(),
         };
         let mut coordinator = preview_coordinator::PreviewCoordinator::default();
         assert!(coordinator.prepare(intent));

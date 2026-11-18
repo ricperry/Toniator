@@ -1,4 +1,10 @@
+
 //! One accepted frame's persistent full-zoom preview pixels and retained roots. GTK is never owned here.
+mod quality;
+pub use quality::*;
+mod fast;
+pub use fast::{FastPlan, WorkerRetirement, WorkerState};
+
 use std::{
     collections::VecDeque,
     sync::{
@@ -17,8 +23,10 @@ const TILE: u32 = 1536;
 /// Accepted upstream workspace/revision/frame identity; viewport changes do not create artwork.
 pub type Artwork = (u64, u64, u64);
 /// Exact effective uniform physical scale, background and numerical work policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RootKey {
+    pub provenance: Provenance,
+    pub projection: Projection,
     scale: u64,
     background: u8,
     edges: usize,
@@ -28,6 +36,8 @@ impl RootKey {
     /// Captures the entire current retained-root raster contract, excluding view/pan dimensions.
     pub fn new(scale: f64, background: RasterBackground, limits: RasterizationLimits) -> Self {
         Self {
+            provenance: Provenance::default(),
+            projection: Projection::Natural,
             scale: scale.to_bits(),
             background: match background {
                 RasterBackground::Transparent => 0,
@@ -37,6 +47,20 @@ impl RootKey {
             edges: limits.max_flattened_edges(),
             boolean: limits.max_boolean_operations(),
         }
+    }
+    /// Rebinds presentation/backend identity without changing the canonical scene or numerical policy.
+    pub fn with_provenance(mut self, provenance: Provenance) -> Self {
+        self.provenance = provenance;
+        self
+    }
+    /// Selects the complete existing fitted/cropped consumer instead of natural fixed-zoom projection.
+    pub fn with_target(mut self, target: toniator_render::PreviewRasterTarget) -> Self {
+        self.projection = Projection::Target(target);
+        self
+    }
+    /// Returns the exact physical zoom bits captured by this final consumer.
+    pub fn scale(self) -> f64 {
+        f64::from_bits(self.scale)
     }
     /// Restores only the admitted immutable backing selected by this key.
     fn backing(self) -> RasterBackground {
@@ -56,17 +80,53 @@ impl RootKey {
 /// One immutable CPU rectangle; its bytes are upload storage, not independent display permission.
 #[derive(Clone)]
 pub struct Pixels {
+    pub provenance: Provenance,
     pub id: u64,
     pub region: Region,
     pub surface: Arc<RasterSurface>,
     touch: u64,
 }
+impl Pixels {
+    /// Returns the backend/algorithm/epoch-qualified upload and GTK texture identity.
+    pub fn identity(&self) -> PixelIdentity {
+        PixelIdentity {
+            provenance: self.provenance,
+            id: self.id,
+        }
+    }
+}
+
+/// Exclusive Accurate numerical permission or complete approximate region provenance.
+#[derive(Clone)]
+pub enum ViewPermission {
+    Accurate(Arc<RegionCertificate>),
+    Fast(fast::FastPermission),
+}
+impl ViewPermission {
+    /// Tests whole-region permission without conflating GPU completeness with an error certificate.
+    pub fn covers(&self, region: Region) -> bool {
+        match self {
+            Self::Accurate(c) => c.covers(region),
+            Self::Fast(p) => p.covers(region),
+        }
+    }
+    /// Returns the complete authorized region for diagnostics and projection containment.
+    pub fn region(&self) -> Region {
+        match self {
+            Self::Accurate(c) => c.region(),
+            Self::Fast(p) => p.region(),
+        }
+    }
+}
 /// Complete current sampled-region permission plus available sparse coverage; alpha is not coverage.
 pub struct View {
+    captured_key: RootKey,
     pub key: RootKey,
     pub generation: u64,
     pub frame: Frame,
-    pub certificate: Arc<RegionCertificate>,
+    pub permission: ViewPermission,
+    pub artwork: Artwork,
+    presentation_authority: Arc<AtomicBool>,
     pub pixels: Vec<Pixels>,
     pub complete: bool,
     /// Actual remaining preparation/paint demand; a temporary upload-gutter gap is not refusal.
@@ -76,19 +136,55 @@ pub struct View {
     authority: Arc<AtomicBool>,
 }
 impl View {
+    /// Copies lock-free draw permission without retaining CPU pixels, canonical scenes or native roots.
+    /// Currentness remains mandatory; stale facts describe accepted immutable history only.
+    pub fn projection_metadata(&self) -> Self {
+        Self {
+            key: self.key,
+            captured_key: self.captured_key,
+            generation: self.generation,
+            frame: self.frame,
+            permission: self.permission.clone(),
+            artwork: self.artwork,
+            presentation_authority: self.presentation_authority.clone(),
+            pixels: Vec::new(),
+            complete: self.complete,
+            background_pending: false,
+            expected: Vec::new(),
+            validity: self.validity.clone(),
+            authority: self.authority.clone(),
+        }
+    }
+
     /// Rechecks artwork and root publication validity at upload/GTK draw time, without locking.
     pub fn is_current(&self) -> bool {
         let expected = self.generation.wrapping_add(1);
         expected != 0
+            && self.key == self.captured_key
             && !self.authority.load(Ordering::Acquire)
+            && !self.presentation_authority.load(Ordering::Acquire)
             && self.validity.load(Ordering::Acquire) == expected
+    }
+    /// Tests complete sampled-region permission without exposing an inaccurate CPU certificate.
+    pub fn covers(&self, region: Region) -> bool {
+        self.permission.covers(region)
+    }
+    /// Returns the whole permission region for diagnostics only.
+    pub fn permission_region(&self) -> Region {
+        self.permission.region()
     }
     /// Copies already-rendered neighbor texels into private upload storage without rasterization.
     /// Upload bytes alone grant no display permission; the current whole-view token remains required.
     /// # Errors
     /// Rejects invalidated authority, missing coverage, checked size overflow or allocation refusal.
     pub fn copy_upload(&self, region: Region) -> Result<Vec<u8>, RenderError> {
-        if !self.is_current() || !missing(region, self.pixels.iter().map(|p| p.region)).is_empty() {
+        if !self.is_current()
+            || self
+                .pixels
+                .iter()
+                .any(|p| p.provenance != self.key.provenance)
+            || !missing(region, self.pixels.iter().map(|p| p.region)).is_empty()
+        {
             return Err(error("upload coverage is unavailable"));
         }
         copy_pixels(region, &self.pixels)
@@ -98,6 +194,12 @@ impl View {
 /// # Errors
 /// Returns checked size/allocation/missing coverage errors without partially publishing a buffer.
 fn copy_pixels(region: Region, pixels: &[Pixels]) -> Result<Vec<u8>, RenderError> {
+    if pixels
+        .first()
+        .is_some_and(|first| pixels.iter().any(|p| p.provenance != first.provenance))
+    {
+        return Err(error("mixed upload provenance"));
+    }
     if !missing(region, pixels.iter().map(|p| p.region)).is_empty() {
         return Err(error("missing upload texels"));
     }
@@ -127,6 +229,7 @@ fn copy_pixels(region: Region, pixels: &[Pixels]) -> Result<Vec<u8>, RenderError
     Ok(bytes)
 }
 /// Distinguishes retained work from ordinary-renderer fallback without manufacturing a render error.
+#[allow(clippy::large_enum_variant)] // A ready projection is returned by value on frequent cache polls.
 pub enum Plan {
     Unavailable,
     Waiting,
@@ -150,10 +253,53 @@ pub struct Statistics {
     pub retained_materialized_scene_bytes: usize,
     pub estimated_scene_bytes: usize,
     pub copied_upload_bytes: u64,
+    pub diagnostic_support_paints: u64,
     pub stored_tiles: usize,
     pub completed_zooms: usize,
     pub visited_zooms: usize,
     pub retired_root_payload_bytes: usize,
+    pub fast_reserved_bytes: usize,
+    pub fast_preparations: u64,
+    pub fast_device_initializations: u64,
+}
+/// Read-only requested-cell facts, not display permission; at most 64 cells are copied.
+#[derive(Clone, Debug)]
+pub struct DiagnosticCells {
+    pub key: RootKey,
+    pub frame: Frame,
+    pub generation: u64,
+    pub ready: bool,
+    /// Each tuple is (fixed cell region, stored, in flight).
+    pub cells: Vec<(Region, bool, bool)>,
+    pub native_device_root: Option<(u64, u64)>,
+    pub assembly_region: Option<Region>,
+    pub upload_ready: bool,
+    pub exact_memo: Option<PixelIdentity>,
+}
+/// Enumerates only a bounded in-root diagnostic query through the ordinary fixed-grid authority.
+fn diagnostic_regions(region: Region, frame: Frame, expand: bool) -> Option<Vec<Region>> {
+    let whole = Region {
+        x: 0,
+        y: 0,
+        width: frame.width,
+        height: frame.height,
+    };
+    if region.width == 0 || region.height == 0 || intersection(region, whole) != Some(region) {
+        return None;
+    }
+    let r = if expand {
+        gutter(region, frame)
+    } else {
+        region
+    };
+    let columns =
+        (u64::from(r.x) + u64::from(r.width) - 1) / u64::from(TILE) - u64::from(r.x / TILE) + 1;
+    let rows =
+        (u64::from(r.y) + u64::from(r.height) - 1) / u64::from(TILE) - u64::from(r.y / TILE) + 1;
+    if columns.checked_mul(rows)? > 64 {
+        return None;
+    }
+    Some(tiles_for_region(r, frame))
 }
 struct Entry {
     key: RootKey,
@@ -179,16 +325,32 @@ struct Entry {
     uploading: Vec<(u64, Region)>,
     uploads: Vec<(u64, Region, Vec<u8>)>,
     failed_uploads: Vec<(u64, Region)>,
+    diagnostic_support: Option<(Region, u64, Provenance, Vec<Region>)>,
+}
+impl Entry {
+    /// Borrows only support tied to the current numerical generation, namespace and visible request.
+    fn diagnostic_support(&self) -> &[Region] {
+        self.diagnostic_support
+            .as_ref()
+            .filter(|(region, generation, provenance, _)| {
+                self.visible == Some(*region)
+                    && self.generation == *generation
+                    && self.key.provenance == *provenance
+            })
+            .map_or(&[], |s| s.3.as_slice())
+    }
 }
 /// Bounded queued work owns snapshots, never document transactions or GTK objects.
 pub struct Job {
     artwork: Artwork,
     key: RootKey,
     cancelled: Arc<AtomicBool>,
+    presentation: Arc<AtomicBool>,
     kind: JobKind,
     inflight: Arc<AtomicUsize>,
 }
 enum JobKind {
+    Fast(fast::FastJob),
     Prepare {
         scene: Arc<RenderScene>,
         budget: usize,
@@ -200,6 +362,8 @@ enum JobKind {
         validity: Arc<AtomicU64>,
     },
     Retire {
+        released: usize,
+        scenes: Vec<(Arc<RenderScene>, usize)>,
         entries: Vec<Entry>,
     },
     Upload {
@@ -219,6 +383,9 @@ impl Completion {
     /// Only visible cells, their full upload-neighbor support, and background completion/termination
     /// request a GTK replan; unrelated offscreen tiles do not rebuild the presentation.
     pub fn changes_view(&self, cache: &PreviewCache) -> bool {
+        if matches!(self.kind, Completed::Fast(_) | Completed::Retired { .. }) {
+            return true;
+        }
         if !cache
             .artwork
             .is_some_and(|current| current.0 == self.artwork.0 && current.2 == self.artwork.2)
@@ -226,7 +393,13 @@ impl Completion {
         {
             return false;
         }
-        let Some(e) = cache.entries.iter().find(|e| e.key == self.key) else {
+        let Some(e) = cache.entries.iter().find(|e| {
+            let mut k = self.key;
+            k.provenance = e.key.provenance;
+            e.key == k
+                && self.key.provenance.backend == Backend::CpuArea
+                && self.key.provenance.algorithm == Algorithm::AccurateAreaV1
+        }) else {
             return false;
         };
         match &self.kind {
@@ -240,7 +413,8 @@ impl Completion {
                             if *generation == e.generation && e.pixels.len() as u64 + 1 == tile_count(frame))
                 })
             }
-            Completed::Retired => false,
+            Completed::Retired {..} => false,
+            Completed::Fast(_) => true,
             _ => true,
         }
     }
@@ -251,6 +425,7 @@ pub struct Completion {
     key: RootKey,
     kind: Completed,
     authority: Arc<AtomicBool>,
+    presentation: Arc<AtomicBool>,
 }
 enum Completed {
     Prepared(Result<Prepared, RenderError>),
@@ -261,7 +436,10 @@ enum Completed {
         prepared_bytes: usize,
         snapshot: Result<RootSnapshot, RenderError>,
     },
-    Retired,
+    Retired {
+        released: usize,
+    },
+    Fast(fast::FastCompleted),
     Uploaded {
         id: u64,
         region: Region,
@@ -282,17 +460,21 @@ struct Prepared {
     prepared_bytes: usize,
     materialized_bytes: usize,
 }
-/// Owns one active frame and all its exact-scale roots, CPU regions, certificates, queue and LRU.
-/// Soft accounting includes known payload plus conservative texture/preparation estimates; it never
-/// preallocates8GiB or rejects artwork solely for exceeding the coherent retention target.
+/// Retains one ordinary exact-target texture memo under its complete derived provenance namespace.
 struct Exact {
+    provenance: Provenance,
     id: u64,
     target: toniator_render::PreviewRasterTarget,
     touch: u64,
     bytes: usize,
 }
 
+/// Owns accepted canonical authority and a shared soft ledger for derived CPU/GPU work and uploads.
+/// Native GPU objects stay on the serialized worker; queued retirement does not release its charge.
 pub struct PreviewCache {
+    fast: fast::FastMetadata,
+    retired_inflight: usize,
+    retired_scenes: Vec<(Arc<RenderScene>, usize)>,
     artwork: Option<Artwork>,
     scene: Option<Arc<RenderScene>>,
     cancelled: Arc<AtomicBool>,
@@ -303,11 +485,14 @@ pub struct PreviewCache {
     budget: usize,
     stats: Statistics,
     texture_charge: usize,
+    last_good_charge: usize,
+    external_exact: Option<u64>,
     scene_estimate: usize,
     exact: Vec<Exact>,
     inflight: Arc<AtomicUsize>,
     active: Option<RootKey>,
     background_cursor: usize,
+    diagnostic_background_fill: bool,
     priority_streak: u8,
     visible_streak: u8,
     retired: Vec<Entry>,
@@ -449,9 +634,63 @@ fn tiles_for_region(region: Region, frame: Frame) -> Vec<Region> {
     result
 }
 impl PreviewCache {
+    /// Copies matching current root/cell/memo metadata without LRU, plan, admission or worker mutation.
+    /// Refuses stale artwork, missing/unprepared roots, out-of-root or >64-cell queries as unknown.
+    pub fn diagnostic_cells(
+        &self,
+        artwork: Artwork,
+        key: RootKey,
+        region: Region,
+        target: toniator_render::PreviewRasterTarget,
+    ) -> Option<DiagnosticCells> {
+        if self.artwork != Some(artwork) {
+            return None;
+        }
+        let mut result = if key.provenance.backend == Backend::HybridGpu {
+            self.diagnostic_fast_cells(key, region)?
+        } else {
+            let entry = self.entries.iter().find(|e| e.key == key)?;
+            let frame = entry.frame?;
+            DiagnosticCells {
+                key,
+                frame,
+                generation: entry.generation,
+                ready: entry.snapshot.is_some(),
+                cells: diagnostic_regions(region, frame, true)?
+                    .into_iter()
+                    .map(|r| {
+                        (
+                            r,
+                            entry.pixels.iter().any(|p| p.region == r),
+                            entry.inflight.contains(&r),
+                        )
+                    })
+                    .collect(),
+                native_device_root: None,
+                assembly_region: None,
+                upload_ready: entry
+                    .uploads
+                    .iter()
+                    .any(|(_, r, _)| intersection(*r, region).is_some()),
+                exact_memo: None,
+            }
+        };
+        result.exact_memo = self
+            .exact
+            .iter()
+            .find(|e| e.target == target && e.provenance == key.provenance)
+            .map(|e| PixelIdentity {
+                provenance: e.provenance,
+                id: e.id,
+            });
+        Some(result)
+    }
     /// Creates an empty full-zoom cache; no pixel or prepared-root storage allocates upfront.
     pub fn new(budget: usize) -> Self {
         Self {
+            fast: fast::FastMetadata::default(),
+            retired_inflight: 0,
+            retired_scenes: Vec::new(),
             artwork: None,
             scene: None,
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -462,11 +701,14 @@ impl PreviewCache {
             budget,
             stats: Statistics::default(),
             texture_charge: 0,
+            last_good_charge: 0,
+            external_exact: None,
             scene_estimate: 0,
             exact: Vec::new(),
             inflight: Arc::new(AtomicUsize::new(0)),
             active: None,
             background_cursor: 0,
+            diagnostic_background_fill: true,
             priority_streak: 0,
             visible_streak: 0,
             retired: Vec::new(),
@@ -474,14 +716,21 @@ impl PreviewCache {
     }
     /// Revokes all derived work after workspace/frame/artwork replacement, preserving no old scene.
     pub fn clear(&mut self) {
+        self.retire_fast_root();
+        self.fast.revoke();
         self.cancelled.store(true, Ordering::Relaxed);
         self.artwork = None;
         self.active = None;
-        self.scene = None;
+        if let Some(scene) = self.scene.take() {
+            self.retired_scenes.push((scene, self.scene_estimate));
+        }
+        for entry in &mut self.entries {
+            entry.diagnostic_support = None;
+        }
         self.retired.append(&mut self.entries);
         self.queue.clear();
         self.cancelled = Arc::new(AtomicBool::new(false));
-        self.texture_charge = 0;
+        self.texture_charge = self.last_good_charge;
         self.scene_estimate = 0;
         self.exact.clear();
     }
@@ -526,15 +775,17 @@ impl PreviewCache {
         target: toniator_render::PreviewRasterTarget,
         bytes: usize,
     ) -> Option<u64> {
-        if !self.has_artwork(artwork) {
+        if !self.has_artwork(artwork) || self.fast.provenance().effective != Quality::Accurate {
             return None;
         }
         self.clock = self.clock.wrapping_add(1);
         self.active = None;
-        self.exact.retain(|e| e.target != target);
+        self.exact
+            .retain(|e| e.target != target || e.provenance != self.fast.provenance());
         self.next_id = self.next_id.wrapping_add(1);
         let id = self.next_id;
         self.exact.push(Exact {
+            provenance: self.fast.provenance(),
             id,
             target,
             touch: self.clock,
@@ -549,11 +800,15 @@ impl PreviewCache {
         artwork: Artwork,
         target: toniator_render::PreviewRasterTarget,
     ) -> Option<u64> {
-        if !self.has_artwork(artwork) {
+        if !self.has_artwork(artwork) || self.fast.provenance().effective != Quality::Accurate {
             return None;
         }
         self.clock = self.clock.wrapping_add(1);
-        let entry = self.exact.iter_mut().find(|e| e.target == target)?;
+        let stamp = self.fast.provenance();
+        let entry = self
+            .exact
+            .iter_mut()
+            .find(|e| e.target == target && e.provenance == stamp)?;
         entry.touch = self.clock;
         Some(entry.id)
     }
@@ -613,17 +868,10 @@ impl PreviewCache {
                     .is_some_and(|f| e.pixels.len() as u64 == tile_count(f))
             })
             .count();
-        s.retired_root_payload_bytes = self.retired.iter().fold(0usize, |bytes, e| {
-            bytes
-                .saturating_add(e.prepared_bytes)
-                .saturating_add(e.materialized_bytes)
-                .saturating_add(
-                    e.pixels
-                        .iter()
-                        .map(|p| p.surface.pixels().len())
-                        .sum::<usize>(),
-                )
-        });
+        s.fast_reserved_bytes = self.fast.charge();
+        s.retired_root_payload_bytes = fast::retired_payload(&self.retired)
+            .saturating_add(self.retired_inflight)
+            .saturating_add(self.retired_scenes.iter().map(|s| s.1).sum::<usize>());
         s.inflight_estimated_bytes = self.inflight.load(Ordering::Acquire);
         s.retained_cpu_bytes = self
             .entries
@@ -638,18 +886,37 @@ impl PreviewCache {
                     .map(|u| u.2.capacity())
                     .sum(),
             );
+        s.retained_cpu_bytes = s.retained_cpu_bytes.saturating_add(self.fast.pixels());
         s.retained_prepared_bytes = self.entries.iter().map(|e| e.prepared_bytes).sum();
         s.retained_materialized_scene_bytes =
             self.entries.iter().map(|e| e.materialized_bytes).sum();
-        s.charged_texture_bytes = self
-            .texture_charge
-            .saturating_add(self.exact.iter().map(|e| e.bytes).sum::<usize>());
+        s.charged_texture_bytes = self.texture_charge.saturating_add(
+            self.exact
+                .iter()
+                .filter(|e| Some(e.id) != self.external_exact)
+                .map(|e| e.bytes)
+                .sum::<usize>(),
+        );
         s.estimated_scene_bytes = self.scene_estimate;
         s
     }
     /// Charges app-owned uploads/GPU estimates and copy observations without taking GTK ownership.
     pub fn textures(&mut self, bytes: usize, copied: u64) {
+        self.textures_with_retained(bytes, copied, 0, None);
+    }
+    /// Charges GTK-owned copies, including unavoidable immutable last-good pixels only once.
+    /// `external_exact` identifies a memo whose texture is already included in `bytes`.
+    /// Releasing inactive textures acknowledges retirement before native preparation can begin.
+    pub fn textures_with_retained(
+        &mut self,
+        bytes: usize,
+        copied: u64,
+        last_good: usize,
+        external_exact: Option<u64>,
+    ) {
         self.texture_charge = bytes;
+        self.last_good_charge = last_good.min(bytes);
+        self.external_exact = external_exact;
         self.stats.copied_upload_bytes = self.stats.copied_upload_bytes.saturating_add(copied);
         self.evict();
     }
@@ -683,7 +950,10 @@ impl PreviewCache {
         key: RootKey,
         region: Region,
     ) -> Result<Plan, RenderError> {
-        if !self.has_artwork(artwork) {
+        if !self.has_artwork(artwork)
+            || key.provenance != self.fast.provenance()
+            || key.provenance.effective != Quality::Accurate
+        {
             return Ok(Plan::Unavailable);
         }
         let scene = self.scene.as_ref().ok_or(error("scene unavailable"))?;
@@ -749,6 +1019,7 @@ impl PreviewCache {
                 uploading: Vec::new(),
                 uploads: Vec::new(),
                 failed_uploads: Vec::new(),
+                diagnostic_support: None,
             });
             if !cacheable {
                 self.stats.unsupported_roots += 1;
@@ -758,6 +1029,7 @@ impl PreviewCache {
                 artwork,
                 key,
                 cancelled: self.cancelled.clone(),
+                presentation: self.fast.authority(),
                 inflight: self.inflight.clone(),
                 kind: JobKind::Prepare {
                     scene,
@@ -770,6 +1042,9 @@ impl PreviewCache {
         };
         let entry = &mut self.entries[index];
         entry.touch = self.clock;
+        if !self.diagnostic_background_fill && entry.visible != Some(region) {
+            entry.diagnostic_support = None;
+        }
         entry.visible = Some(region);
         if entry.unsupported
             || entry.failed_views.contains(&region)
@@ -787,6 +1062,7 @@ impl PreviewCache {
                     artwork,
                     key,
                     cancelled: self.cancelled.clone(),
+                    presentation: self.fast.authority(),
                     inflight: self.inflight.clone(),
                     kind: JobKind::Prepare {
                         scene: self
@@ -830,6 +1106,7 @@ impl PreviewCache {
                     artwork,
                     key,
                     cancelled: self.cancelled.clone(),
+                    presentation: self.fast.authority(),
                     inflight: self.inflight.clone(),
                     kind: JobKind::Certify {
                         root,
@@ -853,10 +1130,13 @@ impl PreviewCache {
             self.stats.partial_hits += 1;
         }
         Ok(Plan::Ready(View {
+            captured_key: key,
             key,
             generation: entry.generation,
             frame: entry.frame.ok_or(error("root frame missing"))?,
-            certificate,
+            permission: ViewPermission::Accurate(certificate),
+            artwork,
+            presentation_authority: self.fast.authority(),
             pixels: entry.pixels.clone(),
             complete,
             background_pending: entry.preparing
@@ -918,6 +1198,7 @@ impl PreviewCache {
                 artwork: self.artwork.ok_or(error("artwork unavailable"))?,
                 key,
                 cancelled: self.cancelled.clone(),
+                presentation: self.fast.authority(),
                 inflight: self.inflight.clone(),
                 kind: JobKind::Upload {
                     id,
@@ -928,6 +1209,62 @@ impl PreviewCache {
             });
         }
         Ok(None)
+    }
+    /// Registers only required padded-upload neighbor cells when autonomous filling is disabled.
+    /// This never grants a certificate or returns pixels; the ordinary painter/budget/cancellation apply.
+    /// # Errors
+    /// Rejects stale key/generation, absent visible demand, failed support or >64-cell dependencies.
+    pub fn diagnostic_upload_support(
+        &mut self,
+        key: RootKey,
+        generation: u64,
+        region: Region,
+    ) -> Result<bool, RenderError> {
+        if self.diagnostic_background_fill {
+            return Ok(false);
+        }
+        if self.active != Some(key) {
+            return Ok(false);
+        }
+        let entry = self
+            .entries
+            .iter_mut()
+            .find(|e| e.key == key && e.generation == generation)
+            .ok_or(error("diagnostic upload root replaced"))?;
+        let visible = entry
+            .visible
+            .ok_or(error("diagnostic support has no visible request"))?;
+        let cells = diagnostic_regions(
+            region,
+            entry.frame.ok_or(error("diagnostic root unprepared"))?,
+            false,
+        )
+        .ok_or(error("diagnostic support exceeds bounded root query"))?;
+        if entry
+            .diagnostic_support
+            .as_ref()
+            .is_none_or(|s| s.0 != visible || s.1 != generation || s.2 != key.provenance)
+        {
+            entry.diagnostic_support = Some((visible, generation, key.provenance, Vec::new()));
+        }
+        let Some((_, _, _, support)) = entry.diagnostic_support.as_mut() else {
+            return Err(error("diagnostic support intent unavailable"));
+        };
+        for cell in cells {
+            if entry.failed_paints.contains(&cell) {
+                return Err(error("diagnostic support paint failed"));
+            }
+            if !entry.pixels.iter().any(|p| p.region == cell) && !support.contains(&cell) {
+                if support.len() >= 64 {
+                    return Err(error("diagnostic support cell bound exceeded"));
+                }
+                support
+                    .try_reserve(1)
+                    .map_err(|_| error("diagnostic support allocation failed"))?;
+                support.push(cell);
+            }
+        }
+        Ok(!support.is_empty())
     }
     /// Registers full-zoom background demand even when an ordinary exact-target memo serves the view.
     /// Existing roots gain no new certificate request; memo display retains its own ordinary authority.
@@ -941,6 +1278,10 @@ impl PreviewCache {
             self.clock = self.clock.wrapping_add(1);
             self.active = Some(key);
             entry.touch = self.clock;
+            if !self.diagnostic_background_fill {
+                entry.visible = None;
+                entry.diagnostic_support = None;
+            }
             return Ok(());
         }
         self.plan(
@@ -967,6 +1308,8 @@ impl PreviewCache {
             .filter(|e| {
                 !e.unsupported
                     && e.root.is_some()
+                    && e.key.provenance == key.provenance
+                    && e.key.projection == key.projection
                     && e.key.background == key.background
                     && e.key.edges == key.edges
                     && e.key.boolean == key.boolean
@@ -1002,7 +1345,13 @@ impl PreviewCache {
     /// Checks out priority preparation/certification, then visible fixed tiles, then lazy background.
     /// No pan removes queued demand. At most one paint snapshot is checked out at a time by the owner.
     pub fn take_job(&mut self) -> Option<Job> {
-        if !self.retired.is_empty() {
+        if let Some(job) = self.take_fast_retirement() {
+            return Some(job);
+        }
+        if !self.retired.is_empty() || !self.retired_scenes.is_empty() {
+            let released = fast::retired_payload(&self.retired)
+                .saturating_add(self.retired_scenes.iter().map(|s| s.1).sum::<usize>());
+            self.retired_inflight = self.retired_inflight.saturating_add(released);
             return Some(Job {
                 artwork: self.artwork.unwrap_or((0, 0, 0)),
                 key: RootKey::new(
@@ -1011,13 +1360,25 @@ impl PreviewCache {
                     RasterizationLimits::default(),
                 ),
                 cancelled: self.cancelled.clone(),
+                presentation: self.fast.authority(),
                 inflight: self.inflight.clone(),
                 kind: JobKind::Retire {
+                    released,
+                    scenes: std::mem::take(&mut self.retired_scenes),
                     entries: std::mem::take(&mut self.retired),
                 },
             });
         }
-        if (self.priority_streak < 2
+        if let Some(job) = self.take_fast_job() {
+            return Some(job);
+        }
+        if self.fast.requested() == Quality::Fast
+            && self.fast.provenance().effective == Quality::Fast
+        {
+            return None;
+        }
+        if (!self.diagnostic_background_fill
+            || self.priority_streak < 2
             || !self.entries.iter().any(|e| {
                 e.snapshot.is_some()
                     && !e.unsupported
@@ -1033,7 +1394,7 @@ impl PreviewCache {
             }
             return Some(job);
         }
-        if self.visible_streak < 2
+        if (!self.diagnostic_background_fill || self.visible_streak < 2)
             && let Some(i) = self.entries.iter().position(|e| Some(e.key) == self.active)
         {
             let entry = &self.entries[i];
@@ -1051,7 +1412,37 @@ impl PreviewCache {
                 return self.paint_job(i, region);
             }
         }
-        let n = self.entries.len();
+        if !self.diagnostic_background_fill {
+            let support = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    Some(e.key) == self.active && !e.unsupported && e.snapshot.is_some()
+                })
+                .find_map(|(i, e)| {
+                    e.diagnostic_support()
+                        .iter()
+                        .copied()
+                        .find(|r| {
+                            !e.pixels.iter().any(|p| p.region == *r)
+                                && !e.inflight.contains(r)
+                                && !e.failed_paints.contains(r)
+                        })
+                        .map(|r| (i, r))
+                });
+            if let Some((i, region)) = support
+                && let Some(job) = self.paint_job(i, region)
+            {
+                self.stats.diagnostic_support_paints += 1;
+                return Some(job);
+            }
+        }
+        let n = if self.diagnostic_background_fill {
+            self.entries.len()
+        } else {
+            0
+        };
         for offset in 0..n {
             let i = (self.background_cursor + offset) % n;
             let entry = &mut self.entries[i];
@@ -1093,6 +1484,7 @@ impl PreviewCache {
             artwork: self.artwork?,
             key: entry.key,
             cancelled: self.cancelled.clone(),
+            presentation: self.fast.authority(),
             inflight: self.inflight.clone(),
             kind: JobKind::Paint {
                 root: entry.root.as_ref()?.clone(),
@@ -1104,16 +1496,50 @@ impl PreviewCache {
     /// Reports lazy autonomous background demand as well as queued priority jobs.
     pub fn queued(&self) -> bool {
         !self.retired.is_empty()
-            || !self.queue.is_empty()
-            || self.entries.iter().any(|e| {
-                e.snapshot.is_some()
-                    && !e.unsupported
-                    && e.frame.is_some_and(|f| e.next_tile < tile_count(f))
-            })
+            || !self.retired_scenes.is_empty()
+            || self.fast.queued()
+            || self.fast_prepare_ready()
+            || (!self.fast.is_fast_active()
+                && (!self.queue.is_empty()
+                    || self.entries.iter().any(|e| {
+                        e.snapshot.is_some()
+                            && !e.unsupported
+                            && e.frame.is_some_and(|f| {
+                                if self.diagnostic_background_fill {
+                                    e.next_tile < tile_count(f)
+                                } else {
+                                    Some(e.key) == self.active
+                                        && (e.visible.is_some_and(|r| {
+                                            tiles_for_region(gutter(r, f), f).into_iter().any(|r| {
+                                                !e.pixels.iter().any(|p| p.region == r)
+                                                    && !e.inflight.contains(&r)
+                                                    && !e.failed_paints.contains(&r)
+                                            })
+                                        }) || e.diagnostic_support().iter().any(|r| {
+                                            !e.pixels.iter().any(|p| p.region == *r)
+                                                && !e.inflight.contains(r)
+                                                && !e.failed_paints.contains(r)
+                                        }))
+                                }
+                            })
+                    })))
+    }
+    /// Suppresses only autonomous full-root CPU filling for a controlled diagnostic comparison.
+    /// Defaults to enabled; foreground coverage, retirement, certificates and numerical work are unchanged.
+    pub fn diagnostic_background_fill(&mut self, enabled: bool) {
+        self.diagnostic_background_fill = enabled;
     }
     /// Accepts same-scene-epoch work after panning or explicit None rebinding, never a stale scene epoch.
     /// Matching workspace/frame and the unrevoked epoch authorize derived work, independently of UI tickets.
     pub fn complete(&mut self, result: Completion) {
+        if let Completed::Retired { released } = &result.kind {
+            self.retired_inflight = self.retired_inflight.saturating_sub(*released);
+            return;
+        }
+        if matches!(&result.kind, Completed::Fast(_)) {
+            self.complete_fast(result);
+            return;
+        }
         if !self
             .artwork
             .is_some_and(|current| current.0 == result.artwork.0 && current.2 == result.artwork.2)
@@ -1121,11 +1547,20 @@ impl PreviewCache {
         {
             return;
         }
-        let Some(entry) = self.entries.iter_mut().find(|e| e.key == result.key) else {
+        // A checked-out CPU certification can change its numerical generation across a mode
+        // transition. Reconcile that same canonical root, preserving its CURRENT namespace;
+        // revoked View/upload leases never regain presentation authority.
+        let Some(entry) = self.entries.iter_mut().find(|e| {
+            let mut old = result.key;
+            old.provenance = e.key.provenance;
+            e.key == old
+                && result.key.provenance.backend == Backend::CpuArea
+                && result.key.provenance.algorithm == Algorithm::AccurateAreaV1
+        }) else {
             return;
         };
         match result.kind {
-            Completed::Retired => {}
+            Completed::Retired { .. } | Completed::Fast(_) => {}
             Completed::Prepared(result) => {
                 entry.preparing = false;
                 match result {
@@ -1232,6 +1667,7 @@ impl PreviewCache {
                             self.stats.painted_pixels +=
                                 u64::from(region.width) * u64::from(region.height);
                             entry.pixels.push(Pixels {
+                                provenance: entry.key.provenance,
                                 id: self.next_id,
                                 region,
                                 surface: Arc::new(surface),
@@ -1265,7 +1701,9 @@ impl PreviewCache {
                 .saturating_add(s.retained_materialized_scene_bytes)
                 .saturating_add(self.scene_estimate)
                 .saturating_add(s.charged_texture_bytes)
-                .saturating_add(s.inflight_estimated_bytes);
+                .saturating_add(s.inflight_estimated_bytes)
+                .saturating_add(s.fast_reserved_bytes)
+                .saturating_add(s.retired_root_payload_bytes);
             if total <= self.budget {
                 break;
             }
@@ -1300,22 +1738,30 @@ impl PreviewCache {
             self.entries[i].validity.store(0, Ordering::Release);
             let key = self.entries[i].key;
             self.queue.retain(|job| job.key != key);
-            self.retired.push(self.entries.remove(i));
+            let mut retired = self.entries.remove(i);
+            retired.diagnostic_support = None;
+            self.retired.push(retired);
             self.stats.evictions += 1;
         }
     }
 }
-/// Executes one checked-out job with cancellation shared only by its accepted artwork lifetime.
+/// Executes CPU work under canonical lifetime; mutable facts reconcile separately from draw leases.
 impl Job {
     /// Performs preparation/certification/painting outside metadata and GTK locks.
     pub fn run(self, shutdown: &AtomicBool) -> Completion {
         let cancelled =
             || shutdown.load(Ordering::Relaxed) || self.cancelled.load(Ordering::Relaxed);
         let kind = match self.kind {
-            JobKind::Retire { entries } => {
+            JobKind::Retire {
+                entries,
+                released,
+                scenes,
+            } => {
                 drop(entries);
-                Completed::Retired
+                drop(scenes);
+                Completed::Retired { released }
             }
+            JobKind::Fast(_) => Completed::Fast(fast::FastCompleted::missing_worker()),
             JobKind::Prepare {
                 scene,
                 budget,
@@ -1444,6 +1890,7 @@ impl Job {
             key: self.key,
             kind,
             authority: self.cancelled.clone(),
+            presentation: self.presentation.clone(),
         }
     }
 }
@@ -1567,6 +2014,278 @@ mod tests {
         CanonicalFillRule, CanonicalMark, FamilySiteId, FamilySiteProvenance, Point2, SiteScope,
     };
     use toniator_render::{GeometryOutput, RenderLayer};
+    /// Proves diagnostic prefetch suppression retains exact visible pixels and default full-root filling.
+    /// # Panics
+    /// Panics if visible demand stalls, default autonomous filling changes, or pixel authority differs.
+    #[test]
+    fn stage4_diagnostic_prefetch_preserves_visible_pixels_and_default_policy() {
+        let key = RootKey::new(
+            1.,
+            RasterBackground::Transparent,
+            RasterizationLimits::default(),
+        );
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let mut results = Vec::new();
+        for background in [true, false] {
+            let mut cache = PreviewCache::default();
+            cache.accept_scene((1, 2, 3), scene("stage4", f64::from(TILE + 1)), 0);
+            if !background {
+                cache.diagnostic_background_fill(false);
+            }
+            let view = settle(&mut cache, key, region);
+            assert!(!cache.queued());
+            results.push((view.pixels[0].surface.pixels().to_vec(), cache.statistics()));
+        }
+        assert_eq!(results[0].0, results[1].0);
+        assert_eq!(results[0].1.paint_jobs, 4);
+        assert_eq!(results[1].1.paint_jobs, 1);
+        assert_eq!(results[0].1.completed_zooms, 1);
+        assert_eq!(results[1].1.completed_zooms, 0);
+    }
+    /// Proves disabled background fill cannot leave an inactive missing root waking an idle worker.
+    /// # Panics
+    /// Panics if an inactive visible hole remains queued after the active root finishes.
+    #[test]
+    fn stage4_diagnostic_prefetch_ignores_inactive_missing_roots() {
+        let mut cache = PreviewCache::default();
+        cache.diagnostic_background_fill(false);
+        cache.accept_scene((1, 2, 3), scene("inactive", f64::from(TILE + 1)), 0);
+        let a = RootKey::new(
+            1.,
+            RasterBackground::Transparent,
+            RasterizationLimits::default(),
+        );
+        let b = RootKey::new(
+            0.5,
+            RasterBackground::Transparent,
+            RasterizationLimits::default(),
+        );
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        for _ in 0..8 {
+            cache.plan((1, 2, 3), a, region).unwrap();
+            if cache
+                .entries
+                .iter()
+                .any(|e| e.key == a && e.snapshot.is_some())
+            {
+                break;
+            }
+            let job = cache
+                .take_job()
+                .expect("preparation/certification must progress");
+            cache.complete(job.run(&AtomicBool::new(false)));
+        }
+        assert!(
+            cache
+                .entries
+                .iter()
+                .any(|e| e.key == a && e.snapshot.is_some() && e.pixels.is_empty())
+        );
+        let ready = settle(&mut cache, b, region);
+        assert!(ready.complete);
+        assert!(!cache.queued());
+        assert!(cache.take_job().is_none());
+        assert!(
+            cache
+                .entries
+                .iter()
+                .any(|e| e.key == a && e.pixels.is_empty())
+        );
+    }
+    /// Proves diagnostic cell reads leave scheduling/LRU/statistics unchanged and reject stale or large queries.
+    /// # Panics
+    /// Panics if a metadata read mutates demand or reports a cell outside its bounded current namespace.
+    #[test]
+    fn stage4_diagnostic_cells_are_bounded_and_read_only() {
+        let mut cache = PreviewCache::default();
+        cache.diagnostic_background_fill(false);
+        cache.accept_scene((1, 2, 3), scene("read-only", f64::from(TILE + 1)), 0);
+        let key = RootKey::new(
+            1.,
+            RasterBackground::Transparent,
+            RasterizationLimits::default(),
+        );
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let _ = settle(&mut cache, key, region);
+        let target = toniator_render::PreviewRasterTarget::for_viewport(8, 8, 0., 0., 1.).unwrap();
+        let before = (
+            cache.clock,
+            cache.queue.len(),
+            format!("{:?}", cache.statistics()),
+        );
+        for _ in 0..4 {
+            let info = cache
+                .diagnostic_cells((1, 2, 3), key, region, target)
+                .unwrap();
+            assert_eq!(info.cells.len(), 1);
+            assert!(info.cells[0].1);
+            assert!(!info.cells[0].2);
+        }
+        assert!(
+            cache
+                .diagnostic_cells((9, 2, 3), key, region, target)
+                .is_none()
+        );
+        assert_eq!(
+            before,
+            (
+                cache.clock,
+                cache.queue.len(),
+                format!("{:?}", cache.statistics())
+            )
+        );
+        let huge = Frame {
+            width: 100_000,
+            height: 100_000,
+            scale: 1.,
+            background: RasterBackground::Transparent,
+        };
+        assert!(
+            diagnostic_regions(
+                Region {
+                    x: 0,
+                    y: 0,
+                    width: 100_000,
+                    height: 100_000
+                },
+                huge,
+                true
+            )
+            .is_none()
+        );
+    }
+    /// Repairs a diagonal-only padded-upload dependency with no autonomous background cells.
+    /// Mirrors the app preupload skip: all side strips exist but one corner is absent.
+    /// # Panics
+    /// Panics on incomplete bytes, absent GUI wakeup, extra fill, stale registration or uncleared intent.
+    #[test]
+    fn stage4_diagnostic_diagonal_upload_support_is_foreground_work() {
+        let mut cache = PreviewCache::default();
+        cache.diagnostic_background_fill(false);
+        cache.accept_scene((1, 2, 3), scene("diagonal", 3600.), 0);
+        let key = RootKey::new(
+            1.,
+            RasterBackground::Transparent,
+            RasterizationLimits::default(),
+        );
+        let first = Region {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let _ = settle(&mut cache, key, first);
+        let visible = Region {
+            x: 2960,
+            y: 1280,
+            width: 640,
+            height: 480,
+        };
+        let view = settle(&mut cache, key, visible);
+        assert_eq!(cache.statistics().stored_tiles, 5);
+        let pixel = view
+            .pixels
+            .iter()
+            .find(|p| p.region.x == TILE && p.region.y == 0)
+            .unwrap();
+        let padded = gutter(pixel.region, view.frame);
+        assert!(!missing(padded, view.pixels.iter().map(|p| p.region)).is_empty());
+        for side in [
+            Region {
+                x: TILE - 1,
+                y: 0,
+                width: 1,
+                height: TILE,
+            },
+            Region {
+                x: 2 * TILE,
+                y: 0,
+                width: 1,
+                height: TILE,
+            },
+            Region {
+                x: TILE,
+                y: TILE,
+                width: TILE,
+                height: 1,
+            },
+        ] {
+            assert!(missing(side, view.pixels.iter().map(|p| p.region)).is_empty());
+        }
+        assert!(
+            cache
+                .diagnostic_upload_support(key, view.generation, padded)
+                .unwrap()
+        );
+        assert!(cache.queued());
+        let mut repaired = 0;
+        while let Some(job) = cache.take_job() {
+            if let JobKind::Paint { region, .. } = &job.kind {
+                assert_eq!(
+                    *region,
+                    Region {
+                        x: 0,
+                        y: TILE,
+                        width: TILE,
+                        height: TILE
+                    }
+                );
+                repaired += 1;
+            }
+            let result = job.run(&AtomicBool::new(false));
+            assert!(result.changes_view(&cache));
+            cache.complete(result);
+        }
+        assert_eq!(repaired, 1);
+        assert_eq!(cache.statistics().diagnostic_support_paints, 1);
+        assert_eq!(cache.statistics().stored_tiles, 6);
+        let bytes = loop {
+            if let Some(bytes) = cache
+                .upload(key, view.generation, pixel.id, padded)
+                .unwrap()
+            {
+                break bytes;
+            }
+            let job = cache.take_job().expect("ready upload must progress");
+            cache.complete(job.run(&AtomicBool::new(false)));
+        };
+        assert_eq!(
+            bytes.len(),
+            padded.width as usize * padded.height as usize * 4
+        );
+        assert!(bytes.iter().all(|v| *v == 0));
+        assert!(!cache.queued());
+        assert!(
+            cache
+                .diagnostic_upload_support(key, view.generation + 1, padded)
+                .is_err()
+        );
+        cache.plan((1, 2, 3), key, first).unwrap();
+        assert!(
+            cache
+                .entries
+                .iter()
+                .find(|e| e.key == key)
+                .unwrap()
+                .diagnostic_support
+                .is_none()
+        );
+    }
     /// Builds deterministic finite canonical geometry, bypassing no accepted-scene cache authority.
     /// # Panics
     /// Panics if the current ordinary scene constructor rejects this finite circle witness.
@@ -1976,7 +2695,7 @@ mod tests {
         };
         let first = settle(&mut c, k, r);
         let next = Region { x: 20, y: 20, ..r };
-        assert!(first.certificate.covers(next));
+        assert!(first.covers(next));
         let facts = c.entries[0]
             .root
             .as_ref()

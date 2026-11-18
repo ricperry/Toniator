@@ -48,7 +48,7 @@ HDR/high-bit-depth output is not retained; primary premultiplied alpha is reject
 marks and drag with the primary mouse button to pan beyond Fit. **Fit** restores
 the whole image. These view changes do not change export resolution.
 
-Preview renders the whole artwork in the background at each visited eligible
+Accurate preview renders the whole artwork in the background at each visited eligible
 zoom. Panning keeps that work running. The closest
 available cached resolution appears first while detail at the requested zoom
 arrives; returning to completed regions reuses their pixels. After an edit at a
@@ -60,10 +60,39 @@ can be evicted; it is not saved with the project or retained after quitting.
 Unsupported or oversized cache views use ordinary preview rendering. See
 [measured performance](PERFORMANCE.md#046-retained-preview-regions).
 
-Use **Main Menu → Save** or **Save As…** for a portable `.toniator` project with
+Use **Main Menu → File → Save** or **Save As…** for a portable `.toniator` project with
 embedded source and editable settings. **Close** returns to startup; **Exit**
 quits. Both prompt about unsaved document changes. Undo/Redo applies to document
-edits. **F1**, **Help and feedback…**, and **About Toniator** provide help links.
+edits. **F1** opens local workflow help; **Main Menu → Help → About Toniator** provides support links.
+
+<a id="development-checkout-fast-preview"></a>
+
+### Fast preview
+
+Toniator 0.4.7 provides **Fast preview** immediately after Zoom/Fit.
+Each window starts with the switch OFF, requesting **Accurate** CPU rendering.
+Switch ON to request approximate GPU rendering for the main canvas. Fast currently
+supports whole scenes of eligible circular marks in RGB or CMYK. Other content,
+including **Source color + alpha**, unavailable GPU support, and unsupported
+sizes or zooms use Accurate CPU fallback. Fast has real coverage and color
+differences; choose Accurate when judging final detail.
+
+The adjacent readout describes the accepted pixels: **Accurate**, **Fast**, or
+**Accurate · CPU fallback**. While a replacement is pending, the previous frame
+keeps its actual mode; requesting Fast does not immediately relabel CPU pixels.
+Fallback information uses the existing status/diagnostic route. If the GPU is
+unavailable or fails, switch OFF and ON to retry.
+
+The preference belongs to this window and survives document changes. In Source
+view, with no artwork, or with no document, the switch is disabled, its preference
+is retained, and the effective-mode readout is blank. Switching quality preserves
+zoom and pan, creates no undo entry or unsaved change, and is not stored in
+projects, Document Presets or settings. Fast does not automatically refine to
+Accurate while idle.
+
+PNG/SVG export, print preparation, temporal output, gallery and Wizard previews
+keep their independent CPU rendering policies. See the
+[development measurements and limits](PERFORMANCE.md#2026-11-02-development-fast--accurate-preview).
 
 ## Color and channel controls
 
@@ -227,7 +256,7 @@ and tone. Explanatory tooltips and Fine adjustments describe individual controls
 
 ## PNG and SVG output
 
-**Main Menu → Export image…** opens a destination chooser. Choose PNG or SVG in
+**Main Menu → File → Export image…** opens a destination chooser. Choose PNG or SVG in
 the format dropdown. PNG then provides background, antialiasing, and output size
 (**1× native**, **2×**, **4×**, **8×**, or **Custom**).
 
@@ -274,7 +303,7 @@ These thresholds are illustrative and depend on artwork and printing process.
 3. Select **End**; its first selection copies Start. Make your changes and toggle
    between the two states to inspect them. Property Animation disclosures choose
    interpolation for supported continuous values.
-4. Use **Main Menu → Animation settings…** for exact frame rate and source interval.
+4. Use **Main Menu → Tools → Animation settings…** for exact frame rate and source interval.
 5. Choose **Export video…** for a PNG sequence, lossless FFV1/Matroska, or optional
    AV1/WebM. The export dialog supplies timing, output-size, and subset controls.
 
@@ -301,7 +330,7 @@ see the [package guide](../packaging/README.md).
 
 ## Preview status and help
 
-The thin bar at the bottom of the canvas shows **Background rendering progress**
+In Accurate mode, the thin bar at the bottom of the canvas shows **Background rendering progress**
 across the eligible zooms you have visited. It disappears when that work completes
 or stops. It has no setting or action, and does not take keyboard focus; you can
 keep panning and editing while it runs.
@@ -316,4 +345,4 @@ independent Save/operation errors remain.
 
 [Known issues](../ISSUES.md), [release notes](releases/v0.4.6.md), and
 [performance evidence](PERFORMANCE.md) record current limits. Use
-**Main Menu → Help and feedback…** to reach documentation or report a problem.
+**Main Menu → Help → About Toniator** to reach documentation or report a problem.

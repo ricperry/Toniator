@@ -536,6 +536,24 @@ transparent over the viewer's neutral gray. The preview target and raster
 cache identity include this presentation choice; canonical scene identity and
 PNG export policy do not.
 
+The main window may offer an explicitly approximate Fast preview alongside
+Accurate preview. Each window starts in Accurate mode. Fast is an opt-in,
+window/session-only presentation request; it does not modify document state,
+calibration, geometry, history, project files, settings, or Document Presets.
+Both modes consume the same accepted immutable canonical `RenderScene`, with
+the same ordered geometry, source, density, and saved calibration outcomes.
+Only Fast main-window preview may approximate geometric coverage and numeric
+precision relative to §§4.5–4.6. It retains the fixed RGB/CMYK composition and
+linear-space backdrop policies; this exception does not permit artistic tone,
+opacity, blend-mode, or calibration adjustments. Approximate GPU completeness
+is not an Accurate CPU area/error certificate and must never be represented
+as one. Accurate preview and all PNG, SVG, print, temporal-output, gallery,
+thumbnail, and wizard consumers retain their existing CPU and precision
+requirements. Unsupported complete scenes or unavailable/failed GPU execution
+fall back atomically to Accurate CPU preview. The interface identifies Fast
+as approximate and reports the effective mode of accepted pixels truthfully,
+including CPU fallback, without relabeling stale pixels or CPU results as Fast.
+
 PNG export background is a final-consumer choice:
 
 ```bash

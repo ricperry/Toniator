@@ -111,6 +111,8 @@ impl Controls {
 /// Local-only wording discloses that raw technical messages may contain local paths.
 fn present(parent: &gtk::Window, invoker: &gtk::Button, snapshot: Arc<Snapshot>) {
     let window = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Preview failure details")
         .transient_for(parent)
         .modal(true)

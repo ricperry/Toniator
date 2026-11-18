@@ -111,6 +111,8 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
         return;
     }
     let window = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Import image sequence")
         .transient_for(&super::presentation_parent(&state.borrow()))
         .modal(true)

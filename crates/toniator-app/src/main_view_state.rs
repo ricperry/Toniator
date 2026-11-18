@@ -30,6 +30,7 @@ pub(crate) struct MainViewState {
     mode: MainViewMode,
     zoom_index: usize,
     fit: bool,
+    quality: toniator_engine::preview_cache::Quality,
 }
 
 impl Default for MainViewState {
@@ -39,6 +40,7 @@ impl Default for MainViewState {
             mode: MainViewMode::Preview,
             zoom_index: Self::DEFAULT_ZOOM_INDEX,
             fit: true,
+            quality: toniator_engine::preview_cache::Quality::Accurate,
         }
     }
 }
@@ -55,6 +57,19 @@ impl MainViewState {
     /// Selects an already available viewport image and preserves the current pan/zoom choice.
     pub(crate) fn set_mode(&mut self, mode: MainViewMode) {
         self.mode = mode;
+    }
+
+    /// Returns the window's transient requested quality, independently of accepted pixel provenance.
+    pub(crate) const fn quality(self) -> toniator_engine::preview_cache::Quality {
+        self.quality
+    }
+    /// Selects only requested precision; document, camera, endpoint and accepted pixels remain external.
+    pub(crate) fn set_quality(&mut self, quality: toniator_engine::preview_cache::Quality) -> bool {
+        if self.quality == quality {
+            return false;
+        }
+        self.quality = quality;
+        true
     }
 
     /// Returns whether the current image is fitted to the shared viewport.
@@ -97,6 +112,18 @@ impl MainViewState {
     /// Reports whether a smaller bounded zoom level remains available.
     pub(crate) const fn can_zoom_out(self) -> bool {
         self.zoom_index > 0
+    }
+}
+
+/// Names the actual accepted backend; requesting Fast alone never creates a Fast claim.
+pub(crate) const fn quality_label(
+    provenance: toniator_engine::preview_cache::Provenance,
+) -> &'static str {
+    use toniator_engine::preview_cache::Quality;
+    match (provenance.requested, provenance.effective) {
+        (Quality::Fast, Quality::Accurate) => "Accurate · CPU fallback",
+        (_, Quality::Fast) => "Fast",
+        _ => "Accurate",
     }
 }
 
@@ -264,6 +291,30 @@ fn apply_system_color_scheme(desktop_settings: &gio::Settings, default_prefer_da
 
 #[cfg(test)]
 mod tests {
+    /// Keeps each new window Accurate while quality changes preserve camera and Source preference.
+    /// # Panics
+    /// Panics if a presentation-only choice resets zoom/Fit or silently resets when viewing Source.
+    #[test]
+    fn stage3_requested_quality_is_transient_and_camera_independent() {
+        use toniator_engine::preview_cache::Quality;
+        let mut state = MainViewState::default();
+        assert_eq!(state.quality(), Quality::Accurate);
+        state.zoom_in();
+        let zoom = state.zoom();
+        let fit = state.is_fit();
+        assert!(state.set_quality(Quality::Fast));
+        assert_eq!(state.zoom(), zoom);
+        assert_eq!(state.is_fit(), fit);
+        state.set_mode(MainViewMode::Source);
+        assert_eq!(state.quality(), Quality::Fast);
+        state.set_mode(MainViewMode::Preview);
+        assert_eq!(state.quality(), Quality::Fast);
+        assert!(!state.set_quality(Quality::Fast));
+        state.fit();
+        assert_eq!(state.quality(), Quality::Fast);
+        assert_eq!(MainViewState::default().quality(), Quality::Accurate);
+    }
+
     use super::*;
 
     /// Checks standardized portal preferences and ignores malformed replies without inventing a theme.

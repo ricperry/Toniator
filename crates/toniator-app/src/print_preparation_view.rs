@@ -253,6 +253,8 @@ impl Controls {
         let options = components::ToniatorPngExportOptions::new();
         let template = options.print_preparation_controls();
         let window = gtk::Window::builder()
+            .destroy_with_parent(true)
+            .accessible_role(gtk::AccessibleRole::Dialog)
             .title("PNG export options")
             .default_width(1_200)
             .default_height(820)

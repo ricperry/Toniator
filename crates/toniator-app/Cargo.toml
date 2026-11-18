@@ -1,6 +1,6 @@
 [package]
 name = "toniator-app"
-version = "0.4.6"
+version = "0.4.7"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -26,3 +26,7 @@ glib-build-tools = "0.22.0"
 [[bin]]
 name = "toniator-app"
 path = "src/main.rs"
+
+[features]
+default = ["fast-preview"]
+fast-preview = ["toniator-engine/fast-preview"]

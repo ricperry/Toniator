@@ -30,6 +30,9 @@ pub mod artistic_tone_evidence {
 
 }
 
+#[cfg(test)]
+mod lloyd_streaming_tests;
+
 mod coverage_response;
 mod curve_tone;
 pub use curve_tone::{ToneKnot, TonePathDomain, TonePathContinuation, ToneProfile, prepare_tone_profile_cancellable, prepare_tone_group_profiles_cancellable, prepare_curve_motif_tone_rows_cancellable};
@@ -100,7 +103,7 @@ pub use toniator_geometry::{
 };
 use toniator_sampling::{
     RegionSamplingDiagnostics, RegionSamplingLimits, RegionSourceSample, SampledSourcePaint,
-    SamplingError, SourceComponent, SourceField, SourceMappingComponent, SourcePlacement,
+    PreparedMappingResponse, SamplingError, SourceComponent, SourceField, SourceMappingComponent, SourcePlacement,
     sample_region_area_average_batch_with_diagnostics,
     sample_region_area_average_batch_with_diagnostics_and_progress, sample_region_reference,
 };
@@ -11333,7 +11336,10 @@ impl HasPosition for RelaxVertex {
     }
 }
 
-/// Applies bounded clipped-cell Lloyd updates while preserving IDs and exclusion guarantees.
+/// Applies serial global-topology Lloyd updates with bounded transient cell storage.
+///
+/// IDs, exclusion/guard behavior and exact per-cell arithmetic remain unchanged. An optional
+/// mapping plane is operation-local; next positions publish only after every iteration succeeds.
 ///
 /// # Errors
 ///
@@ -11362,6 +11368,29 @@ fn relax_random_sites(
     } else {
         None
     };
+    // Plane preparation is profitable only when repeated quadrature substantially reuses pixels.
+    // Its storage budget never changes source pixels, site population, or interpolation semantics.
+    let prepared = source
+        .zip(weighting)
+        .map(|(source, weighting)| {
+            let pixels = u64::from(source.identity().width) * u64::from(source.identity().height);
+            let repeated_samples = (sites.len() as u64)
+                .saturating_mul(u64::from(random.refinement.iterations))
+                .saturating_mul(16);
+            source
+                .prepare_mapping_response(
+                    canvas,
+                    weighting.mapping,
+                    if pixels <= repeated_samples {
+                        16 * 1024 * 1024
+                    } else {
+                        0
+                    },
+                    is_cancelled,
+                )
+                .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
+        })
+        .transpose()?;
     let mut positions = sites.iter().map(|site| site.position).collect::<Vec<_>>();
     for _ in 0..random.refinement.iterations {
         if is_cancelled() {
@@ -11370,42 +11399,48 @@ fn relax_random_sites(
                 "evaluation was cancelled",
             ));
         }
-        let cells = clipped_relaxation_cells(&positions, bounds, is_cancelled)?;
         let mut next = positions.clone();
-        for (index, (polygon, nearest_distance)) in cells.into_iter().enumerate() {
-            if sites[index].scope == SiteScope::Guard {
-                continue;
-            }
-            let Some(polygon) = polygon
-                .map(|polygon| clip_polygon_to_bounds(&polygon, canvas_bounds))
-                .filter(|polygon| !polygon.is_empty())
-            else {
-                continue;
-            };
-            let target = if let (Some(field), Some(weighting)) = (source, weighting) {
-                weighted_polygon_centroid(&polygon, field, canvas, weighting)?
-                    .unwrap_or(positions[index])
-            } else {
-                polygon_centroid(&polygon).unwrap_or(positions[index])
-            };
-            let dx = target.x - positions[index].x;
-            let dy = target.y - positions[index].y;
-            let length = (dx * dx + dy * dy).sqrt();
-            let maximum_move = if exclusion_distance > 0.0 && nearest_distance.is_finite() {
-                ((nearest_distance - exclusion_distance) * 0.5).max(0.0)
-            } else {
-                f64::INFINITY
-            };
-            let scale = if length > maximum_move && length > 0.0 {
-                maximum_move / length
-            } else {
-                1.0
-            };
-            next[index] = Point2::new(
-                positions[index].x + dx * scale,
-                positions[index].y + dy * scale,
-            );
-        }
+        for_each_relaxation_cell(
+            &positions,
+            bounds,
+            is_cancelled,
+            |index, polygon, nearest_distance, clipped| {
+                if sites[index].scope == SiteScope::Guard {
+                    return Ok(());
+                }
+                let Some(polygon) = polygon else {
+                    return Ok(());
+                };
+                clip_polygon_to_bounds_in_place(polygon, clipped, canvas_bounds);
+                if polygon.is_empty() {
+                    return Ok(());
+                }
+                let target = if let (Some(prepared), Some(weighting)) = (&prepared, weighting) {
+                    weighted_polygon_centroid(polygon, prepared, weighting)?
+                        .unwrap_or(positions[index])
+                } else {
+                    polygon_centroid(polygon).unwrap_or(positions[index])
+                };
+                let dx = target.x - positions[index].x;
+                let dy = target.y - positions[index].y;
+                let length = (dx * dx + dy * dy).sqrt();
+                let maximum_move = if exclusion_distance > 0.0 && nearest_distance.is_finite() {
+                    ((nearest_distance - exclusion_distance) * 0.5).max(0.0)
+                } else {
+                    f64::INFINITY
+                };
+                let scale = if length > maximum_move && length > 0.0 {
+                    maximum_move / length
+                } else {
+                    1.0
+                };
+                next[index] = Point2::new(
+                    positions[index].x + dx * scale,
+                    positions[index].y + dy * scale,
+                );
+                Ok(())
+            },
+        )?;
         positions = next;
     }
     for (site, position) in sites.iter_mut().zip(positions) {
@@ -11414,21 +11449,51 @@ fn relax_random_sites(
     Ok(())
 }
 
+#[cfg(test)]
 type RelaxationCell = (Option<Vec<Point2>>, f64);
 
-/// Builds each box-clipped Voronoi cell from Delaunay neighbors and nearest-neighbor slack.
-/// Duplicate sites retain their position; collinear populations remain finite through box clipping.
-/// A spatial hierarchy locates randomly ordered sites without long walks from the previous site;
-/// insertion order and the per-site cancellation boundary remain deterministic and unchanged.
+/// Collects the serial streaming cells only for focused deterministic topology witnesses.
 ///
 /// # Errors
-///
-/// Returns cancellation or finite insertion diagnostics.
+/// Returns the same insertion/cancellation diagnostic as production traversal.
+#[cfg(test)]
 fn clipped_relaxation_cells(
     positions: &[Point2],
     bounds: Bounds,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<RelaxationCell>, PatternPipelineError> {
+    let mut cells = vec![(None, f64::INFINITY); positions.len()];
+    for_each_relaxation_cell(
+        positions,
+        bounds,
+        is_cancelled,
+        |index, polygon, nearest, _| {
+            cells[index] = (polygon.map(|polygon| polygon.clone()), nearest);
+            Ok(())
+        },
+    )?;
+    Ok(cells)
+}
+
+/// Streams exact global-Delaunay clipped cells through two reusable polygon buffers.
+///
+/// Insertion and out-edge order remain unchanged. The consumer receives the original site index;
+/// duplicate sites have no cell. Each polygon exists only until the next callback, so no complete
+/// polygon population is retained. The consumer may reuse the second buffer for canvas clipping.
+///
+/// # Errors
+/// Returns insertion, per-site cancellation, or consumer diagnostics without publishing positions.
+fn for_each_relaxation_cell(
+    positions: &[Point2],
+    bounds: Bounds,
+    is_cancelled: &dyn Fn() -> bool,
+    mut consume: impl FnMut(
+        usize,
+        Option<&mut Vec<Point2>>,
+        f64,
+        &mut Vec<Point2>,
+    ) -> Result<(), PatternPipelineError>,
+) -> Result<(), PatternPipelineError> {
     let mut triangulation: DelaunayTriangulation<
         RelaxVertex,
         (),
@@ -11465,7 +11530,9 @@ fn clipped_relaxation_cells(
                 )
             })?;
     }
-    let mut cells = vec![(None, f64::INFINITY); positions.len()];
+    drop(unique);
+    let mut polygon = Vec::new();
+    let mut clipped = Vec::new();
     for vertex in triangulation.vertices() {
         if is_cancelled() {
             return Err(PatternPipelineError::new(
@@ -11475,24 +11542,32 @@ fn clipped_relaxation_cells(
         }
         let index = vertex.data().site_index;
         let site = positions[index];
-        let mut polygon = bounds.corners().to_vec();
+        polygon.clear();
+        polygon.extend_from_slice(&bounds.corners());
         let mut nearest = f64::INFINITY;
         for edge in vertex.out_edges() {
             let neighbor = positions[edge.to().data().site_index];
             nearest = nearest.min(point_distance(site, neighbor));
-            polygon = clip_polygon_to_site_half_plane(&polygon, site, neighbor);
+            clip_polygon_to_site_half_plane_into(&polygon, site, neighbor, &mut clipped);
+            std::mem::swap(&mut polygon, &mut clipped);
             if polygon.is_empty() {
                 break;
             }
         }
-        cells[index] = ((!polygon.is_empty()).then_some(polygon), nearest);
+        let nonempty = !polygon.is_empty();
+        consume(
+            index,
+            nonempty.then_some(&mut polygon),
+            nearest,
+            &mut clipped,
+        )?;
     }
     for (index, is_duplicate) in duplicate.into_iter().enumerate() {
         if is_duplicate {
-            cells[index] = (None, 0.0);
+            consume(index, None, 0.0, &mut clipped)?;
         }
     }
-    Ok(cells)
+    Ok(())
 }
 
 /// Normalizes signed zero before exact-coordinate duplicate grouping.
@@ -11504,14 +11579,19 @@ fn normalized_coordinate_bits(value: f64) -> u64 {
     }
 }
 
-/// Clips a convex polygon to points no farther from `site` than from `neighbor`.
-fn clip_polygon_to_site_half_plane(
+/// Writes the exact convex half-plane clip into reusable storage, preserving vertex order.
+/// The output is cleared before use and remains distinct from the input slice.
+/// # Panics
+/// The nonempty-input branch requires its guaranteed last vertex.
+fn clip_polygon_to_site_half_plane_into(
     polygon: &[Point2],
     site: Point2,
     neighbor: Point2,
-) -> Vec<Point2> {
+    output: &mut Vec<Point2>,
+) {
+    output.clear();
     if polygon.is_empty() {
-        return Vec::new();
+        return;
     }
     let nx = neighbor.x - site.x;
     let ny = neighbor.y - site.y;
@@ -11519,7 +11599,6 @@ fn clip_polygon_to_site_half_plane(
         (neighbor.x * neighbor.x + neighbor.y * neighbor.y - site.x * site.x - site.y * site.y)
             * 0.5;
     let side = |point: Point2| point.x * nx + point.y * ny - boundary;
-    let mut output = Vec::new();
     let mut previous = *polygon.last().expect("nonempty polygon has a last point");
     let mut previous_side = side(previous);
     for &current in polygon {
@@ -11542,12 +11621,15 @@ fn clip_polygon_to_site_half_plane(
         previous = current;
         previous_side = current_side;
     }
-    output
 }
 
-/// Clips one convex cell to the visible canvas so source weighting never samples edge clamps.
-fn clip_polygon_to_bounds(polygon: &[Point2], bounds: Bounds) -> Vec<Point2> {
-    let mut output = polygon.to_vec();
+/// Clips a cell through the original canvas half-planes using only two reusable buffers.
+/// The exact vertex sequence and arithmetic remain authoritative; no spatial tiling is introduced.
+fn clip_polygon_to_bounds_in_place(
+    polygon: &mut Vec<Point2>,
+    clipped: &mut Vec<Point2>,
+    bounds: Bounds,
+) {
     for (site, neighbor) in [
         (
             Point2::new(bounds.min.x + 0.5, 0.0),
@@ -11566,9 +11648,9 @@ fn clip_polygon_to_bounds(polygon: &[Point2], bounds: Bounds) -> Vec<Point2> {
             Point2::new(0.0, bounds.max.y + 0.5),
         ),
     ] {
-        output = clip_polygon_to_site_half_plane(&output, site, neighbor);
+        clip_polygon_to_site_half_plane_into(polygon, site, neighbor, clipped);
+        std::mem::swap(polygon, clipped);
     }
-    output
 }
 
 /// Returns the finite area centroid of a convex clipped cell.
@@ -11593,16 +11675,15 @@ fn polygon_centroid(polygon: &[Point2]) -> Option<Point2> {
 ///
 /// # Errors
 ///
-/// Returns the sampling layer's stable density diagnostic.
+/// Returns the prepared sampling layer's stable point/value diagnostic.
 fn weighted_polygon_centroid(
     polygon: &[Point2],
-    source: &SourceField,
-    canvas: &CanvasSpec,
+    source: &PreparedMappingResponse<'_>,
     weighting: SourceWeighting,
 ) -> Result<Option<Point2>, PatternPipelineError> {
     weighted_polygon_centroid_with(polygon, |point| {
         let sampled = source
-            .sample_density_weight(point, canvas, weighting.mapping)
+            .sample(point)
             .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
         Ok(completed_density_weight(
             sampled,
@@ -19340,6 +19421,9 @@ mod coverage_tests {
     }
 
     /// Proves outer normal-offset coverage requires authored endpoint span and geometric side bracketing.
+    /// The current fixture carries its exact source interval rather than inventing missing provenance.
+    /// # Panics
+    /// Panics if finite fixture paths fail or current bracketing violates the authored span.
     #[test]
     fn normal_offset_outer_components_must_bracket_the_generation_domain() {
         let source = CurvePath::line(Point2::new(2.0, 5.0), Point2::new(8.0, 5.0)).unwrap();
@@ -19351,6 +19435,7 @@ mod coverage_tests {
                 source_end: PathLocation::new(0, end).unwrap(),
                 path: CurvePath::line(Point2::new(first_x, y), Point2::new(last_x, y)).unwrap(),
                 planar_switch_nodes: Vec::new(),
+                source_intervals: vec![(PathLocation::new(0, start).unwrap(), PathLocation::new(0, end).unwrap())],
             };
         assert!(
             !normal_offset_components_bracket_domain(

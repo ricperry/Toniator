@@ -18,32 +18,37 @@ The portrait source was created with AI for these demonstrations. Every pattern
 effect below is rendered by Toniator; screenshots are captured from the real app.
 Click any image to inspect its full size.
 
-## Get Toniator
+## Get the app
 
-Download the **0.4.6 Linux prerelease** from
-[GitHub Releases](https://github.com/ricperry/Toniator/releases/tag/v0.4.6).
+Download the **0.4.7 Linux prerelease** from
+[GitHub Releases](https://github.com/ricperry/Toniator/releases/tag/v0.4.7).
 Choose an AppImage or Flatpak:
 
 ```bash
 # AppImage
-chmod +x Toniator-0.4.6-x86_64.AppImage
-./Toniator-0.4.6-x86_64.AppImage
+chmod +x Toniator-0.4.7-x86_64.AppImage
+./Toniator-0.4.7-x86_64.AppImage
 
 # Or Flatpak
-flatpak install --user ./Toniator-0.4.6-x86_64.flatpak
+flatpak install --user ./Toniator-0.4.7-x86_64.flatpak
 flatpak run io.github.ricperry.Toniator
 ```
 
 [Installation, upgrades, and Windows](docs/INSTALLING.md) ·
-[Build from source](docs/BUILDING.md) · [Release notes](docs/releases/v0.4.6.md)
+[Build from source](docs/BUILDING.md) · [Release notes](docs/releases/v0.4.7.md)
 
-Version 0.4.6 adds artistic tone and connection controls, placement-aware coverage,
-and whole-artwork background preview refinement. Its `.toniator` project format
-is current-only. The gallery and editor screenshots below retain their **0.4.5**
-provenance; their older projects require that release. Open the source artwork
-in 0.4.6 to create a new project. See [format and Preset details](docs/USING_TONIATOR.md#046-project-and-preset-formats).
+Version 0.4.7 adds optional **Fast preview**, a clearer native interface and
+keyboard help, and bounded CPU responsiveness improvements. Each window starts
+in Accurate CPU mode; Fast is approximate and falls back to CPU when needed.
+Exports retain their existing CPU rendering. The project format remains schema
+19, shared with 0.4.6. Older projects are current-only: the gallery and editor
+screenshots below retain their **0.4.5** provenance, and their older projects
+require that release. Open the source artwork in 0.4.7 to create a new project.
+See [format and Preset details](docs/USING_TONIATOR.md#046-project-and-preset-formats).
 
-## Make your first artwork
+<a id="make-your-first-artwork"></a>
+
+## First steps
 
 1. Choose **Start New Project** in the welcome window and open an image.
    Try the included [raster](assets/raster-sample.png) or
@@ -59,14 +64,16 @@ in 0.4.6 to create a new project. See [format and Preset details](docs/USING_TON
    then select an individual channel to give it a different arrangement.
 5. Use **Preview / Source** to compare with the original. Zoom in to inspect
    details, drag to pan when zoomed beyond Fit, and choose **Fit** to see it all.
-6. Open **Main Menu → Save** to keep an editable `.toniator` project, including
+6. Open **Main Menu → File → Save** to keep an editable `.toniator` project, including
    its source artwork. Choose **Export image…** for PNG or SVG.
 
 **A quick starting point:** after opening your image, choose
 **New options → Select preset…** to try a complete built-in look such as
 Magazine CMYK, Skinny Curve, or Controlled Splatter CMYK.
 
-## Explore the pattern behind the image
+## Creative workflows
+
+### Explore the pattern behind the image
 
 The gallery supplies a starting point; the Wizard exposes its construction.
 Choose **Guides**, **Scatter**, or **Spiral curve**, adjust the family options,
@@ -89,7 +96,7 @@ use **Point density** to follow the artwork, **Keep points apart** for separatio
 and **Relax points (Lloyd)** to smooth the distribution. These control where
 points live; drawing and Advanced settings control what appears at those points.
 
-## Gallery: one source, many constructions
+### Gallery: one source, many constructions
 
 These are **20 full-detail PNG exports from Toniator 0.4.5**, with no image
 editing or pixel upscaling. The files are 2048×2048, 1800×1240, or 2508×2508;
@@ -139,7 +146,7 @@ turn the same image into bolder graphic textures.
 | **Three-Guide Cells** | **Two-Guide Cells** | **Triagrid Spanning Tree** |
 | [![Vector source rendered as triangular guide-face regions](docs/examples/showcase/vector-three-guide-cells.png)](docs/examples/showcase/vector-three-guide-cells.png) | [![Vector source rendered as inset two-guide cells](docs/examples/showcase/vector-two-guide-cells.png)](docs/examples/showcase/vector-two-guide-cells.png) | [![Vector source rendered as branching spanning-tree connections](docs/examples/showcase/vector-spanning-tree.png)](docs/examples/showcase/vector-spanning-tree.png) |
 
-## Mix Patterns by channel
+### Mix Patterns by channel
 
 Each channel can have its own construction and transform. This example reuses
 the **SVG source displayed above**, combining straight lines, scattered circles,
@@ -158,7 +165,7 @@ and diamonds. Select a named channel before changing its Pattern or offsets.
 [Open this editable project](docs/examples/print-animation/vector-mixed-channels.toniator)
 or [see the exact channel settings](docs/examples/print-animation/README.md#mix-patterns-and-transforms).
 
-## Keep experimenting
+### Keep experimenting
 
 **Change one channel at a time.** Select R/G/B or C/M/Y/K to vary its Pattern,
 rotation, spacing, paint, or response. Return to **All** for shared edits.
@@ -177,7 +184,7 @@ used by the vector gallery above:
 
 [![Toniator Source view showing the original vector artwork](docs/examples/showcase/screenshots/source-comparison.png)](docs/examples/showcase/screenshots/source-comparison.png)
 
-## Export your artwork
+### Export your artwork
 
 Use **Main Menu → Export image…**, choose PNG or SVG and a destination.
 For PNG, select background, antialiasing, and **1× native, 2×, 4×, 8×, or Custom**
@@ -189,7 +196,7 @@ vector geometry and a transparent background.
 *PNG options for the custom curved-guides result in the vector gallery; its
 original SVG source is displayed above.*
 
-## Alpha and DTG/DTF preparation
+### Alpha and DTG/DTF preparation
 
 **Source color + alpha** retains source transparency and leaves gaps between
 marks. Here the same portrait has an AI-extracted transparent cut-out as its
@@ -224,7 +231,7 @@ thresholds alpha at 128, then applies the enabled corrections.
 [Editable project](docs/examples/print-animation/portrait-alpha.toniator) ·
 [Settings and pixel checks](docs/examples/print-animation/README.md#alpha-and-garment-print-preparation)
 
-## Animate the artwork
+### Animate the artwork
 
 Author **Start** and **End**, choose interpolation and timing, then use
 **Export video…** for a PNG sequence, lossless FFV1/Matroska, or AV1/WebM.
@@ -260,7 +267,18 @@ Both native exports contain **48 frames at 16 fps**. The inline GIFs are
 720-pixel-wide sharing derivatives: 24 sampled frames at approximately 8 fps,
 with palette conversion. They contain no invented intermediate frames.
 
-## More help
+## Keyboard and accessibility
+
+Use **Main Menu → Help → Keyboard Shortcuts** (Ctrl+?) for local help. F10 opens
+Main Menu, Ctrl+, toggles Settings, and F6 cycles the Canvas and Settings.
+Ctrl+0 fits the artwork; Ctrl++ and Ctrl+- zoom. Standard document shortcuts
+include Ctrl+N/O/S, Ctrl+Shift+S, Ctrl+E, Ctrl+W/Q, Ctrl+Z and Ctrl+Shift+Z/Ctrl+Y.
+Native text fields retain text editing and history.
+
+[Interface conventions](docs/INTERFACE_CONVENTIONS.md) ·
+[Accessibility support and known limits](docs/ACCESSIBILITY.md)
+
+## Documentation
 
 [Detailed usage guide](docs/USING_TONIATOR.md) ·
 [Example projects and exact settings](docs/examples/README.md) ·
@@ -268,9 +286,24 @@ with palette conversion. They contain no invented intermediate frames.
 [Known issues](ISSUES.md) · [Package guide](packaging/README.md)
 
 Toniator is prerelease software; keep original artwork and important projects.
-Developers can start with the [architecture](Project%20Specification/ArchitectureSchema.md)
+## Development
+
+[Build from source](docs/BUILDING.md). Developers can start with the [architecture](Project%20Specification/ArchitectureSchema.md)
 and [normative Addendum](Project%20Specification/Addendum.md). The GUI and headless
 CLI share the same evaluation and rendering core.
+
+The optional **Fast preview** switch appears after Zoom/Fit;
+each window still starts in Accurate mode. Fast uses approximate GPU rendering
+for supported artwork and falls back to the CPU otherwise. Exports remain CPU
+rendered. See [preview modes](docs/USING_TONIATOR.md#fast-preview)
+and [measurements and limits](docs/PERFORMANCE.md#2026-11-02-development-fast--accurate-preview).
+Fast requires a supported Vulkan adapter/driver. See the release notes for its
+eligibility and accuracy limits.
+
+## License and credits
+
+Created by Richard Perry. Free software under [GPL-3.0-only](LICENSE), without
+warranty. Demonstration source artwork above is identified separately.
 
 If Toniator is useful to you, an optional
 [Ko-fi tip](https://ko-fi.com/silentbutdigitaldesigns) supports development.

@@ -5,6 +5,7 @@ template $ToniatorMainShell : Gtk.Box {
   vexpand: true;
 
   Gtk.HeaderBar header {
+    styles [ "suite-header" ]
     [start]
     Gtk.Box {
       spacing: 0;
@@ -22,7 +23,24 @@ template $ToniatorMainShell : Gtk.Box {
       }
     }
     [start]
+    Gtk.Button header_open {
+      icon-name: "document-open-symbolic";
+      action-name: "app.open";
+      tooltip-text: "Open artwork or document (Ctrl+O)";
+      styles [ "suite-icon-button" ]
+      accessibility { label: "Open"; }
+    }
+    [start]
+    Gtk.Button header_save {
+      icon-name: "document-save-symbolic";
+      action-name: "app.save";
+      tooltip-text: "Save document (Ctrl+S)";
+      styles [ "suite-icon-button" ]
+      accessibility { label: "Save"; }
+    }
+    [start]
     Gtk.Button undo_button {
+      styles [ "suite-icon-button" ]
       icon-name: "edit-undo-symbolic";
       action-name: "app.undo";
       tooltip-text: "Undo the last change (Ctrl+Z)";
@@ -30,6 +48,7 @@ template $ToniatorMainShell : Gtk.Box {
     }
     [start]
     Gtk.Button redo_button {
+      styles [ "suite-icon-button" ]
       icon-name: "edit-redo-symbolic";
       action-name: "app.redo";
       tooltip-text: "Redo the last change (Ctrl+Shift+Z)";
@@ -51,12 +70,14 @@ template $ToniatorMainShell : Gtk.Box {
     }
     [end]
     Gtk.MenuButton file_button {
+      styles [ "suite-icon-button" ]
       icon-name: "open-menu-symbolic";
       tooltip-text: "Main Menu";
       accessibility { label: "Main Menu"; }
     }
     [end]
     Gtk.ToggleButton channel_settings_drawer {
+      styles [ "suite-icon-button" ]
       icon-name: "sidebar-show-symbolic";
       active: true;
       tooltip-text: "Show or hide Settings";
@@ -128,6 +149,9 @@ template $ToniatorMainShell : Gtk.Box {
         Gtk.StackPage {
           name: "success";
           child: Gtk.Overlay viewer {
+            accessible-role: group;
+            focusable: true;
+            accessibility { label: "Canvas"; }
             hexpand: true;
             vexpand: true;
             styles [ "toniator-viewer", "toniator-viewer-rgb" ]
@@ -163,7 +187,7 @@ template $ToniatorMainShell : Gtk.Box {
                 label: "Preparing preview… · 0%";
                 wrap: true;
                 justify: center;
-                styles [ "heading" ]
+                styles [ "heading", "suite-section-title" ]
               }
               Gtk.ProgressBar preview_stage_progress_bar {
                 show-text: true;
@@ -179,7 +203,7 @@ template $ToniatorMainShell : Gtk.Box {
         selection-mode: none;
         homogeneous: false;
         min-children-per-line: 1;
-        max-children-per-line: 3;
+        max-children-per-line: 4;
         column-spacing: 6;
         row-spacing: 4;
         margin-top: 4;
@@ -187,14 +211,14 @@ template $ToniatorMainShell : Gtk.Box {
         margin-start: 8;
         margin-end: 8;
         valign: center;
-        styles [ "toniator-viewport-toolbar" ]
+        styles [ "toniator-viewport-toolbar", "suite-statusbar" ]
         Gtk.Box {
           spacing: 4;
           halign: start;
           valign: center;
           Gtk.Button zoom_out_button {
             icon-name: "zoom-out-symbolic";
-            tooltip-text: "Zoom out";
+            tooltip-text: "Zoom out (Ctrl+-)";
             accessibility { label: "Zoom out"; }
           }
           Gtk.Label zoom_label {
@@ -205,14 +229,45 @@ template $ToniatorMainShell : Gtk.Box {
           }
           Gtk.Button zoom_in_button {
             icon-name: "zoom-in-symbolic";
-            tooltip-text: "Zoom in";
+            tooltip-text: "Zoom in (Ctrl++)";
             accessibility { label: "Zoom in"; }
           }
           Gtk.ToggleButton fit_button {
             label: "_Fit";
             use-underline: true;
             active: true;
-            tooltip-text: "Fit the artwork in the viewport";
+            tooltip-text: "Fit the artwork in the viewport (Ctrl+0)";
+          }
+        }
+        Gtk.Box fast_preview_controls {
+          orientation: vertical;
+          spacing: 2;
+          valign: center;
+          Gtk.Box {
+            spacing: 8;
+            Gtk.Label fast_preview_label {
+              label: "Fast preview";
+              xalign: 0;
+              mnemonic-widget: fast_preview_switch;
+            }
+            Gtk.Switch fast_preview_switch {
+              valign: center;
+              tooltip-text: "Use approximate GPU preview when supported";
+              accessibility { label: "Fast preview"; }
+            }
+          }
+          Gtk.Label preview_quality_label {
+            label: "";
+            width-chars: 26;
+            max-width-chars: 26;
+            single-line-mode: true;
+            xalign: 0;
+            accessibility { label: "Accepted preview mode"; }
+          }
+          Gtk.Label {
+            label: "Fast preview is approximate";
+            xalign: 0;
+            styles [ "dim-label" ]
           }
         }
       Gtk.Revealer main_banner_revealer {
@@ -238,6 +293,7 @@ template $ToniatorMainShell : Gtk.Box {
               wrap: true;
               wrap-mode: word_char;
               selectable: true;
+              width-chars: 24;
               max-width-chars: 32;
             }
           }
@@ -332,12 +388,12 @@ template $ToniatorMainShell : Gtk.Box {
         margin-start: 10;
         margin-end: 10;
         valign: start;
-        styles [ "toniator-inspector" ]
+        styles [ "toniator-inspector", "suite-inspector" ]
         Gtk.Box color_channel_group {
           orientation: vertical;
           spacing: 8;
           styles [ "toniator-inspector-group" ]
-          Gtk.Label { label: "Color & Channel"; xalign: 0; styles [ "heading" ] }
+          Gtk.Label { label: "Color & Channel"; xalign: 0; styles [ "heading", "suite-section-title" ] }
           Gtk.Box {
             spacing: 8;
             Gtk.Label {
@@ -404,7 +460,7 @@ template $ToniatorMainShell : Gtk.Box {
           orientation: vertical;
           spacing: 7;
           styles [ "toniator-inspector-group" ]
-          Gtk.Label { label: "Pattern Recipe"; xalign: 0; styles [ "heading" ] }
+          Gtk.Label { label: "Pattern Recipe"; xalign: 0; styles [ "heading", "suite-section-title" ] }
           Gtk.Box inspector_catalog { spacing: 6; }
           Gtk.Expander recipe_details {
             label: "Recipe details";
@@ -428,21 +484,21 @@ template $ToniatorMainShell : Gtk.Box {
           orientation: vertical;
           spacing: 7;
           styles [ "toniator-inspector-group" ]
-          Gtk.Label { label: "Appearance"; xalign: 0; styles [ "heading" ] }
+          Gtk.Label { label: "Appearance"; xalign: 0; styles [ "heading", "suite-section-title" ] }
           Gtk.Box appearance_controls { orientation: vertical; spacing: 7; }
         }
         Gtk.Box variation_group {
           orientation: vertical;
           spacing: 7;
           styles [ "toniator-inspector-group" ]
-          Gtk.Label { label: "Variation"; xalign: 0; styles [ "heading" ] }
+          Gtk.Label { label: "Variation"; xalign: 0; styles [ "heading", "suite-section-title" ] }
           Gtk.Box variation_controls { orientation: vertical; spacing: 7; }
         }
         Gtk.Box frequent_output_group {
           orientation: vertical;
           spacing: 7;
           styles [ "toniator-inspector-group" ]
-          Gtk.Label { label: "Output"; xalign: 0; styles [ "heading" ] }
+          Gtk.Label { label: "Output"; xalign: 0; styles [ "heading", "suite-section-title" ] }
           Gtk.Box frequent_output_controls { orientation: vertical; spacing: 7; }
         }
         Gtk.Expander options_group {

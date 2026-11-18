@@ -3135,6 +3135,58 @@ pub struct EvaluationResult {
     raster: Arc<RasterSurface>,
 }
 
+/// Accepted-candidate canonical evaluation payload with no raster allocation or raster policy.
+/// Only scheduler/session acceptance grants publication and commits its upstream transaction.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneEvaluationResult {
+    token: DocumentEvaluationToken,
+    source_identity: SourceIdentity,
+    channels: Vec<ChannelEvaluationSummary>,
+    families: Vec<Arc<TypedFamilyOutput>>,
+    scene: Arc<RenderScene>,
+}
+
+impl SceneEvaluationResult {
+    /// Returns the captured immutable document token; callers must still check session acceptance.
+    pub const fn token(&self) -> DocumentEvaluationToken {
+        self.token
+    }
+    /// Borrows decoded source identity without transferring source authority.
+    pub fn source_identity(&self) -> &SourceIdentity {
+        &self.source_identity
+    }
+    /// Borrows authoritative channel-order evaluation summaries.
+    pub fn channels(&self) -> &[ChannelEvaluationSummary] {
+        &self.channels
+    }
+    /// Borrows the complete immutable canonical scene without rasterizing it.
+    pub fn scene(&self) -> &RenderScene {
+        &self.scene
+    }
+    /// Retains the canonical scene for a final consumer without copying geometry.
+    pub fn shared_scene(&self) -> Arc<RenderScene> {
+        Arc::clone(&self.scene)
+    }
+    /// Borrows the channel's family result without rerunning geometry or changing scene identity.
+    pub fn family_output(&self, channel: ChannelId) -> Option<&TypedFamilyOutput> {
+        self.channels
+            .iter()
+            .position(|summary| summary.channel_id == channel)
+            .and_then(|index| self.families.get(index))
+            .map(Arc::as_ref)
+    }
+}
+
+/// Canonical-phase cache facts; no raster hit/miss is fabricated for scene-only work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SceneCacheDiagnostics {
+    pub decoded_source: CacheDisposition,
+    pub family: CacheDisposition,
+    pub realization: CacheDisposition,
+    pub scene: CacheDisposition,
+    pub channels: Vec<ChannelCacheDiagnostics>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EvaluationTicket(u64);
 impl EvaluationTicket {
@@ -3196,6 +3248,11 @@ impl EvaluationProgress {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EvaluationCompletion {
+    SceneCompleted {
+        ticket: EvaluationTicket,
+        result: Box<SceneEvaluationResult>,
+        diagnostics: SceneCacheDiagnostics,
+    },
     Completed {
         ticket: EvaluationTicket,
         result: Box<EvaluationResult>,
@@ -3208,40 +3265,69 @@ pub enum EvaluationCompletion {
     },
 }
 impl EvaluationCompletion {
+    /// Returns the scheduler ticket that guards this candidate.
     pub const fn ticket(&self) -> EvaluationTicket {
         match self {
-            Self::Completed { ticket, .. } | Self::Failed { ticket, .. } => *ticket,
+            Self::Completed { ticket, .. }
+            | Self::SceneCompleted { ticket, .. }
+            | Self::Failed { ticket, .. } => *ticket,
         }
     }
+    /// Returns the candidate document token for session acceptance.
     pub fn token(&self) -> DocumentEvaluationToken {
         match self {
             Self::Completed { result, .. } => result.token(),
+            Self::SceneCompleted { result, .. } => result.token(),
             Self::Failed { token, .. } => *token,
         }
     }
+    /// Borrows only a raster candidate; scene-only success remains a distinct payload.
     pub fn result(&self) -> Option<&EvaluationResult> {
         match self {
             Self::Completed { result, .. } => Some(result),
-            Self::Failed { .. } => None,
+            Self::SceneCompleted { .. } | Self::Failed { .. } => None,
         }
     }
+    /// Borrows a raster-free candidate; scheduler acceptance remains required for publication.
+    pub fn scene_result(&self) -> Option<&SceneEvaluationResult> {
+        match self {
+            Self::SceneCompleted { result, .. } => Some(result),
+            _ => None,
+        }
+    }
+    /// Borrows scene-only cache facts without inventing a raster disposition.
+    pub fn scene_cache_diagnostics(&self) -> Option<&SceneCacheDiagnostics> {
+        match self {
+            Self::SceneCompleted { diagnostics, .. } => Some(diagnostics),
+            _ => None,
+        }
+    }
+    /// Borrows a failure diagnostic; both successful consumer variants have no error.
     pub fn error(&self) -> Option<&EvaluationError> {
         match self {
-            Self::Completed { .. } => None,
+            Self::Completed { .. } | Self::SceneCompleted { .. } => None,
             Self::Failed { error, .. } => Some(error),
         }
     }
+    /// Borrows raster evaluation cache facts; scene-only diagnostics have a separate accessor.
     pub fn cache_diagnostics(&self) -> Option<&DocumentCacheDiagnostics> {
         match self {
             Self::Completed { diagnostics, .. } => Some(diagnostics),
-            Self::Failed { .. } => None,
+            Self::SceneCompleted { .. } | Self::Failed { .. } => None,
         }
     }
 }
 
-/// Complete-document scheduler state. The diagnostic scheduler remains a
-/// separate retained API; this cache is never writable authority.
+/// Selects the final consumer without changing canonical evaluation or document authority.
+#[derive(Clone, Copy)]
+enum DocumentJobOutput {
+    Raster,
+    Scene,
+}
+
+/// Captures one immutable document job and private accepted-cache snapshot.
 struct DocumentJob {
+    output: DocumentJobOutput,
     ticket: EvaluationTicket,
     request: EvaluationRequest,
     cancelled: Arc<AtomicBool>,
@@ -3346,33 +3432,59 @@ impl EvaluationScheduler {
                         #[cfg(test)]
                         gate: worker_gate.as_deref(),
                     };
-                    #[cfg(test)]
-                    let outcome = evaluate_cached_document_with_test_observer(
-                        job.request,
-                        limits,
-                        &job.cache,
-                        &worker_cancellation,
-                        job.decode_observer.as_deref(),
-                    );
-                    #[cfg(not(test))]
-                    let outcome = evaluate_cached_document(
-                        job.request,
-                        limits,
-                        &job.cache,
-                        &worker_cancellation,
-                    );
-                    if job.cancelled.load(Ordering::Acquire) {
-                        continue;
-                    }
-                    let completion = match outcome {
-                        Ok(value) => DocumentWorkerCompletion {
+                    let outcome = match job.output {
+                        DocumentJobOutput::Raster => evaluate_cached_document_impl(
+                            job.request,
+                            limits,
+                            &job.cache,
+                            &worker_cancellation,
+                            None,
+                            #[cfg(test)]
+                            job.decode_observer.as_deref(),
+                        )
+                        .map(|value| DocumentWorkerCompletion {
                             completion: EvaluationCompletion::Completed {
                                 ticket: job.ticket,
                                 result: Box::new(value.result),
                                 diagnostics: value.diagnostics,
                             },
                             transaction: Some(value.transaction),
-                        },
+                        }),
+                        DocumentJobOutput::Scene => evaluate_cached_scene(
+                            &job.request,
+                            limits,
+                            &job.cache,
+                            &worker_cancellation,
+                            None,
+                            #[cfg(test)]
+                            job.decode_observer.as_deref(),
+                        )
+                        .map(|value| {
+                            worker_cancellation.report_progress(
+                                EvaluationProgressStage::ComposingScene,
+                                990,
+                                1_000,
+                            );
+                            worker_cancellation.report_progress(
+                                EvaluationProgressStage::Finalizing,
+                                1_000,
+                                1_000,
+                            );
+                            DocumentWorkerCompletion {
+                                completion: EvaluationCompletion::SceneCompleted {
+                                    ticket: job.ticket,
+                                    result: Box::new(value.result),
+                                    diagnostics: value.diagnostics,
+                                },
+                                transaction: Some(value.transaction),
+                            }
+                        }),
+                    };
+                    if job.cancelled.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    let completion = match outcome {
+                        Ok(value) => value,
                         Err(EvaluationRunError::Evaluation(error)) => DocumentWorkerCompletion {
                             completion: EvaluationCompletion::Failed {
                                 ticket: job.ticket,
@@ -3418,7 +3530,38 @@ impl EvaluationScheduler {
         })
     }
 
+    /// Submits an Accurate raster evaluation using the existing final-consumer policy.
+    /// # Errors
+    /// Returns worker availability or ticket exhaustion failures.
+    /// # Panics
+    /// Panics if the scheduler state mutex is poisoned.
     pub fn submit(&self, request: EvaluationRequest) -> Result<EvaluationTicket, SchedulerError> {
+        self.submit_output(request, DocumentJobOutput::Raster)
+    }
+
+    /// Submits a genuine raster-free canonical evaluation; raster request settings are unused.
+    /// Acceptance uses the same latest ticket and session token boundary as raster evaluations.
+    /// # Errors
+    /// Returns worker availability or ticket exhaustion failures.
+    /// # Panics
+    /// Panics if the scheduler state mutex is poisoned.
+    pub fn submit_scene(
+        &self,
+        request: EvaluationRequest,
+    ) -> Result<EvaluationTicket, SchedulerError> {
+        self.submit_output(request, DocumentJobOutput::Scene)
+    }
+
+    /// Atomically supersedes older work and captures the accepted cache for one selected consumer.
+    /// # Errors
+    /// Returns worker availability or ticket exhaustion failures.
+    /// # Panics
+    /// Panics if the scheduler state mutex is poisoned.
+    fn submit_output(
+        &self,
+        request: EvaluationRequest,
+        output: DocumentJobOutput,
+    ) -> Result<EvaluationTicket, SchedulerError> {
         let mut state = self
             .state
             .lock()
@@ -3449,6 +3592,7 @@ impl EvaluationScheduler {
             .as_ref()
             .ok_or(SchedulerError::WorkerUnavailable)?
             .send(DocumentJob {
+                output,
                 ticket,
                 request,
                 cancelled,
@@ -3620,6 +3764,12 @@ impl EvaluationScheduler {
         }
     }
 
+    /// Commits a successful latest candidate only when the current document accepts its token.
+    /// Scene candidates publish upstream caches without replacing the last Accurate raster cache.
+    /// # Errors
+    /// Retains the scheduler's fallible API; ordinary rejection returns `Ok(false)`.
+    /// # Panics
+    /// Panics if the scheduler state mutex is poisoned.
     pub fn accept_completion(
         &self,
         completion: &EvaluationCompletion,
@@ -3638,8 +3788,10 @@ impl EvaluationScheduler {
         if state.accepted == Some(completion.ticket()) {
             return Ok(true);
         }
-        if completion.result().is_some()
-            && let Some((ticket, transaction)) = state.pending.take()
+        if matches!(
+            completion,
+            EvaluationCompletion::Completed { .. } | EvaluationCompletion::SceneCompleted { .. }
+        ) && let Some((ticket, transaction)) = state.pending.take()
             && ticket == completion.ticket()
         {
             state.cache.commit(transaction);
@@ -3717,6 +3869,28 @@ impl EvaluationResult {
     pub fn raster(&self) -> &RasterSurface {
         self.raster.as_ref()
     }
+}
+
+/// Evaluates a complete canonical scene synchronously without creating any raster surface.
+/// This headless entry point has no scheduler cache or asynchronous publication authority.
+/// # Errors
+/// Returns validation, source, construction, composition, or cancellation errors atomically.
+pub fn evaluate_scene_cancellable_with_limits(
+    request: EvaluationRequest,
+    limits: EvaluationLimits,
+    cancelled: &AtomicBool,
+) -> Result<SceneEvaluationResult, EvaluationRunError> {
+    let cancellation = AtomicCancellation(cancelled);
+    evaluate_cached_scene(
+        &request,
+        limits,
+        &DocumentDerivedCache::default(),
+        &cancellation,
+        None,
+        #[cfg(test)]
+        None,
+    )
+    .map(|value| value.result)
 }
 
 /// Evaluates all authoritative topology channels in stable order. A failing
@@ -4127,12 +4301,10 @@ fn raster_work_progress(completed_units: usize, total_units: usize) -> u16 {
     u16::try_from(value.min(990)).expect("raster progress is at most 990 per-mille")
 }
 
-/// Evaluates one complete modeled document into private cache candidates under request-wide limits.
+/// Evaluates the shared canonical phase and then the unchanged Accurate CPU raster consumer.
 ///
 /// # Errors
-///
-/// Returns cancellation or the first stable validation, source, family, realization, scene, or
-/// raster diagnostic; callers receive no partial result or transaction.
+/// Returns the first canonical/raster error or cancellation without publishing cache candidates.
 fn evaluate_cached_document_impl(
     request: EvaluationRequest,
     limits: EvaluationLimits,
@@ -4141,18 +4313,220 @@ fn evaluate_cached_document_impl(
     mut performance: Option<&mut EvaluationPerformanceBuilder>,
     #[cfg(test)] decode_observer: Option<&AtomicUsize>,
 ) -> Result<CachedDocumentEvaluation, EvaluationRunError> {
+    // Preserve the former full-invocation construction/measurement scope through the CPU tail.
+    let construction_context = document_construction_context(&request, limits);
+    let _construction_guard = construction_context.enter();
+    let CachedSceneEvaluation {
+        result: scene_result,
+        diagnostics,
+        mut transaction,
+    } = evaluate_cached_scene(
+        &request,
+        limits,
+        accepted,
+        cancellation,
+        performance.as_deref_mut(),
+        #[cfg(test)]
+        decode_observer,
+    )?;
+    let scene = Arc::clone(&scene_result.scene);
+    let model = request
+        .snapshot
+        .document()
+        .channel_model()
+        .expect("scene preflight validates modeled topology");
+    let raster_key = match request.raster_request {
+        RasterRequest::Preview(target) => format!(
+            "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:preview-v2:{model:?}:{}:edges={}",
+            scene.identity().scene_fingerprint(),
+            target.raster_identity(),
+            limits.max_flattened_raster_edges()
+        ),
+        RasterRequest::Native => format!(
+            "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:{model:?}:edges={}",
+            scene.identity().scene_fingerprint(),
+            limits.max_flattened_raster_edges()
+        ),
+        RasterRequest::Output {
+            background,
+            target,
+            antialiasing,
+        } => format!(
+            "{}:edges={}",
+            raster_output_identity(&scene, background, target, antialiasing),
+            limits.max_flattened_raster_edges()
+        ),
+    };
+    cancellation.report_progress(
+        EvaluationProgressStage::ComposingScene,
+        RASTER_PROGRESS_START,
+        1_000,
+    );
+    cancellation.report_progress(
+        EvaluationProgressStage::RasterizingPreview,
+        RASTER_PROGRESS_START,
+        0,
+    );
+    let raster_started = Instant::now();
+    let (raster, raster_disposition) = match &accepted.raster {
+        Some((key, value)) if *key == raster_key => (Arc::clone(value), CacheDisposition::Hit),
+        _ => (
+            Arc::new(evaluate_stage(
+                EvaluationStage::Raster,
+                cancellation,
+                || {
+                    match request.raster_request {
+                        RasterRequest::Preview(target) => {
+                            rasterize_preview_cancellable_with_progress(
+                                &scene,
+                                target,
+                                toniator_render::RasterizationLimits::new(
+                                    limits.max_flattened_raster_edges(),
+                                )
+                                .expect("EvaluationLimits validates raster edge bounds"),
+                                &|| cancellation.is_cancelled(),
+                                &|completed, total| {
+                                    cancellation.report_progress(
+                                        EvaluationProgressStage::RasterizingPreview,
+                                        raster_work_progress(completed, total),
+                                        unit_stage_progress(completed, total),
+                                    );
+                                },
+                            )
+                        }
+                        RasterRequest::Native => rasterize_cancellable_with_progress(
+                            &scene,
+                            RasterBackground::Transparent,
+                            toniator_render::RasterizationLimits::new(
+                                limits.max_flattened_raster_edges(),
+                            )
+                            .expect("EvaluationLimits validates raster edge bounds"),
+                            &|| cancellation.is_cancelled(),
+                            &|completed, total| {
+                                cancellation.report_progress(
+                                    EvaluationProgressStage::RasterizingPreview,
+                                    raster_work_progress(completed, total),
+                                    unit_stage_progress(completed, total),
+                                );
+                            },
+                        ),
+                        RasterRequest::Output {
+                            background,
+                            target,
+                            antialiasing,
+                        } => toniator_render::rasterize_output_cancellable_with_progress(
+                            &scene,
+                            background,
+                            target,
+                            antialiasing,
+                            toniator_render::RasterizationLimits::new(
+                                limits.max_flattened_raster_edges(),
+                            )
+                            .expect("EvaluationLimits validates raster edge bounds"),
+                            &|| cancellation.is_cancelled(),
+                            &|completed, total| {
+                                cancellation.report_progress(
+                                    EvaluationProgressStage::RasterizingPreview,
+                                    raster_work_progress(completed, total),
+                                    unit_stage_progress(completed, total),
+                                )
+                            },
+                        ),
+                    }
+                    .map_err(EvaluationError::from_render)
+                },
+            )?),
+            CacheDisposition::Miss,
+        ),
+    };
+    if let Some(performance) = performance {
+        let raster_pixels = usize::try_from(raster.width())
+            .ok()
+            .and_then(|width| {
+                usize::try_from(raster.height())
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .unwrap_or(usize::MAX);
+        performance.record(
+            EvaluationPerformanceStage::Raster,
+            None,
+            None,
+            raster_started.elapsed(),
+            Some(raster_disposition),
+            vec![EvaluationWorkloadMetric {
+                kind: EvaluationWorkloadKind::RasterPixels,
+                count: raster_pixels,
+            }],
+        );
+    }
+    cancellation.report_progress(EvaluationProgressStage::RasterizingPreview, 990, 1_000);
+    cancellation.report_progress(EvaluationProgressStage::Finalizing, 990, 0);
+    let result = EvaluationResult {
+        token: scene_result.token,
+        source_identity: scene_result.source_identity,
+        channels: scene_result.channels,
+        families: scene_result.families,
+        scene,
+        raster: Arc::clone(&raster),
+    };
+    transaction.raster =
+        (raster_disposition == CacheDisposition::Miss).then_some((raster_key, raster));
+    cancellation.report_progress(EvaluationProgressStage::Finalizing, 1_000, 1_000);
+    Ok(CachedDocumentEvaluation {
+        result,
+        diagnostics: DocumentCacheDiagnostics {
+            aggregate: CacheDiagnostics {
+                decoded_source: diagnostics.decoded_source,
+                family: diagnostics.family,
+                realization: diagnostics.realization,
+                scene: diagnostics.scene,
+                raster: raster_disposition,
+            },
+            channels: diagnostics.channels,
+        },
+        transaction,
+    })
+}
+
+/// Projects the same request-owned construction mode/canvas into both canonical and CPU phases.
+/// The outer opt-in measurement collector remains shared; no document or geometry authority changes.
+fn document_construction_context(
+    request: &EvaluationRequest,
+    limits: EvaluationLimits,
+) -> toniator_patterns::ConstructionContext {
+    let mut context = toniator_patterns::ConstructionContext::current();
+    context.mode = limits.construction_mode;
+    context.canvas = toniator_patterns::Bounds::new(
+        toniator_patterns::Point2::new(0.0, 0.0),
+        toniator_patterns::Point2::new(
+            request.snapshot.document().canvas().width,
+            request.snapshot.document().canvas().height,
+        ),
+    );
+    context
+}
+
+/// Evaluates one complete modeled document into private cache candidates under request-wide limits.
+///
+/// # Errors
+///
+/// Returns cancellation or the first stable validation, source, family, realization, scene diagnostic; callers receive no partial result or transaction.
+fn evaluate_cached_scene(
+    request: &EvaluationRequest,
+    limits: EvaluationLimits,
+    accepted: &DocumentDerivedCache,
+    cancellation: &dyn CancellationProbe,
+    mut performance: Option<&mut EvaluationPerformanceBuilder>,
+    #[cfg(test)] decode_observer: Option<&AtomicUsize>,
+) -> Result<CachedSceneEvaluation, EvaluationRunError> {
     cancellation.report_progress(EvaluationProgressStage::Preparing, 0, 0);
     let preflight_started = Instant::now();
     if cancellation.is_cancelled() {
         return Err(EvaluationRunError::Cancelled);
     }
     let document = request.snapshot.document();
-    let mut construction_context = toniator_patterns::ConstructionContext::current();
-    construction_context.mode = limits.construction_mode;
-    construction_context.canvas = toniator_patterns::Bounds::new(
-        toniator_patterns::Point2::new(0.0, 0.0),
-        toniator_patterns::Point2::new(document.canvas().width, document.canvas().height),
-    );
+    let construction_context = document_construction_context(request, limits);
     let _construction_guard = construction_context.enter();
     let structural_preview = request.structural_preview;
     request
@@ -5064,7 +5438,7 @@ fn evaluate_cached_document_impl(
             };
             Ok((scene_key, scene, disposition, guard))
         })?;
-    if let Some(performance) = performance.as_deref_mut() {
+    if let Some(performance) = performance {
         performance.record(
             EvaluationPerformanceStage::Scene,
             None,
@@ -5077,149 +5451,7 @@ fn evaluate_cached_document_impl(
             }],
         );
     }
-    let raster_key = match request.raster_request {
-        RasterRequest::Preview(target) => format!(
-            "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:preview-v2:{model:?}:{}:edges={}",
-            scene.identity().scene_fingerprint(),
-            target.raster_identity(),
-            limits.max_flattened_raster_edges()
-        ),
-        RasterRequest::Native => format!(
-            "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:{model:?}:edges={}",
-            scene.identity().scene_fingerprint(),
-            limits.max_flattened_raster_edges()
-        ),
-        RasterRequest::Output {
-            background,
-            target,
-            antialiasing,
-        } => format!(
-            "{}:edges={}",
-            raster_output_identity(&scene, background, target, antialiasing),
-            limits.max_flattened_raster_edges()
-        ),
-    };
-    cancellation.report_progress(
-        EvaluationProgressStage::ComposingScene,
-        RASTER_PROGRESS_START,
-        1_000,
-    );
-    cancellation.report_progress(
-        EvaluationProgressStage::RasterizingPreview,
-        RASTER_PROGRESS_START,
-        0,
-    );
-    let raster_started = Instant::now();
-    let (raster, raster_disposition) = match &accepted.raster {
-        Some((key, value)) if *key == raster_key => (Arc::clone(value), CacheDisposition::Hit),
-        _ => (
-            Arc::new(evaluate_stage(
-                EvaluationStage::Raster,
-                cancellation,
-                || {
-                    match request.raster_request {
-                        RasterRequest::Preview(target) => {
-                            rasterize_preview_cancellable_with_progress(
-                                &scene,
-                                target,
-                                toniator_render::RasterizationLimits::new(
-                                    limits.max_flattened_raster_edges(),
-                                )
-                                .expect("EvaluationLimits validates raster edge bounds"),
-                                &|| cancellation.is_cancelled(),
-                                &|completed, total| {
-                                    cancellation.report_progress(
-                                        EvaluationProgressStage::RasterizingPreview,
-                                        raster_work_progress(completed, total),
-                                        unit_stage_progress(completed, total),
-                                    );
-                                },
-                            )
-                        }
-                        RasterRequest::Native => rasterize_cancellable_with_progress(
-                            &scene,
-                            RasterBackground::Transparent,
-                            toniator_render::RasterizationLimits::new(
-                                limits.max_flattened_raster_edges(),
-                            )
-                            .expect("EvaluationLimits validates raster edge bounds"),
-                            &|| cancellation.is_cancelled(),
-                            &|completed, total| {
-                                cancellation.report_progress(
-                                    EvaluationProgressStage::RasterizingPreview,
-                                    raster_work_progress(completed, total),
-                                    unit_stage_progress(completed, total),
-                                );
-                            },
-                        ),
-                        RasterRequest::Output {
-                            background,
-                            target,
-                            antialiasing,
-                        } => toniator_render::rasterize_output_cancellable_with_progress(
-                            &scene,
-                            background,
-                            target,
-                            antialiasing,
-                            toniator_render::RasterizationLimits::new(
-                                limits.max_flattened_raster_edges(),
-                            )
-                            .expect("EvaluationLimits validates raster edge bounds"),
-                            &|| cancellation.is_cancelled(),
-                            &|completed, total| {
-                                cancellation.report_progress(
-                                    EvaluationProgressStage::RasterizingPreview,
-                                    raster_work_progress(completed, total),
-                                    unit_stage_progress(completed, total),
-                                )
-                            },
-                        ),
-                    }
-                    .map_err(EvaluationError::from_render)
-                },
-            )?),
-            CacheDisposition::Miss,
-        ),
-    };
-    if let Some(performance) = performance {
-        let raster_pixels = usize::try_from(raster.width())
-            .ok()
-            .and_then(|width| {
-                usize::try_from(raster.height())
-                    .ok()
-                    .and_then(|height| width.checked_mul(height))
-            })
-            .unwrap_or(usize::MAX);
-        performance.record(
-            EvaluationPerformanceStage::Raster,
-            None,
-            None,
-            raster_started.elapsed(),
-            Some(raster_disposition),
-            vec![EvaluationWorkloadMetric {
-                kind: EvaluationWorkloadKind::RasterPixels,
-                count: raster_pixels,
-            }],
-        );
-    }
-    cancellation.report_progress(EvaluationProgressStage::RasterizingPreview, 990, 1_000);
-    cancellation.report_progress(EvaluationProgressStage::Finalizing, 990, 0);
-    let result = EvaluationResult {
-        token: request.snapshot.token(),
-        source_identity: source.identity().clone(),
-        channels: summaries,
-        families: families
-            .iter()
-            .map(|(_, family, _)| Arc::clone(family))
-            .collect(),
-        // Evaluation results share the immutable cache values directly. The
-        // public accessors still expose ordinary borrows, so callers cannot
-        // observe this storage optimization or mutate cached authority.
-        scene: Arc::clone(&scene),
-        raster: Arc::clone(&raster),
-    };
-    let channels = result
-        .channels
+    let channels = summaries
         .iter()
         .enumerate()
         .map(|(index, value)| ChannelCacheDiagnostics {
@@ -5229,31 +5461,36 @@ fn evaluate_cached_document_impl(
             outputs: output_realization_dispositions[index].clone(),
         })
         .collect();
-    cancellation.report_progress(EvaluationProgressStage::Finalizing, 1_000, 1_000);
-    Ok(CachedDocumentEvaluation {
-        result,
-        diagnostics: DocumentCacheDiagnostics {
-            aggregate: CacheDiagnostics {
-                decoded_source: source_hit,
-                family: if family_dispositions
-                    .iter()
-                    .all(|value| *value == CacheDisposition::Hit)
-                {
-                    CacheDisposition::Hit
-                } else {
-                    CacheDisposition::Miss
-                },
-                realization: if realization_dispositions
-                    .iter()
-                    .all(|value| *value == CacheDisposition::Hit)
-                {
-                    CacheDisposition::Hit
-                } else {
-                    CacheDisposition::Miss
-                },
-                scene: scene_disposition,
-                raster: raster_disposition,
+    Ok(CachedSceneEvaluation {
+        result: SceneEvaluationResult {
+            token: request.snapshot.token(),
+            source_identity: source.identity().clone(),
+            channels: summaries,
+            families: families
+                .iter()
+                .map(|(_, family, _)| Arc::clone(family))
+                .collect(),
+            scene: Arc::clone(&scene),
+        },
+        diagnostics: SceneCacheDiagnostics {
+            decoded_source: source_hit,
+            family: if family_dispositions
+                .iter()
+                .all(|value| *value == CacheDisposition::Hit)
+            {
+                CacheDisposition::Hit
+            } else {
+                CacheDisposition::Miss
             },
+            realization: if realization_dispositions
+                .iter()
+                .all(|value| *value == CacheDisposition::Hit)
+            {
+                CacheDisposition::Hit
+            } else {
+                CacheDisposition::Miss
+            },
+            scene: scene_disposition,
             channels,
         },
         transaction: DocumentCacheTransaction {
@@ -5266,7 +5503,7 @@ fn evaluate_cached_document_impl(
             coverage_curves,
             uniform_density_fits,
             scene: Some((scene_key, scene, scene_guard)),
-            raster: (raster_disposition == CacheDisposition::Miss).then_some((raster_key, raster)),
+            raster: None,
         },
     })
 }
@@ -8210,6 +8447,13 @@ struct DocumentCacheTransaction {
     raster: Option<(String, Arc<RasterSurface>)>,
 }
 
+/// Holds a private raster-free candidate and the transaction committed only on acceptance.
+struct CachedSceneEvaluation {
+    result: SceneEvaluationResult,
+    diagnostics: SceneCacheDiagnostics,
+    transaction: DocumentCacheTransaction,
+}
+
 struct CachedDocumentEvaluation {
     result: EvaluationResult,
     diagnostics: DocumentCacheDiagnostics,
@@ -8277,6 +8521,8 @@ pub(crate) mod test_support {
     use toniator_patterns::{
         CurveSegment, RegionTreatment, RegionTreatmentRequest, treat_region_requests_cancellable,
     };
+
+    include!("scene_ready_tests.rs");
 
     const GUARD: Duration = Duration::from_secs(15);
     const CHANNEL_ID: ChannelId = ChannelId(1);

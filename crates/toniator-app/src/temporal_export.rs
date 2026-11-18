@@ -364,6 +364,8 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
         ),
     };
     let window = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Export video")
         .modal(true)
         .transient_for(&parent)
@@ -935,7 +937,7 @@ fn options_from_surface(
 ///
 /// # Errors
 /// Rejects a subset outside the accepted project frame range or exact interval arithmetic errors.
-fn document_for_export(document: &Document, first: u64, last: u64) -> Result<Document, String> {
+pub(super) fn document_for_export(document: &Document, first: u64, last: u64) -> Result<Document, String> {
     let range = document.project_timing().frame_range();
     if first == range.start() && last.checked_add(1) == Some(range.end_exclusive()) {
         return Ok(document.clone());

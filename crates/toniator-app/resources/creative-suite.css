@@ -1,0 +1,39 @@
+/* Creative Suite interface baseline, revision 1.
+ * Vendor this file unchanged in each application. Application CSS follows it.
+ * Native GTK colors, fonts, focus rings and high-contrast rules remain authoritative.
+ */
+.creative-suite .suite-header {
+  padding: 0.3em 0.45em;
+}
+.creative-suite .suite-icon-button {
+  min-width: 2em;
+  min-height: 2em;
+}
+.creative-suite .suite-inspector {
+  padding: 0.6em;
+  background-color: @theme_bg_color;
+  color: @theme_fg_color;
+}
+.creative-suite .suite-section-title {
+  font-weight: bold;
+  margin-top: 0.6em;
+  margin-bottom: 0.3em;
+}
+.creative-suite .suite-statusbar {
+  border-top: 1px solid @borders;
+  padding: 0.3em 0.45em;
+  background-color: @theme_bg_color;
+  color: @theme_fg_color;
+}
+.creative-suite .suite-dialog-content {
+  margin: 1.2em;
+}
+.creative-suite .suite-dialog-actions {
+  margin: 0.6em 1.2em;
+}
+/* Custom spatial surfaces need an explicit visible focus indicator. */
+.creative-suite .suite-canvas:focus-visible {
+  outline: 2px solid @theme_selected_bg_color;
+  outline-offset: -2px;
+}
+/* Keep ordinary GTK controls' native :focus-visible styling and non-color cues. */

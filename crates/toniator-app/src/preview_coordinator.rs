@@ -9,6 +9,7 @@ use toniator_engine::PreviewRasterTarget;
 pub(crate) struct PreviewIntent {
     pub(crate) frame: (u64, u64, u64),
     pub(crate) target: PreviewRasterTarget,
+    pub(crate) provenance: toniator_engine::preview_cache::Provenance,
 }
 
 /// Pairs an engine ticket with the app workspace that submitted it.
@@ -72,6 +73,16 @@ impl PreviewCoordinator {
         self.refresh_queued = true;
         self.intent = Some(intent);
         self.failure = None;
+        true
+    }
+
+    /// Retargets only an already pending canonical-only request for the same exact artwork authority.
+    /// Raster-free work has no viewport/backend pixels to invalidate; submission/ticket remains unchanged.
+    pub(crate) fn retarget_scene(&mut self, intent: PreviewIntent) -> bool {
+        if !self.is_pending() || self.intent.is_none_or(|old| old.frame != intent.frame) {
+            return false;
+        }
+        self.intent = Some(intent);
         true
     }
 
@@ -237,6 +248,51 @@ pub(crate) fn accepts_submission(
 
 #[cfg(test)]
 mod tests {
+    /// Retargets canonical-only pending work without replacing its ticket or admitting another document token.
+    /// # Panics
+    /// Panics if a pan/mode change cancels canonical ownership or a different frame can rebind it.
+    #[test]
+    fn stage3_scene_intent_retargets_camera_and_quality_only() {
+        let mut coordinator = PreviewCoordinator::default();
+        let initial = intent(1, 100);
+        coordinator.prepare(initial);
+        coordinator.submit(1, 77);
+        let submission = coordinator.submission();
+        let mut pan = intent(1, 120);
+        pan.provenance = toniator_engine::preview_cache::Provenance::fast(4, 2);
+        assert!(coordinator.retarget_scene(pan));
+        assert_eq!(coordinator.submission(), submission);
+        assert_eq!(coordinator.intent(), Some(pan));
+        assert!(!coordinator.retarget_scene(intent(2, 120)));
+        assert_eq!(coordinator.intent(), Some(pan));
+        assert!(coordinator.accept(1, 77));
+        assert!(!coordinator.retarget_scene(initial));
+    }
+
+    /// Distinguishes requested/effective backend, algorithm and presentation epoch in terminal intent.
+    /// # Panics
+    /// Panics if an old backend failure blocks a new namespace or accepted pixels relabel the attempt.
+    #[test]
+    fn stage2_failure_intent_separates_presentation_epochs_and_backends() {
+        let old = intent(1, 100);
+        let mut coordinator = PreviewCoordinator::default();
+        coordinator.prepare(old);
+        assert!(coordinator.fail_preparation(old, "CPU refused".into()));
+        let mut fast = old;
+        fast.provenance = toniator_engine::preview_cache::Provenance::fast(1, 1);
+        assert!(!coordinator.is_failed(fast));
+        assert!(coordinator.queue_intent(Some(fast)));
+        assert!(coordinator.fail_preparation(fast, "native unavailable".into()));
+        let mut fallback = fast;
+        fallback.provenance = toniator_engine::preview_cache::Provenance::accurate(
+            2,
+            1,
+            toniator_engine::preview_cache::Quality::Fast,
+        );
+        assert!(!coordinator.is_failed(fallback));
+        assert!(coordinator.queue_intent(Some(fallback)));
+    }
+
     use super::*;
 
     /// Builds a checked target witness without creating any document or GTK state.
@@ -246,6 +302,7 @@ mod tests {
         PreviewIntent {
             frame: (1, revision, 0),
             target: PreviewRasterTarget::new(width, 80).expect("target"),
+            provenance: Default::default(),
         }
     }
 

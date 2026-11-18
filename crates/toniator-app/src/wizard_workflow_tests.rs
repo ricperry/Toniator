@@ -138,14 +138,47 @@ fn effective_fineness_readback_preserves_mixed_channels() {
     assert_eq!(workspace.document(), &before);
 }
 
-/// Profiles native Poisson construction independently of thumbnail size without changing the recipe.
+/// Profiles unchanged native Poisson construction using either immutable source and optional warm reuse.
+///
+/// `TONIATOR_PROFILE_SOURCE` selects only the bundled raster or SVG; `TONIATOR_PROFILE_NATIVE`
+/// selects its intrinsic raster dimensions instead of the default 128-square presentation.
+/// `TONIATOR_PROFILE_WARM` repeats against the accepted cache and `TONIATOR_PROFILE_OUTPUT`
+/// writes untouched RGBA PNGs. `TONIATOR_PROFILE_CALIBRATED` prepares or reopens an exact
+/// derived project through production calibration; without it this profiles structural evaluation.
+/// A calibration donor is reused only through exact binding and production attachment guards;
+/// `TONIATOR_PROFILE_PROJECT_OUTPUT` saves a derived current project, and preparation-only skips evaluation.
+/// These diagnostics never change recipe or evaluator authority.
 ///
 /// # Panics
-/// Panics if the reported recipe or full evaluator fails; timings are diagnostics, not CI thresholds.
+/// Panics if source selection, recipe construction, evaluation, or requested output writing fails.
+/// Timings are diagnostics rather than CI thresholds.
 #[test]
 #[ignore = "native-size performance diagnostic"]
 fn poisson_native_profile() {
     let mut workspace = workspace();
+    let input =
+        std::env::var("TONIATOR_PROFILE_SOURCE").unwrap_or_else(|_| "vector-sample.svg".into());
+    assert!(matches!(
+        input.as_str(),
+        "raster-sample.png" | "vector-sample.svg"
+    ));
+    if input != "vector-sample.svg" {
+        workspace = load_workspace(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets")
+                .join(&input),
+        )
+        .unwrap();
+        let preset = crate::current_test_fixtures::clustered_weighted_lloyd();
+        let id = preset.metadata.id.clone();
+        PresetRegistry::new(
+            toniator_patterns::BUNDLED_PRESET_REGISTRY_VERSION,
+            vec![preset],
+        )
+        .unwrap()
+        .apply_to_document_base(&mut workspace.history, &id)
+        .unwrap();
+    }
     let size = std::env::var("TONIATOR_TEST_FEATURE_SIZE")
         .unwrap_or_else(|_| "0.1".into())
         .parse()
@@ -173,13 +206,75 @@ fn poisson_native_profile() {
         &transition,
     )
     .unwrap();
+    let calibrated = std::env::var_os("TONIATOR_PROFILE_CALIBRATED");
+    if let Some(path) = &calibrated {
+        let path = Path::new(path);
+        if path.exists() {
+            let cached = load_workspace(path).unwrap();
+            assert_eq!(cached.sources, workspace.sources);
+            assert_eq!(cached.document().baseline_calibration_binding().unwrap(), workspace.document().baseline_calibration_binding().unwrap());
+            workspace = cached;
+            let density = authority_numeric_value(workspace.document(), PropertyFieldId::Density, size).unwrap();
+            advanced_batches::apply(&mut workspace.history, temporal_preview::Endpoint::Start,
+                PropertyFieldId::Density, density).unwrap();
+            eprintln!("calibrated fixture reopened with requested feature size: {}", path.display());
+        } else {
+            let started = Instant::now();
+            let mut reused = false;
+            if let Some(donor) = std::env::var_os("TONIATOR_PROFILE_CALIBRATION_DONOR") {
+                let donor = load_workspace(Path::new(&donor)).unwrap();
+                if donor.document().baseline_calibration_binding().unwrap() == workspace.document().baseline_calibration_binding().unwrap() {
+                    let active = authoritative_channel_ids(workspace.document()).into_iter()
+                        .map(|channel_id| donor.document().saved_calibration_for(channel_id).unwrap()
+                            .map(|artifact| toniator_domain::AttachedCalibration { channel_id, artifact: artifact.clone() }))
+                        .collect::<Option<Vec<_>>>();
+                    if let Some(active) = active {
+                        let artifacts = calibration_preparation::PreparedCalibrations {
+                            active, baseline: donor.document().baseline_saved_calibration().unwrap().cloned(),
+                        };
+                        reused = attach_calibrations_to_history(&mut workspace.history, artifacts).is_ok();
+                    }
+                }
+                eprintln!("exact guarded calibration donor reused={reused}");
+            }
+            if !reused {
+                let prepared = calibration_preparation::prepare(
+                    workspace.document(), &authoritative_channel_ids(workspace.document()), false, false,
+                    &AtomicBool::new(false),
+                ).unwrap();
+                attach_calibrations_to_history(&mut workspace.history, prepared).unwrap();
+                eprintln!("fresh calibration elapsed={:?}", started.elapsed());
+            }
+            let snapshot = workspace.snapshot();
+            save_container(path, &snapshot.document, &snapshot.sources).unwrap();
+        }
+    }
+    if let Some(path) = std::env::var_os("TONIATOR_PROFILE_PROJECT_OUTPUT") {
+        let snapshot = workspace.snapshot();
+        save_container(Path::new(&path), &snapshot.document, &snapshot.sources).unwrap();
+    }
+    if std::env::var_os("TONIATOR_PROFILE_PREPARE_ONLY").is_some() { return; }
     let mut media = toniator_engine::open_source_media(
         &workspace.sources,
         toniator_engine::MediaTools::default(),
         &|| false,
     )
     .unwrap();
-    let session = DocumentSession::new(workspace.document().clone()).unwrap();
+    let session = if calibrated.is_some() {
+        DocumentSession::new(workspace.document().clone()).unwrap()
+    } else {
+        wizard_preview_session(workspace.document(), InspectorTarget::DocumentAll).unwrap()
+    };
+    let native = std::env::var_os("TONIATOR_PROFILE_NATIVE").is_some();
+    let (width, height) = if native {
+        if input == "raster-sample.png" {
+            (1024, 1024)
+        } else {
+            (900, 620)
+        }
+    } else {
+        (128, 128)
+    };
     let request = toniator_engine::frame_evaluation_request(
         &session,
         &mut media,
@@ -187,16 +282,167 @@ fn poisson_native_profile() {
         &|| false,
     )
     .unwrap()
-    .for_preview(toniator_engine::PreviewRasterTarget::new(128, 128).unwrap());
-    let result = toniator_engine::evaluate_profiled_with_limits(
-        request,
-        toniator_engine::EvaluationLimits::default(),
-    )
-    .unwrap();
-    eprintln!(
-        "Poisson native feature size {size}: {:#?}",
-        result.performance
-    );
+    .for_preview(toniator_engine::PreviewRasterTarget::new(width, height).unwrap());
+    let request = if calibrated.is_some() { request } else { request.for_structural_preview() };
+    eprintln!("profile purpose={}", if calibrated.is_some() { "authoritative calibrated" } else { "structural family diagnostic" });
+    let mut cache = toniator_engine::EvaluationProfileCache::default();
+    let runs = if std::env::var_os("TONIATOR_PROFILE_WARM").is_some() {
+        2
+    } else {
+        1
+    };
+    for run in 0..runs {
+        let started = Instant::now();
+        let result = toniator_engine::evaluate_profiled_cached_with_limits(
+            request.clone(),
+            toniator_engine::EvaluationLimits::default(),
+            &mut cache,
+        )
+        .unwrap();
+        eprintln!(
+            "Poisson source={input} feature_size={size} target={width}x{height} run={run} elapsed={:?}: {:#?}",
+            started.elapsed(),
+            result.performance
+        );
+        if let Some(directory) = std::env::var_os("TONIATOR_PROFILE_OUTPUT") {
+            let directory = PathBuf::from(directory);
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(
+                directory.join(format!("{input}-{size}-{width}x{height}-run{run}.png")),
+                toniator_engine::encode_png(result.result.raster()).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+}
+
+/// Measures exact personal thumbnail preparation and cold/warm native gallery event-loop latency.
+///
+/// Uses two current Curve Motif copies, one with quarter guide spacing, under disposable XDG roots.
+/// Timing never enters product
+/// state, canonical evaluation, or cache identity; no persistent user library is read or changed.
+///
+/// # Panics
+/// Panics if the private GTK runtime, isolated library, exact requests, or thumbnails fail.
+#[test]
+#[ignore = "private GTK personal thumbnail performance diagnostic"]
+fn personal_thumbnail_native_profile() {
+    glib::set_prgname(Some("Toniator"));
+    register_resources();
+    glib::set_application_name("Toniator");
+    gtk::init().unwrap();
+    let app = gtk::Application::builder()
+        .application_id("io.github.ricperry.Toniator.ThumbnailProfile")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    app.register(None::<&gio::Cancellable>).unwrap();
+    let state = build_window(&app);
+    state.borrow().window.present();
+    if let Some(marker) = std::env::var_os("TONIATOR_PROFILE_START") {
+        wait_until("verified private runtime start marker", 30, || Path::new(&marker).exists());
+    }
+    let library = state.borrow().personal_library.clone().unwrap();
+    let registry = PresetRegistry::bundled();
+    for index in 1..=2 {
+        let mut preset = registry.find("curve-motif-rows").unwrap().clone();
+        preset.metadata.id = format!("user-00000000-0000-4000-8000-{index:012}");
+        preset.metadata.name = format!("Thumbnail performance witness {index}");
+        preset.metadata.thumbnail = None;
+        if index == 2 && std::env::var_os("TONIATOR_PROFILE_SIMPLE_THUMBNAILS").is_none() {
+            preset.metadata.name = "Thumbnail performance witness 2 dense guides".into();
+            preset.saved_calibration = None;
+            let mut structure = &mut preset.recipe.structure;
+            loop {
+                match structure {
+                    PatternStructureRecipe::AuthoredResources { definition, .. }
+                    | PatternStructureRecipe::CurveMotifPaths { definition, .. } => structure = definition,
+                    PatternStructureRecipe::GeneralizedStraightGuides { dimensions, .. } => {
+                        dimensions[0].spacing_multiplier = 0.25;
+                        break;
+                    }
+                    _ => panic!("Curve Motif retains its editable guide-spacing authority"),
+                }
+            }
+        }
+        let snapshot = library.scan().unwrap();
+        let expected = snapshot.presets.iter().find(|entry| entry.preset.metadata.id == preset.metadata.id);
+        library.write_preset(&preset, expected.map(|entry| &entry.fingerprint)).unwrap();
+    }
+    install_personal_catalog_snapshot(&state, library.clone(), library.scan().unwrap()).unwrap();
+    let catalog = state.borrow().catalog.clone();
+    for entry in catalog
+        .entries()
+        .iter()
+        .filter(|entry| entry.origin != PresetOrigin::BuiltIn)
+    {
+        let started = Instant::now();
+        let request =
+            synthetic_catalog_thumbnail_request(&catalog, &entry.preset.metadata.id).unwrap();
+        eprintln!(
+            "thumbnail id={} prepare={:?}",
+            entry.preset.metadata.id,
+            started.elapsed()
+        );
+        let started = Instant::now();
+        let result =
+            toniator_engine::evaluate_with_limits(request, EvaluationLimits::default()).unwrap();
+        eprintln!(
+            "thumbnail id={} evaluate={:?} pixels={:?}",
+            entry.preset.metadata.id,
+            started.elapsed(),
+            (result.raster().width(), result.raster().height())
+        );
+    }
+    let gaps = Rc::new(RefCell::new(Vec::new()));
+    let last = Rc::new(RefCell::new(Instant::now()));
+    let heartbeat = glib::timeout_add_local(Duration::from_millis(5), {
+        let gaps = gaps.clone();
+        let last = last.clone();
+        move || {
+            let now = Instant::now();
+            gaps.borrow_mut().push(now.duration_since(*last.borrow()));
+            *last.borrow_mut() = now;
+            glib::ControlFlow::Continue
+        }
+    });
+    for run in 0..2 {
+        let gallery = gtk::FlowBox::new();
+        let current = gtk::ToggleButton::with_label("Current Pattern");
+        let window = gtk::Window::builder()
+            .application(&app)
+            .title("Thumbnail performance diagnostic")
+            .default_width(1200)
+            .default_height(800)
+            .child(&gallery)
+            .build();
+        gaps.borrow_mut().clear();
+        *last.borrow_mut() = Instant::now();
+        let started = Instant::now();
+        let cards = append_wizard_gallery(&state, 0, &gallery, &catalog, &current);
+        window.present();
+        eprintln!("gallery run={run} synchronous_open={:?}", started.elapsed());
+        wait_until("both current thumbnail textures", 120, || {
+            state.borrow().personal_thumbnail_cache.len() == 2
+        });
+        let completed = started.elapsed();
+        wait_until("observed gallery event-loop heartbeats", 3, || gaps.borrow().len() >= 3);
+        eprintln!(
+            "gallery run={run} thumbnails_complete={:?} max_heartbeat_gap={:?} samples={} cards={}",
+            completed,
+            gaps.borrow().iter().max(),
+            gaps.borrow().len(),
+            cards.len()
+        );
+        capture(&format!("thumbnail-profile-run{run}"));
+        window.close();
+        gaps.borrow_mut().clear();
+    }
+    heartbeat.remove();
+    if let Some(marker) = std::env::var_os("TONIATOR_PROFILE_FINISH") {
+        wait_until("private evidence finish marker", 120, || Path::new(&marker).exists());
+    }
+    let window = state.borrow().window.clone();
+    window.close();
 }
 
 /// Pumps the real GTK event loop until an observable workflow condition holds, with a hard deadline.

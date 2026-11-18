@@ -1,6 +1,6 @@
 [package]
 name = "toniator-engine"
-version = "0.4.6"
+version = "0.4.7"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -26,6 +26,7 @@ zip.workspace = true
 
 [features]
 default = []
+fast-preview = ["toniator-render/fast-preview"]
 prepared-crop-pilot = ["toniator-render/prepared-crop-pilot"]
 
 [[example]]
@@ -35,3 +36,11 @@ required-features = ["prepared-crop-pilot"]
 [[example]]
 name = "preview_cache_root_probe"
 required-features = ["prepared-crop-pilot"]
+
+[[example]]
+name = "fast_preview_stage1_probe"
+required-features = ["fast-preview"]
+
+[[example]]
+name = "fast_preview_stage2_cache_probe"
+required-features = ["fast-preview"]

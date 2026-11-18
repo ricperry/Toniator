@@ -3,6 +3,29 @@
 //! These types own stable presentation structure only. They deliberately do
 //! not own a document, history, evaluator, or persistence state.
 
+/// Shares footer wrapping across allocation and message projection so messages cannot oscillate the camera.
+fn viewport_footer_columns(narrow: bool, message: bool) -> u32 {
+    if narrow && message {
+        1
+    } else if message {
+        4
+    } else {
+        3
+    }
+}
+
+/// Keeps the added quality group in both idle/message layouts and stacks narrow messages consistently.
+/// # Panics
+/// Panics if allocation/message paths lose the shared number of independent footer children.
+#[cfg(test)]
+#[test]
+fn stage3_footer_message_and_allocation_share_column_policy() {
+    assert_eq!(viewport_footer_columns(false, false), 3);
+    assert_eq!(viewport_footer_columns(false, true), 4);
+    assert_eq!(viewport_footer_columns(true, true), 1);
+    assert_eq!(viewport_footer_columns(true, false), 3);
+}
+
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
@@ -57,6 +80,14 @@ mod main_shell {
         #[template_child]
         pub file_button: gtk::TemplateChild<gtk::MenuButton>,
         #[template_child]
+        pub header_open: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub header_save: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub undo_button: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub redo_button: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
         pub new_button: gtk::TemplateChild<gtk::MenuButton>,
         #[template_child]
         pub channel_settings_drawer: gtk::TemplateChild<gtk::ToggleButton>,
@@ -78,6 +109,10 @@ mod main_shell {
         pub zoom_in_button: gtk::TemplateChild<gtk::Button>,
         #[template_child]
         pub fit_button: gtk::TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub fast_preview_switch: gtk::TemplateChild<gtk::Switch>,
+        #[template_child]
+        pub preview_quality_label: gtk::TemplateChild<gtk::Label>,
         #[template_child]
         pub preview_view_button: gtk::TemplateChild<gtk::ToggleButton>,
         #[template_child]
@@ -275,6 +310,22 @@ impl ToniatorMainShell {
             .pixel_size()
             .0;
         let layout = inspector_layout(self.width(), preferred_width, self.drawer().is_active());
+        let message_visible = self.imp().main_banner_revealer.is_visible();
+        let columns = viewport_footer_columns(layout.narrow, message_visible);
+        if self.imp().viewport_toolbar.max_children_per_line() != columns {
+            self.imp()
+                .viewport_toolbar
+                .set_max_children_per_line(columns);
+        }
+        // Redundant header actions stay reachable through the menu and accelerators at narrow widths.
+        for button in [
+            self.imp().header_open.get(),
+            self.imp().header_save.get(),
+            self.imp().undo_button.get(),
+            self.imp().redo_button.get(),
+        ] {
+            button.set_visible(!layout.narrow);
+        }
         let canvas_width = self.width()
             - if layout.settings_visible && !layout.narrow {
                 layout.preferred_width
@@ -392,7 +443,10 @@ impl ToniatorMainShell {
             .set_label(message.unwrap_or_default());
         self.imp()
             .viewport_toolbar
-            .set_max_children_per_line(if message.is_some() { 3 } else { 2 });
+            .set_max_children_per_line(viewport_footer_columns(
+                self.imp().layout.get().is_some_and(|layout| layout.narrow),
+                message.is_some(),
+            ));
         self.imp()
             .main_banner_revealer
             .set_reveal_child(message.is_some());
@@ -480,6 +534,15 @@ impl ToniatorMainShell {
     /// Returns the explicit fit-to-viewport control.
     pub fn fit(&self) -> gtk::ToggleButton {
         self.imp().fit_button.get()
+    }
+
+    /// Returns the native session-only quality request switch without document authority.
+    pub fn fast_preview(&self) -> gtk::Switch {
+        self.imp().fast_preview_switch.get()
+    }
+    /// Returns the width-reserved accepted-pixel mode readout; requesting a mode never accepts pixels.
+    pub fn preview_quality(&self) -> gtk::Label {
+        self.imp().preview_quality_label.get()
     }
 
     /// Returns the Preview half of the exclusive main view switcher.

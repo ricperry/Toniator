@@ -8,7 +8,9 @@ use std::{
     },
     thread,
 };
-use toniator_engine::preview_cache::{Frame, Region};
+use toniator_engine::preview_cache::{
+    FastPlan, Frame, PixelIdentity, Provenance, Quality, Region, WorkerState,
+};
 use toniator_engine::{
     EvaluationLimits, PreviewRasterTarget, RasterizationLimits, RenderScene,
     preview_cache::{self as cache, Artwork, Plan, PreviewCache, RootKey, View},
@@ -78,6 +80,13 @@ impl I {
         )
     }
 }
+/// Shares installed Picture centering between live projection and immutable viewport history.
+fn snapshot_translation(picture: [f64; 2], snapshot: [f64; 2]) -> [f64; 2] {
+    [
+        ((picture[0] - snapshot[0]) / 2.).trunc(),
+        ((picture[1] - snapshot[1]).floor() / 2.).trunc(),
+    ]
+}
 impl Layout {
     /// Resolves actual installed GTK contain rounding while retaining the existing uniform root scale.
     /// Only pure-translation Picture frames and physical scale1/2 are admitted; others use ordinary rendering.
@@ -110,10 +119,7 @@ impl Layout {
             (picture[1] * ratio, picture[1])
         };
         let snapshot = [w.ceil(), h.ceil()];
-        let t = [
-            ((picture[0] - snapshot[0]) / 2.).trunc(),
-            ((picture[1] - snapshot[1]).floor() / 2.).trunc(),
-        ];
+        let t = snapshot_translation(picture, snapshot);
         let origin = [
             f64::from((origin[0] as f32) + (t[0] as f32)),
             f64::from((origin[1] as f32) + (t[1] as f32)),
@@ -393,6 +399,27 @@ pub(crate) struct Presentation {
         glib::WeakRef<gtk::ScrolledWindow>,
     )>,
     pub observed: Arc<AtomicBool>,
+    retained: Option<RetainedFrame>,
+    backup: Option<RetainedFrame>,
+    atomic: bool,
+}
+/// Immutable whole viewport history owns textures only, never canonical/native roots or CPU regions.
+#[derive(Clone)]
+struct RetainedFrame {
+    node: gtk::gsk::RenderNode,
+    textures: Vec<gdk::Texture>,
+    authority: Arc<AtomicU64>,
+    generation: u64,
+}
+/// One complete native target with its actual accepted presentation authority.
+#[derive(Clone)]
+pub(crate) struct AcceptedFrame {
+    pub texture: gdk::Texture,
+    pub artwork: Artwork,
+    pub provenance: Provenance,
+    pub target: PreviewRasterTarget,
+    pub image_target: PreviewRasterTarget,
+    identity: PixelIdentity,
 }
 struct Upload {
     tile: Tile,
@@ -405,25 +432,35 @@ pub(crate) struct Controller {
     changed: Arc<AtomicU64>,
     seen: u64,
     thread: Option<thread::JoinHandle<()>>,
-    uploads: HashMap<u64, Upload>,
+    uploads: HashMap<PixelIdentity, Upload>,
     pub presentation: Option<Presentation>,
     pub pending: bool,
     pub exact_complete: bool,
     pub ordinary_required: bool,
     rejected: Arc<AtomicBool>,
     last_request: Option<(Artwork, PreviewRasterTarget, Layout)>,
-    fallbacks: HashMap<u64, gdk::Texture>,
+    fallbacks: HashMap<PixelIdentity, gdk::Texture>,
+    last_good: Option<Presentation>,
+    accepted: Option<AcceptedFrame>,
+    display_generation: Arc<AtomicU64>,
 }
 impl Controller {
     /// Starts one bounded worker; spawn failure leaves the ordinary renderer available.
     pub fn new() -> Self {
-        let shared = Arc::new((Mutex::new(PreviewCache::default()), Condvar::new()));
+        let mut cache = PreviewCache::default();
+        if crate::preview_measurement::enabled()
+            && std::env::var_os("TONIATOR_PREVIEW_NO_PREFETCH").is_some_and(|v| v == "1")
+        {
+            cache.diagnostic_background_fill(false);
+        }
+        let shared = Arc::new((Mutex::new(cache), Condvar::new()));
         let shutdown = Arc::new(AtomicBool::new(false));
         let changed = Arc::new(AtomicU64::new(0));
         let (s, stop, version) = (shared.clone(), shutdown.clone(), changed.clone());
         let thread = thread::Builder::new()
             .name("preview-cache".into())
             .spawn(move || {
+                let mut backend = WorkerState::default();
                 while !stop.load(Ordering::Relaxed) {
                     let job = {
                         let (m, c) = &*s;
@@ -443,7 +480,7 @@ impl Controller {
                         version.fetch_add(1, Ordering::Release);
                     }
                     if let Some(job) = job {
-                        let result = job.run(&stop);
+                        let result = backend.run(job, &stop);
                         let mut cache = s.0.lock().unwrap_or_else(|p| p.into_inner());
                         let visible = result.changes_view(&cache);
                         cache.complete(result);
@@ -453,6 +490,23 @@ impl Controller {
                         }
                     }
                 }
+                // Clear queues own only immutable data. Drain retirement on this thread so Close
+                // and nonblocking Controller drop never leave a native scene/root pinned.
+                loop {
+                    let job = s.0.lock().unwrap_or_else(|p| p.into_inner()).take_job();
+                    let Some(job) = job else {
+                        break;
+                    };
+                    let result = backend.run(job, &stop);
+                    s.0.lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .complete(result);
+                }
+                let ack = backend.finish();
+                s.0.lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .worker_retired(ack);
+                version.fetch_add(1, Ordering::Release);
             })
             .ok();
         Self {
@@ -469,10 +523,16 @@ impl Controller {
             rejected: Arc::new(AtomicBool::new(false)),
             last_request: None,
             fallbacks: HashMap::new(),
+            last_good: None,
+            accepted: None,
+            display_generation: Arc::new(AtomicU64::new(0)),
         }
     }
     /// Drops derived frame data and revokes running work while keeping the worker itself reusable.
     pub fn clear(&mut self) {
+        self.display_generation.fetch_add(1, Ordering::Release);
+        self.last_good = None;
+        self.accepted = None;
         self.shared
             .0
             .lock()
@@ -483,23 +543,401 @@ impl Controller {
         self.pending = false;
         self.last_request = None;
         self.fallbacks.clear();
+        self.shared
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .textures_with_retained(0, 0, 0, None);
+        self.shared.1.notify_one();
     }
     /// Hands only a scheduler-accepted scene Arc to engine ownership, accounting canonical storage.
     pub fn accept(&mut self, artwork: Artwork, scene: Arc<RenderScene>) {
+        self.capture_whole();
         let estimate = cache::estimate_scene(&scene).unwrap_or(usize::MAX);
         let mut cache = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
         if !cache.has_scene(artwork, &scene) {
             self.uploads.clear();
             self.fallbacks.clear();
-            self.presentation = None;
+            self.presentation = self.last_good.clone();
         }
         cache.accept_scene(artwork, scene, estimate);
+        drop(cache);
+        self.sync_residency();
+        self.shared.1.notify_one();
+    }
+    /// Tests accepted canonical workspace/revision/frame authority without evaluating or initializing a backend.
+    pub fn has_artwork(&self, artwork: Artwork) -> bool {
+        self.shared
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .has_artwork(artwork)
+    }
+    /// Requires a whole ordinary CPU base before sparse CPU coverage can replace older backend/artwork pixels.
+    pub fn requires_cpu_base(&self, artwork: Artwork) -> bool {
+        self.provenance().effective == Quality::Accurate
+            && self.accepted.as_ref().is_some_and(|a| {
+                a.artwork != artwork || a.provenance.backend != self.provenance().backend
+            })
+    }
+    /// Returns work/request identity; accepted visible pixels keep their own presentation provenance.
+    pub fn provenance(&self) -> Provenance {
+        self.shared
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .provenance()
+    }
+    /// Returns requested quality independently of currently accepted or fallback pixels.
+    pub fn requested_quality(&self) -> Quality {
+        self.shared
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .requested_quality()
+    }
+    /// Changes only derived presentation authority and explicitly preserves immutable last-good history.
+    pub fn set_quality(&mut self, quality: Quality) -> bool {
+        self.capture_whole();
+        let mut cache = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
+        if !cache.set_quality(quality) {
+            return false;
+        }
+        let stamp = cache.provenance();
+        drop(cache);
+        if stamp.effective == Quality::Accurate {
+            self.rekey_uploads(stamp);
+        }
+        self.presentation = self.last_good.clone();
+        self.last_request = None;
+        self.pending = true;
+        self.shared.1.notify_one();
+        self.sync_residency();
+        true
+    }
+    /// Rewraps unchanged CPU texture ownership only after the engine explicitly rekeys numerical roots.
+    fn rekey_uploads(&mut self, stamp: Provenance) {
+        self.uploads = std::mem::take(&mut self.uploads)
+            .into_iter()
+            .filter_map(|(mut id, u)| {
+                (id.provenance.effective == Quality::Accurate).then(|| {
+                    id.provenance = stamp;
+                    (id, u)
+                })
+            })
+            .collect();
+        self.fallbacks = std::mem::take(&mut self.fallbacks)
+            .into_iter()
+            .filter_map(|(mut id, u)| {
+                (id.provenance.effective == Quality::Accurate).then(|| {
+                    id.provenance = stamp;
+                    (id, u)
+                })
+            })
+            .collect();
+    }
+    /// Returns the accepted whole target with its original quality/revision while replacement is pending.
+    pub fn accepted_frame(&self) -> Option<&AcceptedFrame> {
+        self.accepted.as_ref()
+    }
+    /// Returns typed fallback provenance until a matching complete Fast upload publishes.
+    pub fn fallback_reason(&self) -> Option<(cache::FailureIntent, cache::FallbackReason)> {
+        self.shared
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .fallback_reason()
+            .map(|(intent, reason)| (intent.clone(), reason.clone()))
+    }
+    /// Replaces one accepted whole texture and revokes obsolete spatial history before it can obscure the base.
+    /// The caller supplies facts only after current upload/ordinary-memo validation; alpha is not coverage.
+    fn replace_exact_frame(&mut self, frame: AcceptedFrame) {
+        self.accepted = Some(frame);
+        self.presentation = None;
+        self.last_good = None;
+        self.pending = false;
+        self.ordinary_required = false;
+        self.display_generation.fetch_add(1, Ordering::Release);
+    }
+    /// Charges unique GTK texture objects, including retained history but excluding duplicate memo ownership.
+    fn texture_costs(&self) -> (usize, usize) {
+        let mut retained = Vec::<gdk::Texture>::new();
+        if let Some(frame) = &self.accepted {
+            retained.push(frame.texture.clone());
+        }
+        if let Some(p) = &self.last_good
+            && let Some(frame) = &p.retained
+        {
+            for t in &frame.textures {
+                if !retained.contains(t) {
+                    retained.push(t.clone());
+                }
+            }
+        }
+        let cost = |t: &gdk::Texture| {
+            (t.width() as usize)
+                .saturating_mul(t.height() as usize)
+                .saturating_mul(12)
+        };
+        let unavoidable = retained.iter().map(cost).sum::<usize>();
+        let mut all = retained;
+        for u in self.uploads.values() {
+            if !all.contains(&u.tile.texture) {
+                all.push(u.tile.texture.clone());
+            }
+        }
+        (all.iter().map(cost).sum(), unavoidable)
+    }
+    /// Freezes only complete same-provenance viewport textures, releasing all View pixel/root ownership.
+    fn capture_whole(&mut self) {
+        let Some(p) = self.presentation.as_ref().filter(|p| p.retained.is_none()) else {
+            return;
+        };
+        let Some(mut frame) = p.freeze(self.display_generation.clone()) else {
+            return;
+        };
+        frame.generation = self
+            .display_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        let mut history = p.clone();
+        history.view = Arc::new(p.view.projection_metadata());
+        history.tiles.clear();
+        history.alternatives.clear();
+        history.retained = Some(frame);
+        history.backup = None;
+        self.last_good = Some(history);
+        if let Some(p) = &mut self.presentation
+            && p.atomic
+        {
+            p.backup = self.last_good.as_ref().and_then(|p| p.retained.clone());
+        }
+    }
+    /// Plans natural-scale Fast demand and publishes one complete upload without alternate-scale mixing.
+    fn request_fast(
+        &mut self,
+        artwork: Artwork,
+        target: PreviewRasterTarget,
+        layout: Layout,
+    ) -> bool {
+        let Some((_, _, scale)) = target.viewport() else {
+            return false;
+        };
+        let frame = Frame {
+            width: (layout.canvas[0] * scale).ceil() as u32,
+            height: (layout.canvas[1] * scale).ceil() as u32,
+            scale,
+            background: target.background(),
+        };
+        let Some(mut region) = layout.support(frame, &[]) else {
+            return false;
+        };
+        let key = RootKey::new(scale, target.background(), RasterizationLimits::default())
+            .with_provenance(self.provenance());
+        // The final whole-upload sampler can touch farther than any individual cell sampler.
+        if let Some(fetch) = layout.tile_support(frame, region, region) {
+            region = union(region, fetch);
+        }
+        let result = self.fast_texture(artwork, key, region);
+        self.last_request = Some((artwork, target, layout.clone()));
+        match result {
+            Ok(Some((view, texture))) => {
+                if !view.is_current() {
+                    return true;
+                }
+                let stored = view.pixels[0].region;
+                let Some(fetch) = layout.tile_support(view.frame, stored, stored) else {
+                    return false;
+                };
+                if !view.covers(fetch) || !cache::missing(fetch, [stored]).is_empty() {
+                    let mut cache = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
+                    let _ = cache.plan_fast(artwork, view.key, union(stored, fetch));
+                    self.pending = true;
+                    self.presentation = self.last_good.clone();
+                    self.shared.1.notify_one();
+                    return true;
+                }
+                if !self
+                    .shared
+                    .0
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .publish_fast(view.key, view.generation)
+                {
+                    return true;
+                }
+                let image_target = match PreviewRasterTarget::for_viewport(
+                    stored.width,
+                    stored.height,
+                    f64::from(stored.x) / scale,
+                    f64::from(stored.y) / scale,
+                    scale,
+                ) {
+                    Ok(t) => t.with_background(target.background()),
+                    Err(_) => return false,
+                };
+                self.accepted = Some(AcceptedFrame {
+                    identity: view.pixels[0].identity(),
+                    texture: texture.clone(),
+                    artwork,
+                    provenance: view.key.provenance,
+                    target,
+                    image_target,
+                });
+                let backup = self.last_good.as_ref().and_then(|p| p.retained.clone());
+                self.presentation = Some(Presentation {
+                    view: Arc::new(view.projection_metadata()),
+                    layout,
+                    tiles: vec![Tile {
+                        texture,
+                        interior: stored,
+                        padded: stored,
+                    }],
+                    alternatives: Vec::new(),
+                    rejected: self.rejected.clone(),
+                    geometry: None,
+                    observed: Arc::new(AtomicBool::new(false)),
+                    retained: None,
+                    backup,
+                    atomic: true,
+                });
+                self.capture_whole();
+                self.pending = false;
+                self.exact_complete = true;
+                self.sync_residency();
+                true
+            }
+            Ok(None) => {
+                self.presentation = self.last_good.clone();
+                self.pending = true;
+                self.exact_complete = false;
+                self.sync_residency();
+                self.shared.1.notify_one();
+                true
+            }
+            Err(()) => {
+                self.rekey_uploads(self.provenance());
+                self.presentation = self.last_good.clone();
+                self.pending = false;
+                self.sync_residency();
+                false
+            }
+        }
+    }
+    /// Admits fitted/complete targets through the renderer's authoritative fitted transform.
+    /// Main-view mode and scheduler wiring remain caller-owned; no fitting formula is duplicated here.
+    pub fn request_fast_exact(
+        &mut self,
+        artwork: Artwork,
+        target: PreviewRasterTarget,
+    ) -> Option<AcceptedFrame> {
+        if self.requested_quality() != Quality::Fast {
+            return None;
+        }
+        let key = RootKey::new(1., target.background(), RasterizationLimits::default())
+            .with_target(target)
+            .with_provenance(self.provenance());
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: target.width(),
+            height: target.height(),
+        };
+        match self.fast_texture(artwork, key, region) {
+            Ok(Some((view, texture))) => {
+                if !self
+                    .shared
+                    .0
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .publish_fast(view.key, view.generation)
+                {
+                    return None;
+                }
+                self.replace_exact_frame(AcceptedFrame {
+                    identity: view.pixels[0].identity(),
+                    texture,
+                    artwork,
+                    provenance: view.key.provenance,
+                    target,
+                    image_target: target,
+                });
+                self.pending = false;
+                self.sync_residency();
+                self.accepted.clone()
+            }
+            Ok(None) => {
+                self.pending = true;
+                self.sync_residency();
+                self.shared.1.notify_one();
+                None
+            }
+            Err(()) => {
+                self.pending = false;
+                self.rekey_uploads(self.provenance());
+                self.sync_residency();
+                None
+            }
+        }
+    }
+    /// Transfers one worker-owned whole region to GTK and revalidates epoch/root after upload creation.
+    fn fast_texture(
+        &mut self,
+        artwork: Artwork,
+        key: RootKey,
+        region: Region,
+    ) -> Result<Option<(View, gdk::Texture)>, ()> {
+        let mut cache = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
+        let view = match cache.plan_fast(artwork, key, region) {
+            Ok(FastPlan::Ready(view)) => view,
+            Ok(FastPlan::Waiting) => return Ok(None),
+            _ => return Err(()),
+        };
+        let pixel = &view.pixels[0];
+        let identity = pixel.identity();
+        let texture = if let Some(u) = self.uploads.get(&identity) {
+            u.tile.texture.clone()
+        } else {
+            let Some(bytes) = cache.take_fast_upload(view.key, identity, pixel.region) else {
+                return Ok(None);
+            };
+            let texture: gdk::Texture = gdk::MemoryTexture::new(
+                pixel.region.width as i32,
+                pixel.region.height as i32,
+                gdk::MemoryFormat::R8g8b8a8,
+                &glib::Bytes::from_owned(bytes),
+                pixel.region.width as usize * 4,
+            )
+            .upcast();
+            if !view.is_current() || cache.provenance() != view.key.provenance {
+                return Err(());
+            }
+            self.uploads.insert(
+                identity,
+                Upload {
+                    cost: pixel.surface.pixels().len().saturating_mul(3),
+                    tile: Tile {
+                        texture: texture.clone(),
+                        interior: pixel.region,
+                        padded: pixel.region,
+                    },
+                },
+            );
+            texture
+        };
+        if !view.is_current() || cache.provenance() != view.key.provenance {
+            return Err(());
+        }
+        Ok(Some((view, texture)))
     }
     /// Reports current certified drawable cache pixels without treating alpha as coverage.
     /// Background refinement and ordinary exact-target replacement keep these useful pixels visible;
     /// stale root/scene generations never suppress initial evaluation progress.
     pub fn has_current_pixels(&self) -> bool {
         self.presentation.as_ref().is_some_and(|p| {
+            if let Some(frame) = &p.retained {
+                return frame.authority.load(Ordering::Acquire) == frame.generation;
+            }
             std::iter::once(p)
                 .chain(p.alternatives.iter())
                 .any(|layer| {
@@ -529,6 +967,50 @@ impl Controller {
             .unwrap_or_else(|p| p.into_inner())
             .statistics()
     }
+    /// Copies exact prospective sampler/grid state for opt-in qualification without planning/touching LRU.
+    /// Returns unknown when geometry or a matching current prepared root cannot be observed safely.
+    #[cfg(test)]
+    pub fn diagnostic_cells(
+        &self,
+        artwork: Artwork,
+        target: PreviewRasterTarget,
+        layout: &Layout,
+    ) -> Option<serde_json::Value> {
+        if !crate::preview_measurement::enabled() {
+            return None;
+        }
+        let provenance = self.provenance();
+        let (_, _, scale) = target.viewport()?;
+        let frame = Frame {
+            width: (layout.canvas[0] * scale).ceil() as u32,
+            height: (layout.canvas[1] * scale).ceil() as u32,
+            scale,
+            background: target.background(),
+        };
+        let mut region = layout.support(frame, &[])?;
+        if provenance.effective == Quality::Fast
+            && let Some(fetch) = layout.tile_support(frame, region, region)
+        {
+            region = union(region, fetch);
+        }
+        let limits = if provenance.effective == Quality::Fast {
+            RasterizationLimits::default()
+        } else {
+            RasterizationLimits::new(EvaluationLimits::default().max_flattened_raster_edges())
+                .ok()?
+        };
+        let key = RootKey::new(scale, target.background(), limits).with_provenance(provenance);
+        let cache = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
+        let first = cache.diagnostic_cells(artwork, key, region, target)?;
+        if provenance.effective == Quality::Accurate {
+            let expected = first.cells.iter().map(|x| x.0).collect::<Vec<_>>();
+            region = union(region, layout.support(frame, &expected)?);
+        }
+        let result = cache.diagnostic_cells(artwork, key, region, target)?;
+        Some(
+            serde_json::json!({"key":format!("{:?}",result.key),"generation":result.generation,"root_ready":result.ready,"region":[region.x,region.y,region.width,region.height],"native_device_root":result.native_device_root,"assembly_region":result.assembly_region.map(|r|[r.x,r.y,r.width,r.height]),"upload_ready":result.upload_ready,"exact_memo_texture":result.exact_memo.is_some_and(|id|self.fallbacks.contains_key(&id)),"accepted_whole_target":self.accepted.as_ref().is_some_and(|a|a.artwork==artwork&&a.target==target&&a.provenance==key.provenance),"cells":result.cells.iter().map(|(r,stored,inflight)|serde_json::json!({"region":[r.x,r.y,r.width,r.height],"stored":stored,"inflight":inflight})).collect::<Vec<_>>()}),
+        )
+    }
     /// Reconciles GTK residency with authoritative engine IDs after every eviction-capable lifecycle.
     /// Refreshing conservative texture charges may evict further unused entries; each iteration removes
     /// ownership or reaches stable IDs. Current visible/inflight engine regions remain pinned.
@@ -538,28 +1020,31 @@ impl Controller {
             .as_ref()
             .is_some_and(|p| !p.view.is_current())
         {
-            self.presentation = None;
+            self.presentation = self.last_good.clone();
         }
         let mut cache = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
         loop {
-            let resident = cache.resident_ids();
-            let exact = cache.exact_ids();
+            let resident = cache.resident_identities();
+            let exact = cache.exact_identities();
             let before = (self.uploads.len(), self.fallbacks.len());
             self.uploads.retain(|id, _| resident.contains(id));
             self.fallbacks.retain(|id, _| exact.contains(id));
-            cache.textures(
-                self.uploads
-                    .values()
-                    .fold(0usize, |total, u| total.saturating_add(u.cost)),
+            let (bytes, retained) = self.texture_costs();
+            cache.textures_with_retained(
+                bytes,
                 0,
+                retained,
+                self.accepted.as_ref().map(|a| a.identity.id),
             );
             if before == (self.uploads.len(), self.fallbacks.len())
-                && resident == cache.resident_ids()
-                && exact == cache.exact_ids()
+                && resident == cache.resident_identities()
+                && exact == cache.exact_identities()
             {
                 break;
             }
         }
+        drop(cache);
+        self.shared.1.notify_one();
     }
     /// Captures weak GTK layout observers solely to reject stale viewport transforms at draw time.
     pub fn bind_geometry(&mut self, picture: &gtk::Picture, scroll: &gtk::ScrolledWindow) {
@@ -602,12 +1087,27 @@ impl Controller {
         let bytes = (texture.width() as usize)
             .saturating_mul(texture.height() as usize)
             .saturating_mul(12);
-        if let Some(id) = cache.remember_exact(artwork, target, bytes) {
-            self.fallbacks.insert(id, texture);
-        }
-        let ids = cache.exact_ids();
+        let accepted = cache.remember_exact(artwork, target, bytes).map(|id| {
+            let identity = PixelIdentity {
+                provenance: cache.provenance(),
+                id,
+            };
+            self.fallbacks.insert(identity, texture.clone());
+            AcceptedFrame {
+                texture,
+                artwork,
+                provenance: identity.provenance,
+                target,
+                image_target: target,
+                identity,
+            }
+        });
+        let ids = cache.exact_identities();
         self.fallbacks.retain(|id, _| ids.contains(id));
         drop(cache);
+        if let Some(frame) = accepted {
+            self.replace_exact_frame(frame);
+        }
         self.sync_residency();
     }
     /// Reuses a resident ordinary exact-target upload, governed by the engine-owned LRU.
@@ -618,7 +1118,7 @@ impl Controller {
     ) -> Option<gdk::Texture> {
         self.sync_residency();
         let mut cache = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
-        let id = cache.exact(artwork, target)?;
+        let id = cache.exact_identity(artwork, target)?;
         self.fallbacks.get(&id).cloned()
     }
     /// Rebinds derived ownership only after a successful domain None-invalidation transition.
@@ -635,6 +1135,18 @@ impl Controller {
         {
             *artwork = new;
         }
+        if rebound {
+            if let Some(frame) = self.accepted.as_mut().filter(|f| f.artwork == old) {
+                frame.artwork = new;
+            }
+            for p in self
+                .presentation
+                .iter_mut()
+                .chain(self.last_good.iter_mut())
+            {
+                p.rebind_artwork(old, new);
+            }
+        }
         rebound
     }
     /// Invalidates unobserved authority transitions; no unchanged-byte inference can rebind a revision.
@@ -646,7 +1158,19 @@ impl Controller {
             .unwrap_or_else(|p| p.into_inner())
             .has_artwork(artwork);
         if !matches {
-            self.clear();
+            self.capture_whole();
+            self.shared
+                .0
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clear();
+            self.uploads.clear();
+            self.fallbacks.clear();
+            self.presentation = self.last_good.clone();
+            self.last_request = None;
+            self.pending = true;
+            self.sync_residency();
+            self.shared.1.notify_one();
         }
     }
     /// Suspends foreground projection in Source mode while visited zooms continue background filling.
@@ -678,7 +1202,9 @@ impl Controller {
             let limits =
                 RasterizationLimits::new(EvaluationLimits::default().max_flattened_raster_edges())
                     .expect("Main limits");
-            let _ = cache.visit_zoom(artwork, RootKey::new(scale, target.background(), limits));
+            let key = RootKey::new(scale, target.background(), limits)
+                .with_provenance(cache.provenance());
+            let _ = cache.visit_zoom(artwork, key);
             self.shared.1.notify_one();
         }
     }
@@ -691,6 +1217,14 @@ impl Controller {
         layout: Layout,
     ) -> bool {
         self.ordinary_required = false;
+        if self.requested_quality() == Quality::Fast {
+            if self.request_fast(artwork, target, layout.clone()) {
+                return true;
+            }
+            if self.provenance().effective == Quality::Fast {
+                return false;
+            }
+        }
         let Some((_, _, scale)) = target.viewport() else {
             self.decline();
             return false;
@@ -698,7 +1232,8 @@ impl Controller {
         let limits =
             RasterizationLimits::new(EvaluationLimits::default().max_flattened_raster_edges())
                 .expect("Main nonzero limits");
-        let key = RootKey::new(scale, target.background(), limits);
+        let key =
+            RootKey::new(scale, target.background(), limits).with_provenance(self.provenance());
         let candidates = self
             .shared
             .0
@@ -732,6 +1267,25 @@ impl Controller {
             first.geometry = None;
             self.presentation = Some(first);
         }
+        let cross_backend = self
+            .last_good
+            .as_ref()
+            .is_some_and(|p| p.view.key.provenance.backend != self.provenance().backend)
+            || self.requires_cpu_base(artwork);
+        if cross_backend {
+            let whole = self
+                .presentation
+                .as_ref()
+                .is_some_and(|p| p.visible_complete());
+            if !whole {
+                self.presentation = self.last_good.clone();
+                self.pending = true;
+            } else if let Some(p) = &mut self.presentation {
+                p.atomic = true;
+                p.backup = self.last_good.as_ref().and_then(|p| p.retained.clone());
+            }
+        }
+        self.capture_whole();
         self.last_request = Some((artwork, target, layout));
         let pinned = self
             .presentation
@@ -749,7 +1303,7 @@ impl Controller {
             .unwrap_or_else(|p| p.into_inner())
             .pin_views(&pinned);
         // Accepted-artwork background refinement never raises the foreground evaluation overlay.
-        self.pending = false;
+        self.pending = cross_backend && !self.exact_complete;
         if !handled && self.presentation.is_none() {
             self.decline();
             return false;
@@ -760,8 +1314,8 @@ impl Controller {
         if trace_enabled() {
             let sources=self.presentation.as_ref().map(|p|std::iter::once(p).chain(p.alternatives.iter())
                 .map(|layer|serde_json::json!({"scale":layer.view.frame.scale,"generation":layer.view.generation,
-                    "tiles":layer.tiles.len(),"certificate":[layer.view.certificate.region().x,layer.view.certificate.region().y,
-                        layer.view.certificate.region().width,layer.view.certificate.region().height]})).collect::<Vec<_>>()).unwrap_or_default();
+                    "tiles":layer.tiles.len(),"certificate":[layer.view.permission_region().x,layer.view.permission_region().y,
+                        layer.view.permission_region().width,layer.view.permission_region().height]})).collect::<Vec<_>>()).unwrap_or_default();
             eprintln!(
                 "preview-cache-projection {}",
                 serde_json::json!({"requested_scale":scale,"sources":sources,
@@ -797,7 +1351,7 @@ impl Controller {
         let limits =
             RasterizationLimits::new(EvaluationLimits::default().max_flattened_raster_edges())
                 .expect("Main nonzero limits");
-        let key = RootKey::new(scale, background, limits);
+        let key = RootKey::new(scale, background, limits).with_provenance(self.provenance());
         let mut cache = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
         let mut accepted = None;
         for _ in 0..4 {
@@ -834,9 +1388,9 @@ impl Controller {
             return false;
         };
         cache.pin_view(key);
-        let exact = cache.exact_ids();
+        let exact = cache.exact_identities();
         self.fallbacks.retain(|id, _| exact.contains(id));
-        let resident = cache.resident_ids();
+        let resident = cache.resident_identities();
         self.uploads.retain(|id, _| resident.contains(id));
         let mut tiles = Vec::new();
         let mut waiting_upload = false;
@@ -894,11 +1448,19 @@ impl Controller {
                 };
                 padded = cache::gutter(interior, frame);
                 if !available(padded) {
+                    if cache::intersection(interior, region).is_some()
+                        && matches!(
+                            cache.diagnostic_upload_support(key, view.generation, padded),
+                            Ok(true)
+                        )
+                    {
+                        waiting_upload = true;
+                    }
                     continue;
                 }
             }
             // An existing wider valid upload may keep its copied neighbor pixels after a pan.
-            if let Some(upload) = self.uploads.get(&pixel.id)
+            if let Some(upload) = self.uploads.get(&pixel.identity())
                 && cache::missing(interior, [upload.tile.interior]).is_empty()
             {
                 interior = upload.tile.interior;
@@ -909,7 +1471,7 @@ impl Controller {
             }
             let fresh = self
                 .uploads
-                .get(&pixel.id)
+                .get(&pixel.identity())
                 .is_none_or(|u| u.tile.interior != interior);
             if fresh {
                 let bytes = match cache.upload(key, view.generation, pixel.id, padded) {
@@ -931,7 +1493,7 @@ impl Controller {
                 )
                 .upcast();
                 self.uploads.insert(
-                    pixel.id,
+                    pixel.identity(),
                     Upload {
                         tile: Tile {
                             texture,
@@ -942,7 +1504,7 @@ impl Controller {
                     },
                 );
             }
-            if let Some(u) = self.uploads.get(&pixel.id) {
+            if let Some(u) = self.uploads.get(&pixel.identity()) {
                 tiles.push(u.tile.clone());
             }
         }
@@ -966,7 +1528,7 @@ impl Controller {
             actual_support = Some(actual_support.map_or(fetched, |old| union(old, fetched)));
         }
         if let Some(required) = actual_support
-            && !view.certificate.covers(required)
+            && !view.covers(required)
         {
             match if foreground {
                 cache.plan(artwork, key, union(region, required))
@@ -974,8 +1536,7 @@ impl Controller {
                 cache.plan_cached(artwork, key, union(region, required))
             } {
                 Ok(Plan::Ready(updated))
-                    if updated.generation == view.generation
-                        && updated.certificate.covers(required) =>
+                    if updated.generation == view.generation && updated.covers(required) =>
                 {
                     view = updated;
                 }
@@ -1007,13 +1568,16 @@ impl Controller {
         }
         self.pending = !visible_complete;
         self.presentation = Some(Presentation {
-            view: Arc::new(view),
+            view: Arc::new(view.projection_metadata()),
             layout: layout.clone(),
             tiles,
             alternatives: Vec::new(),
             rejected: self.rejected.clone(),
             geometry: None,
             observed: Arc::new(AtomicBool::new(false)),
+            retained: None,
+            backup: None,
+            atomic: false,
         });
         self.last_request = Some((artwork, target, layout));
         self.shared.1.notify_one();
@@ -1021,8 +1585,9 @@ impl Controller {
     }
 }
 impl Drop for Controller {
-    /// Cancels owned work and joins only this controller's worker at application teardown.
+    /// Cancels work and wakes worker-owned retirement without waiting for GPU/fence teardown on GTK.
     fn drop(&mut self) {
+        self.display_generation.fetch_add(1, Ordering::Release);
         self.shutdown.store(true, Ordering::Release);
         self.shared
             .0
@@ -1030,7 +1595,9 @@ impl Drop for Controller {
             .unwrap_or_else(|p| p.into_inner())
             .clear();
         self.shared.1.notify_one();
-        if let Some(worker) = self.thread.take() {
+        if let Some(worker) = self.thread.take()
+            && worker.is_finished()
+        {
             let _ = worker.join();
         }
     }
@@ -1094,7 +1661,177 @@ fn covered_viewport(layers: &[Presentation], layout: &Layout) -> bool {
             .is_empty()
         })
 }
+/// Supplies prescribed opaque viewport letterboxing without borrowing pixels from another backend.
+/// Canonical composition/backdrop remains renderer-owned; only outside-canvas presentation is filled.
+fn atomic_backdrop(
+    layout: &Layout,
+    background: toniator_engine::RasterBackground,
+) -> Option<gtk::gsk::RenderNode> {
+    let color = match background {
+        toniator_engine::RasterBackground::Transparent => return None,
+        toniator_engine::RasterBackground::OpaqueBlack => gdk::RGBA::BLACK,
+        toniator_engine::RasterBackground::OpaqueWhite => gdk::RGBA::WHITE,
+    };
+    Some(
+        gtk::gsk::ColorNode::new(
+            &color,
+            &gtk::graphene::Rect::new(
+                0.,
+                0.,
+                (layout.page[0] * f64::from(layout.device)) as f32,
+                (layout.page[1] * f64::from(layout.device)) as f32,
+            ),
+        )
+        .upcast(),
+    )
+}
 impl Presentation {
+    /// Rebinds accepted draw facts only after explicit successful None authority; pixel/backend leases are unchanged.
+    fn rebind_artwork(&mut self, old: Artwork, new: Artwork) {
+        if self.view.artwork == old {
+            let mut view = self.view.projection_metadata();
+            view.artwork = new;
+            self.view = Arc::new(view);
+        }
+        for layer in &mut self.alternatives {
+            layer.rebind_artwork(old, new);
+        }
+    }
+
+    /// Builds whole immutable viewport history only from complete current, same-provenance tile layers.
+    fn freeze(&self, authority: Arc<AtomicU64>) -> Option<RetainedFrame> {
+        let layers = std::iter::once(self)
+            .chain(self.alternatives.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        if !covered_viewport(&layers, &self.layout)
+            || layers
+                .iter()
+                .any(|p| !p.view.is_current() || p.view.key.provenance != self.view.key.provenance)
+        {
+            return None;
+        }
+        let mut clips = Vec::new();
+        let mut nodes = Vec::<gtk::gsk::RenderNode>::new();
+        if self.atomic
+            && let Some(node) = atomic_backdrop(&self.layout, self.view.frame.background)
+        {
+            nodes.push(node);
+        }
+        let mut textures = Vec::new();
+        for layer in &layers {
+            for tile in &layer.tiles {
+                let Some(clip) = layer.layout.clip(tile.interior) else {
+                    continue;
+                };
+                let rect = layer.layout.texture_rect(tile.padded);
+                let bounds = layer.layout.physical_rect([
+                    layer.layout.anchor_screen[0] + rect[0],
+                    layer.layout.anchor_screen[1] + rect[1],
+                    rect[2],
+                    rect[3],
+                ])?;
+                for uncovered in cache::missing(clip, clips.iter().copied()) {
+                    clips.push(uncovered);
+                    let texture = gtk::gsk::TextureScaleNode::new(
+                        &tile.texture,
+                        &bounds,
+                        gtk::gsk::ScalingFilter::Linear,
+                    );
+                    nodes.push(
+                        gtk::gsk::ClipNode::new(
+                            texture,
+                            &gtk::graphene::Rect::new(
+                                uncovered.x as f32,
+                                uncovered.y as f32,
+                                uncovered.width as f32,
+                                uncovered.height as f32,
+                            ),
+                        )
+                        .upcast(),
+                    );
+                }
+                if !textures.contains(&tile.texture) {
+                    textures.push(tile.texture.clone());
+                }
+            }
+        }
+        if nodes.is_empty() {
+            return None;
+        }
+        let d = self.layout.device as f32;
+        let transform = gtk::gsk::Transform::new().scale(1. / d, 1. / d);
+        Some(RetainedFrame {
+            node: gtk::gsk::TransformNode::new(
+                gtk::gsk::ContainerNode::new(&nodes),
+                Some(&transform),
+            )
+            .upcast(),
+            textures,
+            generation: authority.load(Ordering::Acquire),
+            authority,
+        })
+    }
+    /// Draws accepted immutable history under its display lease without granting current-target permission.
+    fn snapshot_retained(
+        &self,
+        frame: &RetainedFrame,
+        snapshot: &gtk::Snapshot,
+        width: f64,
+        height: f64,
+    ) -> bool {
+        if frame.authority.load(Ordering::Acquire) != frame.generation {
+            return false;
+        }
+        let origin = if let Some((picture, scroll)) = &self.geometry {
+            let (Some(picture), Some(scroll)) = (picture.upgrade(), scroll.upgrade()) else {
+                return false;
+            };
+            let Some(matrix) = picture.compute_transform(&scroll).and_then(|m| m.to_2d()) else {
+                return false;
+            };
+            if [matrix.0, matrix.1, matrix.2, matrix.3] != [1., 0., 0., 1.] {
+                return false;
+            }
+            let Some(point) = picture.compute_point(&scroll, &gtk::graphene::Point::new(0., 0.))
+            else {
+                return false;
+            };
+            let t = snapshot_translation(
+                [f64::from(picture.width()), f64::from(picture.height())],
+                [width, height],
+            );
+            [point.x() + t[0] as f32, point.y() + t[1] as f32]
+        } else {
+            [self.layout.origin[0] as f32, self.layout.origin[1] as f32]
+        };
+        snapshot.save();
+        snapshot.translate(&gtk::graphene::Point::new(-origin[0], -origin[1]));
+        snapshot.append_node(&frame.node);
+        snapshot.restore();
+        true
+    }
+    /// Publishes complete Fast frames atomically; pending/rejected Fast uses one truthful whole history.
+    /// Ordinary Accurate partial/coarse projection retains its existing certificate behavior.
+    pub fn snapshot(
+        &self,
+        snapshot: &gtk::Snapshot,
+        width: f64,
+        height: f64,
+        fallback: &gdk::Texture,
+        bounds: (f32, f32, f32, f32),
+    ) -> bool {
+        if let Some(frame) = &self.retained {
+            return self.snapshot_retained(frame, snapshot, width, height);
+        }
+        if self.snapshot_current(snapshot, width, height, fallback, bounds) {
+            return true;
+        }
+        self.backup
+            .as_ref()
+            .is_some_and(|frame| self.snapshot_retained(frame, snapshot, width, height))
+    }
+
     /// Reports visible exact-source coverage independently of whole-zoom background completion.
     fn visible_complete(&self) -> bool {
         covered_viewport(std::slice::from_ref(self), &self.layout)
@@ -1115,7 +1852,7 @@ impl Presentation {
     /// certificate per layer. GTK UPDATE may precede scroll allocation, so captured origin alone is
     /// never current draw authority. This performs bounded placement/containment checks, no root lock,
     /// certificate scan, geometry work or pixel copies; unsupported frames retain ordinary fallback.
-    pub fn snapshot(
+    fn snapshot_current(
         &self,
         snapshot: &gtk::Snapshot,
         width: f64,
@@ -1200,12 +1937,15 @@ impl Presentation {
                 required = union(required, fetch);
                 true
             });
-            if !layer.view.is_current() || !layer.view.certificate.covers(required) {
+            if !layer.view.is_current() || !layer.view.covers(required) {
                 layer.tiles.clear();
                 self.reject_draw("source-certificate");
             }
         }
         projected.alternatives = alternatives;
+        if self.atomic && !projected.visible_complete() {
+            return self.reject_draw("incomplete-atomic-frame");
+        }
         if trace_enabled() {
             eprintln!(
                 "preview-cache-draw {}",
@@ -1217,7 +1957,18 @@ impl Presentation {
                 })
             );
         }
-        projected.snapshot_projected(snapshot, width, height, fallback, fallback_bounds)
+        let complete = projected.visible_complete();
+        let drawn =
+            projected.snapshot_projected(snapshot, width, height, fallback, fallback_bounds);
+        if drawn && complete {
+            crate::preview_measurement::draw(crate::preview_measurement::Draw::Tiles {
+                artwork: projected.view.artwork,
+                provenance: projected.view.key.provenance,
+                scale: projected.view.frame.scale,
+                background: projected.view.frame.background,
+            });
+        }
+        drawn
     }
 
     /// Appends disjoint certified viewport nodes plus ordinary fallback throughout the full canvas.
@@ -1280,6 +2031,11 @@ impl Presentation {
         );
         let holes = cache::missing(whole, clips.iter().copied());
         let mut nodes = Vec::<gtk::gsk::RenderNode>::new();
+        if self.atomic
+            && let Some(node) = atomic_backdrop(&self.layout, self.view.frame.background)
+        {
+            nodes.push(node);
+        }
         if nodes
             .try_reserve(holes.len().saturating_add(drawn.len()).saturating_add(4))
             .is_err()
@@ -1325,7 +2081,7 @@ impl Presentation {
             (x0, top, x1 - x0, y0 - top),
             (x0, y1, x1 - x0, bottom - y1),
         ] {
-            if w > 0. && h > 0. {
+            if w > 0. && h > 0. && !self.atomic {
                 let texture = gtk::gsk::TextureScaleNode::new(
                     fallback,
                     &fallback_physical,
@@ -1337,7 +2093,7 @@ impl Presentation {
                 );
             }
         }
-        for hole in holes {
+        for hole in holes.into_iter().filter(|_| !self.atomic) {
             let Some(bounds) = self.layout.physical_rect([
                 fallback_rect.x(),
                 fallback_rect.y(),
@@ -1413,6 +2169,39 @@ impl Presentation {
 
 #[cfg(test)]
 mod tests {
+    /// Proves GTK-side destruction returns before a gated worker retires and eventual cleanup still runs.
+    /// # Panics
+    /// Panics if drop joins an unfinished worker or the detached owner never acknowledges cleanup.
+    #[test]
+    fn stage2_controller_drop_is_nonblocking_and_eventually_retires() {
+        use std::{sync::mpsc, time::Duration};
+        let mut controller = Controller::new();
+        controller.shutdown.store(true, Ordering::Release);
+        controller.shared.1.notify_one();
+        controller.thread.take().unwrap().join().unwrap();
+        let (release, resume) = mpsc::channel();
+        let (finished, cleanup) = mpsc::channel();
+        controller.thread = Some(thread::spawn(move || {
+            resume.recv().unwrap();
+            finished.send(()).unwrap();
+        }));
+        let (dropped, observed) = mpsc::channel();
+        let (report, result) = mpsc::channel();
+        let watcher = thread::spawn(move || {
+            let returned = observed.recv_timeout(Duration::from_secs(5)).is_ok();
+            release.send(()).unwrap();
+            report.send(returned).unwrap();
+        });
+        drop(controller);
+        dropped.send(()).unwrap();
+        assert!(
+            result.recv_timeout(Duration::from_secs(10)).unwrap(),
+            "GTK drop waited for worker"
+        );
+        cleanup.recv_timeout(Duration::from_secs(5)).unwrap();
+        watcher.join().unwrap();
+    }
+
     use super::*;
     /// Verifies installed Picture contain rounding and per-axis presentation without changing root scale.
     /// # Panics
@@ -1477,6 +2266,300 @@ mod tests {
 
 #[cfg(test)]
 mod gtk_pixel_tests {
+    /// Proves a newly accepted Fit base clears old spatial nodes and transparent CPU pixels reveal no old Fast base.
+    /// Runs only in an identity-verified private window; this tests publication ordering, not native GPU eligibility.
+    /// # Panics
+    /// Panics if stale history obscures a new exact texture, alpha-zero pixels expose the old base or I/O fails.
+    #[test]
+    #[ignore = "requires verified agent-owned private Wayland session"]
+    fn stage3_exact_base_supersedes_spatial_history_and_transparent_holes() {
+        let (_, window) = owned_window();
+        let renderer = gtk::gsk::Renderer::for_surface(&window.surface().unwrap()).unwrap();
+        let out =
+            std::path::PathBuf::from(std::env::var_os("TONIATOR_CACHE_C2_PIXEL_OUTPUT").unwrap());
+        std::fs::create_dir_all(&out).unwrap();
+        let scene = Arc::new(
+            RenderScene::new(
+                CanvasSpec {
+                    width: 96.,
+                    height: 48.,
+                },
+                "base-order".into(),
+                "base-order".into(),
+                vec![
+                    RenderLayer::new(
+                        ChannelId(1),
+                        true,
+                        ColorValue {
+                            red: 1.,
+                            green: 0.,
+                            blue: 0.,
+                            alpha: 1.,
+                        },
+                        1.,
+                        GeometryOutput::CanonicalMarks(Vec::new()),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut c = PreviewCache::default();
+        c.accept_scene((1, 2, 3), scene, 4096);
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 96,
+            height: 48,
+        };
+        let key = RootKey::new(
+            1.,
+            toniator_engine::RasterBackground::Transparent,
+            RasterizationLimits::default(),
+        );
+        let view = loop {
+            if let Plan::Ready(v) = c.plan((1, 2, 3), key, region).unwrap()
+                && v.complete
+            {
+                break v;
+            }
+            while let Some(job) = c.take_job() {
+                c.complete(job.run(&AtomicBool::new(false)));
+            }
+        };
+        let mut controller = Controller::new();
+        let p = Presentation {
+            view: Arc::new(view.projection_metadata()),
+            layout: Layout::new(
+                [96., 48.],
+                [96., 48.],
+                [96., 48.],
+                [0., 0.],
+                [96., 48.],
+                1,
+                1.,
+            )
+            .unwrap(),
+            tiles: vec![Tile {
+                texture: texture(96, 48, [10, 30, 240, 255]),
+                interior: region,
+                padded: region,
+            }],
+            alternatives: Vec::new(),
+            rejected: Arc::new(AtomicBool::new(false)),
+            geometry: None,
+            observed: Arc::new(AtomicBool::new(false)),
+            retained: None,
+            backup: None,
+            atomic: true,
+        };
+        controller.presentation = Some(p);
+        controller.capture_whole();
+        let old_history = controller.last_good.clone().unwrap();
+        let target = PreviewRasterTarget::new(96, 48).unwrap();
+        let fast = Provenance::fast(1, 1);
+        controller.pending = true;
+        controller.ordinary_required = true;
+        controller.replace_exact_frame(AcceptedFrame {
+            texture: texture(96, 48, [30, 220, 50, 255]),
+            artwork: (1, 2, 3),
+            provenance: fast,
+            target,
+            image_target: target,
+            identity: PixelIdentity {
+                provenance: fast,
+                id: 1,
+            },
+        });
+        assert!(controller.presentation.is_none() && controller.last_good.is_none());
+        assert!(!controller.pending && !controller.ordinary_required);
+        assert!(controller.requires_cpu_base((1, 2, 3)));
+        assert!(!old_history.snapshot(
+            &gtk::Snapshot::new(),
+            96.,
+            48.,
+            &texture(96, 48, [0, 0, 0, 255]),
+            (0., 0., 96., 48.)
+        ));
+        let render = |frame: &AcceptedFrame, name: &str| {
+            let paintable = crate::viewport_paintable::ViewportPaintable::new(
+                frame.texture.clone(),
+                96.,
+                48.,
+                (0., 0., 96., 48.),
+            );
+            let snapshot = gtk::Snapshot::new();
+            paintable.snapshot(&snapshot, 96., 48.);
+            let node = snapshot.to_node().unwrap();
+            let image =
+                renderer.render_texture(&node, Some(&gtk::graphene::Rect::new(0., 0., 96., 48.)));
+            image.save_to_png(out.join(format!("{name}.png"))).unwrap();
+            download(&image)
+        };
+        let fit = render(controller.accepted_frame().unwrap(), "stage3-new-fit-base");
+        assert!(fit.chunks_exact(4).all(|p| p[1] > p[2] && p[3] == 255));
+        let cpu = Provenance::accurate(2, 1, Quality::Fast);
+        controller.pending=true;controller.ordinary_required=true;
+        controller.replace_exact_frame(AcceptedFrame {
+            texture: texture(96, 48, [240, 10, 10, 0]),
+            artwork: (1, 2, 3),
+            provenance: cpu,
+            target,
+            image_target: target,
+            identity: PixelIdentity {
+                provenance: cpu,
+                id: 2,
+            },
+        });
+        assert!(!controller.requires_cpu_base((1, 2, 3)));
+        assert!(!controller.pending && !controller.ordinary_required);
+        *controller.shared.0.lock().unwrap() = c;
+        assert!(controller.rebind_unchanged((1, 2, 3), (1, 3, 3)));
+        assert_eq!(controller.accepted_frame().unwrap().artwork, (1, 3, 3));
+        assert_eq!(controller.accepted_frame().unwrap().provenance, cpu);
+        assert!(!controller.requires_cpu_base((1, 3, 3)));
+        assert!(!controller.rebind_unchanged((1, 2, 3), (1, 4, 3)));
+        assert_eq!(controller.accepted_frame().unwrap().artwork, (1, 3, 3));
+        let holes = render(
+            controller.accepted_frame().unwrap(),
+            "stage3-cpu-transparent-base",
+        );
+        assert!(
+            holes.chunks_exact(4).all(|p| p[3] == 0),
+            "old opaque Fast base leaked through CPU alpha-zero coverage"
+        );
+        renderer.unrealize();
+        window.close();
+    }
+
+    /// Verifies atomic partial/revoked frames draw only one immutable whole history and release CPU payload.
+    /// Requires the verified private Wayland harness; no Fast main-view control is introduced here.
+    /// # Panics
+    /// Panics on mixed fallback pixels, stale display lease acceptance, retained canonical ownership or I/O failure.
+    #[test]
+    #[ignore = "requires verified agent-owned private Wayland session"]
+    fn stage2_atomic_history_never_fills_fast_holes_with_cpu() {
+        let (_, window) = owned_window();
+        let renderer = gtk::gsk::Renderer::for_surface(&window.surface().unwrap()).unwrap();
+        let out =
+            std::path::PathBuf::from(std::env::var_os("TONIATOR_CACHE_C2_PIXEL_OUTPUT").unwrap());
+        std::fs::create_dir_all(&out).unwrap();
+        let scene = Arc::new(
+            RenderScene::new(
+                CanvasSpec {
+                    width: 96.,
+                    height: 48.,
+                },
+                "stage2".into(),
+                "stage2".into(),
+                vec![
+                    RenderLayer::new(
+                        ChannelId(1),
+                        true,
+                        ColorValue {
+                            red: 1.,
+                            green: 0.,
+                            blue: 0.,
+                            alpha: 1.,
+                        },
+                        1.,
+                        GeometryOutput::CanonicalMarks(Vec::new()),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let canonical = Arc::downgrade(&scene);
+        let mut c = PreviewCache::default();
+        c.accept_scene((1, 2, 3), scene, 4096);
+        let key = RootKey::new(
+            1.,
+            toniator_engine::RasterBackground::Transparent,
+            RasterizationLimits::default(),
+        );
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 96,
+            height: 48,
+        };
+        let view = loop {
+            if let Plan::Ready(v) = c.plan((1, 2, 3), key, region).unwrap()
+                && v.complete
+            {
+                break v;
+            }
+            while let Some(job) = c.take_job() {
+                c.complete(job.run(&AtomicBool::new(false)));
+            }
+        };
+        let layout = Layout::new(
+            [96., 48.],
+            [96., 48.],
+            [96., 48.],
+            [0., 0.],
+            [96., 48.],
+            1,
+            1.,
+        )
+        .unwrap();
+        let native = texture(96, 48, [20, 100, 210, 128]);
+        let fallback = texture(96, 48, [250, 5, 5, 255]);
+        let mut p = Presentation {
+            view: Arc::new(view.projection_metadata()),
+            layout,
+            tiles: vec![Tile {
+                texture: native,
+                interior: region,
+                padded: region,
+            }],
+            alternatives: Vec::new(),
+            rejected: Arc::new(AtomicBool::new(false)),
+            geometry: None,
+            observed: Arc::new(AtomicBool::new(false)),
+            retained: None,
+            backup: None,
+            atomic: true,
+        };
+        drop(view);
+        assert!(p.view.pixels.is_empty());
+        let authority = Arc::new(AtomicU64::new(7));
+        let frame = p.freeze(authority.clone()).unwrap();
+        let render = |p: &Presentation, name: &str| {
+            let snapshot = gtk::Snapshot::new();
+            assert!(p.snapshot(&snapshot, 96., 48., &fallback, (0., 0., 96., 48.)));
+            let node = snapshot.to_node().unwrap();
+            let rendered =
+                renderer.render_texture(&node, Some(&gtk::graphene::Rect::new(0., 0., 96., 48.)));
+            rendered
+                .save_to_png(out.join(format!("{name}.png")))
+                .unwrap();
+            download(&rendered)
+        };
+        let expected = render(&p, "stage2-current-whole");
+        p.backup = Some(frame.clone());
+        p.tiles[0].interior.width = 48;
+        assert_eq!(render(&p, "stage2-partial-whole-history"), expected);
+        c.set_quality(Quality::Fast);
+        assert!(!p.view.is_current());
+        assert_eq!(render(&p, "stage2-revoked-whole-history"), expected);
+        c.clear();
+        let mut worker = WorkerState::default();
+        while let Some(job) = c.take_job() {
+            c.complete(worker.run(job, &AtomicBool::new(false)));
+        }
+        assert!(
+            canonical.upgrade().is_none(),
+            "history retained canonical scene"
+        );
+        authority.fetch_add(1, Ordering::Release);
+        let snapshot = gtk::Snapshot::new();
+        assert!(!p.snapshot(&snapshot, 96., 48., &fallback, (0., 0., 96., 48.)));
+        renderer.unrealize();
+        window.close();
+    }
+
     use super::*;
     use toniator_domain::{CanvasSpec, ChannelId, ColorValue};
     use toniator_engine::{GeometryOutput, RenderLayer};
@@ -2008,7 +3091,7 @@ mod gtk_pixel_tests {
             let mut cache = controller.shared.0.lock().unwrap();
             cache.pin_views(&[first_key, second_key]);
             cache.textures(usize::MAX, 0); // Synthetic retention pressure, no pixel/GPU allocation.
-            cache.resident_ids()
+            cache.resident_identities()
         };
         controller.visit_zoom((1, 2, 3), high_target);
         assert!(controller.presentation.is_none());
@@ -2016,7 +3099,7 @@ mod gtk_pixel_tests {
             let mut cache = controller.shared.0.lock().unwrap();
             cache.textures(usize::MAX, 0);
             assert!(
-                cache.resident_ids().len() < old_ids.len(),
+                cache.resident_identities().len() < old_ids.len(),
                 "memo activation must release older projected roots"
             );
         }
@@ -2077,7 +3160,7 @@ mod gtk_pixel_tests {
                 layer.layout = base.at_scale(layer.view.frame.scale).unwrap();
                 layer.geometry = None;
                 assert!(
-                    layer.view.certificate.covers(
+                    layer.view.covers(
                         layer
                             .layout
                             .support(
@@ -2305,6 +3388,9 @@ mod gtk_pixel_tests {
                             rejected: Arc::new(AtomicBool::new(false)),
                             geometry: None,
                             observed: Arc::new(AtomicBool::new(false)),
+                            retained: None,
+                            backup: None,
+                            atomic: false,
                         });
                         let ordinary = PreviewRasterTarget::new(80, 40).unwrap();
                         assert!(!controller.request((1, 2, 3), ordinary, layout.clone()));
@@ -2387,6 +3473,9 @@ mod gtk_pixel_tests {
                             rejected: Arc::new(AtomicBool::new(false)),
                             geometry: None,
                             observed: Arc::new(AtomicBool::new(false)),
+                            retained: None,
+                            backup: None,
+                            atomic: false,
                         };
                         let snapshot = gtk::Snapshot::new();
                         snapshot.scale(device as f32, device as f32);

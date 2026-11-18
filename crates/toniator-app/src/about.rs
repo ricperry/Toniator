@@ -10,13 +10,17 @@ use gtk::prelude::*;
 pub fn present(parent: &gtk::Window) {
     let window = gtk::Window::builder()
         .title("About Toniator")
+        .accessible_role(gtk::AccessibleRole::Dialog)
+        .destroy_with_parent(true)
         .transient_for(parent)
         .modal(true)
         .default_width(560)
         .default_height(660)
         .build();
     window.set_titlebar(Some(&gtk::HeaderBar::new()));
+    crate::suite_interface::information_dialog(&window, parent);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    content.add_css_class("suite-dialog-content");
     content.set_margin_top(24);
     content.set_margin_bottom(24);
     content.set_margin_start(24);
@@ -111,19 +115,7 @@ pub fn present(parent: &gtk::Window) {
     close.set_margin_end(24);
     layout.append(&close);
     window.set_child(Some(&layout));
-    let keys = gtk::EventControllerKey::new();
-    let weak = window.downgrade();
-    keys.connect_key_pressed(move |_, key, _, _| {
-        if key == gtk::gdk::Key::Escape {
-            if let Some(window) = weak.upgrade() {
-                window.close();
-            }
-            gtk::glib::Propagation::Stop
-        } else {
-            gtk::glib::Propagation::Proceed
-        }
-    });
-    window.add_controller(keys);
+    window.set_default_widget(Some(&close));
     window.present();
 }
 

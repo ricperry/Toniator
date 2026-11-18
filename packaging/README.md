@@ -1,7 +1,7 @@
 # Toniator desktop packages
 
 Download the x86_64 AppImage or Flatpak from the
-[0.4.6 prerelease](https://github.com/ricperry/Toniator/releases/tag/v0.4.6).
+[0.4.7 prerelease](https://github.com/ricperry/Toniator/releases/tag/v0.4.7).
 Both include the GUI and headless CLI. Packages, checksums, and build provenance
 are release attachments; `dist/` is a local output directory, not tracked source.
 
@@ -10,14 +10,14 @@ are release attachments; `dist/` is a local output directory, not tracked source
 ### AppImage
 
 ```sh
-chmod +x Toniator-0.4.6-x86_64.AppImage
-./Toniator-0.4.6-x86_64.AppImage
+chmod +x Toniator-0.4.7-x86_64.AppImage
+./Toniator-0.4.7-x86_64.AppImage
 ```
 
 If FUSE mounting is unavailable:
 
 ```sh
-APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.6-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./Toniator-0.4.7-x86_64.AppImage
 ```
 
 Use `--cli --help` to invoke the bundled CLI. The AppImage bundles GTK,
@@ -29,7 +29,7 @@ development environment; broad distribution compatibility is not established.
 ### Flatpak
 
 ```sh
-flatpak install --user ./Toniator-0.4.6-x86_64.flatpak
+flatpak install --user ./Toniator-0.4.7-x86_64.flatpak
 flatpak run io.github.ricperry.Toniator
 ```
 
@@ -79,7 +79,7 @@ do not establish exhaustive GNOME/Mutter or production-portal behavior. See
 ## Rebuild locally
 
 Prerequisites: Python 3, Flatpak, GNOME SDK and Platform 50, Rust/rustup 1.94+,
-Cargo dependencies cached for Cargo.lock, binutils, tar, and network access for
+Cargo registry and git dependencies cached for Cargo.lock, binutils, tar, and network access for
 pinned packaging tools and media source downloads. The SDK provides GTK,
 dav1d, and blueprint-compiler. The scripts do not install apps or dependencies.
 
@@ -97,6 +97,9 @@ verified tools. The bundles include original corresponding sources, recipes,
 and logs; see [media notices](MEDIA-NOTICES.md). Packaged Toniator uses these
 tools beside its executable, without a host FFmpeg fallback.
 
+`cargo fetch --locked` populates both registry and pinned git caches. Keep the
+complete Cargo home available to the SDK; the build shares it without network.
+
 `build.py` compiles locked/offline Rust sources inside the SDK, stages desktop
 metadata, and builds the Flatpak. Both bundles retain the vendored iOverlay and
 i_tree license texts and local patch provenance under
@@ -105,12 +108,17 @@ uses pinned `jxl-oxide 0.12.6` and moxcms; no system libjxl is required to build
 or decode JPEG XL. Both payloads also include the 18 new decoder dependency
 notices under that license directory's `jpegxl/` subtree. See
 [dependency provenance](../THIRD_PARTY_LICENSES/jpegxl/PROVENANCE.md) and
-[media notices](MEDIA-NOTICES.md). `appimage.py` bundles those SDK-built
+[media notices](MEDIA-NOTICES.md). The optional Fast preview adds pinned
+Vello/wgpu dependencies; their license texts and exact provenance ship in the
+`fast-preview/` subtree beside the decoder notices. See
+[Fast preview dependency provenance](../THIRD_PARTY_LICENSES/fast-preview/PROVENANCE.md).
+Vulkan drivers and the Vulkan loader remain runtime-provided; unsupported GPUs
+use Accurate CPU fallback. `appimage.py` bundles those SDK-built
 binaries and libraries using checksum-pinned appimagetool. Previous staging directories
 are retained under `target/packaging/`.
 
-Outputs: `dist/Toniator-0.4.6-x86_64.AppImage`,
-`dist/Toniator-0.4.6-x86_64.flatpak`, `dist/build-info.json`, and `dist/SHA256SUMS`.
+Outputs: `dist/Toniator-0.4.7-x86_64.AppImage`,
+`dist/Toniator-0.4.7-x86_64.flatpak`, `dist/build-info.json`, and `dist/SHA256SUMS`.
 Build provenance records the source commit, runtime/SDK identities, and icon
 hashes. This is a repeatable procedure, not a bit-for-bit reproducibility claim.
 Follow [release instructions](../docs/RELEASING.md) to publish.

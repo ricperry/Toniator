@@ -9,6 +9,182 @@ verification are complete. These measurements establish specific workload
 improvements, not universal speedups or user acceptance. The later recovery and
 capacity work below is user-accepted for the 0.4.5 release preparation.
 
+## 2026-11-02 development: Fast / Accurate preview
+
+Toniator 0.4.7 includes optional approximate GPU rendering for the main
+canvas; Accurate CPU rendering remains each new window's default. Parent technical
+review passes the bounded implementation. The user accepts its visual quality
+for now on 2026-11-02, finding GPU/CPU differences exceedingly difficult to discern.
+[TON-025](../ISSUES.md#ton-025--reevaluate-cpugpu-preview-defaults-at-a-later-stage) defers default reevaluation; Accurate remains the default. Broader
+GNOME/Mutter qualification remains unproven. Fast consumes the same canonical geometry, calibration
+and density through a genuine scene-only evaluation path, without first paying
+for a CPU raster. Eligibility is whole-scene supported circles in RGB/CMYK;
+unsupported content, device or target selects whole CPU fallback. Independent
+exports, print, temporal output, gallery and Wizard consumers retain CPU authority.
+
+The historical development [qualification report](../target/validation/fast-accurate-preview-20261102/stage4-report.md)
+and [parent review](../target/validation/fast-accurate-preview-20261102/stage4-parent-review.json)
+retain source/binary pins, images, individual timings, preparation and resource
+records. Five alternating pairs per artwork/policy use the same release Main
+integration-test binary on RX 6900 XT/RADV, genuine Feature size 0.2 inputs,
+physical 640×480 viewports, vector 4× and raster 2×. Each endpoint requires current
+complete primary Canvas coverage and same-frame nonzero GDK presentation feedback,
+including viewport assembly, copies and texture upload. Ordinary native input
+and rendered frames corroborate the integration tests; these are not FPS or
+physical scanout measurements.
+
+| Presented pan latency | Accurate median | Fast median | Scope |
+| --- | ---: | ---: | --- |
+| Ordinary vector 4× | 62.3 ms | 73.3 ms | 40 pans per route; background prefetch ON |
+| Ordinary raster 2× | 57.6 ms | 60.3 ms | 40 pans per route; background prefetch ON |
+| Conditioned vector 4× matched misses | 1,118.6 ms | 105.8 ms | 15 matched observations; 10.57× ratio of medians |
+| Conditioned raster 2× matched misses | 1,510.2 ms | 92.9 ms | 10 matched observations; 16.25× ratio of medians |
+
+Ordinary CPU caching remains competitive; its five initial lazy-root stalls per
+artwork are retained. The separate conditioned diagnostic disables autonomous
+prefetch and waits for ready roots before timing misses. Preparation is excluded
+from those miss intervals and reported separately: CPU root-ready medians are
+13.3 s vector / 20.3 s raster. Fast mode cycles include outliers of 15–22 s and are
+not pure GPU initialization timings. Five conditioned-raster CPU hit pans have
+exact Canvas/after-paint but unavailable GDK presentation feedback at two seconds;
+they remain disclosed without imputed presentation. No universal pan speedup is
+claimed.
+
+Fresh-process initial-Fit observations, N=1 per route/artwork with warm OS caches,
+start **after UI construction but before document loading** and include decode,
+canonical construction, backend initialization/preparation and first complete
+Canvas/GDK presentation. Vector wall time is 17.370 s Accurate / 5.796 s preselected
+Fast; raster is 27.228 / 9.634 s. These are not full app-startup or repeated cold
+guarantees. Process high-water memory includes startup/UI baseline. Mixed-route
+group kernel peaks are 2.424–2.447 GiB vector and 3.788–3.915 GiB raster, including
+file cache; they are not isolated per-mode pan peaks. Device-wide VRAM/GTT samples
+and conservative reservations are separate. The combined preview payload target
+remains a soft 8 GiB, including the full 2 GiB GPU reservation charged once; it is
+neither a hard process-RSS limit nor an available-VRAM guarantee.
+
+Approximation still fails exact coverage: a duplicate-circle witness has alpha
+CPU 199 / Fast 255; a native 128² raster crop loses 313 CPU-positive pixels and
+has 735 hidden-RGB differences where both alphas are zero. Opaque screen crops
+have different sampling and cannot replace native alpha evidence. Fast has no
+Accurate error certificate. Genuine raster 4× exceeds a native strip-buffer
+limit; higher physical virtual roots can exceed the configured 4096 blend-root
+limit. These are distinct pilot/resource limits, not universal hardware maxima.
+
+Both artworks' native/prepared PNG, semantic SVG and two-frame PNG sequence bytes
+match with Fast requested OFF/ON. Vector print rasters match; raster print returns
+the same current record-limit refusal in both modes, with no accepted print pixels.
+An offline SDK 50 build and static Accurate/Fast preview in an uninstalled
+Platform 50 tree pass; Platform memory/guard counters are excluded because its
+process moved outside the outer monitor scope. No new installable-package,
+bundled-media, other-hardware or energy claim follows from these checks.
+
+## 2026-10-31: personal gallery and dense Pattern previews
+
+The user provisionally accepts the verified TON-002/TON-003 CPU improvements on
+2026-10-31, with the documented limits retained. These
+checkout-local measurements compare retained pre-change/current release binaries
+with matching optimized/debug/link flags, inputs and genuine production
+calibration. They do not benchmark a packaged release. The
+[scoped report](../target/validation/ton002-ton003-20261031/report.md) retains
+commands, source/executable hashes, profiler evidence and raw artifacts.
+
+Personal thumbnail request preparation and evaluation now run entirely off GTK
+through one dedicated worker with one queued job. GTK admission is nonblocking;
+close/cancellation, catalog generation, fingerprint and weak-card checks reject
+obsolete work/results. Warm fingerprint cache reuse remains. Failure to start
+this optional worker logs the error and leaves cards/actions usable.
+
+The matched ordinary two-record cold gallery has synchronous append **89.57 →
+75.13 ms**, maximum 5-ms heartbeat gap **89.73 → 75.18 ms**. Warm synchronous
+append remains **76.99 / 77.40 ms**. Cold image completion is **222.78 →
+323.54 ms**: bounded serial work trades throughput for controlled background
+resource use. Built-in card/widget work remains on GTK. The historical
+multi-second first-open observation is not reproduced by these ordinary current
+fixtures. Actual normal-app private checks cover pending Cancel, reopen,
+external edits/Refresh, obsolete title rejection and current card selection.
+
+Dense evaluation uses an optional exact mapped scalar plane, local to one
+operation and bounded to 16 MiB, with fallible allocation, cancellation and direct
+sampling fallback. Lloyd retains global triangulation/neighbor topology and
+stable site order, streams one cell through two reused polygon buffers, and
+publishes positions only after a complete iteration. Raster normalization frees
+consumed raw shapes and inserts normalized contours in the same order into one
+fixed-adapter global overlay; temporary raw/positive containers are released
+before global graph work. No parallel cell execution or spatial partition is
+introduced. Authored density, saturated Poisson population, seed, four weighted
+iterations, numerical/certificate/work policy and canonical output remain intact.
+
+| Matched workload | Baseline | Current | Boundary |
+| --- | ---: | ---: | --- |
+| Vector Feature 0.2, 900×620, complete-command wall | 22.533 s ±0.052 | 17.128 s ±0.030 | Three serial fresh-process Hyperfine runs each; 24.0% lower mean |
+| Same repeated runs, mean peak RSS | 2.265 GB | 2.086 GB | 7.9% lower; baseline RSS variation about 73.6 MB |
+| Vector 0.2 cold evaluator | 21.654 s | 16.220 s | One pair; warm 1.697 / 1.699 ms |
+| Raster 0.2, 1024×1024, cold evaluator | 35.604 s | 26.714 s | One pair; warm 3.218 / 2.804 ms |
+| Same raster pair, peak cgroup memory | 3.646 GiB | 3.312 GiB | Single observation, distinct from RSS |
+| Vector 0.1, 900×620, cold evaluator | 97.577 s | 76.525 s | One pair; warm 5.997 / 5.825 ms |
+| Same finer vector pair, peak cgroup memory | 8.096 GiB | 7.114 GiB | Single observation, 12.1% lower |
+| Actual Wizard projection, Feature 0.1, 128×128 | 322.14 ms ±5.63 | 287.08 ms ±1.30 | Three fresh evaluator runs each; 10.9% lower mean |
+
+The small Wizard projection uses the existing production neutral presentation
+policy; its timing/pixels are separate from calibrated native Main/Review
+consumers. Native per-channel site counts remain exactly 137,419 for vector 0.2,
+255,876 for raster 0.2 and 542,680 for vector 0.1. All baseline/current cold/warm
+native PNG bytes match in each case, and all six Wizard PNGs match. Independent
+pre-change oracles compare complete seeded Lloyd positions/IDs/fingerprints,
+geometry/pixels/work/precision and cancellation. Prepared/direct sampler tests
+compare exact float bits. Focused tests and strict app Clippy pass.
+
+Both immutable artworks have intrinsic transparent PNG/SVG exports through the
+supported current CLI; SVG retains three canonical channel paths and existing
+filter composition. Both SVGs are rasterized at natural dimensions for visual
+review. Raster CLI PNG equals native Preview RGBA. Vector live text initially
+differs under different XDG/font environments; a controlled Preview run under
+the identical four disposable CLI roots equals CLI RGBA exactly. This confirms
+the documented source-font caveat rather than a general consumer difference.
+Private GTK covers the actual personal gallery lifecycle and completed raster 0.2
+preview at fitted target 1140×889, with Feature size 0.2 and seed 19 readback.
+Parent review inspects raw native PNGs, SVG rasterizations and GTK screenshots.
+Requested-card keyboard targeting remains explicitly unverified; existing
+keyboard setup is unchanged. These automated Sway checks do not establish human,
+screen-reader-user, GNOME Shell or Mutter acceptance.
+
+One early owned vector 0.1 benchmark was OOM-killed by our original **6 GiB test
+cgroup**, not a system-wide memory limit. Invalid/partial diagnostics are retained
+and excluded from completed benchmark claims. Subsequent workloads use graceful
+software memory/headroom/watchdog stops before finite hard cgroup backups,
+`MemorySwapMax=0`, and serial execution. Completed vector 0.2 uses soft 3/hard 4 GiB;
+raster 0.2 soft 5/hard 6 GiB with at least 16 GiB starting available memory; vector 0.1
+soft 10/hard 12 GiB with at least 20 GiB starting available memory. The latter cases
+retain a 10 GiB host reserve. All completed pairs record zero OOM/max events and
+zero cgroup swap. These are benchmark guards, not new application settings.
+
+The finer native case still takes **76.5 seconds cold and about 7.1 GiB peak
+cgroup memory**. These gains preserve quality; they do not establish interactive
+latency for every dense native artwork. The user prioritizes the largest safe
+gains first. Further changes require measured scope rather than a speculative
+renderer redesign. Reproduction semantics are in
+[Pattern Wizard checks](PATTERN_WIZARD_TESTING.md).
+
+The authorized [GPU/Vulkan research](GPU_VULKAN_EVALUATION_PLAN.md) now retains
+[matched diagnostic timings, full natural RGBA images and zoomed pan regions](../target/validation/gpu-vulkan-20261031/report.md).
+Three same-binary0.2 runs give CPU/hybrid/compute medians15.669/4.072/3.983s vector
+and26.510/7.700/7.635s raster, using exact canonical scenes/calibration/density.
+A separate4x retained-geometry trace paints five new production1536px cache cells:
+CPU3.373s versus native hybrid0.177s or refined-circle hybrid0.190s median across
+three pixel-cache-cold rounds (best refined17.8× ratio). Refined alpha MAE is
+0.259–0.758 bytes across the tested4x views; local errors/union authority remain.
+One-time preparation is3.139s refined versus11.269s CPU; native cold comparisons
+above do not include this separate refinement. This headless research did not
+measure actual GTK upload/continuous pan, and app background caching can hide misses.
+Native GPU coverage/tone differs materially; correct model blends/linear transport
+and the bounded finer-circle consumer correction distinguish repairable integration
+from remaining union/certificate limits. These gains support researching an
+explicit approximate live-preview option with precise CPU exports; that research
+alone established no product backend, normative accuracy change or perceptual
+acceptance. The 2026-11-02 development qualification above covers the subsequent
+bounded main-preview implementation.
+Authored inputs/calibration and resource reserves remain protected.
+
 ## 0.4.6: retained preview regions
 
 The 2026-10-20 followup renders the **whole artwork at each visited eligible
@@ -482,15 +658,16 @@ an otherwise clean checkout. Retain original evidence and use fresh directories.
 
 ### Hardware, choices and remaining limits
 
-The measured host is Fedora 44, Ryzen 9 5900X (12 cores/24 threads), 32 GiB RAM,
+For the historical 2026-10-16 measurements, the host is Fedora 44,
+Ryzen 9 5900X (12 cores/24 threads), 32 GiB RAM,
 RX 6900 XT with amdgpu/RADV Mesa 26.2.4, and rustc 1.94.1. Vulkan 1.4 was detected;
-performance work executes on the CPU, with OpenGL used for GTK presentation.
-No compute GPU kernel is tested on AMD, Intel, NVIDIA or integrated graphics.
-No new backend, driver setup, environment switch or manual backend choice is
-introduced. Ordinary CPU execution and automatic dense/sparse selection remain
+that performance work executes on the CPU, with OpenGL used for GTK presentation.
+Those checks tested no compute GPU kernel on AMD, Intel, NVIDIA or integrated graphics.
+That milestone introduced no new backend, driver setup, environment switch or manual
+backend choice. Ordinary CPU execution and automatic dense/sparse selection remain
 available without hardware-specific setup.
 
-GPU and sorting options were researched, not implemented.
+GPU and sorting options were researched, not implemented in that milestone.
 [wgpu documents Vulkan, D3D12 and Metal backends](https://github.com/gfx-rs/wgpu#supported-platforms)
 that are candidates for ordinary OS graphics drivers. This is documented
 portability, not tested Toniator compute compatibility or a claim that every

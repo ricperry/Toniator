@@ -109,6 +109,8 @@ pub(super) fn open(state: &Rc<RefCell<AppState>>) {
         }
     };
     let window = gtk::Window::builder()
+        .destroy_with_parent(true)
+        .accessible_role(gtk::AccessibleRole::Dialog)
         .title("Animation settings")
         .transient_for(&parent)
         .modal(true)
