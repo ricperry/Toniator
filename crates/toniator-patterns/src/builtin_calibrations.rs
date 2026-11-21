@@ -19,6 +19,12 @@ type MeasuredData<'a> = (
 
 #[path = "builtin_calibrations_data.rs"]
 mod measured;
+#[path = "ranked_hatch_calibrations_data.rs"]
+mod additions;
+#[path = "adaptive_square_calibrations_data.rs"]
+mod adaptive;
+#[path = "adaptive_blue_noise_calibrations_data.rs"]
+mod adaptive_blue_noise;
 
 /// Materializes one recipe on the canonical reference document before binding it.
 ///
@@ -80,6 +86,8 @@ pub(super) fn restore_measurement(
         toniator_domain::CALIBRATION_PROFILE_SEEDED_64,
         toniator_domain::CALIBRATION_PROFILE_ROUND_INTERIOR,
         toniator_domain::CALIBRATION_PROFILE_MEAN,
+        toniator_domain::CALIBRATION_PROFILE_HATCH,
+        toniator_domain::CALIBRATION_PROFILE_ADAPTIVE_SQUARE,
     ]
     .into_iter()
     .any(|reference| binding.profile_for_reference(reference) == profile);
@@ -124,8 +132,30 @@ pub(super) fn calibration_for_recipe(
     id: &str,
     recipe: &PatternDefinitionRecipe,
 ) -> Result<Option<SavedCalibration>, ValidationError> {
-    let Some(measured) = measured::data(id) else {
+    let Some(measured) = measured::data(id).or_else(|| additions::data(id)).or_else(|| adaptive::data(id)) else {
         return Ok(None);
     };
-    restore_measurement(canonical_reference_binding(recipe)?, measured)
+    let restored = restore_measurement(canonical_reference_binding(recipe)?, measured)?;
+    match (restored, additions::dispersion(id)) {
+        (Some(saved), Some(observations)) => saved.with_dispersion(toniator_domain::DispersionCalibration::new(observations.to_vec())?).map(Some),
+        (saved, _) => Ok(saved),
+    }
+}
+
+/// Restores the independently measured adaptive producer for an exact complete binding.
+/// Mode selection uses typed binding policy and never substitutes observations across modes.
+/// # Errors
+/// Returns invalid frozen observations or current producer validation diagnostics.
+pub(super) fn adaptive_shape_for_binding(
+    binding: &CalibrationBinding,
+) -> Result<Option<SavedCalibration>, ValidationError> {
+    if !binding.uses_adaptive_square_marks() {
+        return Ok(None);
+    }
+    let data = if binding.uses_adaptive_blue_noise() {
+        adaptive_blue_noise::data("adaptive-shape-marks")
+    } else {
+        adaptive::data("adaptive-shape-marks")
+    };
+    restore_measurement(binding.clone(), data.expect("compiled adaptive companion"))
 }

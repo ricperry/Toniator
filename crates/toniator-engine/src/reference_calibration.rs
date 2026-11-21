@@ -324,7 +324,13 @@ impl FrozenCoverageProbe {
                 .map_err(EvaluationError::from_domain)?
                 .mode
                 == MarkDensityMode::Uniform;
-        if uniform && let Some(random) = &mut plan.family.random {
+        if uniform
+            && let Some(random) = &mut plan.family.random
+            && !matches!(
+                random.character,
+                toniator_domain::RandomSiteCharacter::Dispersion { .. }
+            )
+        {
             random.full_population_for_uniform_marks = true;
             random.density_modulation =
                 toniator_patterns::ResolvedSiteDensityModulation::ArtworkWeightedUnbound;
@@ -949,15 +955,36 @@ fn reference_document_with_canvas(
         .0;
     let base = document.pattern_settings().clone();
     let mut settings = base.clone();
+    let authored_spacing = document
+        .pattern_definition_bundles()
+        .iter()
+        .find(|bundle| bundle.definition.id == base.definition_id)
+        .and_then(|bundle| {
+            bundle.definition.dispersion_layout().and_then(|_| {
+                bundle
+                    .definition
+                    .mechanisms
+                    .iter()
+                    .find_map(|mechanism| match mechanism {
+                        toniator_domain::PatternMechanism::RandomSiteProcess {
+                            nominal_spacing: Some(spacing),
+                            ..
+                        } => Some(*spacing),
+                        _ => None,
+                    })
+            })
+        });
     settings.density = DensityMetric2D {
-        density: f64::from(side),
+        density: f64::from(side)*authored_spacing.map_or(1.0,|spacing|spacing/toniator_domain::DEFAULT_RANDOM_NOMINAL_SPACING),
         aspect: density_aspect,
     };
     settings.shape_rotation_degrees = shape_rotation_degrees;
-    document = document
-        .apply_command(&DocumentCommand::SetDocumentPatternSettings { base, settings })
-        .map_err(EvaluationError::from_domain)?
-        .0;
+    if settings != base {
+        document = document
+            .apply_command(&DocumentCommand::SetDocumentPatternSettings { base, settings })
+            .map_err(EvaluationError::from_domain)?
+            .0;
+    }
     let base = document.response_settings().clone();
     let mut settings = base.clone();
     settings.marks.minimum_fill = 0.0;
@@ -1047,6 +1074,12 @@ pub fn calibrate_saved_binding(
     limits: EvaluationLimits,
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<SavedCalibration, EvaluationError> {
+    if binding.uses_adaptive_square_marks() {
+        return calibrate_adaptive_square_reference(binding, limits, is_cancelled);
+    }
+    if binding.uses_hatching() {
+        return calibrate_hatch_reference(binding, limits, is_cancelled);
+    }
     let recipe = reference_recipe_from_binding(binding);
     let mut cache = ReferenceMeasurementCache::default();
     let strict = calibrate_reference_geometry(
@@ -1094,7 +1127,10 @@ pub fn calibrate_saved_binding(
         }
         Err(error) => return Err(error),
     };
-    let (uniform, uniform_transfer) = if mean.is_some() {
+    let (uniform, uniform_transfer) = if recipe.structure.dispersion_layout().is_some() {
+        // Intrinsic tone allocation replaces independent Uniform survival; C(q) is measured below.
+        (None, None)
+    } else if mean.is_some() {
         fit_uniform_mean(&recipe, binding, limits, is_cancelled)?
     } else {
         (
@@ -1112,7 +1148,7 @@ pub fn calibrate_saved_binding(
             coverage: point.coverage,
         })
         .collect();
-    if let Some(mean) = mean {
+    let saved = if let Some(mean) = mean {
         let variation = CalibrationVariation::new(
             mean.raw_absolute,
             mean.raw_fraction_of_span,
@@ -1146,7 +1182,204 @@ pub fn calibrate_saved_binding(
         };
         SavedCalibration::with_profile(binding.profile_for_reference(profile), binding.clone(), knots, uniform)
             .map_err(EvaluationError::from_domain)
+    }?;
+    if saved.requires_dispersion() {
+        let transfer = measure_dispersion_transfer(&recipe, binding, &saved, limits, is_cancelled)?;
+        saved
+            .with_dispersion(transfer)
+            .map_err(EvaluationError::from_domain)
+    } else {
+        Ok(saved)
     }
+}
+
+/// Measures actual canonical nearest-area plateaus on the fixed square reference canvas.
+/// Ten raw probes include every area bucket and repeated full coverage; no continuous fit occurs.
+/// # Errors
+/// Propagates binding, measurement, bounded geometry and cancellation diagnostics.
+fn calibrate_adaptive_square_reference(
+    binding: &CalibrationBinding,
+    limits: EvaluationLimits,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<SavedCalibration, EvaluationError> {
+    let recipe = reference_recipe_from_binding(binding);
+    let (document, source, channel) = reference_document_with_geometry(&recipe, 32, 1.0, 0.0)?;
+    let probe = FrozenCoverageProbe::new(&document, source, channel, limits, cancel)?;
+    let mut raw = Vec::new();
+    for i in 0..10 {
+        if cancel() {
+            return Err(cancelled());
+        }
+        let input = i as f64 * 2.0 / 9.0;
+        let measured = probe.measure_at(input, VectorOccupancyPrecision::Baseline, cancel)?;
+        raw.push(CalibrationKnot {
+            input,
+            coverage: measured.coverage,
+        });
+    }
+    SavedCalibration::with_profile(
+        binding.profile_for_reference(toniator_domain::CALIBRATION_PROFILE_ADAPTIVE_SQUARE),
+        binding.clone(),
+        raw,
+        None,
+    )
+    .map_err(EvaluationError::from_domain)
+}
+
+/// Measures every attainable fixed-width hatch population through the canonical union consumer.
+/// The fixed reference profile records quantized coverage, never a smooth-fit error witness.
+/// # Errors
+/// Returns reference, geometry, numeric, occupancy, cancellation or persisted-profile diagnostics.
+fn calibrate_hatch_reference(
+    binding: &CalibrationBinding,
+    limits: EvaluationLimits,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<SavedCalibration, EvaluationError> {
+    let recipe = reference_recipe_from_binding(binding);
+    let (document, source, channel) = reference_document_with_geometry(
+        &recipe,
+        32,
+        binding.density_aspect(),
+        binding.shape_rotation_degrees(),
+    )?;
+    let probe = FrozenCoverageProbe::new(&document, source, channel, limits, cancel)?;
+    let mut raw = Vec::new();
+    for level in 0..=8 {
+        if cancel() {
+            return Err(cancelled());
+        }
+        let input = f64::from(level) / 4.0;
+        let point = probe.measure_at(input, VectorOccupancyPrecision::Baseline, cancel)?;
+        raw.push(CalibrationKnot {
+            input,
+            coverage: point.coverage,
+        });
+    }
+    SavedCalibration::with_profile(
+        binding.profile_for_reference(toniator_domain::CALIBRATION_PROFILE_HATCH),
+        binding.clone(),
+        raw,
+        None,
+    )
+    .map_err(EvaluationError::from_domain)
+}
+
+/// Measures the actual layout union at fixed source-independent flat-tone probes.
+/// The raw footprint inverse remains separate; ordinary renders never enter this fitter.
+/// Measurements use canonical geometry and the binary raster consumer at fixed 2048²,
+/// with 32 authored nominal spacings and 128-spacings low-tone probes through 2% ink.
+/// The original neutral guide and seed 43 remain source-independent; the versioned
+/// persisted profile identifies this binary-raster measurement separately from raw C(size).
+/// # Errors
+/// Propagates reconstruction, producer, geometry, raster, allocation or cancellation diagnostics.
+fn measure_dispersion_transfer(
+    recipe: &PatternDefinitionRecipe,
+    binding: &CalibrationBinding,
+    saved: &SavedCalibration,
+    limits: EvaluationLimits,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<toniator_domain::DispersionCalibration, EvaluationError> {
+    let (document, source, channel) = reference_document_with_geometry(
+        recipe,
+        32,
+        binding.density_aspect(),
+        binding.shape_rotation_degrees(),
+    )?;
+    let probe = FrozenCoverageProbe::new(&document, source, channel, limits, cancel)?;
+    let (low_document, low_source, low_channel) = reference_document_with_geometry(
+        recipe,
+        128,
+        binding.density_aspect(),
+        binding.shape_rotation_degrees(),
+    )?;
+    let low_probe =
+        FrozenCoverageProbe::new(&low_document, low_source, low_channel, limits, cancel)?;
+    let fit = crate::coverage::from_saved(saved, 0.0, 1.0)?;
+    let request = GridInspectRequest {
+        canvas: document.canvas().clone(),
+        density: probe.effective.resolved_density,
+        rotation_degrees: 0.0,
+        translation_x: 0.0,
+        translation_y: 0.0,
+        guard_steps: probe.definition.coverage.guard_steps,
+        support_radius: probe.family.planned_support_radius(),
+        max_family_candidates: limits.max_family_candidates(),
+    };
+    let mut observations = Vec::new();
+    let mut inputs = (0..=40)
+        .map(|i| i as f64 / 40.0)
+        .chain([
+            0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.98, 0.99,
+            0.995, 0.999,
+        ])
+        .collect::<Vec<_>>();
+    inputs.sort_by(f64::total_cmp);
+    inputs.dedup();
+    for q in inputs {
+        if cancel() {
+            return Err(cancelled());
+        }
+        let probe = if q > 0.0 && q <= 0.02 {
+            &low_probe
+        } else {
+            &probe
+        };
+        let document = &probe.document;
+        let request = GridInspectRequest {
+            canvas: document.canvas().clone(),
+            density: probe.effective.resolved_density,
+            ..request.clone()
+        };
+        let mut plan = probe.plan.clone();
+        let random = plan.family.random.as_mut().ok_or(EvaluationError::new(
+            "reference.dispersion.family",
+            "dispersion calibration requires its authored site family",
+        ))?;
+        random.dispersion_probe = Some(q);
+        let family = toniator_patterns::evaluate_typed_family_product_with_source_cancellable(
+            &plan.family,
+            &request,
+            Some(&probe.source),
+            cancel,
+        )
+        .map_err(EvaluationError::from_pipeline)?;
+        let result =
+            toniator_patterns::realize_typed_canonical_mark_output_with_response_cancellable(
+                document,
+                &family,
+                &plan,
+                &probe.capability,
+                &probe.setting,
+                &probe.source,
+                document.canvas(),
+                probe.mapping,
+                false,
+                probe.effective.shape_rotation_degrees,
+                limits.max_transformed_curve_segment_instances(),
+                GeometryResponseInput::AbsoluteCoverage {
+                    curve: &fit.curve,
+                    minimum: 0.0,
+                    maximum: fit.curve.near_full_coverage(),
+                },
+                cancel,
+            )
+            .map_err(EvaluationError::from_pipeline)?;
+        let geometry = GeometryOutput::CanonicalMarks(result.realization.output.marks);
+        let coverage = rasterize_geometry_occupancy(
+            &geometry,
+            document.canvas(),
+            OutputRasterTarget::new(2048, 2048).map_err(EvaluationError::from_render)?,
+            RasterizationLimits::default(),
+            cancel,
+        )
+        .map_err(EvaluationError::from_render)?
+        .fraction();
+        observations.push(CalibrationKnot { input: q, coverage });
+        if std::env::var_os("TONIATOR_CALIBRATION_DIAGNOSTICS").is_some() {
+            eprintln!("dispersion reference: q={q:.6} coverage={coverage:.9}");
+        }
+    }
+    toniator_domain::DispersionCalibration::new(observations).map_err(EvaluationError::from_domain)
 }
 
 /// Supplies a presentation-only name required by document materialization after binding normalization.

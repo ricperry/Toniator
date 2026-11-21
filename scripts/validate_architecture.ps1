@@ -5,7 +5,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $repoRoot
 try {
     $manifest = Get-Content -LiteralPath 'Cargo.toml' -Raw
-    if ($manifest -notmatch '(?m)^exclude = \["ToniatorLegacy"\]\r?$') { throw 'workspace must exclude ToniatorLegacy' }
+    if ($manifest -notmatch '(?m)^exclude = \["ToniatorLegacy", "shared/creatiator"\]\r?$') { throw 'workspace must exclude ToniatorLegacy and the standalone shared crate' }
     $metadataText = & $CargoExecutable metadata --format-version 1 --no-deps --locked
     if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
     $metadata = ($metadataText -join "`n") | ConvertFrom-Json
@@ -13,6 +13,7 @@ try {
     $actual = @($metadata.packages | Where-Object { $metadata.workspace_members -contains $_.id } | ForEach-Object { $_.name } | Sort-Object)
     if (($actual -join ',') -ne ($expected -join ',')) { throw 'workspace members do not match the core and Windows infrastructure crate set' }
     $allowed = @(
+        'toniator-app:creatiator','toniator-domain:creatiator','toniator-sampling:creatiator','toniator-render:creatiator',
         'toniator-geometry:toniator-domain',
         'toniator-sampling:toniator-domain','toniator-sampling:toniator-geometry','toniator-sampling:toniator-windows-fs',
         'toniator-patterns:toniator-domain','toniator-patterns:toniator-geometry','toniator-patterns:toniator-sampling',
@@ -25,6 +26,13 @@ try {
     foreach ($package in $metadata.packages) {
         if ($metadata.workspace_members -notcontains $package.id) { continue }
         foreach ($dependency in $package.dependencies) {
+            if ($dependency.name -eq 'creatiator') {
+                $sharedPath = [IO.Path]::GetFullPath((Join-Path $repoRoot 'shared/creatiator'))
+                $features = if ($package.name -eq 'toniator-app') { 'gtk' } else { '' }
+                if ([IO.Path]::GetFullPath($dependency.path) -ne $sharedPath -or $dependency.uses_default_features -or ($dependency.features -join ',') -ne $features) {
+                    throw 'creatiator must use its local path and enable GTK only in toniator-app'
+                }
+            }
             if ($null -ne $dependency.path -and $allowed -notcontains ($package.name + ':' + $dependency.name)) {
                 throw ('forbidden workspace dependency: ' + $package.name + ' -> ' + $dependency.name)
             }

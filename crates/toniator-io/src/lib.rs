@@ -1318,6 +1318,8 @@ struct ParametricCurveSiteRecipeDtoV3 {
 #[serde(deny_unknown_fields)]
 enum PatternOutputRealizationRecipeDtoV3 {
     Marks,
+    AdaptiveSquareMarks,
+    AdaptiveSquareBlueNoiseMarks,
     AuthoredClosedShapeMarks {
         resource_index: usize,
         orientation: MarkOrientationDraftDto,
@@ -1679,6 +1681,16 @@ struct SavedCalibrationDto {
     uniform: Option<UniformCalibrationDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     variation: Option<CalibrationVariationDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dispersion: Option<DispersionCalibrationDto>,
+}
+
+/// Fixed source-independent measurement provenance for the intrinsic layout transfer.
+#[derive(Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DispersionCalibrationDto {
+    profile: String,
+    observations: Vec<CalibrationKnotDto>,
 }
 
 /// Typed empirical transfer maxima required only by the stochastic mean profile.
@@ -1741,6 +1753,14 @@ impl SavedCalibrationDto {
                 radius_per_nominal_spacing: uniform.radius_per_nominal_spacing(),
                 inverse: uniform.inverse().iter().map(CalibrationKnotDto::from_domain).collect(),
             }),
+            dispersion: value.dispersion().map(|value| DispersionCalibrationDto {
+                profile: "flat-layout-binary-2048-32-low128-v3".into(),
+                observations: value
+                    .observations()
+                    .iter()
+                    .map(CalibrationKnotDto::from_domain)
+                    .collect(),
+            }),
             variation: value.variation().map(|variation| CalibrationVariationDto {
                 raw_absolute: variation.raw_absolute(),
                 raw_fraction_of_span: variation.raw_fraction_of_span(),
@@ -1767,7 +1787,7 @@ impl SavedCalibrationDto {
             uniform.inverse.into_iter().map(CalibrationKnotDto::into_domain).collect(),
         )).transpose()?;
         let raw = self.raw.into_iter().map(CalibrationKnotDto::into_domain).collect();
-        match self.variation {
+        let artifact = match self.variation {
             Some(variation) if self.profile == binding.profile_for_reference(CALIBRATION_PROFILE_MEAN) => {
                 let variation = CalibrationVariation::new(
                     variation.raw_absolute, variation.raw_fraction_of_span,
@@ -1779,7 +1799,26 @@ impl SavedCalibrationDto {
             Some(_) => Err(ValidationError::new("calibration.variation",
                 "deterministic profile cannot carry stochastic variation")),
             None => SavedCalibration::with_profile(self.profile, binding, raw, uniform),
-        }
+        }?;
+        let artifact = if let Some(dispersion) = self.dispersion {
+            if dispersion.profile != "flat-layout-binary-2048-32-low128-v3" {
+                return Err(ValidationError::new(
+                    "calibration.dispersion.profile",
+                    "unsupported dispersion measurement profile; Recalibrate",
+                ));
+            }
+            artifact.with_dispersion(toniator_domain::DispersionCalibration::new(
+                dispersion
+                    .observations
+                    .into_iter()
+                    .map(CalibrationKnotDto::into_domain)
+                    .collect(),
+            )?)?
+        } else {
+            artifact
+        };
+        artifact.require_complete()?;
+        Ok(artifact)
     }
 }
 
@@ -2161,6 +2200,9 @@ struct RandomSiteRefinementDtoV6 {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
 enum RandomSiteCharacterDtoV6 {
+    Dispersion {
+        layout: toniator_domain::DispersionLayout,
+    },
     RawUniform,
     Even {
         minimum_center_distance: f64,
@@ -2606,6 +2648,8 @@ enum GridSpanningTreeAlgorithmDtoV6 {
 #[serde(deny_unknown_fields)]
 enum MarkPrototypeDtoV6 {
     Circle,
+    AdaptiveSquare,
+    AdaptiveSquareBlueNoise,
     AuthoredClosedShape { structure_id: u64 },
 }
 #[derive(Serialize, Deserialize)]
@@ -3079,6 +3123,8 @@ impl PatternOutputRealizationRecipeDtoV3 {
     fn from_domain(value: &PatternOutputRealizationRecipe) -> Self {
         match value {
             PatternOutputRealizationRecipe::Marks => Self::Marks,
+            PatternOutputRealizationRecipe::AdaptiveSquareMarks => Self::AdaptiveSquareMarks,
+            PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks => Self::AdaptiveSquareBlueNoiseMarks,
             PatternOutputRealizationRecipe::AuthoredClosedShapeMarks {
                 resource_index,
                 orientation,
@@ -3136,6 +3182,8 @@ impl PatternOutputRealizationRecipeDtoV3 {
     fn into_domain(self) -> Result<PatternOutputRealizationRecipe, PresetIoError> {
         Ok(match self {
             Self::Marks => PatternOutputRealizationRecipe::Marks,
+            Self::AdaptiveSquareMarks => PatternOutputRealizationRecipe::AdaptiveSquareMarks,
+            Self::AdaptiveSquareBlueNoiseMarks => PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks,
             Self::AuthoredClosedShapeMarks {
                 resource_index,
                 orientation,
@@ -4479,8 +4527,10 @@ impl PatternMechanismDtoV6 {
 }
 
 impl RandomSiteCharacterDtoV6 {
+    /// Persists the active typed process without rewriting dormant independent mechanisms.
     fn from_domain(value: &RandomSiteCharacter) -> Self {
         match value {
+            RandomSiteCharacter::Dispersion { layout } => Self::Dispersion { layout: *layout },
             RandomSiteCharacter::RawUniform => Self::RawUniform,
             RandomSiteCharacter::Even {
                 minimum_center_distance,
@@ -4499,8 +4549,10 @@ impl RandomSiteCharacterDtoV6 {
             RandomSiteCharacter::Stratified { jitter } => Self::Stratified { jitter: *jitter },
         }
     }
+    /// Restores the authored process; aggregate domain validation owns all numeric bounds.
     fn into_domain(self) -> RandomSiteCharacter {
         match self {
+            Self::Dispersion { layout } => RandomSiteCharacter::Dispersion { layout },
             Self::RawUniform => RandomSiteCharacter::RawUniform,
             Self::Even {
                 minimum_center_distance,
@@ -5026,6 +5078,8 @@ impl MarkPrototypeDtoV6 {
     fn from_domain(value: &MarkPrototype) -> Self {
         match value {
             MarkPrototype::Circle => Self::Circle,
+            MarkPrototype::AdaptiveSquare => Self::AdaptiveSquare,
+            MarkPrototype::AdaptiveSquareBlueNoise => Self::AdaptiveSquareBlueNoise,
             MarkPrototype::AuthoredClosedShape { structure_id } => Self::AuthoredClosedShape {
                 structure_id: structure_id.0,
             },
@@ -5036,6 +5090,8 @@ impl MarkPrototypeDtoV6 {
     fn into_domain(self) -> MarkPrototype {
         match self {
             Self::Circle => MarkPrototype::Circle,
+            Self::AdaptiveSquare => MarkPrototype::AdaptiveSquare,
+            Self::AdaptiveSquareBlueNoise => MarkPrototype::AdaptiveSquareBlueNoise,
             Self::AuthoredClosedShape { structure_id } => MarkPrototype::AuthoredClosedShape {
                 structure_id: toniator_domain::AuthoredStructureId(structure_id),
             },

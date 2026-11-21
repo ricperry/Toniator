@@ -170,7 +170,7 @@ fn reusable_companion(
     binding: &CalibrationBinding,
 ) -> Result<Option<SavedCalibration>, ValidationError> {
     let baseline = document.baseline_saved_calibration()?;
-    Ok(document
+    let existing = document
         .saved_calibrations()
         .iter()
         .find(|entry| entry.artifact.binding().is_compatible_with(binding))
@@ -179,7 +179,9 @@ fn reusable_companion(
             baseline
                 .filter(|artifact| artifact.binding().is_compatible_with(binding))
                 .cloned()
-        }))
+        });
+    if existing.is_some() { return Ok(existing); }
+    toniator_patterns::adaptive_shape_marks_calibration(binding)
 }
 
 /// Measures exact current bindings once, then expands only the plan's explicit recipients.

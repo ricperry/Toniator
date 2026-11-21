@@ -285,6 +285,13 @@ pub(super) fn append(controls: &Controls, parent: &gtk::Box) {
 pub(super) fn sync(app: &AppState, component: &DescriptorComponent) {
     let end = app.endpoint == temporal_preview::Endpoint::End;
     component.row.set_sensitive(true);
+    if component.value.descriptor.field == PropertyFieldId::AdaptiveBlueNoise {
+        component.control.set_sensitive(!end);
+        if end {
+            component.detail.set_label("Shared by all frames · edit at Start");
+            component.detail.set_visible(true);
+        }
+    }
     if let Some(reset) = component.reset.as_ref() {
         reset.set_visible(!end);
     }

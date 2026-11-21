@@ -56,3 +56,47 @@ Local correction, 2026-10-19:
   must not make a vertical or steep original edge backtrack across distant Y
   positions. The exact six-shape zoom/clip regression and independent rational
   clipped-area oracle are retained in Toniator's current renderer tests.
+
+Local optional certificate support, 2026-11-18:
+
+- `core/checked.rs`: opt-in bounded spatial metadata groups each accepted nonzero
+  split triangle exactly once into at most 32×32 buckets. Each bucket retains
+  the union of every triangle's full three-vertex integer bounding box and its
+  exact unsigned doubled-area sum. Zero and single-bucket paths allocate no
+  scratch table; a second occupied bucket lazily promotes to a fixed-size,
+  fallibly allocated table. Refusal disables only the optional proof. Accepted
+  attempt resets clear scalar and spatial debt together; discarded work remains
+  charged. Ordinary solver output, scalar certificates, fixed radii, bounded
+  attempts/rounds and operation accounting are unchanged.
+- The renderer alone encloses final adapter readbacks and decides visibility.
+  Group boxes are conservative supports, not geometry or a per-tile error budget.
+  Missing metadata requires the original scalar certificate in full. Export
+  and normalization do not request this final-preview proof.
+
+Local optional final-overlay refinement, 2026-11-19:
+
+- `core/checked.rs`: an opt-in checked operation lifts original integer segments
+  exactly by four, retaining their common origin, winding counts and ordering.
+  Every lifted source and accepted output coordinate must remain within the
+  inclusive f64 exact-integer range `[-2^53, 2^53]`, which is stricter than the
+  solver's conservative i64 coordinate range. Checked multiplication and exact
+  reversal validate the lift. Unsupported nonzero area filters, range failures
+  or unavailable fallible input storage decline the optional route. Scans and
+  ordinary checked solver attempts share the supplied work/cancellation control.
+- `float/overlay.rs`: an f64-only opt-in wrapper preserves the common adapter
+  origin and validates its fourfold scale and exact reciprocal relation. Input
+  endpoints retain byte-identical floating readback under this binary lift.
+  Accepted integer output casts are exact before the existing affine floating
+  readback; the cast-range guard precedes publication. As in the original API,
+  split certificates concern integer winding changes, not floating multiply/add,
+  curve flattening or graph extraction. The renderer converts the accepted exact
+  area certificate on its actual grid and encloses optional spatial readbacks
+  outward; no error budget or claimed certificate scope is enlarged.
+- Ordinary checked calls remain unchanged. Toniator requests this bounded
+  refinement only after its former successful rendering and complete-stroke
+  fallback routes fail an independently over-budget final split certificate.
+  Discarded coarse attempts retain all consumed work. Missing refinement keeps
+  the original geometry, certificate and earlier debt. Current focused tests
+  cover rational-node improvement, unchanged source endpoints, range/cancellation/
+  work refusal, and same-origin endpoint readback beyond the rejected64-lift
+  mantissa boundary. Omitted historical upstream suites remain out of scope.

@@ -6,37 +6,83 @@ an entry does not authorize a later stage or change an accepted contract.
 
 ## TON-010 — Scatter choices need greater artistic variety and clearer priorities
 
-- Status: Planning/research resumed at the user's request (2026-11-02); product
-  implementation remains paused pending a separately approved scope. The user
-  gives faithful artwork reproduction and expressive texture equal priority.
-  See the [research and planning proposal](docs/TON010_STIPPLING_RESEARCH_PLAN.md)
-  and [current source/UI evidence](target/validation/ton010-planning-20261102/report.md).
-- Report: Clustered produces blotchy coverage that can compete with the artwork.
-  It has artistic uses, but receives too much prominence relative to choices
-  intended for image reproduction. The available algorithms remain too limited.
-- Current implementation: Four generators—Random, Poisson disk, Jittered cells,
-  and Clustered. There are no additional hidden generators. Uniform/artwork-weighted
-  density and optional ordinary/weighted Lloyd relaxation modify these generators;
-  they are not additional scatter algorithms.
-- Explanation: Clustered deliberately groups points around randomly placed centers.
-  With Uniform initial density those centers do not follow the artwork. Lower
-  strength or broader spread softens the effect, but a few weighted Lloyd steps
-  do not globally redistribute the clusters into faithful image stippling.
-- Earlier proposed direction (2026-09-20), pending design review: Prioritize even blue-noise stippling,
-  genuinely artwork-adaptive spacing, and a coherent artwork-weighted relaxed
-  stippling workflow. Retain Random and Clustered as secondary texture effects.
-  Distinguish initial placement, artwork-density control, and subsequent relaxation
-  in the interface rather than presenting more combinations as new algorithms.
-- Research candidates: Variable-density Poisson sampling; a complete
-  [weighted Voronoi stippling](https://www.cs.ubc.ca/labs/imager/tr/2002/secord2002b/)
-  workflow; and [weighted sample elimination](https://www.cemyuksel.com/research/sampleelimination/)
-  for point-count control. A different implementation alone does not establish
-  a meaningfully different artistic result.
-- Verification when resumed: Present labeled side-by-side render comparisons on
-  both immutable sample artworks, with settings, native PNG/SVG artifacts, test
-  logs, and preview/Review timings. Check tonal fidelity, spacing, visible variety,
-  Feature size response, cancellation and Apply/Undo. Keep the approximately
-  50-second fine Poisson Review limitation tracked separately under TON-003.
+- Implemented locally on 2026-11-18. TON-010 is open for artist review. Faithful artwork reproduction and expressive texture
+  retain equal priority. Shape Library outlines remain independent of placement.
+- Selecting a Scatter Pattern in the Wizard and opening **Customize → Family options
+  → Dispersion** offers **Ranked blue noise** (progressive 64×64 screen),
+  **Bayer 8×8** (ordered), **Floyd–Steinberg** (serpentine), **Ink-weighted quadtree**, **Tangent ribbons**,
+  and **Stochastic cluster screen** (repeatable seed). These six additions are
+  mark-only choices. **Ranked Blue Noise** also has a direct gallery card.
+  Tangent ribbons offers Spacing, Size, and Blend in **Tangent tone**.
+  The original Random, Poisson disk, Jittered cells, and Clustered remain available.
+  Density, exclusion and Lloyd controls apply to the original four layouts.
+- Source weighting owns placement and tangent guides. Tangent Size/Blend consume
+  independent Fill mapping for mark area. Fixed-area modes support a Fill mask
+  when the cutoff is positive. Fill cutoff, requested coverage bounds, paint Alpha
+  and channel Opacity retain authority. Ordinary Uniform sizing/size scale is
+  inapplicable to the new layouts.
+- The [earlier integrated comparison and measurements](target/validation/ton010-product-20261118/verification.md)
+  cover 49 native PNG/SVG pairs across both immutable artworks, Cyan, Magenta,
+  inverted luminance and synthetic gradients. Saved Patterns, projects and a
+  source-free Document Preset round-trip. The three earlier gradient SVG clipping
+  repros now export successfully with their original geometry and pixel-identical
+  native PNGs. [Tangent comparison](target/validation/ton010-product-20261118/ribbons.html)
+  shows continuous guides replacing the earlier tiled pilot and its regular seam.
+  [Geometry witnesses](target/validation/ton010-product-20261118/geometry-witness.json)
+  check spacing/size response, Feature size and guide direction.
+- GTK controls retain native descriptor-backed selection/actions, visible-label
+  relations, applicable enabled state and keyboard paths. Dispersion now lists
+  ten layouts; Tangent tone appears for ribbons; Scatter variation applies to
+  the cluster screen. [Earlier private GTK action/readback and visual evidence](target/validation/ton010-product-20261118/ui/current-svg-report.md)
+  records selection, Review, Apply, save and cold reopen. The
+  [stored profiles](target/validation/ton010-product-20261118/ui/v3-stored-profiles.json)
+  confirm that integration’s dispersion calibration. Automated Sway evidence does not
+  establish artist or GNOME/Mutter acceptance.
+- **Parallel Hatching** and **Concentric Hatching** are gallery recipes built
+  from editable repeated guide paths. **Customize → Drawing** exposes
+  **Interleaved hatching** and **Hatch stroke width** on eligible repeated guide
+  paths. Width defaults to one full spacing between adjacent lines. Eight
+  ink-density steps plus paper control which strokes appear and how far they
+  extend across the artwork. Finer widths leave gaps and limit maximum coverage.
+  Feature size scales width and pitch together. Single guides, parametric paths,
+  motifs, connections and mazes cannot enable this policy.
+- The [Ranked and hatching native gallery](target/validation/ranked-hatch-20261118/index.html)
+  preserves exact PNG/SVG and reopenable projects for both immutable artworks.
+  [Measured output and verification](target/validation/ranked-hatch-20261118/report.md)
+  cover calibrated tone, native alpha, independent SVG consumption and source-free
+  Document Preset round trips. Private GTK action/readback sequences verify
+  [Ranked selection](target/validation/ranked-hatch-20261118/ui/final-ranked-sequence1.json),
+  [hatch switch and width](target/validation/ranked-hatch-20261118/ui/final-parallel-controls-sequence.json),
+  [Apply and Undo](target/validation/ranked-hatch-20261118/ui/final-parallel-apply-sequence.json)
+  and [cold reopen](target/validation/ranked-hatch-20261118/ui/final-rings-cold-reopen-sequence.json).
+  The switch and conditional width entry retain native GTK roles/state/value,
+  visible-label relations and keyboard access under domain descriptor authority.
+  Point placement controls are omitted for active hatching.
+- On 2026-11-19 the user accepted the fine Concentric Hatching rendering repair,
+  full corner coverage and editable SVG curves. At Feature size 0.25 the saved
+  CMYK project now renders in Accurate Fit and exports all four channels.
+  [Final export comparison](target/validation/concentric-corners-svg-20261119/native/report.md) ·
+  [Fit and Inkscape checks](target/validation/concentric-corners-svg-20261119/ui/report.md).
+- Remaining review: inspect both the Ranked/hatching gallery above and the
+  [earlier integrated native artwork comparison](target/validation/ton010-product-20261118/index.html).
+  Curved ribbon overlap can leave Size/Blend lighter than target; clustered
+  islands have greater local tone variation. Calibration does not guarantee
+  exact coverage for every artwork, shape, scale or seed. Keep the fine Poisson
+  Review limitation separately tracked under TON-003.
+- Historical baseline: the original selection contained only Random, Poisson
+  disk, Jittered cells and Clustered. Clustered could compete with the artwork;
+  a few weighted Lloyd steps did not turn its groups into faithful stippling.
+  The [first candidate study](target/validation/ton010-pilot-20261118/report.md)
+  found Poisson Variable closest in local tone across three seeds, while other
+  arrangements and same-site library shapes offered distinct textures. The
+  [expanded study](target/validation/ton010-dispersion-20261118/report.md)
+  used the superseded tiled ribbon pilot and recorded the now-fixed SVG failures;
+  use the current product comparison for review.
+- Research rationale: [LBG stippling](https://github.com/MarcSpicker/LindeBuzoGrayStippling/blob/master/src/lbgstippling.cpp)
+  couples mark area and population. Earlier candidates included variable-density
+  Poisson, [weighted Voronoi stippling](https://www.cs.ubc.ca/labs/imager/tr/2002/secord2002b/)
+  and [weighted sample elimination](https://www.cemyuksel.com/research/sampleelimination/).
+  These references do not imply additional shipped algorithms.
 
 ## TON-004 — A second launch does not forward a file to the running app
 

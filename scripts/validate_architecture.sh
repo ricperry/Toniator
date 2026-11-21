@@ -10,7 +10,7 @@ fail() {
     exit 1
 }
 
-rg -q '^exclude = \["ToniatorLegacy"\]$' Cargo.toml || fail 'workspace must exclude ToniatorLegacy'
+rg -q '^exclude = \["ToniatorLegacy", "shared/creatiator"\]$' Cargo.toml || fail 'workspace must exclude ToniatorLegacy and the standalone shared crate'
 
 metadata="$(cargo metadata --format-version 1 --no-deps)"
 member_count="$(jq -r '.workspace_members | length' <<<"$metadata")"
@@ -27,6 +27,10 @@ actual_members="$(jq -r --arg root "$repo_root" '
 while IFS=$'\t' read -r package dependency; do
     [[ -z "$package" ]] && continue
     case "$package:$dependency" in
+        toniator-app:creatiator | \
+        toniator-domain:creatiator | \
+        toniator-sampling:creatiator | \
+        toniator-render:creatiator | \
         toniator-geometry:toniator-domain | \
         toniator-sampling:toniator-domain | \
         toniator-sampling:toniator-geometry | \
@@ -64,6 +68,15 @@ done < <(jq -r --arg root "$repo_root" '
     | select(.path != null)
     | "\($package)\t\(.name)"
 ' <<<"$metadata")
+
+# The vendored library stays headless unless the application explicitly enables GTK.
+jq -e --arg path "$repo_root/shared/creatiator" '
+    [.packages[] | .name as $package | .dependencies[]?
+     | select(.name == "creatiator")
+     | (.path == $path and .uses_default_features == false
+        and .features == (if $package == "toniator-app" then ["gtk"] else [] end))]
+    | length == 4 and all
+' <<<"$metadata" >/dev/null || fail 'creatiator must use its local path and enable GTK only in toniator-app'
 
 if rg -n -i --glob '*.rs' --glob 'Cargo.toml' --glob '!crates/toniator-app/**' \
     '(^|[^[:alnum:]_])(gtk4?|libadwaita|adw)([^[:alnum:]_]|$)' crates; then

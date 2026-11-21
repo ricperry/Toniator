@@ -7,8 +7,98 @@
 use crate::core::{
     fill_rule::FillRule, overlay::Overlay, overlay_rule::OverlayRule, solver::Precision,
 };
+use alloc::vec::Vec;
 use i_float::int::{number::int::IntNumber, point::IntPoint};
 use i_shape::int::shape::IntShapes;
+
+/// One bounded group of exact split triangles; its box encloses every triangle vertex.
+/// Group boxes may overlap, but each triangle contributes its absolute area exactly once.
+#[derive(Clone, Debug, Default)]
+pub struct CheckedSplitRegion {
+    pub bounds: [i64; 4],
+    pub doubled_area: u128,
+}
+
+/// Fixed-size optional proof storage, independent of the number of input edges or intersections.
+struct SpatialCertificate {
+    bounds: [i64; 4],
+    regions: Vec<CheckedSplitRegion>,
+    single: Option<(usize, CheckedSplitRegion)>,
+    disabled: bool,
+}
+
+impl SpatialCertificate {
+    /// Initializes allocation-free proof storage; invalid bounds decline the optional proof.
+    fn new(bounds: [i64; 4]) -> Option<Self> {
+        if bounds[0] >= bounds[2] || bounds[1] >= bounds[3] {
+            return None;
+        }
+        Some(Self {
+            bounds,
+            regions: Vec::new(),
+            single: None,
+            disabled: false,
+        })
+    }
+
+    /// Clears discarded-attempt support and area without resetting request work.
+    fn clear(&mut self) {
+        self.regions.fill(CheckedSplitRegion::default());
+        self.single = None;
+    }
+
+    /// Assigns a full triangle to one bucket and retains its complete support, including long edges.
+    /// The global checked sum already proves that every bucket addition fits in u128.
+    /// One occupied bucket stays inline; a second lazily allocates at most 1024 slots. Refusal
+    /// disables all spatial proof, preserving the original global scalar charge.
+    /// # Panics
+    /// The promotion invariant requires the previously occupied inline bucket to exist.
+    fn record(&mut self, a: IntPoint<i64>, p: IntPoint<i64>, b: IntPoint<i64>, area: u128) {
+        if area == 0 || self.disabled {
+            return;
+        }
+        let bounds = [
+            a.x.min(p.x).min(b.x),
+            a.y.min(p.y).min(b.y),
+            a.x.max(p.x).max(b.x),
+            a.y.max(p.y).max(b.y),
+        ];
+        let cell = |axis: usize| {
+            let lo = i128::from(self.bounds[axis]);
+            let extent = i128::from(self.bounds[axis + 2]) - lo;
+            let midpoint = (i128::from(bounds[axis]) + i128::from(bounds[axis + 2])) / 2;
+            ((midpoint - lo) * 32 / extent).clamp(0, 31) as usize
+        };
+        let index = cell(0) + 32 * cell(1);
+        if self.regions.is_empty() && self.single.as_ref().is_some_and(|(old, _)| *old != index) {
+            if self.regions.try_reserve_exact(1024).is_err() {
+                self.disabled = true;
+                self.single = None;
+                return;
+            }
+            self.regions.resize(1024, CheckedSplitRegion::default());
+            let (old, region) = self.single.take().unwrap();
+            self.regions[old] = region;
+        }
+        let region = if self.regions.is_empty() {
+            &mut self
+                .single
+                .get_or_insert_with(|| (index, CheckedSplitRegion::default()))
+                .1
+        } else {
+            &mut self.regions[index]
+        };
+        if region.doubled_area == 0 {
+            region.bounds = bounds;
+        } else {
+            for axis in 0..2 {
+                region.bounds[axis] = region.bounds[axis].min(bounds[axis]);
+                region.bounds[axis + 2] = region.bounds[axis + 2].max(bounds[axis + 2]);
+            }
+        }
+        region.doubled_area += area;
+    }
+}
 
 /// Stable failures from the opt-in checked Boolean route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +136,7 @@ pub struct CheckedOverlayControl<'a> {
     attempts: usize,
     total_rounds: usize,
     poll_at: usize,
+    spatial: Option<SpatialCertificate>,
 }
 
 impl<'a> CheckedOverlayControl<'a> {
@@ -62,7 +153,31 @@ impl<'a> CheckedOverlayControl<'a> {
             attempts: 0,
             total_rounds: 0,
             poll_at: 0,
+            spatial: None,
         }
+    }
+
+    /// Requests bounded triangle-support metadata without changing geometry, work or scalar certification.
+    /// Invalid bounds or allocation refusal leave the original full scalar certificate authoritative.
+    pub fn with_spatial_certificate(mut self, bounds: [i64; 4]) -> Self {
+        self.spatial = SpatialCertificate::new(bounds);
+        self
+    }
+
+    /// Takes accepted-attempt support; missing storage requires the caller to charge the full certificate.
+    /// Only nonempty buckets remain, and retained capacity never exceeds 1024 buckets.
+    pub fn take_spatial_certificate(&mut self) -> Option<Vec<CheckedSplitRegion>> {
+        let mut spatial = self.spatial.take()?;
+        if spatial.disabled {
+            return None;
+        }
+        if let Some((_, region)) = spatial.single {
+            spatial.regions.try_reserve_exact(1).ok()?;
+            spatial.regions.push(region);
+        } else {
+            spatial.regions.retain(|region| region.doubled_area != 0);
+        }
+        Some(spatial.regions)
     }
 
     /// Reduces the fixed per-attempt round ceiling for stricter callers and focused failure tests.
@@ -119,11 +234,15 @@ impl<'a> CheckedOverlayControl<'a> {
         self.attempts += 1;
         self.rounds = 0;
         self.doubled_area = 0;
+        if let Some(spatial) = &mut self.spatial {
+            spatial.clear();
+        }
         self.error = None;
         self.poll_at = self.operations();
     }
 
     /// Accumulates the exact absolute triangle for one directed current-remainder split.
+    /// Optional bounded support metadata receives the same full triangle only after checked summation.
     ///
     /// # Errors
     /// Stores certificate overflow or work/cancellation failure without publishing geometry.
@@ -145,6 +264,9 @@ impl<'a> CheckedOverlayControl<'a> {
             .and_then(|value| u128::try_from(value).ok());
         if let Some(total) = area.and_then(|value| self.doubled_area.checked_add(value)) {
             self.doubled_area = total;
+            if let Some(spatial) = &mut self.spatial {
+                spatial.record(a, p, b, area.unwrap());
+            }
             true
         } else {
             self.fail(CheckedOverlayError::CertificateOverflow)
@@ -215,6 +337,71 @@ impl SplitControl<i64> for CheckedOverlayControl<'_> {
 }
 
 impl Overlay<i64> {
+    /// Lifts original integer segments exactly by two binary fraction bits before checked splitting.
+    /// Positive scaling preserves the common origin, winding, ordering and source geometry.
+    /// Lifted input and accepted output coordinates remain exactly representable as f64 integers; nonzero area filters
+    /// and unavailable fallible storage decline this optional refinement without changing input.
+    /// All scans and solver retries consume the supplied cumulative work/cancellation control.
+    /// # Errors
+    /// Returns checked cancellation, work, convergence or certificate-overflow failures.
+    pub(crate) fn overlay_checked_refined(
+        &self,
+        overlay_rule: OverlayRule,
+        fill_rule: FillRule,
+        control: &mut CheckedOverlayControl<'_>,
+    ) -> Result<Option<CheckedOverlayResult>, CheckedOverlayError> {
+        const FACTOR: i64 = 4;
+        const MAXIMUM_COORDINATE: i64 = 1_i64 << 53;
+        if self.options.min_output_area != 0 {
+            return Ok(None);
+        }
+        let mut refined = Overlay::new_custom(0, self.options, self.solver);
+        if refined
+            .segments
+            .try_reserve_exact(self.segments.len())
+            .is_err()
+        {
+            return Ok(None);
+        }
+        for source in &self.segments {
+            if !control.charge_work(1) {
+                return Err(control.error.unwrap_or(CheckedOverlayError::WorkLimit));
+            }
+            let mut segment = *source;
+            for point in [&mut segment.x_segment.a, &mut segment.x_segment.b] {
+                for coordinate in [&mut point.x, &mut point.y] {
+                    let Some(lifted) = coordinate.checked_mul(FACTOR) else {
+                        return Ok(None);
+                    };
+                    if !(-MAXIMUM_COORDINATE..=MAXIMUM_COORDINATE).contains(&lifted)
+                        || lifted / FACTOR != *coordinate
+                    {
+                        return Ok(None);
+                    }
+                    *coordinate = lifted;
+                }
+            }
+            refined.segments.push(segment);
+        }
+        let result = refined.overlay_checked(overlay_rule, fill_rule, control)?;
+        for point in result
+            .shapes
+            .iter()
+            .flat_map(|shape| shape.iter())
+            .flat_map(|contour| contour.iter())
+        {
+            if !control.charge_work(1) {
+                return Err(control.error.unwrap_or(CheckedOverlayError::WorkLimit));
+            }
+            if !(-MAXIMUM_COORDINATE..=MAXIMUM_COORDINATE).contains(&point.x)
+                || !(-MAXIMUM_COORDINATE..=MAXIMUM_COORDINATE).contains(&point.y)
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some(result))
+    }
+
     /// Runs original split algorithms at fixed radii 1, 2, then 4, with bounded retries.
     ///
     /// Each attempt starts from the original integer segments. Failed-attempt geometry and
@@ -284,6 +471,165 @@ impl Overlay<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+
+    /// Keeps zero/single-bucket paths allocation-free and retains complete support through promotion.
+    /// # Panics
+    /// Panics if grouping loses any vertex, exact area, retry reset, or conservative refusal fallback.
+    #[test]
+    fn spatial_support_is_bounded_lazy_and_attempt_local() {
+        let mut control = CheckedOverlayControl::new(1000, &|| false)
+            .with_spatial_certificate([-100, -100, 100, 100]);
+        assert!(control.spatial.as_ref().unwrap().regions.is_empty());
+        assert!(control.triangle(
+            IntPoint::new(-90, -90),
+            IntPoint::new(90, -90),
+            IntPoint::new(90, -89)
+        ));
+        assert!(control.spatial.as_ref().unwrap().regions.is_empty());
+        let single = control.spatial.as_ref().unwrap().single.as_ref().unwrap();
+        assert_eq!(single.1.bounds, [-90, -90, 90, -89]);
+        assert_eq!(single.1.doubled_area, 180);
+        assert!(control.triangle(
+            IntPoint::new(70, 70),
+            IntPoint::new(90, 70),
+            IntPoint::new(90, 71)
+        ));
+        assert_eq!(control.spatial.as_ref().unwrap().regions.len(), 1024);
+        let used = control.operations();
+        control.begin_attempt();
+        assert_eq!(control.operations(), used);
+        assert_eq!(control.doubled_area, 0);
+        assert!(
+            control
+                .spatial
+                .as_ref()
+                .unwrap()
+                .regions
+                .iter()
+                .all(|r| r.doubled_area == 0)
+        );
+        assert!(control.triangle(
+            IntPoint::new(0, 0),
+            IntPoint::new(1, 0),
+            IntPoint::new(1, 1)
+        ));
+        assert_eq!(
+            control
+                .take_spatial_certificate()
+                .unwrap()
+                .iter()
+                .map(|r| r.doubled_area)
+                .sum::<u128>(),
+            1
+        );
+        let mut refused = CheckedOverlayControl::new(1000, &|| false)
+            .with_spatial_certificate([-100, -100, 100, 100]);
+        // Deterministically exercise the same no-proof state as optional allocation refusal.
+        refused.spatial.as_mut().unwrap().disabled = true;
+        assert!(refused.triangle(
+            IntPoint::new(0, 0),
+            IntPoint::new(1, 0),
+            IntPoint::new(1, 1)
+        ));
+        assert_eq!(refused.doubled_area, 1);
+        assert!(refused.take_spatial_certificate().is_none());
+        assert!(
+            CheckedOverlayControl::new(10, &|| false)
+                .with_spatial_certificate([0; 4])
+                .take_spatial_certificate()
+                .is_none()
+        );
+    }
+
+    /// Verifies exact source lifting improves a rational crossing without mutating winding inputs.
+    /// # Panics
+    /// Panics if the bounded refinement changes source endpoints or invents split area at an exact node.
+    #[test]
+    fn refined_integer_lift_preserves_input_and_improves_certificate() {
+        let bow = vec![
+            IntPoint::new(0, 0),
+            IntPoint::new(10, 7),
+            IntPoint::new(0, 7),
+            IntPoint::new(10, 0),
+        ];
+        let mut overlay = Overlay::from_subj(&bow);
+        let before = overlay.segments.clone();
+        let coarse = overlay
+            .overlay_checked(
+                OverlayRule::Subject,
+                FillRule::EvenOdd,
+                &mut CheckedOverlayControl::new(100_000, &|| false),
+            )
+            .unwrap();
+        let mut control = CheckedOverlayControl::new(100_000, &|| false);
+        let fine = overlay
+            .overlay_checked_refined(OverlayRule::Subject, FillRule::EvenOdd, &mut control)
+            .unwrap()
+            .unwrap();
+        assert!(coarse.doubled_area > fine.doubled_area);
+        assert_eq!(fine.doubled_area, 0);
+        assert!(
+            fine.shapes
+                .iter()
+                .flatten()
+                .flatten()
+                .any(|p| *p == IntPoint::new(20, 14))
+        );
+        assert_eq!(before.len(), overlay.segments.len());
+        for (a, b) in before.iter().zip(&overlay.segments) {
+            assert_eq!(a.x_segment.a, b.x_segment.a);
+            assert_eq!(a.x_segment.b, b.x_segment.b);
+        }
+        assert!(control.operations() >= before.len());
+    }
+
+    /// Keeps optional refinement within exact float-integer, source range and cumulative work bounds.
+    /// # Panics
+    /// Panics if a nonrepresentable lift publishes geometry or cancellation/work exhaustion is hidden.
+    #[test]
+    fn refined_integer_guards_and_cancellation_keep_authority() {
+        let huge = 1_i64 << 51;
+        let outside = vec![
+            IntPoint::new(huge + 1, 0),
+            IntPoint::new(huge + 5, 10),
+            IntPoint::new(huge + 1, 10),
+        ];
+        let overlay = Overlay::from_subj(&outside);
+        let mut control = CheckedOverlayControl::new(100_000, &|| false);
+        assert!(
+            overlay
+                .overlay_checked_refined(OverlayRule::Subject, FillRule::NonZero, &mut control)
+                .unwrap()
+                .is_none()
+        );
+        assert!(control.operations() > 0);
+        let small = Overlay::from_subj(&vec![
+            IntPoint::new(0, 0),
+            IntPoint::new(10, 10),
+            IntPoint::new(0, 10),
+        ]);
+        assert_eq!(
+            small
+                .overlay_checked_refined(
+                    OverlayRule::Subject,
+                    FillRule::NonZero,
+                    &mut CheckedOverlayControl::new(0, &|| false)
+                )
+                .err(),
+            Some(CheckedOverlayError::WorkLimit)
+        );
+        assert_eq!(
+            small
+                .overlay_checked_refined(
+                    OverlayRule::Subject,
+                    FillRule::NonZero,
+                    &mut CheckedOverlayControl::new(100_000, &|| true)
+                )
+                .err(),
+            Some(CheckedOverlayError::Cancelled)
+        );
+    }
 
     /// Proves multiple split triangles use current remainder endpoints and never signed cancellation.
     ///

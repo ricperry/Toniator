@@ -30,9 +30,9 @@ fn main() {
         println!("cargo:rerun-if-changed={blueprint}");
     }
     println!("cargo:rerun-if-changed=resources/toniator.css");
-    println!("cargo:rerun-if-changed=resources/creative-suite.css");
     println!("cargo:rerun-if-changed=../../assets/Stage21D_Mockup/SplashMockup.png");
     println!("cargo:rerun-if-changed=resources/toniator.gresource.xml");
+    println!("cargo:rerun-if-changed=resources/preset-icons/adaptive-shape-marks.svg");
     println!("cargo:rerun-if-changed=../../assets/appicon.png");
     println!("cargo:rerun-if-changed=resources/toniator.rc");
     println!("cargo:rerun-if-changed=../../assets/appicon.ico");

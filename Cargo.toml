@@ -11,7 +11,7 @@ members = [
     "crates/toniator-app",
     "crates/toniator-windows-fs",
 ]
-exclude = ["ToniatorLegacy"]
+exclude = ["ToniatorLegacy", "shared/creatiator"]
 resolver = "3"
 
 [workspace.package]
@@ -24,6 +24,7 @@ license = "GPL-3.0-only"
 opt-level = 2
 
 [workspace.dependencies]
+creatiator = { path = "shared/creatiator", default-features = false }
 robust = "=1.2.0"
 clap = { version = "4.5.54", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }

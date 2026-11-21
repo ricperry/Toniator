@@ -125,11 +125,12 @@ Follow [release instructions](../docs/RELEASING.md) to publish.
 
 ## Application icon
 
-`assets/icon-final.svg` is the approved editable source. Packages copy
-`assets/appicon.svg` unchanged and include `assets/appicon.png` at 512×512.
-The AppImage also uses the PNG as its root thumbnail. After an icon edit:
+`assets/appicon.svg` is the Creatiator Suite launcher icon. Packages copy
+it unchanged and include `assets/appicon.png` at 512×512. The AppImage also uses
+the PNG as its root thumbnail; Windows embeds `assets/appicon.ico`, including
+16, 24, 32, 48, 64, 128 and 256 pixel variants. The original
+`assets/icon-final.svg` remains available as earlier artwork.
 
-```sh
-cp assets/icon-final.svg assets/appicon.svg
-inkscape assets/icon-final.svg --export-type=png --export-width=512 --export-height=512 --export-filename=assets/appicon.png
-```
+After editing the family SVG, render it at 512×512 to `assets/appicon.png` and
+regenerate the ICO sizes from that PNG. The suite's icon source is coordinated
+with the sister applications; do not replace it with the earlier icon.

@@ -309,20 +309,27 @@ fn clip(
             for pair in cuts.windows(2) {
                 let (a, b) = (pair[0].0, pair[1].0);
                 let mid = a + (b - a) * 0.5;
-                if !(a < mid && mid < b) {
+                if a == b && pair[0].1 == pair[1].1 { continue; }
+                let piece = segment.section(a, b, [pair[0].1, pair[1].1]);
+                let arc_midpoint = if let Segment::Arc { radius, ends, .. } = piece {
+                    let x = ends[0].x + ends[1].x;
+                    let y = ends[0].y + ends[1].y;
+                    let norm = x.hypot(y);
+                    (norm > 0.0).then(|| Point2::new(radius*x/norm, radius*y/norm))
+                } else { None };
+                if !(a < mid && mid < b) && arc_midpoint.is_none() {
                     return Err(error(
                         "svg.precision.clip",
                         "SVG clipping interval cannot be resolved",
                     ));
                 }
-                let d = plane.distance(segment.point(mid));
+                let d = plane.distance(arc_midpoint.unwrap_or_else(|| segment.point(mid)));
                 if !d.is_finite() {
                     return Err(error(
                         "svg.precision.clip",
                         "SVG clipping evaluation is not finite",
                     ));
                 }
-                let piece = segment.section(a, b, [pair[0].1, pair[1].1]);
                 let inside = if d == 0.0 {
                     let bounds = piece.bounds();
                     let lo = bounds[plane.axis];
@@ -406,6 +413,7 @@ fn crossings(
     work: &mut SvgJoin<'_>,
 ) -> Result<Vec<(f64, Point2)>, RenderError> {
     let mut roots = Vec::new();
+    let mut exact_arc_cuts = Vec::new();
     match segment {
         Segment::Line(p) => {
             let (a, b) = (plane.distance(p[0]), plane.distance(p[1]));
@@ -466,12 +474,16 @@ fn crossings(
                     } else {
                         (sign * other, q)
                     };
-                    let mut a = y.atan2(x);
-                    if a < 0.0 {
-                        a += std::f64::consts::TAU;
-                    }
-                    if a > angles[0] && a < angles[1] {
-                        roots.push((a - angles[0]) / (angles[1] - angles[0]));
+                    let start = segment.ends()[0];
+                    // Relative cross/dot avoids adding TAU to a tiny negative angle.
+                    // Exact intersection coordinates survive even when an angular parameter
+                    // rounds onto its quadrant endpoint; SVG retains the supporting radius.
+                    let angle = (start.x * y - start.y * x).atan2(start.x * x + start.y * y);
+                    let span = angles[1] - angles[0];
+                    if angle >= 0.0 && angle <= span {
+                        let t = (angle / span).clamp(0.0, 1.0);
+                        let point = plane.snap(Point2::new(radius * x, radius * y));
+                        exact_arc_cuts.push((t, point));
                     }
                 }
             }
@@ -484,7 +496,13 @@ fn crossings(
         work.edges(1)?;
         result.push((t, plane.snap(segment.point(t))));
     }
+    for cut in exact_arc_cuts {
+        work.edges(1)?;
+        result.push(cut);
+    }
     result.push((1.0, segment.ends()[1]));
+    result.sort_by(|a, b| a.0.total_cmp(&b.0));
+    result.dedup();
     Ok(result)
 }
 
@@ -731,6 +749,36 @@ mod tests {
     }
 
     /// Proves boundary root work honors explicit limits and cancellation without partial data.
+    /// Preserves exact near-cardinal circle intersections when absolute angles round to endpoints.
+    /// # Panics
+    /// Panics if the reproduced tiny positive or negative centers fail strict clipping.
+    #[test]
+    fn tangent_near_cardinal_circles_close_without_tolerance() {
+        let canvas = CanvasSpec {
+            width: 896.0,
+            height: 256.0,
+        };
+        for (x, y, r) in [
+            (128.0, 1.959434878635765e-15, 5.8),
+            (344.0, 4.898587196589413e-16, 2.8148660952461824),
+            (712.0, 1.4695761589768238e-15, 4.941305562824543),
+        ] {
+            for center in [
+                Point2::new(x, y),
+                Point2::new(x, -y),
+                Point2::new(y, 128.0),
+                Point2::new(-y, 128.0),
+            ] {
+                let mut work = SvgJoin::new(&canvas, usize::MAX, &|| false).unwrap();
+                let mut data = String::new();
+                circle(&mut data, center, r, [0.0, 0.0, 896.0, 256.0], &mut work).unwrap();
+                assert!(!data.is_empty());
+                assert!(data.contains('A') || data.contains('a'));
+            }
+        }
+    }
+
+    /// Checks boundary-root work accounting and cancellation without emitting partial SVG.
     /// # Panics
     /// Panics if a bounded/cancelled clip returns SVG bytes or the wrong diagnostic.
     #[test]

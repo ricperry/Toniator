@@ -20,6 +20,7 @@ struct Entry {
 /// Projects a stored variant's typed choice without retaining descriptor allocation identities.
 fn kind(character: &RandomSiteCharacter) -> RandomCharacterKind {
     match character {
+        RandomSiteCharacter::Dispersion { layout } => layout.character_kind(),
         RandomSiteCharacter::RawUniform => RandomCharacterKind::RawUniform,
         RandomSiteCharacter::Even { .. } => RandomCharacterKind::Even,
         RandomSiteCharacter::Clustered { .. } => RandomCharacterKind::Clustered,

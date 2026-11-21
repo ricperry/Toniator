@@ -800,6 +800,72 @@ mod tests {
 }
 
 impl<P: FloatPointCompatible> FloatOverlay<P, i64> {
+    /// Refines the original quantized input by exactly4 while retaining its common floating origin.
+    /// The checked conservative adapter validates the finer range before any solver input changes.
+    /// Its directed/inverse scales must retain the exact power-of-two relation; unavailable ranges
+    /// or storage decline the optional attempt. Ordinary checked overlays remain unchanged.
+    /// # Errors
+    /// Returns checked cleanup, cancellation, work, convergence or certificate failures.
+    pub fn overlay_checked_refined(
+        &self,
+        overlay_rule: OverlayRule,
+        fill_rule: FillRule,
+        control: &mut crate::core::checked::CheckedOverlayControl<'_>,
+    ) -> Result<Option<(Shapes<P>, u128)>, crate::core::checked::CheckedOverlayError>
+    where
+        P: FloatPointCompatible<Scalar = f64>,
+    {
+        if self.clean_result {
+            return Err(crate::core::checked::CheckedOverlayError::UncertifiedCleanup);
+        }
+        let factor = P::Scalar::from_float(4.0);
+        let Ok(adapter) = FloatPointAdapter::<P, i64>::try_with_scale_conservative(
+            *self.adapter.rect(),
+            self.adapter.dir_scale() * factor,
+        ) else {
+            return Ok(None);
+        };
+        let original_offset = self.adapter.offset();
+        let refined_offset = adapter.offset();
+        if original_offset.x() != refined_offset.x()
+            || original_offset.y() != refined_offset.y()
+            || adapter.inv_scale() * factor != self.adapter.inv_scale()
+        {
+            return Ok(None);
+        }
+        let Some(result) =
+            self.overlay
+                .overlay_checked_refined(overlay_rule, fill_rule, control)?
+        else {
+            return Ok(None);
+        };
+        // The exact lift can enclose an original snapped endpoint just outside the finer
+        // adapter's original float box. Read back on the validated common affine frame without
+        // applying that unrelated input-box assertion to already-checked integer output.
+        let inverse = adapter.inv_scale();
+        let shapes = result
+            .shapes
+            .iter()
+            .map(|shape| {
+                shape
+                    .iter()
+                    .map(|contour| {
+                        contour
+                            .iter()
+                            .map(|point| {
+                                P::from_xy(
+                                    P::Scalar::from_int(point.x) * inverse + refined_offset.x(),
+                                    P::Scalar::from_int(point.y) * inverse + refined_offset.y(),
+                                )
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
+        Ok(Some((shapes, result.doubled_area)))
+    }
+
     /// Executes bounded checked i64 splitting and converts the accepted integer result.
     /// The certificate is relative to integer input; float conversion and extraction remain
     /// synchronous upstream phases. Cleanup is rejected because it is not certified here.
@@ -820,5 +886,58 @@ impl<P: FloatPointCompatible> FloatOverlay<P, i64> {
             .overlay_checked(overlay_rule, fill_rule, control)?;
         let shapes = result.shapes.to_float(&self.adapter);
         Ok((shapes, result.doubled_area))
+    }
+}
+
+#[cfg(test)]
+mod checked_refinement_tests {
+    use super::*;
+    use crate::core::checked::CheckedOverlayControl;
+    use alloc::{vec, vec::Vec};
+    /// Proves the power-of-two lift preserves endpoint readback bits above the former64-lift mantissa bound.
+    /// Exact integer casts, unchanged origin and reciprocal binary scaling retain the original affine map.
+    /// # Panics
+    /// Panics if valid factor4 coordinates or original endpoints change through the optional route.
+    #[test]
+    fn refined_float_endpoint_readback_keeps_common_origin_and_bits() {
+        let rect = FloatRect::new(100.0, 3100.0, -1000.0, 1000.0).unwrap();
+        let adapter =
+            FloatPointAdapter::<[f64; 2], i64>::try_with_scale_conservative(rect, 1e12).unwrap();
+        let points = vec![[100.0, -1.0], [3100.0, -1.0], [3100.0, 1.0], [100.0, 1.0]];
+        let mut options = OverlayOptions::default();
+        options.clean_result = false;
+        let mut overlay = FloatOverlay::new_custom(adapter.clone(), options, Solver::AUTO, 4)
+            .unsafe_add_contour(&points, ShapeType::Subject);
+        let coarse = overlay
+            .overlay_checked(
+                OverlayRule::Subject,
+                FillRule::NonZero,
+                &mut CheckedOverlayControl::new(100_000, &|| false),
+            )
+            .unwrap()
+            .0;
+        let fine = overlay
+            .overlay_checked_refined(
+                OverlayRule::Subject,
+                FillRule::NonZero,
+                &mut CheckedOverlayControl::new(100_000, &|| false),
+            )
+            .unwrap()
+            .unwrap()
+            .0;
+        let bits = |shapes: &Shapes<[f64; 2]>| {
+            let mut points = shapes
+                .iter()
+                .flatten()
+                .flatten()
+                .map(|p| [p[0].to_bits(), p[1].to_bits()])
+                .collect::<Vec<_>>();
+            points.sort();
+            points
+        };
+        assert_eq!(bits(&coarse), bits(&fine));
+        let integer = adapter.float_to_int(&points[0]);
+        assert!(integer.x.unsigned_abs() * 64 > (1_u64 << 53));
+        assert!(integer.x.unsigned_abs() * 4 <= (1_u64 << 53));
     }
 }

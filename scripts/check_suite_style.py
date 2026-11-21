@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Check vendored Creative Suite stylesheet parity without changing any files.
+"""Check fixed CreatiatorSuite stylesheet locations without changing any files.
 
-The Toniator copy is canonical. Missing sibling checkouts are explicit skips;
-present mismatches fail. No sibling is required to build or run an application.
+The suite crate is canonical when present. Missing sibling checkouts are explicit
+skips; present mismatches fail. Each application builds from its own crate copy.
 """
 from hashlib import sha256
 from pathlib import Path
@@ -16,26 +16,36 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="Check only (also the default)")
     parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    canonical = root / "crates/toniator-app/resources/creative-suite.css"
+    relative = Path("shared/creatiator/resources/creative-suite.css")
+    local = root / relative
+    suite = root.parent / "CreatiatorSuite"
+    canonical = suite / "creatiator/resources/creative-suite.css" if suite.is_dir() else local
+    if not canonical.is_file():
+        print(f"FAIL {canonical}: canonical stylesheet missing")
+        return 1
+    if not suite.is_dir():
+        print("SKIP CreatiatorSuite: sibling checkout absent; using local baseline")
     expected = canonical.read_bytes()
     print(f"Creative Suite revision 1 SHA-256 {sha256(expected).hexdigest()}")
     failed = False
-    for name in ("Chromiator", "Bezziator"):
-        sibling = root.parent / name
+    locations = (
+        ("Toniator", root),
+        ("Chromiator", root.parent / "Chromiator"),
+        ("Bezziator", root.parent / "Bezziator"),
+    )
+    for name, sibling in locations:
         if not sibling.is_dir():
             print(f"SKIP {name}: sibling checkout absent")
             continue
-        copies = list(sibling.glob("**/creative-suite.css"))
-        # Build outputs are derived; compare only the checked-in source locations.
-        copies = [path for path in copies if not any(part in {"target", ".git", "dist"} for part in path.relative_to(sibling).parts)]
-        if len(copies) != 1:
-            print(f"FAIL {name}: expected one source stylesheet, found {len(copies)}")
+        copy = sibling / relative
+        if not copy.is_file():
+            print(f"FAIL {copy}: source stylesheet missing")
             failed = True
-        elif copies[0].read_bytes() != expected:
-            print(f"FAIL {copies[0]}: stylesheet differs")
+        elif copy.read_bytes() != expected:
+            print(f"FAIL {copy}: stylesheet differs")
             failed = True
         else:
-            print(f"OK {copies[0]}")
+            print(f"OK {copy}")
     return int(failed)
 
 

@@ -179,7 +179,8 @@ impl<'a> SvgJoin<'a> {
 
     /// Emits one NonZero path for a maximal eligible opaque output run.
     ///
-    /// The path retains exact circles and canonical certified positive regions.
+    /// The path retains exact circles, canonical certified positive regions and geometry-certified
+    /// nonnegative curved stroke compounds, including their true opposite-winding holes.
     /// Unsafe fill topology is flattened and normalized per primitive on a
     /// checked 1e12 canvas-relative grid before entering the compound path.
     ///
@@ -221,6 +222,14 @@ CanonicalMark::DeferredPath(_) => {},
                     GeometryOutputPart::CanonicalStrokes(strokes) => {
                         for stroke in strokes {
                             self.check()?;
+                            if stroke.outline.has_nonnegative_winding_certificate() {
+                                // Exact private geometry preparation certifies the complete compound,
+                                // including opposite-winding holes and potentially overlapping round caps.
+                                for contour in &stroke.outline.contours {
+                                    self.curve_data(&mut data, &contour.segments, false)?;
+                                }
+                                continue;
+                            }
                             if let [contour] = stroke.outline.contours.as_slice() {
                                 self.path(&mut data, &contour.segments, stroke.outline.fill_rule)?;
                                 continue;
@@ -715,6 +724,12 @@ fn certified_simple_winding(
     segments: &[CurveSegment],
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Option<bool>, RenderError> {
+    if segments.len() == 2 {
+        if cancelled() {
+            return Err(err("svg.cancelled", "SVG serialization was cancelled"));
+        }
+        return Ok(certified_cubic_chord_winding(segments));
+    }
     if segments.len() < 3 || segments.len() > 1024 {
         return Ok(None);
     }
@@ -840,6 +855,59 @@ fn certified_simple_winding(
         }
     }
     Ok(Some(area < 0.0))
+}
+
+/// Certifies one injective cubic closed by its chord without flattening its positive fill.
+/// Both interior controls lie strictly on the same side of the chord, so Bernstein positivity
+/// keeps every interior curve point off the closing line. Strictly ordered chord projections
+/// make the cubic injective. Together these prove a simple contour and its winding regardless
+/// of segment order, translation or rotation. Bounded predicates fail closed near degeneracy.
+fn certified_cubic_chord_winding(segments: &[CurveSegment]) -> Option<bool> {
+    let cubic = match segments {
+        [CurveSegment::CubicBezier(cubic), CurveSegment::Line(_)]
+        | [CurveSegment::Line(_), CurveSegment::CubicBezier(cubic)] => cubic,
+        _ => return None,
+    };
+    let origin = cubic.start();
+    let end = cubic.end();
+    let chord = Point2::new(end.x - origin.x, end.y - origin.y);
+    let normal = Point2::new(-chord.y, chord.x);
+    let (side_1, error_1) = bounded_projection(cubic.control_1(), origin, normal);
+    let (side_2, error_2) = bounded_projection(cubic.control_2(), origin, normal);
+    if !((side_1 > error_1 && side_2 > error_2) || (side_1 < -error_1 && side_2 < -error_2)) {
+        return None;
+    }
+    let (first, first_error) = bounded_projection(cubic.control_1(), origin, chord);
+    let (second, second_error) = bounded_projection(cubic.control_2(), origin, chord);
+    let (last, last_error) = bounded_projection(end, origin, chord);
+    if first <= first_error
+        || second - first <= second_error + first_error
+        || last - second <= last_error + second_error
+    {
+        return None;
+    }
+    let orientation = |point: Point2| {
+        robust::orient2d(
+            robust::Coord {
+                x: origin.x,
+                y: origin.y,
+            },
+            robust::Coord { x: end.x, y: end.y },
+            robust::Coord {
+                x: point.x,
+                y: point.y,
+            },
+        )
+    };
+    let exact_1 = orientation(cubic.control_1());
+    let exact_2 = orientation(cubic.control_2());
+    if !exact_1.is_finite()
+        || !exact_2.is_finite()
+        || !((exact_1 > 0.0 && exact_2 > 0.0) || (exact_1 < 0.0 && exact_2 < 0.0))
+    {
+        return None;
+    }
+    Some(exact_1 > 0.0)
 }
 
 /// Proves disjoint control hulls along a polygon-edge normal with rounding bounds.
@@ -1272,6 +1340,64 @@ fn err(path: &'static str, message: &'static str) -> RenderError {
 mod tests {
     use super::*;
     use toniator_geometry::{CubicBezierSegment, CurvePath, PathClosure};
+
+    /// Proves the two-edge certificate accepts both windings and rejects inflection and backtracking.
+    /// # Panics
+    /// Panics if a noninjective or chord-crossing cubic bypasses primitive-local fill normalization.
+    #[test]
+    fn cubic_chord_certificate_rejects_uncertain_topology() {
+        let pair = |a: Point2, b: Point2| {
+            vec![
+                CurveSegment::CubicBezier(
+                    CubicBezierSegment::new(Point2::new(0.0, 0.0), a, b, Point2::new(1.0, 1.0))
+                        .unwrap(),
+                ),
+                CurveSegment::Line(
+                    toniator_geometry::LineSegment::new(Point2::new(1.0, 1.0), Point2::new(0.0, 0.0))
+                        .unwrap(),
+                ),
+            ]
+        };
+        let safe = pair(
+            Point2::new(0.5522847498307936, 0.0),
+            Point2::new(1.0, 0.4477152501692064),
+        );
+        assert_eq!(certified_cubic_chord_winding(&safe), Some(false));
+        let reversed = vec![
+            CurveSegment::Line(
+                toniator_geometry::LineSegment::new(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0))
+                    .unwrap(),
+            ),
+            CurveSegment::CubicBezier(
+                CubicBezierSegment::new(
+                    Point2::new(1.0, 1.0),
+                    Point2::new(1.0, 0.4477152501692064),
+                    Point2::new(0.5522847498307936, 0.0),
+                    Point2::new(0.0, 0.0),
+                )
+                .unwrap(),
+            ),
+        ];
+        assert_eq!(certified_cubic_chord_winding(&reversed), Some(true));
+        assert_eq!(
+            certified_cubic_chord_winding(&pair(Point2::new(0.2, 0.8), Point2::new(0.8, 0.2))),
+            None
+        );
+        assert_eq!(
+            certified_cubic_chord_winding(&pair(Point2::new(0.9, 0.2), Point2::new(0.3, 0.1))),
+            None
+        );
+        let looping = vec![
+            CurveSegment::CubicBezier(CubicBezierSegment::new(
+                Point2::new(0.0, 0.0), Point2::new(3.0, 1.0),
+                Point2::new(-2.0, 1.0), Point2::new(1.0, 0.0),
+            ).unwrap()),
+            CurveSegment::Line(toniator_geometry::LineSegment::new(
+                Point2::new(1.0, 0.0), Point2::new(0.0, 0.0),
+            ).unwrap()),
+        ];
+        assert_eq!(certified_cubic_chord_winding(&looping), None);
+    }
 
     /// Checks the geometric error budget independently on bowed, inflected, cusp, loop and tiny cubics.
     /// Cubic-to-quadratic third-difference bounds certify each lazy interval; dense Hausdorff samples

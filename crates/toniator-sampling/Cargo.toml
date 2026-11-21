@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+creatiator.workspace = true
 image.workspace = true
 jxl-oxide = { version = "=0.12.6", features = ["moxcms"] }
 rayon.workspace = true

@@ -3,7 +3,7 @@
 use super::*;
 use crate::GeometryOutputPart;
 use i_overlay::{
-    core::checked::{CheckedOverlayControl, CheckedOverlayError},
+    core::checked::{CheckedOverlayControl, CheckedOverlayError, CheckedSplitRegion},
     core::{
         fill_rule::FillRule,
         overlay::ShapeType,
@@ -44,9 +44,10 @@ struct AreaOmissionBudget(
 );
 
 /// Identifies only a finite checked split certificate that exceeds the cumulative layer budget.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AreaFailureKind {
     SplitCertificateBudget,
+    FinalSplitCertificateBudget,
 }
 
 impl AreaOmissionBudget {
@@ -96,6 +97,19 @@ impl AreaOmissionBudget {
         result
     }
 
+    /// Marks only final Boolean split-budget failures as eligible for the finer integer attempt.
+    /// Earlier debt remains in the same ledger; normalization never gains this typed authority.
+    /// # Errors
+    /// Returns the original split-budget, numeric or allocation diagnostic.
+    fn record_final_split_certificate(&mut self, bound: f64) -> Result<(), RenderError> {
+        let result = self.record_split_certificate(bound);
+        if self.2 == Some(AreaFailureKind::SplitCertificateBudget) && bound > MAX_OMITTED_PIXEL_AREA
+        {
+            self.2 = Some(AreaFailureKind::FinalSplitCertificateBudget);
+        }
+        result
+    }
+
     /// Charges already incurred local recovery error once with upward positive accumulation.
     /// Zero debt leaves eager compensated accounting unchanged; retained roots collect the event
     /// after its independent local bound check, without cumulative certification yet.
@@ -127,16 +141,101 @@ impl AreaOmissionBudget {
     }
 }
 
-/// One original-order layer charge; only normalization has a region-local zero-fill waiver.
+/// One original-order layer charge; only proven normalization or final split support can be invisible.
 #[derive(Clone, Debug)]
 pub(super) enum AreaDebt {
     Regular(f64),
     Incurred(f64),
     Split(f64),
+    SpatialSplit {
+        bound: f64,
+        regions: Vec<AreaSplitRegion>,
+        full_clip: [f64; 4],
+    },
     Normalization {
         bound: f64,
         boxes: Option<[[f64; 4]; 2]>,
     },
+}
+
+/// One exact bucket sum and an outward enclosure of every accepted triangle through final readback.
+#[derive(Clone, Debug)]
+pub(super) struct AreaSplitRegion {
+    doubled_area: u128,
+    bounds: [f64; 4],
+    /// Actual accepted integer grid; all regions in one event share this exact scale.
+    scale: f64,
+}
+
+/// Converts an exact nonzero doubled-grid area upward once, preserving the global certificate policy.
+#[cfg(test)]
+fn area_split_bound(doubled_area: u128) -> f64 {
+    area_split_bound_at_scale(doubled_area, AREA_BOOLEAN_SCALE)
+}
+
+/// Converts one exact accepted-grid certificate upward without changing its absolute area budget.
+fn area_split_bound_at_scale(doubled_area: u128, scale: f64) -> f64 {
+    if doubled_area == 0 {
+        return 0.0;
+    }
+    let numerator = (doubled_area as f64).next_up();
+    let denominator = (2.0 * scale * scale).next_down();
+    (numerator / denominator).next_up()
+}
+
+/// Selects full bucket charges against one undivided sampled region, never against individual tiles.
+/// Missing/invalid visibility or support and whole-canvas queries retain the original global charge.
+/// Pointwise Boolean
+/// fill changes remain inside the union of exact split triangles; each stored box encloses that
+/// support after the final integer-to-float readback. Touching buckets retain their complete area.
+/// # Errors
+/// Returns cancellation during the bounded scan; arithmetic uncertainty retains the global bound.
+fn area_spatial_split_bound(
+    global: f64,
+    regions: &[AreaSplitRegion],
+    visible: [f64; 4],
+    full_clip: [f64; 4],
+    work: &RasterWork<'_>,
+) -> Result<f64, RenderError> {
+    work.check()?;
+    if regions.is_empty()
+        || !visible.iter().all(|v| v.is_finite())
+        || visible[0] >= visible[2]
+        || visible[1] >= visible[3]
+    {
+        return Ok(global);
+    }
+    if !full_clip.iter().all(|v| v.is_finite())
+        || full_clip[0] >= full_clip[2]
+        || full_clip[1] >= full_clip[3]
+        || (visible[0] <= full_clip[0]
+            && visible[1] <= full_clip[1]
+            && visible[2] >= full_clip[2]
+            && visible[3] >= full_clip[3])
+    {
+        return Ok(global);
+    }
+    let scale = regions[0].scale;
+    if !scale.is_finite() || scale < AREA_BOOLEAN_SCALE {
+        return Ok(global);
+    }
+    let mut selected = 0_u128;
+    for (index, region) in regions.iter().enumerate() {
+        if index & 1023 == 0 {
+            work.check()?;
+        }
+        let b = region.bounds;
+        if region.scale != scale || !b.iter().all(|v| v.is_finite()) || b[0] > b[2] || b[1] > b[3] {
+            return Ok(global);
+        }
+        if !(b[2] < visible[0] || b[0] > visible[2] || b[3] < visible[1] || b[1] > visible[3]) {
+            let Some(sum) = selected.checked_add(region.doubled_area) else {
+                return Ok(global);
+            };
+            selected = sum;
+        }
+    }
+    Ok(area_split_bound_at_scale(selected, scale).min(global))
 }
 
 /// Retains all charges independently of paints, including empty accepted geometry.
@@ -149,9 +248,36 @@ pub(super) struct AreaDebtLedger {
 pub(super) struct AreaDebtFailure {
     pub(super) error: RenderError,
     pub(super) split_budget: bool,
+    pub(super) final_split_budget: bool,
 }
 
 impl AreaDebtLedger {
+    /// Includes nested spatial proof capacity in retained-root memory observations.
+    /// # Errors
+    /// Rejects capacity arithmetic overflow instead of hiding proof storage from admission.
+    pub(super) fn storage_bytes(&self) -> Result<usize, RenderError> {
+        self.events
+            .iter()
+            .fold(
+                self.events
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<AreaDebt>()),
+                |total, event| {
+                    let extra = match event {
+                        AreaDebt::SpatialSplit { regions, .. } => regions
+                            .capacity()
+                            .checked_mul(std::mem::size_of::<AreaSplitRegion>()),
+                        _ => Some(0),
+                    };
+                    total.and_then(|total| extra.and_then(|extra| total.checked_add(extra)))
+                },
+            )
+            .ok_or(area_error(
+                "raster.allocation",
+                "area debt capacity overflows",
+            ))
+    }
+
     /// Appends one finite charge fallibly without certifying an output or dropping geometry.
     /// # Errors
     /// Returns allocation refusal; independent numeric checks occur before insertion.
@@ -164,7 +290,8 @@ impl AreaDebtLedger {
     }
 
     /// Replays one complete sampled region in original order under the unchanged layer budget.
-    /// Strictly disjoint complete-fill boxes waive only their normalization certificate.
+    /// Strictly disjoint complete-fill boxes waive normalization; exact final-split boxes can
+    /// exclude only their own invisible area in partial views. Whole-canvas queries stay scalar.
     /// Touching, unknown or invalid regions charge fully; no tile can reset this authority.
     /// # Errors
     /// Returns the first original debt/cancellation diagnostic and its typed retry origin.
@@ -182,12 +309,27 @@ impl AreaDebtLedger {
                 work.check().map_err(|error| AreaDebtFailure {
                     error,
                     split_budget: false,
+                    final_split_budget: false,
                 })?;
             }
             let result = match event {
                 AreaDebt::Regular(v) => budget.record(*v),
                 AreaDebt::Incurred(v) => budget.record_incurred(*v),
-                AreaDebt::Split(v) => budget.record_split_certificate(*v),
+                AreaDebt::Split(v) => budget.record_final_split_certificate(*v),
+                AreaDebt::SpatialSplit {
+                    bound,
+                    regions,
+                    full_clip,
+                } => {
+                    let local =
+                        area_spatial_split_bound(*bound, regions, visible, *full_clip, work)
+                            .map_err(|error| AreaDebtFailure {
+                                error,
+                                split_budget: false,
+                                final_split_budget: false,
+                            })?;
+                    budget.record_final_split_certificate(local)
+                }
                 AreaDebt::Normalization { bound, boxes } => {
                     let outside = valid
                         && boxes.as_ref().is_some_and(|boxes| {
@@ -209,12 +351,15 @@ impl AreaDebtLedger {
                 return Err(AreaDebtFailure {
                     error,
                     split_budget: budget.2.is_some(),
+                    final_split_budget: budget.2
+                        == Some(AreaFailureKind::FinalSplitCertificateBudget),
                 });
             }
         }
         work.check().map_err(|error| AreaDebtFailure {
             error,
             split_budget: false,
+            final_split_budget: false,
         })?;
         Ok(budget.total_bound())
     }
@@ -952,7 +1097,7 @@ fn area_collapsed_contour_bound(
 }
 
 /// Retains the complete typed input and unchanged grid for a normalization-only visibility proof.
-/// Final union/clip certificates never receive this scope; no geometry or work is omitted.
+/// Final split support uses its independent exact-triangle proof; no geometry or work is omitted.
 struct AreaNormalizationScope<'a> {
     original: &'a [AreaShape],
     adapter: FloatPointAdapter<AreaPoint, i64>,
@@ -1082,6 +1227,66 @@ fn area_grid_readback_bounds(
     mapped.iter().all(|v| v.is_finite()).then_some(mapped)
 }
 
+/// Encloses every accepted split triangle through the final adapter readback without changing it.
+/// Allocation refusal, incomplete exact sums or invalid numeric support decline the entire proof;
+/// the original scalar certificate remains charged. At most 1024 regions are scanned and retained.
+/// # Errors
+/// Returns cancellation before publishing optional metadata.
+fn area_split_regions(
+    regions: Option<Vec<CheckedSplitRegion>>,
+    doubled_area: u128,
+    adapter: &FloatPointAdapter<AreaPoint, i64>,
+    work: &RasterWork<'_>,
+) -> Result<Option<Vec<AreaSplitRegion>>, RenderError> {
+    let Some(regions) = regions else {
+        return Ok(None);
+    };
+    if regions.is_empty() || regions.len() > 1024 {
+        return Ok(None);
+    }
+    let mut mapped = Vec::new();
+    if mapped.try_reserve_exact(regions.len()).is_err() {
+        return Ok(None);
+    }
+    let mut total = 0_u128;
+    let scale = adapter.inv_scale();
+    let offset = adapter.offset();
+    if !scale.is_finite() || scale <= 0.0 || !offset.iter().all(|v| v.is_finite()) {
+        return Ok(None);
+    }
+    for (index, region) in regions.into_iter().enumerate() {
+        if index & 1023 == 0 {
+            work.check()?;
+        }
+        let Some(sum) = total.checked_add(region.doubled_area) else {
+            return Ok(None);
+        };
+        total = sum;
+        let b = region.bounds;
+        if b[0] > b[2] || b[1] > b[3] {
+            return Ok(None);
+        }
+        let mut bounds = [0.0; 4];
+        for axis in 0..2 {
+            // Enclose integer cast, positive multiplication, then offset addition separately.
+            bounds[axis] =
+                (((b[axis] as f64).next_down() * scale).next_down() + offset[axis]).next_down();
+            bounds[axis + 2] =
+                (((b[axis + 2] as f64).next_up() * scale).next_up() + offset[axis]).next_up();
+        }
+        if !bounds.iter().all(|v| v.is_finite()) {
+            return Ok(None);
+        }
+        mapped.push(AreaSplitRegion {
+            doubled_area: region.doubled_area,
+            bounds,
+            scale: adapter.dir_scale(),
+        });
+    }
+    work.check()?;
+    Ok((total == doubled_area).then_some(mapped))
+}
+
 /// Builds owned integer-segment storage with the existing checked area options and solver.
 /// The caller supplies the already-authoritative common adapter and original capacity policy.
 fn area_overlay_builder(
@@ -1150,6 +1355,7 @@ fn area_owned_union(
         FillRule::NonZero,
         work,
         omissions,
+        AreaOverlayPurpose::Final,
         None,
     )
 }
@@ -1194,35 +1400,20 @@ fn area_overlay(
         rule,
         work,
         omissions,
-        normalization,
+        AreaOverlayPurpose::Normalization(normalization),
+        None,
     )
 }
 
-/// Charges accepted split-mutation uncertainty and all Boolean attempts before returning shapes.
-///
-/// The exact doubled-area certificate concerns the already-quantized integer input. Initial float
-/// quantization, curve flattening, and upstream graph extraction are separate authority boundaries.
-/// Healthy unchanged contours receive no global perimeter charge. A normalization-only scope may
-/// omit its certificate when both complete fills provably vanish in the visible pixel rectangle;
-/// final global operations and all incurred/collapsed debt retain their cumulative authority.
-/// Overflow and bounded convergence failures discard local geometry; no partial pixels are published.
-///
-/// # Errors
-/// Returns cancellation, Boolean work exhaustion, precision, or cumulative layer-error diagnostics.
-fn area_checked_overlay(
-    overlay: &mut FloatOverlay<AreaPoint, i64>,
-    overlay_rule: OverlayRule,
-    fill_rule: FillRule,
-    work: &mut RasterWork<'_>,
-    omissions: &mut AreaOmissionBudget,
-    normalization: Option<AreaNormalizationScope<'_>>,
-) -> Result<AreaShapes, RenderError> {
-    work.check()?;
-    let mut control =
-        CheckedOverlayControl::new(work.remaining_boolean_operations, work.is_cancelled);
-    let result = overlay.overlay_checked(overlay_rule, fill_rule, &mut control);
-    work.remaining_boolean_operations -= control.operations();
-    let (shapes, doubled_area) = result.map_err(|error| match error {
+/// Distinguishes normalization from final fill operations independently of optional visibility proof.
+enum AreaOverlayPurpose<'a> {
+    Normalization(Option<AreaNormalizationScope<'a>>),
+    Final,
+}
+
+/// Maps checked Boolean failures without replacing their resource or precision authority.
+fn checked_overlay_error(error: CheckedOverlayError) -> RenderError {
+    match error {
         CheckedOverlayError::Cancelled => {
             area_error("evaluation.cancelled", "rasterization was cancelled")
         }
@@ -1242,9 +1433,133 @@ fn area_checked_overlay(
             "raster.area.precision",
             "Boolean split certificate exceeds checked integer bounds",
         ),
-    })?;
+    }
+}
+
+/// Charges accepted split-mutation uncertainty and all Boolean attempts before returning shapes.
+///
+/// The exact doubled-area certificate concerns the already-quantized integer input. Initial float
+/// quantization, curve flattening, and upstream graph extraction are separate authority boundaries.
+/// Healthy unchanged contours receive no global perimeter charge. A normalization-only scope may
+/// omit its certificate when both complete fills provably vanish in the visible pixel rectangle;
+/// final operations retain their exact global certificate, optionally localized by complete split
+/// supports for one preview region. All incurred/collapsed debt retains global cumulative authority.
+/// Overflow and bounded convergence failures discard local geometry; no partial pixels are published.
+///
+/// # Errors
+/// Returns cancellation, Boolean work exhaustion, precision, or cumulative layer-error diagnostics.
+fn area_checked_overlay(
+    overlay: &mut FloatOverlay<AreaPoint, i64>,
+    overlay_rule: OverlayRule,
+    fill_rule: FillRule,
+    work: &mut RasterWork<'_>,
+    omissions: &mut AreaOmissionBudget,
+    purpose: AreaOverlayPurpose<'_>,
+    split_scope: Option<(FloatRect<f64>, [f64; 4], [f64; 4])>,
+) -> Result<AreaShapes, RenderError> {
+    let (final_operation, normalization) = match purpose {
+        AreaOverlayPurpose::Normalization(scope) => (false, scope),
+        AreaOverlayPurpose::Final => (true, None),
+    };
     work.check()?;
+    let mut control =
+        CheckedOverlayControl::new(work.remaining_boolean_operations, work.is_cancelled);
+    // Only final preview/root clipping requests this optional proof. Export and per-primitive
+    // normalization keep their existing scalar certificates and grid authority.
+    let mut spatial_adapter = split_scope.and_then(|(rect, _, full_clip)| {
+        FloatPointAdapter::<AreaPoint, i64>::try_with_scale_conservative(rect, AREA_BOOLEAN_SCALE)
+            .ok()
+            .and_then(|adapter| {
+                let lo = adapter.try_float_to_int(&[rect.min_x, rect.min_y]).ok()?;
+                let hi = adapter.try_float_to_int(&[rect.max_x, rect.max_y]).ok()?;
+                Some((adapter, [lo.x, lo.y, hi.x, hi.y], full_clip))
+            })
+    });
+    if let Some((_, bounds, _)) = &spatial_adapter
+        && (omissions.3.is_none()
+            || work.remaining_spatial_certificate_bytes
+                >= 1024 * std::mem::size_of::<AreaSplitRegion>())
+    {
+        control = control.with_spatial_certificate(*bounds);
+    }
+    let result = overlay.overlay_checked(overlay_rule, fill_rule, &mut control);
+    work.remaining_boolean_operations -= control.operations();
+    let (mut shapes, mut doubled_area) = result.map_err(checked_overlay_error)?;
+    work.check()?;
+    let mut certificate_scale = AREA_BOOLEAN_SCALE;
+    if work.refine_final_overlay
+        && final_operation
+        && area_split_bound_at_scale(doubled_area, certificate_scale) > MAX_OMITTED_PIXEL_AREA
+    {
+        let mut refined_control =
+            CheckedOverlayControl::new(work.remaining_boolean_operations, work.is_cancelled);
+        // The original adapter origin is unchanged; only two exact binary fraction bits are added.
+        let refined_adapter = spatial_adapter
+            .as_ref()
+            .and_then(|(adapter, _, full_clip)| {
+                let fine = FloatPointAdapter::<AreaPoint, i64>::try_with_scale_conservative(
+                    *adapter.rect(),
+                    AREA_BOOLEAN_SCALE * 4.0,
+                )
+                .ok()?;
+                let lo = fine
+                    .try_float_to_int(&[fine.rect().min_x, fine.rect().min_y])
+                    .ok()?;
+                let hi = fine
+                    .try_float_to_int(&[fine.rect().max_x, fine.rect().max_y])
+                    .ok()?;
+                Some((fine, [lo.x, lo.y, hi.x, hi.y], *full_clip))
+            });
+        if let Some((_, bounds, _)) = &refined_adapter
+            && (omissions.3.is_none()
+                || work.remaining_spatial_certificate_bytes
+                    >= 1024 * std::mem::size_of::<AreaSplitRegion>())
+        {
+            refined_control = refined_control.with_spatial_certificate(*bounds);
+        }
+        let refined =
+            overlay.overlay_checked_refined(overlay_rule, fill_rule, &mut refined_control);
+        work.remaining_boolean_operations -= refined_control.operations();
+        work.check()?;
+        if let Some((fine_shapes, fine_area)) = refined.map_err(checked_overlay_error)? {
+            shapes = fine_shapes;
+            doubled_area = fine_area;
+            certificate_scale *= 4.0;
+            control = refined_control;
+            spatial_adapter = refined_adapter;
+        }
+    }
     if doubled_area != 0 {
+        if let Some((adapter, _, full_clip)) = spatial_adapter
+            && let Some(regions) = area_split_regions(
+                control.take_spatial_certificate(),
+                doubled_area,
+                &adapter,
+                work,
+            )?
+        {
+            let bound = area_split_bound_at_scale(doubled_area, certificate_scale);
+            if let Some(ledger) = &mut omissions.3 {
+                let bytes = regions.capacity() * std::mem::size_of::<AreaSplitRegion>();
+                if bytes <= work.remaining_spatial_certificate_bytes {
+                    work.remaining_spatial_certificate_bytes -= bytes;
+                    ledger.push(AreaDebt::SpatialSplit {
+                        bound,
+                        regions,
+                        full_clip,
+                    })?;
+                    return Ok(shapes);
+                }
+            } else {
+                let visible = split_scope.map(|(_, visible, full_clip)| (visible, full_clip));
+                if let Some((visible, full_clip)) = visible {
+                    omissions.record_final_split_certificate(area_spatial_split_bound(
+                        bound, &regions, visible, full_clip, work,
+                    )?)?;
+                    return Ok(shapes);
+                }
+            }
+        }
         if let Some(ledger) = &mut omissions.3 {
             let boxes = match normalization.as_ref() {
                 Some(scope) => {
@@ -1258,14 +1573,12 @@ fn area_checked_overlay(
                 }
                 None => None,
             };
-            let numerator = (doubled_area as f64).next_up();
-            let denominator = (2.0 * AREA_BOOLEAN_SCALE * AREA_BOOLEAN_SCALE).next_down();
-            let bound = (numerator / denominator).next_up();
+            let bound = area_split_bound_at_scale(doubled_area, certificate_scale);
             validate_deferred_bound(bound)?;
-            let event = if normalization.is_some() {
-                AreaDebt::Normalization { bound, boxes }
-            } else {
+            let event = if final_operation {
                 AreaDebt::Split(bound)
+            } else {
+                AreaDebt::Normalization { bound, boxes }
             };
             ledger.push(event)?;
         } else if !normalization
@@ -1275,9 +1588,17 @@ fn area_checked_overlay(
             .unwrap_or(false)
         {
             // Same upward conversion/division and downward denominator as the eager path.
-            let numerator = (doubled_area as f64).next_up();
-            let denominator = (2.0 * AREA_BOOLEAN_SCALE * AREA_BOOLEAN_SCALE).next_down();
-            omissions.record_split_certificate((numerator / denominator).next_up())?;
+            if !final_operation {
+                omissions.record_split_certificate(area_split_bound_at_scale(
+                    doubled_area,
+                    certificate_scale,
+                ))?;
+            } else {
+                omissions.record_final_split_certificate(area_split_bound_at_scale(
+                    doubled_area,
+                    certificate_scale,
+                ))?;
+            }
         }
     }
     Ok(shapes)
@@ -1295,7 +1616,8 @@ fn area_checked_overlay(
 /// adapter, avoiding an intermediate global union and float-grid roundtrip. Unclipped consumers
 /// retain their original global union. Both branches charge actual request-wide Boolean work.
 /// Optional visible bounds scope only normalization certificates proven irrelevant to every pixel;
-/// the adapter and final global union/clip certificate remain unchanged.
+/// the adapter and exact final certificate remain unchanged. Optional bounded final-split supports
+/// exclude only error proven strictly outside the entire sampled region.
 ///
 /// # Errors
 /// Returns cancellation, precision, allocation or Boolean diagnostics without painting partial pixels.
@@ -1316,10 +1638,16 @@ fn normalize_owned_and_union(
         omissions.record_incurred(primitive.incurred_area_error_bound)?;
     }
     let mut omitted = AreaSum::default();
-    for primitive in raw_slice.iter().filter(|primitive| primitive.shape.is_empty()) {
+    for primitive in raw_slice
+        .iter()
+        .filter(|primitive| primitive.shape.is_empty())
+    {
         omitted.add(primitive.omitted_area_bound);
     }
-    if !raw_slice.iter().any(|primitive| !primitive.shape.is_empty()) {
+    if !raw_slice
+        .iter()
+        .any(|primitive| !primitive.shape.is_empty())
+    {
         omissions.record(omitted.value())?;
         return Ok(Vec::new());
     }
@@ -1388,7 +1716,8 @@ fn normalize_owned_and_union(
             FillRule::NonZero,
             work,
             omissions,
-            None,
+            AreaOverlayPurpose::Final,
+            visible.map(|visible| (rect, visible, [left, top, right, bottom])),
         )
     } else {
         area_owned_union(positive, rect, work, omissions)
@@ -2092,13 +2421,14 @@ fn pilot_add_capacity(bytes: usize, count: usize, size: usize) -> Result<usize, 
         ))
 }
 
-/// Attempts private layer preparation and retries only a typed split-budget failure of restricted strokes.
+/// Attempts private layer preparation, retaining successful ordinary and complete-stroke routes.
+/// Only a remaining typed final-split budget failure enables one finer-grid attempt.
 /// Failed pixels/paints and their approximation ledger drop before source-free full materialization.
-/// Both attempts consume the same edge/Boolean allowance. Logical units already reported by the
-/// discarded attempt are suppressed during the single retry; other errors retain their authority.
+/// All attempts share the edge and Boolean allowances. Each retry suppresses logical progress
+/// already reported by discarded attempts.
 /// # Errors
-/// Propagates the original error when no prepared restricted stroke exists, cancellation/storage
-/// errors during restoration, or the unchanged second-attempt error without recursive retries.
+/// Returns the original error when no recovery applies, a cancellation or storage error during
+/// recovery, or the error from the last eligible attempt.
 fn with_complete_stroke_retry<T>(
     layer: &RenderLayer,
     work: &mut RasterWork<'_>,
@@ -2110,26 +2440,42 @@ fn with_complete_stroke_retry<T>(
 ) -> Result<T, RenderError> {
     let started_units = work.completed_units;
     let mut omissions = AreaOmissionBudget::default();
-    match attempt(layer, work, &mut omissions) {
-        Ok(value) => Ok(value),
-        Err(error) => {
-            if omissions.2 != Some(AreaFailureKind::SplitCertificateBudget) {
-                return Err(error);
-            }
-            work.check()?;
-            let Some(restored) =
-                materialization::complete_restricted_stroke_layer(layer, work.is_cancelled)?
-            else {
-                return Err(error);
-            };
-            work.check()?;
-            let previous_suppression = work.suppressed_retry_units;
-            work.suppressed_retry_units = work.completed_units.saturating_sub(started_units);
-            let result = attempt(&restored, work, &mut AreaOmissionBudget::default());
-            work.suppressed_retry_units = previous_suppression;
-            result
-        }
+    let failure = match attempt(layer, work, &mut omissions) {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    if omissions.2.is_none() {
+        return Err(failure);
     }
+    let previous_suppression = work.suppressed_retry_units;
+    let previous_refinement = work.refine_final_overlay;
+    let result = (|| {
+        work.check()?;
+        let restored = materialization::complete_restricted_stroke_layer(layer, work.is_cancelled)?;
+        let mut failure = failure;
+        if let Some(restored) = &restored {
+            work.suppressed_retry_units = work.completed_units.saturating_sub(started_units);
+            omissions = AreaOmissionBudget::default();
+            match attempt(restored, work, &mut omissions) {
+                Ok(value) => return Ok(value),
+                Err(error) => failure = error,
+            }
+        }
+        if omissions.2 != Some(AreaFailureKind::FinalSplitCertificateBudget) {
+            return Err(failure);
+        }
+        work.check()?;
+        work.suppressed_retry_units = work.completed_units.saturating_sub(started_units);
+        work.refine_final_overlay = true;
+        attempt(
+            restored.as_ref().unwrap_or(layer),
+            work,
+            &mut AreaOmissionBudget::default(),
+        )
+    })();
+    work.refine_final_overlay = previous_refinement;
+    work.suppressed_retry_units = previous_suppression;
+    result
 }
 
 /// Prepares one complete-target AA layer before any streaming encoder receives bytes.
@@ -2195,7 +2541,8 @@ pub(super) fn prepare_retained_area_layer(
     ))
 }
 
-/// Rasterizes a private AA layer, restoring only restricted strokes after a typed split-budget failure.
+/// Rasterizes a private AA layer through ordinary, complete-stroke and bounded final-refinement routes.
+/// Passing former routes remain unchanged; only a remaining final split-budget failure refines.
 /// Successful layers preserve original paint order and every consumed request-wide work unit.
 /// # Errors
 /// Propagates unchanged raster/precision/resource errors or source-free restoration failures.
@@ -4711,6 +5058,7 @@ mod tests {
                 FillRule::NonZero,
                 work,
                 omissions,
+                AreaOverlayPurpose::Final,
                 None,
             )?;
         }
@@ -5484,6 +5832,142 @@ pub(crate) mod restricted_retry_tests {
 }
 
 #[cfg(test)]
+mod final_refinement_tests {
+    use super::*;
+    use std::cell::Cell;
+    /// Enables refinement only after ordinary and complete-stroke failures, sharing all consumed work.
+    /// # Panics
+    /// Panics on reordered successful routes, repeated refinement, state leaks or refunded resources.
+    #[test]
+    fn final_refinement_preserves_prior_success_and_retry_state() {
+        let layer = restricted_retry_tests::layer();
+        for accepted_attempt in [1, 2, 3] {
+            let mut work = RasterWork::new(
+                RasterizationLimits::default(),
+                RasterAntialiasing::On,
+                &|| false,
+            );
+            let initial = work.remaining_edges;
+            let calls = Cell::new(0);
+            let value = with_complete_stroke_retry(&layer, &mut work, |_, work, budget| {
+                calls.set(calls.get() + 1);
+                work.edge()?;
+                assert_eq!(work.refine_final_overlay, calls.get() == 3);
+                if calls.get() == accepted_attempt {
+                    return Ok(7);
+                }
+                budget.record_final_split_certificate(2e-6)?;
+                Ok(0)
+            })
+            .unwrap();
+            assert_eq!(value, 7);
+            assert_eq!(calls.get(), accepted_attempt);
+            assert_eq!(work.remaining_edges, initial - accepted_attempt);
+            assert!(!work.refine_final_overlay);
+            assert_eq!(work.suppressed_retry_units, 0);
+        }
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
+        let mut work = RasterWork::new(
+            RasterizationLimits::default(),
+            RasterAntialiasing::On,
+            &cancelled,
+        );
+        let calls = Cell::new(0);
+        let error = with_complete_stroke_retry::<()>(&layer, &mut work, |_, _, budget| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            budget.record_final_split_certificate(2e-6)
+        })
+        .unwrap_err();
+        assert_eq!(error.path(), "evaluation.cancelled");
+        assert_eq!(calls.get(), 2);
+        assert!(!work.refine_final_overlay);
+        assert_eq!(work.suppressed_retry_units, 0);
+    }
+
+    /// Retains earlier layer debt and denies refinement to normalization or cumulative-only failures.
+    /// # Panics
+    /// Panics if an unrelated budget class gains final-overlay authority or the accepted-grid units drift.
+    #[test]
+    fn final_refinement_keeps_debt_classification_and_grid_units() {
+        let mut budget = AreaOmissionBudget::default();
+        budget.record(8e-7).unwrap();
+        assert!(budget.record_final_split_certificate(4e-7).is_err());
+        assert_eq!(budget.2, Some(AreaFailureKind::SplitCertificateBudget));
+        assert!(budget.total_bound() > MAX_OMITTED_PIXEL_AREA);
+        let work = RasterWork::new(
+            RasterizationLimits::default(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        let ledger = AreaDebtLedger {
+            events: vec![AreaDebt::Normalization {
+                bound: 2e-6,
+                boxes: None,
+            }],
+        };
+        assert!(
+            !ledger
+                .certify([0., 0., 1., 1.], &work)
+                .err()
+                .unwrap()
+                .final_split_budget
+        );
+        let area = 1_234_567_890_123_456_u128;
+        assert_eq!(
+            area_split_bound(area),
+            area_split_bound_at_scale(area * 16, AREA_BOOLEAN_SCALE * 4.0)
+        );
+        let region = AreaSplitRegion {
+            doubled_area: area * 16,
+            bounds: [0., 0., 1., 1.],
+            scale: AREA_BOOLEAN_SCALE * 4.0,
+        };
+        assert_eq!(
+            area_spatial_split_bound(1.0, &[region], [0., 0., 1., 1.], [0., 0., 2., 2.], &work)
+                .unwrap(),
+            area_split_bound(area)
+        );
+        let raw = vec![vec![vec![
+            [0., 0.],
+            [1., 1.],
+            [0., 1.],
+            [1., 0.333333333333],
+        ]]];
+        let mut work = RasterWork::new(
+            RasterizationLimits::default(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        work.refine_final_overlay = true;
+        let mut deferred = AreaOmissionBudget {
+            3: Some(AreaDebtLedger::default()),
+            ..Default::default()
+        };
+        area_overlay(
+            &raw,
+            FloatRect::new(0., 1., 0., 1.).unwrap(),
+            FillRule::NonZero,
+            &mut work,
+            &mut deferred,
+            None,
+        )
+        .unwrap();
+        assert!(
+            deferred
+                .3
+                .unwrap()
+                .events
+                .iter()
+                .any(|e| matches!(e, AreaDebt::Normalization { .. }))
+        );
+    }
+}
+
+#[cfg(test)]
 mod retained_debt_tests {
     use super::*;
     /// Checks ordered replay, strict boundary/unknown behavior and debt independent of paints.
@@ -5619,5 +6103,305 @@ mod retained_empty_tests {
             .unwrap();
         assert_eq!(failure.error.path(), "raster.area.precision");
         assert!(!failure.split_budget);
+    }
+}
+
+#[cfg(test)]
+mod spatial_split_tests {
+    use super::*;
+
+    /// Retains visible pixels and exact global solved contours while excluding only distant final split debt.
+    /// # Panics
+    /// Panics if the deterministic final-clip certificate is absent, a full-layer failure is waived,
+    /// or viewport proof changes geometry, consumed work, collapsed debt, or cancellation authority.
+    #[test]
+    fn final_clip_spatial_proof_repairs_only_proven_invisible_debt() {
+        let raw = || {
+            vec![
+                RawAreaPrimitive {
+                    shape: vec![vec![[10.05, 10.1], [10.95, 10.3], [10.2, 10.97]]],
+                    fill_rule: FillRule::NonZero,
+                    omitted_area_bound: 0.,
+                    incurred_area_error_bound: 0.,
+                },
+                RawAreaPrimitive {
+                    shape: vec![vec![[10., 10.], [10.9, 10.], [10.9, 10.9], [10., 10.9]]],
+                    fill_rule: FillRule::NonZero,
+                    omitted_area_bound: 0.,
+                    incurred_area_error_bound: 0.,
+                },
+                RawAreaPrimitive {
+                    shape: vec![vec![[0., 0.], [0.8, 0.], [0.8, 0.8], [0., 0.8]]],
+                    fill_rule: FillRule::NonZero,
+                    omitted_area_bound: 0.,
+                    incurred_area_error_bound: 0.,
+                },
+            ]
+        };
+        let limits = RasterizationLimits::new(100_000).unwrap();
+        let clip = Some([0., 0., 20., 20.]);
+        let mut work = RasterWork::new(limits, RasterAntialiasing::On, &|| false);
+        let mut global = AreaOmissionBudget::default();
+        let expected =
+            normalize_owned_and_union(raw(), clip, &mut work, &mut global, None).unwrap();
+        let debt = global.total_bound();
+        assert!(debt > 0. && debt < MAX_OMITTED_PIXEL_AREA);
+        let consumed = work.remaining_boolean_operations;
+        let mut local_work = RasterWork::new(limits, RasterAntialiasing::On, &|| false);
+        let mut local = AreaOmissionBudget::default();
+        local.record(MAX_OMITTED_PIXEL_AREA - debt * 0.5).unwrap();
+        let actual = normalize_owned_and_union(
+            raw(),
+            clip,
+            &mut local_work,
+            &mut local,
+            Some([0., 0., 1., 1.]),
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(local_work.remaining_boolean_operations, consumed);
+        let mut visible_area = 0.;
+        for_each_area_pixel(&actual, 1, 1, &mut local_work, |_, q| visible_area += q).unwrap();
+        assert!(visible_area > 0.6);
+        let mut whole = AreaOmissionBudget::default();
+        whole.record(MAX_OMITTED_PIXEL_AREA - debt * 0.5).unwrap();
+        let error = normalize_owned_and_union(
+            raw(),
+            clip,
+            &mut RasterWork::new(limits, RasterAntialiasing::On, &|| false),
+            &mut whole,
+            Some([0., 0., 20., 20.]),
+        )
+        .unwrap_err();
+        assert_eq!(error.path(), "raster.area.precision");
+        let mut ledger = AreaOmissionBudget {
+            3: Some(AreaDebtLedger::default()),
+            ..Default::default()
+        };
+        ledger.record(MAX_OMITTED_PIXEL_AREA - debt * 0.5).unwrap();
+        let mut retained_work = RasterWork::new(limits, RasterAntialiasing::On, &|| false);
+        normalize_owned_and_union(
+            raw(),
+            clip,
+            &mut retained_work,
+            &mut ledger,
+            Some([0., 0., 20., 20.]),
+        )
+        .unwrap();
+        let ledger = ledger.3.unwrap();
+        assert!(
+            ledger
+                .events
+                .iter()
+                .any(|e| matches!(e, AreaDebt::SpatialSplit { .. }))
+        );
+        for _ in 0..2 {
+            assert!(ledger.certify([0., 0., 1., 1.], &retained_work).is_ok());
+            assert!(ledger.certify([0., 0., 20., 20.], &retained_work).is_err());
+        }
+        assert!(
+            ledger
+                .certify(
+                    [0., 0., 1., 1.],
+                    &RasterWork::new(limits, RasterAntialiasing::On, &|| true)
+                )
+                .is_err()
+        );
+        let mut capped = AreaOmissionBudget {
+            3: Some(AreaDebtLedger::default()),
+            ..Default::default()
+        };
+        capped.record(MAX_OMITTED_PIXEL_AREA - debt * 0.5).unwrap();
+        retained_work.remaining_spatial_certificate_bytes = 0;
+        normalize_owned_and_union(
+            raw(),
+            clip,
+            &mut retained_work,
+            &mut capped,
+            Some([0., 0., 1., 1.]),
+        )
+        .unwrap();
+        let capped = capped.3.unwrap();
+        assert!(
+            !capped
+                .events
+                .iter()
+                .any(|e| matches!(e, AreaDebt::SpatialSplit { .. }))
+        );
+        assert!(capped.certify([0., 0., 1., 1.], &retained_work).is_err());
+    }
+
+    /// Checks exact whole-view accumulation, strict support boundaries and global non-split debt.
+    /// # Panics
+    /// Panics if two independently admitted crops can reset the undivided union budget or if
+    /// touching/unknown support, incurred debt or ordinary omission loses authority.
+    #[test]
+    fn spatial_split_replay_keeps_whole_layer_budget_and_conservative_fallback() {
+        let work = RasterWork::new(
+            RasterizationLimits::default(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        let part = 1_200_000_000_000_000_000_u128;
+        let global = area_split_bound(part * 2);
+        let regions = vec![
+            AreaSplitRegion {
+                scale: AREA_BOOLEAN_SCALE,
+                doubled_area: part,
+                bounds: [0., 0., 2., 2.],
+            },
+            AreaSplitRegion {
+                scale: AREA_BOOLEAN_SCALE,
+                doubled_area: part,
+                bounds: [8., 0., 10., 2.],
+            },
+        ];
+        let mut ledger = AreaDebtLedger::default();
+        ledger
+            .push(AreaDebt::SpatialSplit {
+                bound: global,
+                regions: regions.clone(),
+                full_clip: [0., 0., 20., 20.],
+            })
+            .unwrap();
+        assert!(ledger.certify([0., 0., 2., 2.], &work).is_ok());
+        assert!(ledger.certify([8., 0., 10., 2.], &work).is_ok());
+        assert!(ledger.certify([0., 0., 10., 2.], &work).is_err());
+        assert_eq!(
+            area_spatial_split_bound(
+                global,
+                &regions,
+                [-1., -1., 11., 3.],
+                [0., 0., 20., 20.],
+                &work
+            )
+            .unwrap(),
+            global
+        );
+        assert!(
+            area_spatial_split_bound(
+                global,
+                &regions,
+                [2., 0., 8., 2.],
+                [0., 0., 20., 20.],
+                &work
+            )
+            .unwrap()
+                > MAX_OMITTED_PIXEL_AREA
+        );
+        assert_eq!(
+            area_spatial_split_bound(
+                global,
+                &regions,
+                [f64::NAN, 0., 1., 1.],
+                [0., 0., 20., 20.],
+                &work
+            )
+            .unwrap(),
+            global
+        );
+        // Even wholly off-canvas guards retain their scalar debt for a complete-canvas query.
+        let guards = vec![AreaSplitRegion {
+            scale: AREA_BOOLEAN_SCALE,
+            doubled_area: part * 2,
+            bounds: [30., 30., 31., 31.],
+        }];
+        assert_eq!(
+            area_spatial_split_bound(
+                global,
+                &guards,
+                [0., 0., 20., 20.],
+                [0., 0., 20., 20.],
+                &work
+            )
+            .unwrap(),
+            global
+        );
+        assert_eq!(
+            area_spatial_split_bound(global, &guards, [0., 0., 1., 1.], [0., 0., 20., 20.], &work)
+                .unwrap(),
+            0.
+        );
+        let unknown = vec![AreaSplitRegion {
+            scale: AREA_BOOLEAN_SCALE,
+            doubled_area: part,
+            bounds: [f64::NAN; 4],
+        }];
+        assert_eq!(
+            area_spatial_split_bound(
+                global,
+                &unknown,
+                [0., 0., 1., 1.],
+                [0., 0., 20., 20.],
+                &work
+            )
+            .unwrap(),
+            global
+        );
+        let bytes = ledger.storage_bytes().unwrap();
+        assert!(
+            bytes
+                >= ledger.events.capacity() * std::mem::size_of::<AreaDebt>()
+                    + regions.len() * std::mem::size_of::<AreaSplitRegion>()
+        );
+        ledger.push(AreaDebt::Regular(8e-7)).unwrap();
+        ledger.push(AreaDebt::Incurred(4e-7)).unwrap();
+        assert!(ledger.certify([20., 20., 21., 21.], &work).is_err());
+    }
+
+    /// Encloses complete long-triangle readbacks near wide integer casts and rejects incomplete metadata.
+    /// # Panics
+    /// Panics if any adapter-mapped endpoint escapes its support or missing area can acquire a waiver.
+    #[test]
+    fn spatial_split_support_encloses_actual_adapter_readbacks() {
+        let work = RasterWork::new(
+            RasterizationLimits::default(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        let rect = FloatRect::new(-10_000., 20_000., -12_000., 18_000.).unwrap();
+        let adapter = FloatPointAdapter::<AreaPoint, i64>::try_with_scale_conservative(
+            rect,
+            AREA_BOOLEAN_SCALE,
+        )
+        .unwrap();
+        let endpoints = [
+            [-9_999.123456789, 17_999.2],
+            [19_999.4, -11_999.1],
+            [20.1, 20.3],
+        ]
+        .map(|p| adapter.try_float_to_int(&p).unwrap());
+        let bounds = [
+            endpoints.iter().map(|p| p.x).min().unwrap(),
+            endpoints.iter().map(|p| p.y).min().unwrap(),
+            endpoints.iter().map(|p| p.x).max().unwrap(),
+            endpoints.iter().map(|p| p.y).max().unwrap(),
+        ];
+        let regions = vec![CheckedSplitRegion {
+            bounds,
+            doubled_area: 11,
+        }];
+        let mapped = area_split_regions(Some(regions.clone()), 11, &adapter, &work)
+            .unwrap()
+            .unwrap();
+        for p in endpoints {
+            let actual = adapter.int_to_float(&p);
+            for axis in 0..2 {
+                assert!(
+                    mapped[0].bounds[axis] <= actual[axis]
+                        && actual[axis] <= mapped[0].bounds[axis + 2]
+                );
+            }
+        }
+        assert!(
+            area_split_regions(Some(regions), 12, &adapter, &work)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            area_split_regions(None, 11, &adapter, &work)
+                .unwrap()
+                .is_none()
+        );
     }
 }

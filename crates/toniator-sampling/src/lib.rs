@@ -439,6 +439,22 @@ impl SourceField {
         }
     }
 
+    /// Samples edge-clamped associated linear RGB and alpha for footprint integration.
+    /// Callers average these associated values and unassociate once after integration.
+    /// # Errors
+    /// Rejects nonfinite points or invalid canvas bounds before sampling source pixels.
+    pub fn sample_associated_color(
+        &self,
+        point: Point2,
+        canvas: &CanvasSpec,
+    ) -> Result<(f64, f64, f64, f64), SamplingError> {
+        validate_canvas(canvas)?;
+        if !point.is_finite() {
+            return Err(SamplingError::new("sampling.point", "point must be finite"));
+        }
+        self.sample_stretch_associated_rgb(point, canvas)
+    }
+
     /// Samples SourceColorAlpha's associated linear RGB and independent alpha.
     ///
     /// The returned paint is straight linear and fully opaque when source alpha
@@ -2381,6 +2397,13 @@ fn component_value(pixel: SourcePixel, component: SourceComponent) -> f64 {
 /// therefore returns zero C, M, and Y. This function never associates color fields
 /// with alpha; [`mapped_response`] performs that operation exactly once after mapping.
 pub fn mapping_component_value(pixel: SourcePixel, component: SourceMappingComponent) -> f64 {
+    match component {
+        SourceMappingComponent::Red => return srgb_to_linear(pixel.red.clamp(0.0, 1.0)),
+        SourceMappingComponent::Green => return srgb_to_linear(pixel.green.clamp(0.0, 1.0)),
+        SourceMappingComponent::Blue => return srgb_to_linear(pixel.blue.clamp(0.0, 1.0)),
+        SourceMappingComponent::Alpha => return pixel.alpha.clamp(0.0, 1.0),
+        _ => {}
+    }
     let (red, green, blue) = linear_rgb(pixel);
     let maximum = red.max(green).max(blue);
     let black = (1.0 - maximum).clamp(0.0, 1.0);
@@ -2462,14 +2485,7 @@ pub fn effective_mark_ink(pixel: SourcePixel, component: SourceComponent) -> f64
     }
 }
 
-/// Converts one straight-sRGB component to linear light.
-pub fn srgb_to_linear(value: f64) -> f64 {
-    if value <= 0.04045 {
-        value / 12.92
-    } else {
-        ((value + 0.055) / 1.055).powf(2.4)
-    }
-}
+pub use creatiator::color::srgb_to_linear;
 
 /// Computes Rec.709 luminance in linear light, never multiplying by alpha.
 pub fn rec709_luminance(red: f64, green: f64, blue: f64) -> f64 {
@@ -4857,5 +4873,65 @@ mod preview_source_diagnostic_tests {
             source_storage::<u8>(24, true).unwrap_err().path(),
             "preview.proxy.allocation"
         );
+    }
+}
+
+#[cfg(test)]
+mod component_conversion_regressions {
+    use super::*;
+    /// Retains the pre-specialization conversion as an independent bitwise control.
+    fn reference_component(pixel: SourcePixel, component: SourceMappingComponent) -> f64 {
+        let (red, green, blue) = linear_rgb(pixel);
+        let maximum = red.max(green).max(blue);
+        let black = (1.0 - maximum).clamp(0.0, 1.0);
+        let normalized_chromatic = |value: f64| {
+            if maximum == 0.0 {
+                0.0
+            } else {
+                (1.0 - value / maximum).clamp(0.0, 1.0)
+            }
+        };
+        match component {
+            SourceMappingComponent::Red => red,
+            SourceMappingComponent::Green => green,
+            SourceMappingComponent::Blue => blue,
+            SourceMappingComponent::Cyan => normalized_chromatic(red),
+            SourceMappingComponent::Magenta => normalized_chromatic(green),
+            SourceMappingComponent::Yellow => normalized_chromatic(blue),
+            SourceMappingComponent::Black => black,
+            SourceMappingComponent::Alpha => pixel.alpha.clamp(0.0, 1.0),
+            SourceMappingComponent::Luminance => rec709_luminance_linear(red, green, blue),
+        }
+    }
+
+    /// Preserves every component bit while avoiding unused RGB conversions for single channels.
+    /// # Panics
+    /// Panics if specialized scalar conversion changes the original decoded-pixel result.
+    #[test]
+    fn specialized_component_matches_original_bits() {
+        for value in 0..=255_u32 {
+            let pixel = SourcePixel {
+                red: value as f64 / 255.0,
+                green: ((value * 71 + 13) % 256) as f64 / 255.0,
+                blue: ((value * 17 + 89) % 256) as f64 / 255.0,
+                alpha: ((value * 43) % 256) as f64 / 255.0,
+            };
+            for component in [
+                SourceMappingComponent::Red,
+                SourceMappingComponent::Green,
+                SourceMappingComponent::Blue,
+                SourceMappingComponent::Alpha,
+                SourceMappingComponent::Luminance,
+                SourceMappingComponent::Cyan,
+                SourceMappingComponent::Magenta,
+                SourceMappingComponent::Yellow,
+                SourceMappingComponent::Black,
+            ] {
+                assert_eq!(
+                    mapping_component_value(pixel, component).to_bits(),
+                    reference_component(pixel, component).to_bits()
+                );
+            }
+        }
     }
 }

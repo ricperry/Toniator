@@ -52,22 +52,21 @@ pub use scheduler::{
 
 use toniator_domain::{
     CalibrationBinding, CanvasSpec, ChannelId, ChannelOutputResponse, ChannelResponseOverride,
-    Document, DocumentConfiguration, DocumentResponseSettings, EvaluationSnapshot,
-    EvaluationToken, PendingRawPresetImport, PatternDefinition, PatternGeometryResponse,
-    PatternMechanism, PatternOutputLayer, PatternOutputRealization, RegionGeometryResponse,
-    PropertyFieldId, PropertyTarget, SavedCalibration, ScalarEndOverride,
-    SourceComponent, SourcePlacement, SourceReference, SourceReferenceId, TemporalEndOverride,
+    Document, DocumentConfiguration, DocumentResponseSettings, EvaluationSnapshot, EvaluationToken,
+    PatternDefinition, PatternGeometryResponse, PatternMechanism, PatternOutputLayer,
+    PatternOutputRealization, PendingRawPresetImport, PropertyFieldId, PropertyTarget,
+    RegionGeometryResponse, SavedCalibration, ScalarEndOverride, SourceComponent, SourcePlacement,
+    SourceReference, SourceReferenceId, TemporalEndOverride,
 };
 use toniator_domain::{
     ChannelPaint, DocumentEvaluationSnapshot, DocumentEvaluationToken, DocumentSession,
     HalftoneChannelModel, HalftoneChannelRole, ModeledChannelState,
 };
 use toniator_patterns::{
-    CurveWorkLimits,
     Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID, CanonicalRegionLimits,
-    CanonicalRegionSet, CurvePath, CurveSegment, FamilyCapability, GUIDE_FACE_CONTRACT_ID,
-    GenericGuideCapability, GridFamilyOutput, GuideFaceLimits, GuideFaceRequest,
-    MAZE_WALL_CONTRACT_ID, MazeLimits, PathOffsetLimits, PatternPipelineError,
+    CanonicalRegionSet, CurvePath, CurveSegment, CurveWorkLimits, FamilyCapability,
+    GUIDE_FACE_CONTRACT_ID, GenericGuideCapability, GridFamilyOutput, GuideFaceLimits,
+    GuideFaceRequest, MAZE_WALL_CONTRACT_ID, MazeLimits, PathOffsetLimits, PatternPipelineError,
     REGION_TREATMENT_CONTRACT_ID, RegionReference, RegionTreatmentLimits,
     SITE_ADJACENCY_CONTRACT_ID, SiteUsageSet, TypedFamilyOutput, TypedRealization,
     VORONOI_REGION_CONTRACT_ID, VoronoiRegionDiagnostics, VoronoiRegionLimits,
@@ -78,8 +77,8 @@ use toniator_patterns::{
     evaluate_typed_family_product_with_curve_limits_progress_cancellable,
     evaluate_typed_maze_walls_from_family_cancellable, family_requires_decoded_source,
     maximum_emitted_guide_spacing, maximum_nominal_cell_diameter, realize_circular_marks,
-    realize_region_output_with_progress_cancellable, voronoi_region_references,
-    resolve_connection_program_for_feature_size,
+    realize_region_output_with_progress_cancellable, resolve_connection_program_for_feature_size,
+    voronoi_region_references,
 };
 pub use toniator_patterns::{
     CanonicalCircleMark, CanonicalMark, CanonicalMarkRealization, CanonicalStrokeRealization,
@@ -1216,6 +1215,9 @@ struct FamilyDefinitionKey {
     mechanisms: Vec<PatternMechanism>,
     /// Complete artwork-weight source response after receiving-channel binding.
     resolved_source_weighting: Option<toniator_domain::SourceWeighting>,
+    /// Intrinsic occupancy consumes this receiving output range before mark sizing.
+    dispersion_target_range: Option<(f64, f64)>,
+    dispersion_calibration: Option<toniator_domain::DispersionCalibration>,
     resolved_guide_content: Option<String>,
     path_offset_algorithm: Option<PathOffsetAlgorithmKey>,
 }
@@ -1879,6 +1881,16 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
         })?;
     let mut definition_key = family_definition_key(definition);
     definition_key.resolved_source_weighting = resolved_source_weighting(&plan.family);
+    definition_key.dispersion_target_range = plan
+        .family
+        .random
+        .as_ref()
+        .and_then(|random| random.dispersion_target_range);
+    definition_key.dispersion_calibration = plan
+        .family
+        .random
+        .as_ref()
+        .and_then(|random| random.dispersion_calibration.clone());
     let family_key = FamilyCacheKey {
         canvas: canvas_key(document.canvas()),
         density: (
@@ -2101,6 +2113,8 @@ fn family_definition_key(value: &PatternDefinition) -> FamilyDefinitionKey {
         family: value.family.clone(),
         mechanisms: value.mechanisms.clone(),
         resolved_source_weighting: None,
+        dispersion_target_range: None,
+        dispersion_calibration: None,
         resolved_guide_content: None,
         path_offset_algorithm: path_offset_algorithm_key(value),
     }
@@ -2111,6 +2125,12 @@ fn resolved_source_weighting(
     family: &FamilyCapability,
 ) -> Option<toniator_domain::SourceWeighting> {
     family.random.as_ref().and_then(|random| {
+        if matches!(
+            random.character,
+            toniator_domain::RandomSiteCharacter::Dispersion { .. }
+        ) {
+            return random.refinement_weighting;
+        }
         if random.full_population_for_uniform_marks {
             return (random.refinement.enabled && random.refinement.density_weighted)
                 .then_some(random.refinement_weighting)
@@ -2514,6 +2534,10 @@ fn preset_companion(
     {
         pool.push(saved.clone());
         return Ok(saved.clone());
+    }
+    if let Some(saved) = toniator_patterns::adaptive_shape_marks_calibration(binding).map_err(EvaluationError::from_domain)? {
+        pool.push(saved.clone());
+        return Ok(saved);
     }
     let saved = reference_calibration::calibrate_saved_binding(binding, limits, is_cancelled)?;
     if is_cancelled() {
@@ -3319,17 +3343,18 @@ impl EvaluationCompletion {
 }
 
 /// Selects the final consumer without changing canonical evaluation or document authority.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum DocumentJobOutput {
     Raster,
     Scene,
+    SceneRaster(Box<SceneEvaluationResult>, SceneCacheDiagnostics, PreviewRasterTarget),
 }
 
 /// Captures one immutable document job and private accepted-cache snapshot.
 struct DocumentJob {
     output: DocumentJobOutput,
     ticket: EvaluationTicket,
-    request: EvaluationRequest,
+    request: Option<EvaluationRequest>,
     cancelled: Arc<AtomicBool>,
     cache: DocumentDerivedCache,
     #[cfg(test)]
@@ -3422,7 +3447,15 @@ impl EvaluationScheduler {
                     if job.cancelled.load(Ordering::Acquire) {
                         continue;
                     }
-                    let token = job.request.snapshot.token();
+                    let token = match &job.output {
+                        DocumentJobOutput::SceneRaster(result, ..) => result.token(),
+                        _ => job
+                            .request
+                            .as_ref()
+                            .expect("canonical job has a request")
+                            .snapshot
+                            .token(),
+                    };
                     let last_progress = Mutex::new(None);
                     let worker_cancellation = SchedulerCancellation {
                         cancelled: &job.cancelled,
@@ -3434,7 +3467,7 @@ impl EvaluationScheduler {
                     };
                     let outcome = match job.output {
                         DocumentJobOutput::Raster => evaluate_cached_document_impl(
-                            job.request,
+                            job.request.expect("canonical job has a request"),
                             limits,
                             &job.cache,
                             &worker_cancellation,
@@ -3450,8 +3483,26 @@ impl EvaluationScheduler {
                             },
                             transaction: Some(value.transaction),
                         }),
+                        DocumentJobOutput::SceneRaster(result, diagnostics, target) => {
+                            evaluate_accepted_scene_raster(
+                                target,
+                                *result,
+                                diagnostics,
+                                limits,
+                                &job.cache,
+                                &worker_cancellation,
+                            )
+                            .map(|value| DocumentWorkerCompletion {
+                                completion: EvaluationCompletion::Completed {
+                                    ticket: job.ticket,
+                                    result: Box::new(value.result),
+                                    diagnostics: value.diagnostics,
+                                },
+                                transaction: Some(value.transaction),
+                            })
+                        }
                         DocumentJobOutput::Scene => evaluate_cached_scene(
-                            &job.request,
+                            job.request.as_ref().expect("canonical job has a request"),
                             limits,
                             &job.cache,
                             &worker_cancellation,
@@ -3552,6 +3603,37 @@ impl EvaluationScheduler {
         self.submit_output(request, DocumentJobOutput::Scene)
     }
 
+    /// Submits only the existing CPU raster tail for a previously accepted canonical candidate.
+    /// The worker checks the captured accepted scene Arc before rasterization; publication still
+    /// requires the candidate's unchanged document token to match the accepting session.
+    /// it performs no source, family, realization or scene traversal. Target and backdrop remain
+    /// target-owned, with the ordinary renderer's keys, limits and cancellation policy.
+    /// Non-scene completions return `None` without submitting work.
+    ///
+    /// # Errors
+    /// Returns worker availability or ticket exhaustion failures. A stale candidate fails evaluation.
+    /// # Panics
+    /// Panics if the scheduler state mutex is poisoned.
+    pub fn submit_scene_raster(
+        &self,
+        target: PreviewRasterTarget,
+        candidate: &EvaluationCompletion,
+    ) -> Result<Option<EvaluationTicket>, SchedulerError> {
+        let EvaluationCompletion::SceneCompleted {
+            result,
+            diagnostics,
+            ..
+        } = candidate
+        else {
+            return Ok(None);
+        };
+        self.submit_job(
+            None,
+            DocumentJobOutput::SceneRaster(result.clone(), diagnostics.clone(), target),
+        )
+        .map(Some)
+    }
+
     /// Atomically supersedes older work and captures the accepted cache for one selected consumer.
     /// # Errors
     /// Returns worker availability or ticket exhaustion failures.
@@ -3560,6 +3642,20 @@ impl EvaluationScheduler {
     fn submit_output(
         &self,
         request: EvaluationRequest,
+        output: DocumentJobOutput,
+    ) -> Result<EvaluationTicket, SchedulerError> {
+        self.submit_job(Some(request), output)
+    }
+
+    /// Queues either canonical evaluation or a source-free raster continuation atomically.
+    ///
+    /// # Errors
+    /// Returns worker availability or ticket exhaustion failures.
+    /// # Panics
+    /// Panics if the scheduler state mutex is poisoned.
+    fn submit_job(
+        &self,
+        request: Option<EvaluationRequest>,
         output: DocumentJobOutput,
     ) -> Result<EvaluationTicket, SchedulerError> {
         let mut state = self
@@ -4316,11 +4412,7 @@ fn evaluate_cached_document_impl(
     // Preserve the former full-invocation construction/measurement scope through the CPU tail.
     let construction_context = document_construction_context(&request, limits);
     let _construction_guard = construction_context.enter();
-    let CachedSceneEvaluation {
-        result: scene_result,
-        diagnostics,
-        mut transaction,
-    } = evaluate_cached_scene(
+    let canonical = evaluate_cached_scene(
         &request,
         limits,
         accepted,
@@ -4329,13 +4421,99 @@ fn evaluate_cached_document_impl(
         #[cfg(test)]
         decode_observer,
     )?;
+    rasterize_cached_document_scene(
+        request.raster_request,
+        canonical,
+        limits,
+        accepted,
+        cancellation,
+        performance,
+    )
+}
+
+/// Rasterizes an accepted scene without revisiting any canonical stage or source input.
+///
+/// # Errors
+/// Rejects a candidate outside the captured accepted cache, and propagates
+/// raster failure/cancellation without publishing derived state.
+fn evaluate_accepted_scene_raster(
+    target: PreviewRasterTarget,
+    result: SceneEvaluationResult,
+    mut diagnostics: SceneCacheDiagnostics,
+    limits: EvaluationLimits,
+    accepted: &DocumentDerivedCache,
+    cancellation: &dyn CancellationProbe,
+) -> Result<CachedDocumentEvaluation, EvaluationRunError> {
+    if accepted
+        .scene
+        .as_ref()
+        .is_none_or(|(_, scene, _)| !Arc::ptr_eq(scene, &result.scene))
+    {
+        return Err(EvaluationError::new(
+            "evaluation.scene_stale",
+            "Raster continuation requires the accepted canonical scene",
+        )
+        .into());
+    }
+    let mut construction_context = toniator_patterns::ConstructionContext::current();
+    construction_context.mode = limits.construction_mode;
+    construction_context.canvas = toniator_patterns::Bounds::new(
+        toniator_patterns::Point2::new(0.0, 0.0),
+        toniator_patterns::Point2::new(result.scene.canvas().width, result.scene.canvas().height),
+    );
+    let _construction_guard = construction_context.enter();
+    diagnostics.decoded_source = CacheDisposition::Hit;
+    diagnostics.family = CacheDisposition::Hit;
+    diagnostics.realization = CacheDisposition::Hit;
+    diagnostics.scene = CacheDisposition::Hit;
+    for channel in &mut diagnostics.channels {
+        channel.family = CacheDisposition::Hit;
+        channel.realization = CacheDisposition::Hit;
+        for output in &mut channel.outputs {
+            output.realization = CacheDisposition::Hit;
+        }
+    }
+    let canonical = CachedSceneEvaluation {
+        result,
+        diagnostics,
+        transaction: DocumentCacheTransaction {
+            raster_only: true,
+            ..Default::default()
+        },
+    };
+    rasterize_cached_document_scene(
+        RasterRequest::Preview(target),
+        canonical,
+        limits,
+        accepted,
+        cancellation,
+        None,
+    )
+}
+
+/// Runs the shared CPU final consumer with the unchanged raster identity, precision and bounds.
+/// Canonical transactions stay caller-owned until scheduler/session acceptance.
+///
+/// # Errors
+/// Propagates the renderer's failure or cancellation without publishing cache candidates.
+fn rasterize_cached_document_scene(
+    raster_request: RasterRequest,
+    canonical: CachedSceneEvaluation,
+    limits: EvaluationLimits,
+    accepted: &DocumentDerivedCache,
+    cancellation: &dyn CancellationProbe,
+    performance: Option<&mut EvaluationPerformanceBuilder>,
+) -> Result<CachedDocumentEvaluation, EvaluationRunError> {
+    let CachedSceneEvaluation {
+        result: scene_result,
+        diagnostics,
+        mut transaction,
+    } = canonical;
     let scene = Arc::clone(&scene_result.scene);
-    let model = request
-        .snapshot
-        .document()
-        .channel_model()
-        .expect("scene preflight validates modeled topology");
-    let raster_key = match request.raster_request {
+    let model = scene
+        .model()
+        .expect("canonical document scene has a channel model");
+    let raster_key = match raster_request {
         RasterRequest::Preview(target) => format!(
             "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:preview-v2:{model:?}:{}:edges={}",
             scene.identity().scene_fingerprint(),
@@ -4357,11 +4535,13 @@ fn evaluate_cached_document_impl(
             limits.max_flattened_raster_edges()
         ),
     };
-    cancellation.report_progress(
-        EvaluationProgressStage::ComposingScene,
-        RASTER_PROGRESS_START,
-        1_000,
-    );
+    if !transaction.raster_only {
+        cancellation.report_progress(
+            EvaluationProgressStage::ComposingScene,
+            RASTER_PROGRESS_START,
+            1_000,
+        );
+    }
     cancellation.report_progress(
         EvaluationProgressStage::RasterizingPreview,
         RASTER_PROGRESS_START,
@@ -4375,7 +4555,7 @@ fn evaluate_cached_document_impl(
                 EvaluationStage::Raster,
                 cancellation,
                 || {
-                    match request.raster_request {
+                    match raster_request {
                         RasterRequest::Preview(target) => {
                             rasterize_preview_cancellable_with_progress(
                                 &scene,
@@ -4583,6 +4763,35 @@ fn evaluate_cached_scene(
                 channel.weighting,
             )
             .map_err(EvaluationError::from_pipeline)?;
+            if let Some(random) = &mut plan.family.random
+                && matches!(
+                    random.character,
+                    toniator_domain::RandomSiteCharacter::Dispersion { .. }
+                )
+            {
+                random.dispersion_calibration = request
+                    .snapshot
+                    .saved_calibration_for(channel.id)
+                    .map_err(EvaluationError::from_domain)?
+                    .and_then(|saved| saved.dispersion().cloned());
+                if !structural_preview && random.dispersion_calibration.is_none() {
+                    return Err(EvaluationError::new(
+                        "calibration.dispersion.missing",
+                        "Dispersion needs a saved tone measurement; Recalibrate",
+                    )
+                    .into());
+                }
+                random.dispersion_target_range =
+                    effective
+                        .output_settings
+                        .iter()
+                        .find_map(|setting| match &setting.response {
+                            toniator_domain::PatternGeometryResponse::Marks(response) => {
+                                Some((response.minimum_fill, response.maximum_fill))
+                            }
+                            _ => None,
+                        });
+            }
             let uniform_marks = !structural_preview
                 && plan
                     .ordered_outputs
@@ -4593,7 +4802,13 @@ fn evaluate_cached_scene(
                     .map_err(EvaluationError::from_domain)?
                     .iter()
                     .any(|density| density.mode == toniator_domain::MarkDensityMode::Uniform);
-            if uniform_marks && let Some(random) = &mut plan.family.random {
+            if uniform_marks
+                && let Some(random) = &mut plan.family.random
+                && !matches!(
+                    random.character,
+                    toniator_domain::RandomSiteCharacter::Dispersion { .. }
+                )
+            {
                 random.full_population_for_uniform_marks = true;
                 // Ordinary weighting is consumed only by later thinning. Keep the
                 // ArtworkWeighted structure while removing inactive channel metadata
@@ -4933,6 +5148,12 @@ fn evaluate_cached_scene(
                 .transpose()
                 .map_err(EvaluationError::from_domain)?;
             let uniform_marks = !structural_preview
+                && !plan.family.random.as_ref().is_some_and(|random| {
+                    matches!(
+                        random.character,
+                        toniator_domain::RandomSiteCharacter::Dispersion { .. }
+                    )
+                })
                 && uniform_density.is_some_and(|density| {
                     density.mode == toniator_domain::MarkDensityMode::Uniform
                 });
@@ -5106,8 +5327,26 @@ fn evaluate_cached_scene(
                                 .expect("persisted coverage transfer retains desired endpoints");
                             toniator_patterns::GeometryResponseInput::AbsoluteCoverage {
                                 curve: &fit.curve,
-                                minimum,
-                                maximum,
+                                minimum: if plan.family.random.as_ref().is_some_and(|random| {
+                                    matches!(
+                                        random.character,
+                                        toniator_domain::RandomSiteCharacter::Dispersion { .. }
+                                    )
+                                }) {
+                                    0.0
+                                } else {
+                                    minimum
+                                },
+                                maximum: if plan.family.random.as_ref().is_some_and(|random| {
+                                    matches!(
+                                        random.character,
+                                        toniator_domain::RandomSiteCharacter::Dispersion { .. }
+                                    )
+                                }) {
+                                    fit.curve.near_full_coverage()
+                                } else {
+                                    maximum
+                                },
                             }
                         })
                         .unwrap_or(toniator_patterns::GeometryResponseInput::Identity);
@@ -5494,6 +5733,7 @@ fn evaluate_cached_scene(
             channels,
         },
         transaction: DocumentCacheTransaction {
+            raster_only: false,
             decoded_source: (source_hit == CacheDisposition::Miss).then_some((source_key, source)),
             families: families
                 .into_iter()
@@ -7449,6 +7689,14 @@ fn document_family_cache_key(
 ) -> Result<DocumentFamilyCacheKey, EvaluationError> {
     let mut definition_key = family_definition_key(definition);
     definition_key.resolved_source_weighting = resolved_source_weighting(family);
+    definition_key.dispersion_target_range = family
+        .random
+        .as_ref()
+        .and_then(|random| random.dispersion_target_range);
+    definition_key.dispersion_calibration = family
+        .random
+        .as_ref()
+        .and_then(|random| random.dispersion_calibration.clone());
     let exact_support = family.product
         == toniator_patterns::StructuralProductCapability::GuideIntersections
         && family.generic_guides.is_none()
@@ -8433,8 +8681,9 @@ struct DocumentDerivedCache {
     raster: Option<(String, Arc<RasterSurface>)>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct DocumentCacheTransaction {
+    raster_only: bool,
     decoded_source: Option<(SourceCacheKey, Arc<SourceField>)>,
     families: Vec<(DocumentFamilyCacheKey, Arc<TypedFamilyOutput>)>,
     realizations: Vec<(DocumentRealizationCacheKey, Arc<DocumentOutputRealization>)>,
@@ -8465,14 +8714,18 @@ impl DocumentDerivedCache {
         self.clone()
     }
 
+    /// Publishes an accepted transaction, preserving upstream ownership for a raster-only tail.
+    /// Ordinary canonical transactions replace their complete family/realization population.
     fn commit(&mut self, transaction: DocumentCacheTransaction) {
         if let Some(source) = transaction.decoded_source {
             self.decoded_source = Some(source);
         }
-        self.families = transaction.families;
-        self.realizations = transaction.realizations;
-        self.coverage_curves = transaction.coverage_curves;
-        self.uniform_density_fits = transaction.uniform_density_fits;
+        if !transaction.raster_only {
+            self.families = transaction.families;
+            self.realizations = transaction.realizations;
+            self.coverage_curves = transaction.coverage_curves;
+            self.uniform_density_fits = transaction.uniform_density_fits;
+        }
         if let Some(scene) = transaction.scene {
             self.scene = Some(scene);
         }
@@ -15445,6 +15698,8 @@ mod cache_key_tests {
                 resolved_source_weighting: None,
                 resolved_guide_content: None,
                 path_offset_algorithm: None,
+                dispersion_target_range: None,
+                dispersion_calibration: None,
             },
             required_support_radius: 4.5_f64.to_bits(),
             max_family_candidates: EvaluationLimits::DEFAULT_MAX_FAMILY_CANDIDATES,

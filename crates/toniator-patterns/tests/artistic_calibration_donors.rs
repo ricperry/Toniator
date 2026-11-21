@@ -21,7 +21,7 @@ fn receiver(width: f64, height: f64) -> Document {
 #[test]
 fn all_bundled_recipes_publish_complete_current_companions_without_missing_targets() {
     let registry = PresetRegistry::bundled();
-    assert_eq!(registry.entries().len(), 16);
+    assert_eq!(registry.entries().len(), 19);
     for (width, height) in [(1024.0, 1024.0), (900.0, 620.0)] {
         for entry in registry.entries() {
             let saved = entry

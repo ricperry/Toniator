@@ -61,7 +61,7 @@ pub use maze_walls::{
 };
 pub use outlines::{
     CanonicalFilledOutline, CanonicalOutlineContour, PreparedVariableWidthOutline, materialize_prepared_outline_cancellable, VariableWidthOutlineLimits,
-    VariableWidthPathSample, build_variable_width_outline_cancellable,
+    VariableWidthPathSample, build_variable_width_outline_cancellable, build_circular_stroke_outline_cancellable,
 };
 pub(crate) use path_offsets::offset_path_with_work_region_round_cancellable;
 pub use path_offsets::{

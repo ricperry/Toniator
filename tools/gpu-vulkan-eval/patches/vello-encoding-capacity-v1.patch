@@ -1,0 +1,41 @@
+diff --git a/research/vello_encoding/Cargo.toml b/research/vello_encoding/Cargo.toml
+index 9e71527..c266d68 100644
+--- a/research/vello_encoding/Cargo.toml
++++ b/research/vello_encoding/Cargo.toml
+@@ -1,4 +1,5 @@
+ [package]
++workspace = "../.." # Explicit owner for the isolated Git-patch path dependency.
+ name = "vello_encoding"
+ version.workspace = true # We mimic Vello's version
+ description = "Vello types that represent the data that needs to be rendered."
+diff --git a/research/vello_encoding/src/config.rs b/research/vello_encoding/src/config.rs
+index 7e78883..2160a7c 100644
+--- a/research/vello_encoding/src/config.rs
++++ b/research/vello_encoding/src/config.rs
+@@ -360,6 +360,13 @@ pub struct BufferSizes {
+ }
+ 
+ impl BufferSizes {
++    /// Sizes the pinned research encoding buffers with one predeclared isolated capacity variant.
++    /// Only line, segment-count and segment capacities increase from2^21 to2^23 elements;
++    /// shader arithmetic, geometry quality and every other capacity remain upstream authority.
++    /// This experiment never resizes automatically or changes the outer process/device reserves.
++    /// # Panics
++    /// Upstream u32 layout arithmetic can overflow for unchecked oversized layouts; callers use
++    /// bounded native artwork dimensions and the ordinary upstream encoding validation path.
+     pub fn new(layout: &Layout, workgroups: &WorkgroupCounts) -> Self {
+         let n_paths = layout.n_paths;
+         let n_draw_objects = layout.n_draw_objects;
+@@ -400,9 +407,9 @@ impl BufferSizes {
+         // reasonable heuristics.
+         let bin_data = BufferSize::new(1 << 18);
+         let tiles = BufferSize::new(1 << 21);
+-        let lines = BufferSize::new(1 << 21);
+-        let seg_counts = BufferSize::new(1 << 21);
+-        let segments = BufferSize::new(1 << 21);
++        let lines = BufferSize::new(1 << 23);
++        let seg_counts = BufferSize::new(1 << 23);
++        let segments = BufferSize::new(1 << 23);
+         // 16 * 16 (1 << 8) is one blend spill, so this allows for 4096 spills.
+         let blend_spill = BufferSize::new(1 << 20);
+         let ptcl = BufferSize::new(1 << 23);

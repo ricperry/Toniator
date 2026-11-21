@@ -1,0 +1,36 @@
+{
+  "generation": "greenfield-rewrite",
+  "producer": "toniator_engine::reference_calibration::calibrate_saved_pattern",
+  "git_head": "4aa63b7f1b67231530ed1e4de77e7ff1f17e4c4b",
+  "working_tree": "ranked/hatch candidate plus preserved prior TON010/compute/shape changes",
+  "reproduce_freeze": "python3 tools/update_ranked_hatch_companions.py ARTIFACT_DIRECTORY",
+  "blue_noise_generator": "tools/generate_blue_noise.py",
+  "blue_noise_table_sha256": "8d4aa62e390b7959efc7ab27da628e1522c08f337c78a7088b4e0dac774b8b38",
+  "artifacts": [
+    {
+      "id": "parallel-hatching",
+      "source_artifact": "target/validation/ranked-hatch-20261118/projects/hatch-parallel.toniator-pattern",
+      "sha256": "8badf19a28c71c77d7a792a181e00103b84e8e495ee2361506e31d09c224bec6",
+      "profile": "hatch-reference-fixed-canvas1024-spacings32-levels8-v1+anchored-tone-v1+interleaved-hatch-v3",
+      "raw_observations": 9,
+      "measured_discrete_populations": 9
+    },
+    {
+      "id": "concentric-hatching",
+      "source_artifact": "target/validation/concentric-corners-svg-20261119/implementation/reference-current/concentric-hatching.toniator-pattern",
+      "sha256": "11bd7cc4996e013fe54e9eb0bfba502a77f182dd23f077757e95f6e608d8e19f",
+      "profile": "hatch-reference-fixed-canvas1024-spacings32-levels8-v1+anchored-tone-v1+interleaved-hatch-v3",
+      "raw_observations": 9,
+      "measured_discrete_populations": 9,
+      "measurement_note": "2026-11-19 actual curved radial rails; same authored binding/profile/reference protocol and bounded approximation intent; earlier saved companions remain authoritative."
+    },
+    {
+      "id": "ranked-blue-noise-marks",
+      "source_artifact": "target/validation/ranked-hatch-20261118/projects/ranked.toniator-pattern",
+      "sha256": "8b49c7bb8bcddfb97cc9b100e0c7453f7b2ff32bc2694a1b6458755f603e3391",
+      "profile": "ton018-reference-fixed-canvas1024-spacings32-seed-neutral-v5",
+      "raw_observations": 124,
+      "measured_discrete_populations": null
+    }
+  ]
+}

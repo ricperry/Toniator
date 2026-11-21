@@ -27,23 +27,47 @@ To open the included sample directly:
 For development, `cargo run -p toniator-app` builds and launches the application.
 For a headless build, use `cargo build --release --locked -p toniator-cli`;
 GTK and Blueprint are unnecessary, but the native `dav1d` dependency still applies.
+The local `shared/creatiator` source is included with Toniator; no sibling
+checkout or separate publication is required. Only `toniator-app` enables its
+`gtk` feature. Domain, sampling and render crates share its default headless
+sRGB transfers, retaining their existing input/output clipping policies.
 
-The app enables the `fast-preview` Cargo feature by default. This
-builds the pinned Vello/wgpu Vulkan consumer; GPU initialization is lazy, and each
-window still starts with Accurate CPU preview. Fast needs a supported Vulkan
-adapter/driver and an eligible scene/target; refusal uses Accurate CPU fallback.
-To build the GTK app without Vello/wgpu support:
+The app enables two independent Cargo features by default.
+
+- `geometry-compute` automatically assists eligible Tangent ribbons
+  Spacing/Size/Blend construction with exact Vulkan ownership certificates and
+  CPU correction/fallback. It also applies while the canvas uses Accurate preview.
+- `fast-preview` builds the pinned Vello/wgpu Vulkan canvas renderer. Each window
+  starts with Accurate CPU preview. The optional Fast mode needs a supported
+  adapter and an eligible scene/target. Other cases use Accurate CPU fallback.
+
+Both initialize GPU resources lazily. Build the GTK app without either GPU
+feature using the following command.
 
 ```bash
 cargo build --release --locked -p toniator-app --no-default-features
 ```
 
-Build the CLI separately with the headless command above to retain its independent
-CPU-only dependency boundary. The production GPU dependencies are pinned by
-Cargo.lock, including the Vello git revision. Run `cargo fetch --locked` while
-network access is available before an offline build; retain both Cargo's registry
-and git caches. The GNOME SDK packaging build uses that complete Cargo home.
-See [preview measurements and limits](PERFORMANCE.md#2026-11-02-development-fast--accurate-preview).
+To retain exact geometry assistance without the approximate Fast renderer, add
+`--features geometry-compute` to that command. The separate headless CLI build
+above has no default GPU feature. Opt in explicitly with the following command.
+
+```bash
+cargo build --release --locked -p toniator-cli --features geometry-compute
+```
+
+Cargo unifies dependency features within one build, so build the CLI separately
+when checking its CPU-only dependency boundary. A geometry-enabled executable can
+be forced to CPU construction before Vulkan initialization with
+`TONIATOR_GEOMETRY_COMPUTE=cpu`. The canvas preview mode has its own control.
+See [geometry routing and measurements](PERFORMANCE.md#2026-11-18-development-exact-pattern-construction)
+for automatic admission, fallback and diagnostic controls.
+
+The production GPU dependencies are pinned by Cargo.lock, including the Vello git
+revision. Run `cargo fetch --locked` while network access is available before an
+offline build and retain both Cargo's registry and git caches. The GNOME SDK packaging
+build uses that complete Cargo home. See also
+[preview measurements and limits](PERFORMANCE.md#2026-11-02-development-fast--accurate-preview).
 
 For the verified native Windows development build and its current limits, see
 [Windows build notes](windows-build.md).

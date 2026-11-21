@@ -286,7 +286,7 @@ fn update_fill_tone_disclosure_copy(
     let (name, help) = if mask_only {
         (
             "Fill tone mask",
-            "For Uniform weighted Marks, Fill tone mapping is an optional independent mask. At cutoff 0 the mask is Off; Source weighting still controls point density.",
+            "For fixed-area Marks, Fill tone mapping is an optional independent mask. At cutoff 0 the mask is Off; Source weighting still controls placement. Tangent Size and Blend retain Fill tone for mark area.",
         )
     } else if includes_uniform_marks {
         (
@@ -311,7 +311,8 @@ fn update_fill_tone_disclosure_copy(
     }
 }
 
-/// Reports whether the complete scope consists only of Uniform artwork-weighted Mark outputs.
+/// Reports whether every scoped Mark output uses Fill solely as an optional cutoff mask.
+/// Intrinsic fixed-area layouts and existing Uniform weighted Marks share this applicability.
 fn fill_tone_scope_is_uniform_mark_mask(document: &Document, channels: &[ChannelId]) -> bool {
     !channels.is_empty()
         && channels.iter().all(|channel| {
@@ -325,6 +326,14 @@ fn fill_tone_scope_is_uniform_mark_mask(document: &Document, channels: &[Channel
                     .all(|output| matches!(output.response, PatternGeometryResponse::Marks(_)))
             {
                 return false;
+            }
+            if let Some(layout) = document
+                .pattern_definition_bundles()
+                .iter()
+                .find(|bundle| bundle.definition.id == pattern.definition_id)
+                .and_then(|bundle| bundle.definition.dispersion_layout())
+            {
+                return layout.spacing_fraction() == 1.0;
             }
             let states = weighted_mark_density_states(document, *channel);
             states.len() == pattern.output_settings.len()

@@ -345,4 +345,208 @@ mod scene_ready_tests {
             && progress.fraction() == 1.0));
         scheduler.shutdown().unwrap();
     }
+    /// Proves both immutable artworks share accepted canonical ownership across CPU targets,
+    /// retain the ordinary byte/backdrop contract and enter no upstream evaluation stage.
+    /// # Panics
+    /// Panics on changed pixels, scene identity, cache retention, progress or source-decode count.
+    #[test]
+    fn preview_handoff_raster_only_matches_ordinary_cpu_for_both_artworks() {
+        for (name, format) in [
+            ("raster-sample.png", SourceFormatHint::Png),
+            ("vector-sample.svg", SourceFormatHint::Svg),
+        ] {
+            let session = scene_guard_session();
+            let bytes: Arc<[u8]> = std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../assets")
+                    .join(name),
+            )
+            .unwrap()
+            .into();
+            let request =
+                document_request_for_format(&session, "cancellation-test-source", bytes, format);
+            let probe = SceneProbe::new(false);
+            let canonical = evaluate_cached_scene(
+                &request,
+                EvaluationLimits::default(),
+                &DocumentDerivedCache::default(),
+                &NeverCancelled,
+                None,
+                None,
+            )
+            .unwrap();
+            let scene = canonical.result.clone();
+            let diagnostics = canonical.diagnostics.clone();
+            let mut cache = DocumentDerivedCache::default();
+            cache.commit(canonical.transaction);
+            let family_count = cache.families.len();
+            for target in [
+                PreviewRasterTarget::new(32, 24).unwrap(),
+                PreviewRasterTarget::for_viewport(24, 20, 3.25, 2.5, 1.5).unwrap(),
+            ] {
+                for background in [
+                    RasterBackground::Transparent,
+                    RasterBackground::OpaqueBlack,
+                    RasterBackground::OpaqueWhite,
+                ] {
+                    let target = target.with_background(background);
+                    let expected = evaluate_cached_document_impl(
+                        request.clone().for_preview(target),
+                        EvaluationLimits::default(),
+                        &DocumentDerivedCache::default(),
+                        &NeverCancelled,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                    let output = evaluate_accepted_scene_raster(
+                        target,
+                        scene.clone(),
+                        diagnostics.clone(),
+                        EvaluationLimits::default(),
+                        &cache,
+                        &probe,
+                    )
+                    .unwrap();
+                    assert!(Arc::ptr_eq(
+                        &output.result.shared_scene(),
+                        &scene.shared_scene()
+                    ));
+                    assert_eq!(output.result.raster(), expected.result.raster());
+                    assert_eq!(output.result.source_identity(), scene.source_identity());
+                    cache.commit(output.transaction);
+                    assert_eq!(cache.families.len(), family_count);
+                    let before = probe.raster_calls.load(Ordering::Relaxed);
+                    let warm = evaluate_accepted_scene_raster(
+                        target,
+                        scene.clone(),
+                        diagnostics.clone(),
+                        EvaluationLimits::default(),
+                        &cache,
+                        &probe,
+                    )
+                    .unwrap();
+                    assert_eq!(warm.diagnostics.aggregate.raster, CacheDisposition::Hit);
+                    assert_eq!(probe.raster_calls.load(Ordering::Relaxed), before);
+                }
+            }
+            assert_eq!(probe.scene_calls.load(Ordering::Relaxed), 0);
+            assert!(probe.progress.lock().unwrap().iter().all(|stage| matches!(
+                stage,
+                EvaluationProgressStage::RasterizingPreview | EvaluationProgressStage::Finalizing
+            )));
+        }
+    }
+
+    /// Proves scene-only scheduler acceptance permits one source-free raster continuation and
+    /// rejects unaccepted/cleared or superseded scene ownership, including equal-revision sources.
+    /// # Panics
+    /// Panics if stale candidates rasterize or accepted scene/source ownership drifts.
+    #[test]
+    fn preview_handoff_scheduler_rejects_stale_scene_and_recovers_after_restart() {
+        let session = scene_guard_session();
+        let scheduler = EvaluationScheduler::new().unwrap();
+        let request = document_request(&session, valid_document_bytes());
+        scheduler.submit_scene(request.clone()).unwrap();
+        let canonical = wait_for_document_completion(&scheduler);
+        let target = PreviewRasterTarget::new(16, 12)
+            .unwrap()
+            .with_background(RasterBackground::OpaqueBlack);
+        scheduler
+            .submit_scene_raster(target, &canonical)
+            .unwrap()
+            .unwrap();
+        let unaccepted = wait_for_document_completion(&scheduler);
+        assert_eq!(unaccepted.error().unwrap().path(), "evaluation.scene_stale");
+        scheduler.submit_scene(request.clone()).unwrap();
+        let canonical = wait_for_document_completion(&scheduler);
+        assert!(scheduler.accept_completion(&canonical, &session).unwrap());
+        scheduler
+            .submit_scene_raster(target, &canonical)
+            .unwrap()
+            .unwrap();
+        let first = wait_for_document_completion(&scheduler);
+        assert!(Arc::ptr_eq(
+            &first.result().unwrap().shared_scene(),
+            &canonical.scene_result().unwrap().shared_scene()
+        ));
+        assert!(scheduler.accept_completion(&first, &session).unwrap());
+        // A different source has the same document token; its accepted scene owns continuation.
+        scheduler
+            .submit_scene(document_request(&session, flat_document_bytes()))
+            .unwrap();
+        let other = wait_for_document_completion(&scheduler);
+        assert_eq!(other.token(), canonical.token());
+        assert!(scheduler.accept_completion(&other, &session).unwrap());
+        scheduler
+            .submit_scene_raster(target, &canonical)
+            .unwrap()
+            .unwrap();
+        let wrong_source = wait_for_document_completion(&scheduler);
+        assert_eq!(
+            wrong_source.error().unwrap().path(),
+            "evaluation.scene_stale"
+        );
+        scheduler.cancel_and_clear();
+        scheduler
+            .submit_scene_raster(target, &other)
+            .unwrap()
+            .unwrap();
+        let cleared = wait_for_document_completion(&scheduler);
+        assert_eq!(cleared.error().unwrap().path(), "evaluation.scene_stale");
+        scheduler.shutdown().unwrap();
+        let replacement = EvaluationScheduler::new().unwrap();
+        replacement.submit_scene(request).unwrap();
+        let recovered = wait_for_document_completion(&replacement);
+        assert!(replacement.accept_completion(&recovered, &session).unwrap());
+        replacement
+            .submit_scene_raster(target, &recovered)
+            .unwrap()
+            .unwrap();
+        let pixels = wait_for_document_completion(&replacement);
+        assert!(replacement.accept_completion(&pixels, &session).unwrap());
+        replacement.shutdown().unwrap();
+    }
+
+    /// Proves raster-only supersession uses the existing raster cancellation gate and rejects
+    /// stale document revisions before pixel publication without regenerating canonical geometry.
+    /// # Panics
+    /// Panics if a canceled ticket or changed-revision raster can become accepted.
+    #[test]
+    fn preview_handoff_raster_cancellation_and_revision_rejection() {
+        let (gate, entered) =
+            EvaluationStageGate::new(EvaluationStage::Raster, EvaluationCheckpoint::Before);
+        let scheduler =
+            EvaluationScheduler::new_with_test_gate(EvaluationLimits::default(), Arc::clone(&gate))
+                .unwrap();
+        let mut session = scene_guard_session();
+        scheduler
+            .submit_scene(document_request(&session, valid_document_bytes()))
+            .unwrap();
+        let canonical = wait_for_document_completion(&scheduler);
+        assert!(scheduler.accept_completion(&canonical, &session).unwrap());
+        let target = PreviewRasterTarget::new(16, 12).unwrap();
+        let old = scheduler
+            .submit_scene_raster(target, &canonical)
+            .unwrap()
+            .unwrap();
+        entered.recv_timeout(GUARD).unwrap();
+        let latest = scheduler
+            .submit_scene_raster(target.with_background(RasterBackground::OpaqueWhite), &canonical)
+            .unwrap()
+            .unwrap();
+        gate.release();
+        let completion = wait_for_document_completion(&scheduler);
+        assert_ne!(old, completion.ticket());
+        assert_eq!(latest, completion.ticket());
+        let id = session.document().channel_topology().unwrap().channels()[0].id;
+        session
+            .apply(&DocumentCommand::SetOpacity {
+                channel_id: id,
+                opacity: 0.001,
+            })
+            .unwrap();
+        assert!(!scheduler.accept_completion(&completion, &session).unwrap());
+        scheduler.shutdown().unwrap();
+    }
 }

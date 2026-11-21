@@ -35,6 +35,12 @@ pub const CALIBRATION_PROFILE_SEEDED_64: &str =
 /// Covered-interior 768-square 64/128 reference for one finite isotropic Round Spiral.
 pub const CALIBRATION_PROFILE_ROUND_INTERIOR: &str =
     "ton018-reference-covered-interior-canvas768-spacings64-v4";
+/// Ten canonical measurements retain the nearest-area square-cell response and its plateaus.
+/// This producer has no continuous inverse and never reuses ordinary raw-size measurements.
+pub const CALIBRATION_PROFILE_ADAPTIVE_SQUARE: &str =
+    "adaptive-square-reference-canvas1024-spacings32-nearest-area-v1";
+/// Nine measured populations of fixed-width interleaved hatching.
+pub const CALIBRATION_PROFILE_HATCH: &str = "hatch-reference-fixed-canvas1024-spacings32-levels8-v1";
 /// One fixed statistical reference realization; authored rendering seeds remain untouched.
 pub const CALIBRATION_REFERENCE_SEED: u32 = 43;
 
@@ -211,7 +217,11 @@ impl CalibrationBinding {
 
     /// Classifies strict reference tiers by their existing typed producer and window authority.
     fn supports_strict_reference_profile(&self, profile: &str) -> bool {
-        if self.uses_guide_faces() {
+        if self.uses_adaptive_square_marks() {
+            profile == CALIBRATION_PROFILE_ADAPTIVE_SQUARE
+        } else if self.uses_hatching() {
+            profile == CALIBRATION_PROFILE_HATCH
+        } else if self.uses_guide_faces() {
             [
                 CALIBRATION_PROFILE_GUIDE_FACES,
                 CALIBRATION_PROFILE_GUIDE_FACES_64,
@@ -264,10 +274,78 @@ impl CalibrationBinding {
         suffix
     }
 
+    /// Identifies both full-cell adaptive strategies through typed recipe wrappers.
+    pub fn uses_adaptive_square_marks(&self) -> bool {
+        /// Visits structural wrappers without deriving policy from labels or catalog identities.
+        fn uses(structure: &PatternStructureRecipe) -> bool {
+            match structure {
+                PatternStructureRecipe::OrderedOutputs {
+                    definition,
+                    outputs,
+                } => {
+                    uses(definition)
+                        || outputs.iter().any(|output| {
+                            matches!(output, PatternOutputRealizationRecipe::AdaptiveSquareMarks | PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks)
+                        })
+                }
+                PatternStructureRecipe::AuthoredResources { definition, .. } => uses(definition),
+                _ => false,
+            }
+        }
+        uses(&self.recipe.structure)
+    }
+
+    /// Identifies adjacent-area mixing from persisted typed output recipes alone.
+    pub fn uses_adaptive_blue_noise(&self) -> bool {
+        /// Visits wrappers without deriving output policy from gallery identity.
+        fn uses(structure: &PatternStructureRecipe) -> bool {
+            match structure {
+                PatternStructureRecipe::OrderedOutputs {
+                    definition,
+                    outputs,
+                } => {
+                    uses(definition)
+                        || outputs.iter().any(|output| {
+                            matches!(
+                                output,
+                                PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks
+                            )
+                        })
+                }
+                PatternStructureRecipe::AuthoredResources { definition, .. } => uses(definition),
+                _ => false,
+            }
+        }
+        uses(&self.recipe.structure)
+    }
+
+    /// Identifies the fixed-width hatch producer through current output wrappers.
+    /// Ordinary stroke and Shape Library bindings retain their existing profile revision.
+    pub fn uses_hatching(&self) -> bool {
+        /// Reads typed output policy without interpreting labels, IDs or frontend state.
+        fn uses(structure: &PatternStructureRecipe) -> bool {
+            match structure {
+                PatternStructureRecipe::OrderedOutputs { definition, outputs } => uses(definition) || outputs.iter().any(|output| matches!(output, PatternOutputRealizationRecipe::StructuralPaths { style, .. } if style.hatch.is_some())),
+                PatternStructureRecipe::AuthoredResources { definition, .. }
+                | PatternStructureRecipe::ConnectionPaths { definition, .. }
+                | PatternStructureRecipe::MazeWalls { definition, .. }
+                | PatternStructureRecipe::AuthoredClosedShapeMarks { definition, .. }
+                | PatternStructureRecipe::CurveMotifPaths { definition, .. }
+                | PatternStructureRecipe::VoronoiRegions { definition }
+                | PatternStructureRecipe::GuideFaceRegions { definition, .. } => uses(definition),
+                _ => false,
+            }
+        }
+        uses(&self.recipe.structure)
+    }
+
     /// Adds all current typed coverage producers to the single existing artistic/base suffix authority.
     /// Exact prior suffix recognition excludes these coverage revisions together, including mixed outputs.
     fn geometry_profile_suffix(&self) -> String {
         let mut suffix = self.geometry_profile_suffix_before_coverage();
+        if self.uses_adaptive_square_marks() { suffix.push_str("+cell-area-overlap-q16-mask256-v1"); }
+        if self.uses_adaptive_blue_noise() { suffix.push_str("+blue-noise64-area-mixing-v1"); }
+        if self.uses_hatching() { suffix.push_str("+interleaved-hatch-v3"); }
         if self.requires_canvas_coverage() {
             suffix.push_str("+cover-envelope-v1");
         }
@@ -542,11 +620,9 @@ impl CalibrationBinding {
         normalize_inactive_family_orientation(&mut recipe.structure);
         normalize_variation_seeds(&mut recipe.structure);
         normalize_response_shells(&mut recipe);
-        Ok(Self {
-            recipe,
-            density_aspect,
-            shape_rotation_degrees,
-        })
+        let mut binding = Self { recipe, density_aspect, shape_rotation_degrees };
+        if binding.uses_adaptive_square_marks() { binding.density_aspect = 1.0; binding.shape_rotation_degrees = 0.0; }
+        Ok(binding)
     }
 }
 
@@ -680,6 +756,76 @@ impl UniformCalibration {
     }
 }
 
+/// Measured flat-field layout response C(q), distinct from raw footprint C(size).
+/// Observations retain small nonmonotone population fluctuations; inversion uses their
+/// cumulative upper envelope without rewriting the measured numbers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DispersionCalibration {
+    observations: Vec<CalibrationKnot>,
+}
+impl DispersionCalibration {
+    /// Validates finite ordered flat-field probes with exact zero/full inputs.
+    /// # Errors
+    /// Rejects missing endpoints, invalid values, nonzero empty ink, or an empty attainable span.
+    pub fn new(observations: Vec<CalibrationKnot>) -> Result<Self, ValidationError> {
+        if observations.len() < 3
+            || observations.len() > 512
+            || observations
+                .first()
+                .is_none_or(|k| k.input != 0.0 || k.coverage != 0.0)
+            || observations
+                .last()
+                .is_none_or(|k| k.input != 1.0 || k.coverage <= 0.0)
+        {
+            return Err(ValidationError::new(
+                "calibration.dispersion.endpoints",
+                "dispersion probes must measure empty ink and a positive attainable full-ink span",
+            ));
+        }
+        for (i, k) in observations.iter().enumerate() {
+            if !k.input.is_finite()
+                || !k.coverage.is_finite()
+                || !(0.0..=1.0).contains(&k.input)
+                || !(0.0..=1.0).contains(&k.coverage)
+                || (i > 0 && observations[i - 1].input >= k.input)
+            {
+                return Err(ValidationError::new(
+                    "calibration.dispersion.observations",
+                    "dispersion observations must be finite, bounded and input-ordered",
+                ));
+            }
+        }
+        Ok(Self { observations })
+    }
+    /// Returns the unchanged measured C(q) observations.
+    pub fn observations(&self) -> &[CalibrationKnot] {
+        &self.observations
+    }
+    /// Inverts the cumulative measured envelope, saturating only beyond measured full ink.
+    pub fn inverse(&self, target: f64) -> f64 {
+        let target = target.clamp(0.0, 1.0);
+        if target == 0.0 {
+            return 0.0;
+        }
+        if target == 1.0 {
+            return 1.0;
+        }
+        let mut peak = 0.0_f64;
+        for (i, k) in self.observations.iter().enumerate().skip(1) {
+            if k.coverage > peak {
+                if k.coverage >= target {
+                    let previous = &self.observations[i - 1];
+                    return previous.input
+                        + (k.input - previous.input) * (target - previous.coverage)
+                            / (k.coverage - previous.coverage);
+                }
+                peak = k.coverage;
+            }
+        }
+        1.0
+    }
+}
+
 /// One validated, immutable measurement for an exact structural binding.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SavedCalibration {
@@ -688,11 +834,12 @@ pub struct SavedCalibration {
     raw: Vec<CalibrationKnot>,
     uniform: Option<UniformCalibration>,
     variation: Option<CalibrationVariation>,
+    dispersion: Option<DispersionCalibration>,
 }
 
 impl SavedCalibration {
     /// Validates raw zero-to-two coverage and optional Uniform data under the producer's
-    /// default strict profile, including current typed geometry-producer revisions.
+    /// default measured profile, including discrete hatch populations and current producer revisions.
     ///
     /// # Errors
     /// Rejects missing endpoints, nonfinite, unordered, or out-of-range observations.
@@ -701,7 +848,11 @@ impl SavedCalibration {
         raw: Vec<CalibrationKnot>,
         uniform: Option<UniformCalibration>,
     ) -> Result<Self, ValidationError> {
-        let profile = if binding.uses_guide_faces() {
+        let profile = if binding.uses_adaptive_square_marks() {
+            CALIBRATION_PROFILE_ADAPTIVE_SQUARE
+        } else if binding.uses_hatching() {
+            CALIBRATION_PROFILE_HATCH
+        } else if binding.uses_guide_faces() {
             CALIBRATION_PROFILE_GUIDE_FACES
         } else if binding.has_variation_seed() {
             CALIBRATION_PROFILE_SEEDED
@@ -711,8 +862,8 @@ impl SavedCalibration {
         Self::with_profile(binding.profile_for_reference(profile), binding, raw, uniform)
     }
 
-    /// Restores a persisted measurement only under its typed producer's strict or eligible
-    /// covered-interior profile, rejecting superseded typed producer observations.
+    /// Restores a persisted measurement only under its typed producer's strict, discrete-hatch
+    /// or eligible covered-interior profile, rejecting superseded typed producer observations.
     ///
     /// # Errors
     /// Rejects obsolete profiles and invalid measured payloads.
@@ -723,6 +874,8 @@ impl SavedCalibration {
         uniform: Option<UniformCalibration>,
     ) -> Result<Self, ValidationError> {
         let supported = [
+            CALIBRATION_PROFILE_ADAPTIVE_SQUARE,
+            CALIBRATION_PROFILE_HATCH,
             CALIBRATION_PROFILE,
             CALIBRATION_PROFILE_64,
             CALIBRATION_PROFILE_GUIDE_FACES,
@@ -743,6 +896,12 @@ impl SavedCalibration {
             ));
         }
         validate_knots(&raw, 2.0, MAX_SAVED_CALIBRATION_KNOTS)?;
+        if binding.uses_adaptive_square_marks() && (uniform.is_some() || raw.len() != 10 || raw.iter().enumerate().any(|(i,k)| k.input != i as f64 * 2.0 / 9.0)) {
+            return Err(ValidationError::new("calibration.adaptive_square.levels", "Adaptive shape calibration requires ten measured discrete probes and no Uniform fit"));
+        }
+        if binding.uses_hatching() && (uniform.is_some() || raw.len() != 9 || raw.iter().enumerate().any(|(i, k)| k.input != i as f64 / 4.0)) {
+            return Err(ValidationError::new("calibration.hatch.populations", "hatch calibration requires all nine measured populations and no independent Uniform transfer"));
+        }
         if raw.first().unwrap().coverage == raw.last().unwrap().coverage {
             return Err(ValidationError::new(
                 "calibration.raw.span",
@@ -755,6 +914,7 @@ impl SavedCalibration {
             raw,
             uniform,
             variation: None,
+            dispersion: None,
         })
     }
 
@@ -788,6 +948,7 @@ impl SavedCalibration {
             raw,
             uniform,
             variation: Some(variation),
+            dispersion: None,
         })
     }
 
@@ -806,6 +967,42 @@ impl SavedCalibration {
     /// Returns Uniform data when this geometry supports that mode.
     pub fn uniform(&self) -> Option<&UniformCalibration> {
         self.uniform.as_ref()
+    }
+    /// Attaches separately measured layout tone response to an intrinsic dispersion binding.
+    /// # Errors
+    /// Rejects an unrelated structural binding.
+    pub fn with_dispersion(
+        mut self,
+        value: DispersionCalibration,
+    ) -> Result<Self, ValidationError> {
+        if !self.requires_dispersion() {
+            return Err(ValidationError::new(
+                "calibration.dispersion.binding",
+                "dispersion observations require an intrinsic layout binding",
+            ));
+        }
+        self.dispersion = Some(value);
+        Ok(self)
+    }
+    /// Returns the layout-specific measured tone transfer when present.
+    pub fn dispersion(&self) -> Option<&DispersionCalibration> {
+        self.dispersion.as_ref()
+    }
+    /// Reports whether this typed binding requires a separate layout response measurement.
+    pub fn requires_dispersion(&self) -> bool {
+        self.binding.recipe.structure.dispersion_layout().is_some()
+    }
+    /// Rejects incomplete new-layout artifacts without changing older artifact authority.
+    /// # Errors
+    /// Returns a Recalibrate diagnostic when required measured transfer data is absent.
+    pub fn require_complete(&self) -> Result<(), ValidationError> {
+        if self.requires_dispersion() && self.dispersion.is_none() {
+            return Err(ValidationError::new(
+                "calibration.dispersion.missing",
+                "dispersion tone measurement is missing; Recalibrate",
+            ));
+        }
+        Ok(())
     }
     /// Returns empirical population-transfer maxima only for the stochastic mean profile.
     pub fn variation(&self) -> Option<&CalibrationVariation> {

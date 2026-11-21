@@ -113,6 +113,7 @@ fn reference_normalize_and_union(
             FillRule::NonZero,
             work,
             omissions,
+            AreaOverlayPurpose::Final,
             None,
         )
     } else {

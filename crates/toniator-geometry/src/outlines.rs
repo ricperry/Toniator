@@ -9,6 +9,9 @@ use crate::{
     LineSegment, PathClosure, PathLocation, Point2, Vector2,
 };
 
+mod circular;
+pub use circular::build_circular_stroke_outline_cancellable;
+
 /// One exact centerline location and document-space width consumed by the outline service.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VariableWidthPathSample {
@@ -46,6 +49,18 @@ pub struct CanonicalFilledOutline {
 }
 
 impl CanonicalFilledOutline {
+    /// Verifies that immutable geometry-owned positive-winding preparation matches these exact contours.
+    /// Public outline edits or copied preparation cannot grant a certificate to different geometry.
+    pub fn has_nonnegative_winding_certificate(&self) -> bool {
+        self.fill_rule == CanonicalFillRule::NonZero
+            && self.coverage == MaterializationCoverage::Complete
+            && self
+                .prepared
+                .as_ref()
+                .and_then(|p| p.certified_curved.as_ref())
+                .is_some_and(|contours| *contours == self.contours)
+    }
+
     /// Charges complete original procedural commands while retaining actual storage as a lower bound.
     /// # Errors
     /// Returns the original segment-limit authority if stored contour accounting overflows.
@@ -225,7 +240,10 @@ pub fn build_variable_width_outline_cancellable(
     for run in &runs {
         context.count_storage(ConstructionCounter::PreparedOutlineBytes, &run.vertices);
     }
-    let prepared = Arc::new(PreparedVariableWidthOutline { runs });
+    let prepared = Arc::new(PreparedVariableWidthOutline {
+        runs,
+        certified_curved: None,
+    });
     materialize_prepared_outline_cancellable(
         prepared,
         ConstructionContext::current().coverage(),
@@ -274,10 +292,11 @@ fn validate_samples(
     Ok(())
 }
 
-/// Immutable complete compacted vertices; materialization never samples artwork or changes runs.
+/// Retains the complete compacted runs or certified curved contours for source-free materialization.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreparedVariableWidthOutline {
     runs: Vec<PreparedOutlineRun>,
+    certified_curved: Option<Vec<CanonicalOutlineContour>>,
 }
 /// One original zero-separated positive run, including its unchanged closed seam authority.
 #[derive(Clone, Debug, PartialEq)]
@@ -286,7 +305,7 @@ struct PreparedOutlineRun {
     closed: bool,
 }
 
-/// Materializes complete prepared runs without changing original primitive arithmetic.
+/// Materializes compacted runs or copies their certified curved outline using its original coordinates.
 /// # Errors
 /// Returns cancellation, numeric, allocation or explicit segment-policy failures atomically.
 pub fn materialize_prepared_outline_cancellable(
@@ -295,6 +314,13 @@ pub fn materialize_prepared_outline_cancellable(
     limits: VariableWidthOutlineLimits,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<CanonicalFilledOutline, CurveError> {
+    if let Some(contours) = &prepared.certified_curved {
+        return certified_curved_outline(
+            clone_curved_contours(contours, limits, cancelled)?,
+            limits,
+            cancelled,
+        );
+    }
     let context = ConstructionContext::current();
     let mut endpoints = EndpointScan(None);
     let mut full_segment_count = None;
@@ -373,6 +399,83 @@ pub fn materialize_prepared_outline_cancellable(
         },
     })
 }
+/// Copies a bounded immutable curved preparation with the ordinary outline allocation/segment authority.
+/// # Errors
+/// Returns cancellation, allocation or segment-budget failure before exposing a partial copy.
+fn clone_curved_contours(
+    contours: &[CanonicalOutlineContour],
+    limits: VariableWidthOutlineLimits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<CanonicalOutlineContour>, CurveError> {
+    let mut result = Vec::new();
+    let mut remaining = limits.maximum_segments();
+    for contour in contours {
+        check_curve_cancelled(cancelled)?;
+        reserve_curve(&mut result, 1)?;
+        let mut segments = Vec::new();
+        for segment in &contour.segments {
+            check_curve_cancelled(cancelled)?;
+            if remaining == 0 {
+                return Err(CurveError::new(
+                    "curve.outline.segment_limit",
+                    "curved outline exceeds segment budget",
+                ));
+            }
+            remaining -= 1;
+            reserve_curve(&mut segments, 1)?;
+            segments.push(*segment);
+        }
+        result.push(CanonicalOutlineContour { segments });
+    }
+    Ok(result)
+}
+
+/// Publishes a complete nonnegative-winding curved construction and an exact private contour snapshot.
+/// Only the bounded circular constructor calls this after its radial winding/accuracy proof.
+/// # Errors
+/// Returns cancellation, allocation, bounds or segment-budget diagnostics before publication.
+fn certified_curved_outline(
+    contours: Vec<CanonicalOutlineContour>,
+    limits: VariableWidthOutlineLimits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CanonicalFilledOutline, CurveError> {
+    let certified = clone_curved_contours(&contours, limits, cancelled)?;
+    let mut extrema: Option<(Point2, Point2)> = None;
+    let mut count = 0;
+    for contour in &contours {
+        for segment in &contour.segments {
+            check_curve_cancelled(cancelled)?;
+            count += 1;
+            for point in outline_segment_points(segment) {
+                if let Some((min, max)) = &mut extrema {
+                    min.x = min.x.min(point.x);
+                    min.y = min.y.min(point.y);
+                    max.x = max.x.max(point.x);
+                    max.y = max.y.max(point.y);
+                } else {
+                    extrema = Some((point, point));
+                }
+            }
+        }
+    }
+    let context = ConstructionContext::current();
+    context.count_storage(ConstructionCounter::PreparedOutlineBytes, &certified);
+    for contour in &certified {
+        context.count_storage(ConstructionCounter::PreparedOutlineBytes, &contour.segments);
+    }
+    Ok(CanonicalFilledOutline {
+        full_segment_count: Some(count),
+        prepared: Some(Arc::new(PreparedVariableWidthOutline {
+            runs: Vec::new(),
+            certified_curved: Some(certified),
+        })),
+        coverage: MaterializationCoverage::Complete,
+        contours,
+        fill_rule: CanonicalFillRule::NonZero,
+        bounds: extrema.and_then(|(a, b)| Bounds::new(a, b)),
+    })
+}
+
 /// Emits one original contour from globally prepared vertices, preserving caps, seams and winding.
 /// # Errors
 /// Propagates cancellation and original primitive-construction diagnostics.

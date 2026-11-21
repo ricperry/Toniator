@@ -18,11 +18,11 @@ mod channel_defaults;
 pub use calibration::{
     AttachedCalibration, CALIBRATION_PROFILE, CALIBRATION_PROFILE_64,
     CALIBRATION_PROFILE_GUIDE_FACES, CALIBRATION_PROFILE_GUIDE_FACES_64,
-    CALIBRATION_PROFILE_MEAN, CALIBRATION_PROFILE_ROUND_INTERIOR,
+    CALIBRATION_PROFILE_ADAPTIVE_SQUARE, CALIBRATION_PROFILE_HATCH, CALIBRATION_PROFILE_MEAN, CALIBRATION_PROFILE_ROUND_INTERIOR,
     CALIBRATION_PROFILE_SEEDED, CALIBRATION_PROFILE_SEEDED_64,
     CALIBRATION_REFERENCE_CANVAS_SIDE, CALIBRATION_REFERENCE_SEED, CalibrationBinding,
-    CalibrationKnot, CalibrationVariation, MAX_SAVED_CALIBRATION_KNOTS, SavedCalibration,
-    UniformCalibration,
+    CalibrationKnot, CalibrationVariation, DispersionCalibration, MAX_SAVED_CALIBRATION_KNOTS,
+    SavedCalibration, UniformCalibration,
 };
 mod color_authoring;
 mod pattern_batches;
@@ -894,7 +894,77 @@ pub enum MarkOrientation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MarkPrototype {
     Circle,
+    /// Selects a full square-cell silhouette by nearest channel ink area and overlap.
+    AdaptiveSquare,
+    /// Mixes adjacent full-cell areas using stable logical-cell blue-noise ranks.
+    AdaptiveSquareBlueNoise,
     AuthoredClosedShape { structure_id: AuthoredStructureId },
+}
+
+impl PatternDefinition {
+    /// Reports full-cell adaptive output policy independently of metadata and renderer state.
+    pub fn uses_adaptive_square_marks(&self) -> bool {
+        self.output_layers.iter().any(|output| {
+            matches!(
+                output.realization,
+                PatternOutputRealization::MarkPrototype {
+                    prototype: MarkPrototype::AdaptiveSquare | MarkPrototype::AdaptiveSquareBlueNoise,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// Derives eligibility from two perpendicular straight directions and equal native pitch.
+    /// Both classic and generalized guide intersections retain their ordinary stable identities.
+    pub fn supports_adaptive_square_marks(&self) -> bool {
+        if matches!(
+            self.mechanisms.as_slice(),
+            [
+                PatternMechanism::StraightGuides { .. },
+                PatternMechanism::GuideIntersections { .. }
+            ]
+        ) {
+            return self.output_layers.iter().all(|output| {
+                matches!(
+                    output.realization,
+                    PatternOutputRealization::CircularMarks { .. }
+                        | PatternOutputRealization::MarkPrototype { .. }
+                )
+            });
+        }
+        let directions = self
+            .mechanisms
+            .iter()
+            .find_map(|mechanism| match mechanism {
+                PatternMechanism::StraightGuideDimensions { dimensions, .. }
+                    if dimensions.len() == 2 =>
+                {
+                    Some(dimensions)
+                }
+                _ => None,
+            });
+        let Some(directions) = directions else {
+            return false;
+        };
+        let angle =
+            (directions[0].baseline_angle_degrees - directions[1].baseline_angle_degrees).to_radians();
+        let spacing = directions[0].repetition.spacing_multiplier;
+        angle.cos().abs() < 1e-10
+            && (spacing - directions[1].repetition.spacing_multiplier).abs() < 1e-10
+            && self.output_layers.iter().all(|output| {
+                output.site_mechanism_id().is_some_and(|id| {
+                    self.mechanisms.iter().any(|mechanism| {
+                        mechanism.id() == id
+                            && matches!(
+                                mechanism,
+                                PatternMechanism::GuideIntersections { .. }
+                                    | PatternMechanism::SelectedGuideIntersections { .. }
+                            )
+                    })
+                })
+            })
+    }
 }
 
 /// A stable identifier for a channel owned by a document.
@@ -2138,6 +2208,8 @@ fn reconstruct_recipe_output(
             })
     };
     match &output.realization {
+        PatternOutputRealization::MarkPrototype { prototype: MarkPrototype::AdaptiveSquare, .. } => Ok(PatternOutputRealizationRecipe::AdaptiveSquareMarks),
+        PatternOutputRealization::MarkPrototype { prototype: MarkPrototype::AdaptiveSquareBlueNoise, .. } => Ok(PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks),
         PatternOutputRealization::CircularMarks { .. }
         | PatternOutputRealization::MarkPrototype {
             prototype: MarkPrototype::Circle,
@@ -3028,11 +3100,55 @@ pub enum StrokeCap {
     Round,
 }
 
-/// Persisted authored stroke style; response width remains document/channel authority.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Persisted stroke realization policy; ordinary width remains document/channel authority.
+/// Hatching uses a fixed feature-relative width and spends tone on clipped carrier occupancy.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathStrokeStyle {
     pub join: StrokeJoin,
     pub cap: StrokeCap,
+    /// Selects level-interleaved constant-width strokes only for structural path outputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hatch: Option<HatchStyle>,
+}
+
+/// Authored constant stroke width as a fraction of the owning carrier's nominal pitch.
+/// Eight progressive interleaved thresholds are fixed product behavior; zero ink emits nothing.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HatchStyle {
+    pub width: f64,
+}
+impl PartialEq for HatchStyle {
+    /// Compares persisted bits so invalid NaNs remain reflexive before validation rejects them.
+    fn eq(&self, other: &Self) -> bool {
+        self.width.to_bits() == other.width.to_bits()
+    }
+}
+impl Eq for HatchStyle {}
+impl HatchStyle {
+    /// Rejects nonfinite or nonprintable widths before realization or command publication.
+    /// # Errors
+    /// Returns the stable hatch width diagnostic outside the positive zero-through-two range.
+    pub fn validate(self) -> Result<(), ValidationError> {
+        if !self.width.is_finite() || self.width <= 0.0 || self.width > 2.0 {
+            return Err(ValidationError::new(
+                "pattern.hatch.width",
+                "hatch width must be positive and at most twice the carrier pitch",
+            ));
+        }
+        Ok(())
+    }
+}
+impl fmt::Debug for PathStrokeStyle {
+    /// Preserves ordinary style identity text; hatching adds its explicit authored policy.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut value = f.debug_struct("PathStrokeStyle");
+        value.field("join", &self.join).field("cap", &self.cap);
+        if let Some(hatch) = &self.hatch {
+            value.field("hatch", hatch);
+        }
+        value.finish()
+    }
 }
 
 /// Authored mutual-nearest bounds consumed by one connection program.
@@ -3178,10 +3294,12 @@ impl ConnectionProgram {
 }
 
 impl Default for PathStrokeStyle {
+    /// Supplies an ordinary round stroke with source-controlled width.
     fn default() -> Self {
         Self {
             join: StrokeJoin::Round,
             cap: StrokeCap::Round,
+            hatch: None,
         }
     }
 }
@@ -4905,6 +5023,8 @@ pub enum PatternFamily {
 /// The distinct structural character of an unmodulated candidate process.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RandomSiteCharacter {
+    /// Channel-driven deterministic placement with an explicit tone allocation.
+    Dispersion { layout: DispersionLayout },
     /// Independent uniform candidates; close neighbors are permitted unless
     /// the separately declared exclusion mechanism rejects them.
     RawUniform,
@@ -4921,6 +5041,76 @@ pub enum RandomSiteCharacter {
     /// normalized: zero keeps each candidate at its cell center and one
     /// permits the complete cell extent.
     Stratified { jitter: f64 },
+}
+
+/// Saved channel-driven layouts; tangent variants allocate tone between occupancy and size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DispersionLayout {
+    /// Uses the project-owned unique 64×64 progressive void-and-cluster ranks.
+    RankedBlueNoise,
+    Bayer,
+    FloydSteinberg,
+    InkQuadtree,
+    TangentSpacing,
+    TangentSize,
+    TangentBlend,
+    ClusterScreen,
+}
+impl DispersionLayout {
+    /// Returns the fraction of channel tone consumed by occupancy; the remainder sizes marks.
+    pub fn spacing_fraction(self) -> f64 {
+        match self {
+            Self::TangentSize => 0.0,
+            Self::TangentBlend => 0.5,
+            _ => 1.0,
+        }
+    }
+    /// Projects the saved layout onto the existing descriptor selector authority.
+    pub fn character_kind(self) -> RandomCharacterKind {
+        match self {
+            Self::RankedBlueNoise => RandomCharacterKind::RankedBlueNoise,
+            Self::Bayer => RandomCharacterKind::Bayer,
+            Self::FloydSteinberg => RandomCharacterKind::FloydSteinberg,
+            Self::InkQuadtree => RandomCharacterKind::InkQuadtree,
+            Self::TangentSpacing => RandomCharacterKind::TangentSpacing,
+            Self::TangentSize => RandomCharacterKind::TangentSize,
+            Self::TangentBlend => RandomCharacterKind::TangentBlend,
+            Self::ClusterScreen => RandomCharacterKind::ClusterScreen,
+        }
+    }
+}
+
+impl PatternDefinition {
+    /// Reports whether this definition owns repeated guide carriers for interleaved hatching.
+    /// Finite single guides and parametric sources do not invent additional carrier levels.
+    pub fn supports_interleaved_hatching(&self) -> bool {
+        match self.mechanisms.first() {
+            Some(PatternMechanism::StraightGuides { .. } | PatternMechanism::StraightGuideDimensions { .. }) => true,
+            Some(PatternMechanism::GuideDimensions { dimensions, .. }) => !dimensions.is_empty() && dimensions.iter().all(|dimension| !matches!(dimension.repetition, GuideRepetition::Single)),
+            _ => false,
+        }
+    }
+    /// Returns the intrinsic channel-driven layout declared by this definition, if any.
+    pub fn dispersion_layout(&self) -> Option<DispersionLayout> {
+        self.mechanisms.iter().find_map(|m| match m {
+            PatternMechanism::RandomSiteProcess {
+                character: RandomSiteCharacter::Dispersion { layout },
+                ..
+            } => Some(*layout),
+            _ => None,
+        })
+    }
+}
+
+impl PatternOutputRealization {
+    /// Returns the active hatch policy only on raw structural path outputs.
+    pub fn hatch_style(&self) -> Option<HatchStyle> {
+        match self {
+            Self::GuidePaths { style, .. } | Self::ParametricPaths { style, .. } => style.hatch,
+            _ => None,
+        }
+    }
 }
 
 /// Built-in authored scatter spacing in document units at Feature size one.
@@ -6267,6 +6457,7 @@ impl Document {
         channel_id: ChannelId,
         artifact: SavedCalibration,
     ) -> Result<Self, ValidationError> {
+        artifact.require_complete()?;
         if !artifact
             .binding()
             .is_compatible_with(&CalibrationBinding::for_channel(self, channel_id)?)
@@ -6301,6 +6492,7 @@ impl Document {
         &self,
         artifact: SavedCalibration,
     ) -> Result<Self, ValidationError> {
+        artifact.require_complete()?;
         if !artifact
             .binding()
             .is_compatible_with(&self.baseline_calibration_binding()?)
@@ -6617,12 +6809,13 @@ impl Document {
         ))?;
         let definition = &bundle.definition;
         let density_delta = instance.layout_delta.density.as_ref();
-        let density = DensityMetric2D {
+        let mut density = DensityMetric2D {
             density: self.pattern_settings.density.density
                 + density_delta.map_or(0.0, |value| value.density_delta),
             aspect: self.pattern_settings.density.aspect
                 + density_delta.map_or(0.0, |value| value.aspect_delta),
         };
+        if definition.uses_adaptive_square_marks() { density.aspect = 1.0; }
         let resolved_density = density.resolve(&self.canvas)?;
         let pattern_rotation_degrees = self.pattern_settings.pattern_rotation_degrees
             + instance.layout_delta.rotation_degrees.unwrap_or(0.0);
@@ -6777,6 +6970,9 @@ impl Document {
         });
         projection.active_controls =
             capability_active_controls(self, scope, definition_id, true, supports_shape_rotation);
+        if bundle.definition.uses_adaptive_square_marks() {
+            projection.active_controls.retain(|control| !matches!(control.field, PropertyFieldId::DensityAspect | PropertyFieldId::ShapeRotationDegrees | PropertyFieldId::MarkSizeScale | PropertyFieldId::OutputOrientation | PropertyFieldId::OutputOrientationDimension));
+        }
         Ok(projection)
     }
 
@@ -6859,7 +7055,13 @@ impl Document {
                 }
             )
         });
-        let reason = if strict_margin {
+        let reason = if definition.uses_adaptive_square_marks() {
+            Some("Adaptive shapes select full-cell areas; Uniform sizing is inapplicable")
+        } else if definition.dispersion_layout().is_some() {
+            Some(
+                "This dispersion owns its spacing and size response; separate Uniform density is inapplicable",
+            )
+        } else if strict_margin {
             Some(
                 "Visible Mark Margin forbids overlap, so this pattern uses Variable sizing instead of automatic Uniform calibration",
             )
@@ -8094,6 +8296,10 @@ impl Document {
                         }
                     }
                     PatternMechanism::AlongGuideSites { .. } => {
+                        if definition.output_layers.iter().any(|output| output.realization.hatch_style().is_some()) {
+                            // Hatching consumes complete carriers, so site cadence cannot affect it.
+                            continue;
+                        }
                         for field in [
                             PropertyFieldId::AlongGuideDimensions,
                             PropertyFieldId::AlongGuideIntervalMultiplier,
@@ -8139,10 +8345,27 @@ impl Document {
                             PropertyFieldId::RandomCharacter,
                             PropertyFieldId::RandomSeed,
                         ] {
-                            descriptors.push(descriptor_from_contract(field, target));
+                            if field == PropertyFieldId::RandomSeed
+                                && matches!(character,RandomSiteCharacter::Dispersion { layout } if *layout!=DispersionLayout::ClusterScreen)
+                            {
+                                continue;
+                            }
+                            let mut descriptor = descriptor_from_contract(field, target);
+                            if field == PropertyFieldId::RandomCharacter
+                                && !definition.output_layers.iter().all(|output| {
+                                    matches!(
+                                        output.realization,
+                                        PatternOutputRealization::MarkPrototype { .. }
+                                    )
+                                })
+                            {
+                                descriptor.choices = LEGACY_RANDOM_CHARACTER_CHOICES;
+                            }
+                            descriptors.push(descriptor);
                         }
                         match character {
-                            RandomSiteCharacter::RawUniform => {
+                            RandomSiteCharacter::Dispersion { .. }
+                            | RandomSiteCharacter::RawUniform => {
                                 descriptors.push(descriptor_from_contract(
                                     PropertyFieldId::RandomNominalSpacing,
                                     target,
@@ -8180,6 +8403,9 @@ impl Document {
                         }
                     }
                     PatternMechanism::SiteDensityModulation { modulation, .. } => {
+                        if definition.dispersion_layout().is_some() {
+                            continue;
+                        }
                         descriptors.push(descriptor_with_runtime_context(
                             PropertyFieldId::RandomDensityModulation,
                             target,
@@ -8196,6 +8422,9 @@ impl Document {
                         ));
                     }
                     PatternMechanism::SiteExclusion { policy, .. } => {
+                        if definition.dispersion_layout().is_some() {
+                            continue;
+                        }
                         let visible =
                             matches!(policy, SiteExclusionPolicy::VisibleMarkMargin { .. });
                         descriptors.push(descriptor_with_runtime_context(
@@ -8227,6 +8456,9 @@ impl Document {
                         }
                     }
                     PatternMechanism::RandomSiteProduct { refinement, .. } => {
+                        if definition.dispersion_layout().is_some() {
+                            continue;
+                        }
                         for field in [
                             PropertyFieldId::RandomMaximumAttempts,
                             PropertyFieldId::RandomMaximumNeighborChecks,
@@ -8315,6 +8547,12 @@ impl Document {
                 }
                 if matches!(layer.realization, PatternOutputRealization::GuidePaths { .. } | PatternOutputRealization::ParametricPaths { .. } | PatternOutputRealization::CurveMotifPaths { .. }) {
                     descriptors.push(descriptor_from_contract(PropertyFieldId::ToneSampleSpacing, target));
+                    if definition.supports_interleaved_hatching() && matches!(layer.realization, PatternOutputRealization::GuidePaths { .. }) {
+                        descriptors.push(descriptor_from_contract(PropertyFieldId::HatchEnabled, target));
+                    }
+                    if layer.realization.hatch_style().is_some() {
+                        descriptors.push(descriptor_from_contract(PropertyFieldId::HatchStrokeWidth, target));
+                    }
                 }
                 if let PatternOutputRealization::ConnectionPaths { program, .. } =
                     &layer.realization
@@ -8400,6 +8638,9 @@ impl Document {
                         target,
                     ));
                 }
+                if matches!(layer.realization, PatternOutputRealization::MarkPrototype { prototype: MarkPrototype::AdaptiveSquare | MarkPrototype::AdaptiveSquareBlueNoise, .. }) {
+                    descriptors.push(descriptor_from_contract(PropertyFieldId::AdaptiveBlueNoise, target));
+                }
                 if let PatternOutputRealization::MarkPrototype { orientation, .. } =
                     &layer.realization
                 {
@@ -8421,7 +8662,9 @@ impl Document {
                                 },
                             )
                         } else {
-                            descriptor_from_contract(field, target)
+                            descriptor_with_runtime_context(field, target, DescriptorRuntimeContext::StructuralChoices {
+                                choices: if definition.supports_adaptive_square_marks() { MARK_PROTOTYPE_CHOICES } else { NON_ADAPTIVE_MARK_PROTOTYPE_CHOICES },
+                            })
                         };
                         descriptors.push(descriptor);
                     }
@@ -8449,6 +8692,16 @@ impl Document {
                 }
             }
         }
+        descriptors.retain(|descriptor| {
+            let definition = match descriptor.target {
+                PropertyTarget::Document => self.definition(self.pattern_settings.definition_id),
+                PropertyTarget::Channel(channel) | PropertyTarget::ChannelOutput(channel, _) => self.effective_channel_pattern(channel).ok().and_then(|value| self.definition(value.definition_id)),
+                PropertyTarget::OutputLayer(id, _) => self.definition(id),
+                _ => None,
+            };
+            !definition.is_some_and(|definition| definition.uses_adaptive_square_marks()) || !matches!(descriptor.field,
+                PropertyFieldId::DensityAspect | PropertyFieldId::ShapeRotationDegrees | PropertyFieldId::MarkSizeScale | PropertyFieldId::OutputOrientation | PropertyFieldId::OutputOrientationDimension)
+        });
         descriptors
     }
 
@@ -8723,6 +8976,10 @@ impl Document {
         })
     }
 
+    /// Reads the current value only from the descriptor's authoritative document target.
+    /// Active descriptor generation guarantees the required typed payload exists.
+    /// # Panics
+    /// Panics only if a caller supplies a descriptor whose active target contract is violated.
     fn property_value_for(&self, descriptor: &PropertyDescriptor) -> PropertyCurrentValueKind {
         let channel = |id| {
             self.channel(id)
@@ -9370,6 +9627,9 @@ impl Document {
                     (PropertyFieldId::ConnectionAllowLoops, PatternOutputRealization::ConnectionPaths { selection, program, .. }) => PropertyCurrentValueKind::Boolean(!matches!(program, ConnectionProgram::GridSpanningTree { .. }) && selection.cycles == ConnectionCyclePolicy::Allow),
                     (PropertyFieldId::ConnectionMinimumComponentPoints, PatternOutputRealization::ConnectionPaths { selection, .. }) => PropertyCurrentValueKind::U32(selection.minimum_component_points),
 
+                    (PropertyFieldId::AdaptiveBlueNoise, PatternOutputRealization::MarkPrototype { prototype, .. }) => PropertyCurrentValueKind::Boolean(*prototype == MarkPrototype::AdaptiveSquareBlueNoise),
+                    (PropertyFieldId::HatchEnabled, output) => PropertyCurrentValueKind::Boolean(output.hatch_style().is_some()),
+                    (PropertyFieldId::HatchStrokeWidth, output) => PropertyCurrentValueKind::FiniteF64(output.hatch_style().expect("descriptor requires active hatch policy").width),
                     (PropertyFieldId::ToneSampleSpacing, PatternOutputRealization::GuidePaths { tone_sample_spacing, .. }
                         | PatternOutputRealization::ParametricPaths { tone_sample_spacing, .. }
                         | PatternOutputRealization::CurveMotifPaths { tone_sample_spacing, .. }) => PropertyCurrentValueKind::FiniteF64(tone_sample_spacing.multiplier),
@@ -9449,6 +9709,7 @@ impl Document {
                     ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::MarkPrototype(
                         match prototype {
                             MarkPrototype::Circle => MarkPrototypeKind::Circle,
+                            MarkPrototype::AdaptiveSquare | MarkPrototype::AdaptiveSquareBlueNoise => MarkPrototypeKind::AdaptiveSquare,
                             MarkPrototype::AuthoredClosedShape { .. } => {
                                 MarkPrototypeKind::AuthoredClosedShape
                             }
@@ -10914,6 +11175,10 @@ impl Document {
                 ));
             }
             let realization = match output {
+                PatternOutputRealizationRecipe::AdaptiveSquareMarks | PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks => PatternOutputRealization::MarkPrototype {
+                    site_mechanism_id: site_mechanism_id.ok_or_else(|| ValidationError::new("pattern.adaptive_square", "Adaptive shapes require square guide sites"))?,
+                    prototype: if matches!(output, PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks) { MarkPrototype::AdaptiveSquareBlueNoise } else { MarkPrototype::AdaptiveSquare }, orientation: MarkOrientation::Fixed,
+                },
                 PatternOutputRealizationRecipe::Marks => {
                     let realization = neutral_marks.clone().ok_or(ValidationError::new(
                         "preset.recipe.outputs.marks",
@@ -12954,6 +13219,7 @@ fn recipe_random_transition(
     Vec<(PropertyFieldId, VariantTransitionValue)>,
 ) {
     match character {
+        RandomSiteCharacter::Dispersion { layout } => (layout.character_kind(), Vec::new()),
         RandomSiteCharacter::RawUniform => (RandomCharacterKind::RawUniform, Vec::new()),
         RandomSiteCharacter::Even {
             minimum_center_distance,
@@ -13048,6 +13314,37 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
         PatternDefinitionEdit::SetConnectionAllowLoops { output_layer_id, allow } => apply_connection_selection(definition, *output_layer_id, |selection| selection.cycles=if *allow {ConnectionCyclePolicy::Allow}else{ConnectionCyclePolicy::Forbid}),
         PatternDefinitionEdit::SetConnectionMinimumComponentPoints { output_layer_id, value } => apply_connection_selection(definition, *output_layer_id, |selection| selection.minimum_component_points = *value),
 
+        PatternDefinitionEdit::SetAdaptiveBlueNoise { output_layer_id, enabled } => {
+            if let Some(PatternOutputLayer {
+                realization: PatternOutputRealization::MarkPrototype { prototype, .. },
+                ..
+            }) = definition.output_layers.iter_mut().find(|layer| layer.id == *output_layer_id)
+            {
+                *prototype = if *enabled {
+                    MarkPrototype::AdaptiveSquareBlueNoise
+                } else {
+                    MarkPrototype::AdaptiveSquare
+                };
+            }
+        }
+        PatternDefinitionEdit::SetHatchEnabled { output_layer_id, enabled } => {
+            if let Some(output) = definition.output_layers.iter_mut().find(|output| output.id == *output_layer_id) {
+                match &mut output.realization {
+                    PatternOutputRealization::GuidePaths { style, .. } | PatternOutputRealization::ParametricPaths { style, .. } => style.hatch = if *enabled { Some(style.hatch.unwrap_or(HatchStyle { width: 1.0 })) } else { None },
+                    _ => {}
+                }
+            }
+        }
+        PatternDefinitionEdit::SetHatchStrokeWidth { output_layer_id, value } => {
+            if let Some(output) = definition.output_layers.iter_mut().find(|output| output.id == *output_layer_id) {
+                match &mut output.realization {
+                    PatternOutputRealization::GuidePaths { style, .. } | PatternOutputRealization::ParametricPaths { style, .. } => {
+                        if let Some(hatch) = &mut style.hatch { hatch.width = *value; }
+                    }
+                    _ => {}
+                }
+            }
+        }
         PatternDefinitionEdit::SetToneSampleSpacing { output_layer_id, value } => {
             if let Some(output) = definition.output_layers.iter_mut().find(|output| output.id == *output_layer_id) {
                 match &mut output.realization {
@@ -13487,6 +13784,19 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                     .then_some(nominal_spacing.unwrap_or(DEFAULT_RANDOM_NOMINAL_SPACING));
                 *current = character.clone();
             }
+            if matches!(character, RandomSiteCharacter::Dispersion { .. }) {
+                for mechanism in &mut definition.mechanisms {
+                    match mechanism {
+                        PatternMechanism::SiteExclusion { policy, .. } => {
+                            *policy = SiteExclusionPolicy::None
+                        }
+                        PatternMechanism::RandomSiteProduct { refinement, .. } => {
+                            refinement.enabled = false
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
         PatternDefinitionEdit::SetRandomNominalSpacing {
             mechanism_id,
@@ -13760,8 +14070,8 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
             {
                 match &mut layer.realization {
                     PatternOutputRealization::MarkPrototype {
-                        prototype: current, ..
-                    } => *current = prototype.clone(),
+                        prototype: current, orientation, ..
+                    } => { *current = prototype.clone(); if matches!(prototype, MarkPrototype::AdaptiveSquare | MarkPrototype::AdaptiveSquareBlueNoise) { *orientation = MarkOrientation::Fixed; } },
                     PatternOutputRealization::CircularMarks { site_mechanism_id } => {
                         layer.realization = PatternOutputRealization::MarkPrototype {
                             site_mechanism_id: *site_mechanism_id,
@@ -14179,6 +14489,9 @@ fn remap_definition_edit_with(
         PatternDefinitionEdit::SetConnectionMaximumFinalDegree { output_layer_id, value } => PatternDefinitionEdit::SetConnectionMaximumFinalDegree { output_layer_id: output(*output_layer_id), value: *value },
         PatternDefinitionEdit::SetConnectionAllowLoops { output_layer_id, allow } => PatternDefinitionEdit::SetConnectionAllowLoops { output_layer_id: output(*output_layer_id), allow: *allow },
         PatternDefinitionEdit::SetConnectionMinimumComponentPoints { output_layer_id, value } => PatternDefinitionEdit::SetConnectionMinimumComponentPoints { output_layer_id: output(*output_layer_id), value: *value },
+        PatternDefinitionEdit::SetAdaptiveBlueNoise { output_layer_id, enabled } => PatternDefinitionEdit::SetAdaptiveBlueNoise { output_layer_id: output(*output_layer_id), enabled: *enabled },
+        PatternDefinitionEdit::SetHatchEnabled { output_layer_id, enabled } => PatternDefinitionEdit::SetHatchEnabled { output_layer_id: output(*output_layer_id), enabled: *enabled },
+        PatternDefinitionEdit::SetHatchStrokeWidth { output_layer_id, value } => PatternDefinitionEdit::SetHatchStrokeWidth { output_layer_id: output(*output_layer_id), value: *value },
         PatternDefinitionEdit::SetToneSampleSpacing { output_layer_id, value } => PatternDefinitionEdit::SetToneSampleSpacing { output_layer_id: output(*output_layer_id), value: *value },
 
         PatternDefinitionEdit::SetParametricShape {
@@ -14802,6 +15115,20 @@ fn validate_definition_edit(
             if matches!(edit, PatternDefinitionEdit::SetConnectionAllowLoops { .. }) && matches!(program, ConnectionProgram::GridSpanningTree { .. }) {return Err(ValidationError::new("connection.selection.intrinsic_forest", "branching trees are intrinsically loop-free"));}
             Ok(())
         }
+        PatternDefinitionEdit::SetAdaptiveBlueNoise { output_layer_id, .. } => {
+            match validate_mark_prototype_output_target(definition, *output_layer_id)? {
+                PatternOutputRealization::MarkPrototype { prototype: MarkPrototype::AdaptiveSquare | MarkPrototype::AdaptiveSquareBlueNoise, .. } => Ok(()),
+                _ => Err(ValidationError::new("pattern.adaptive_blue_noise", "Blue noise requires an adaptive mark output")),
+            }
+        }
+        PatternDefinitionEdit::SetHatchEnabled { output_layer_id, .. } => {
+            if definition.supports_interleaved_hatching() && matches!(validate_output_layer_target(definition, *output_layer_id)?.realization, PatternOutputRealization::GuidePaths { .. }) { Ok(()) } else { Err(ValidationError::new("pattern.hatch.target", "hatching requires raw structural paths")) }
+        }
+        PatternDefinitionEdit::SetHatchStrokeWidth { output_layer_id, value } => {
+            HatchStyle { width: *value }.validate()?;
+            validate_output_layer_target(definition, *output_layer_id)?.realization.hatch_style().ok_or(ValidationError::new("pattern.hatch.target", "hatch width requires an interleaved path output"))?;
+            Ok(())
+        }
         PatternDefinitionEdit::SetToneSampleSpacing { output_layer_id, value } => {
             value.validate()?;
             match &validate_output_layer_target(definition, *output_layer_id)?.realization {
@@ -15096,7 +15423,7 @@ fn validate_definition_edit(
             let available = validate_selected_intersection_target(definition, *mechanism_id)?;
             validate_selection(
                 dimensions,
-                available,
+                &available,
                 2,
                 "pattern_definitions.mechanisms.intersections.dimensions",
             )
@@ -15118,7 +15445,7 @@ fn validate_definition_edit(
             let available = validate_along_guide_target(definition, *mechanism_id)?;
             validate_selection(
                 dimensions,
-                available,
+                &available,
                 1,
                 "pattern_definitions.mechanisms.along_guides.dimensions",
             )
@@ -15800,11 +16127,15 @@ fn validate_active_offset_target(
     }
 }
 
+/// Projects the actual straight or generic root IDs for guide selection validation.
+/// # Errors
+/// Returns a missing or incompatible root/mechanism diagnostic without mutating authored guides.
 fn straight_guide_root_dimensions(
     definition: &PatternDefinition,
-) -> Result<&[StraightGuideDimension], ValidationError> {
+) -> Result<std::borrow::Cow<'_, [StraightGuideDimension]>, ValidationError> {
     match definition.mechanisms.first() {
-        Some(PatternMechanism::StraightGuideDimensions { dimensions, .. }) => Ok(dimensions),
+        Some(PatternMechanism::StraightGuideDimensions { dimensions, .. }) => Ok(std::borrow::Cow::Borrowed(dimensions)),
+        Some(PatternMechanism::GuideDimensions { dimensions, .. }) => Ok(std::borrow::Cow::Owned(dimensions.iter().map(|dimension| StraightGuideDimension { id: dimension.id, baseline_angle_degrees: dimension.baseline_angle_degrees, phase: dimension.phase, repetition: StraightGuideRepetition { spacing_multiplier: 1.0 } }).collect())),
         _ => Err(ValidationError::new(
             "pattern_definitions.family",
             "definition has no straight guide root",
@@ -15812,10 +16143,13 @@ fn straight_guide_root_dimensions(
     }
 }
 
+/// Validates the addressed intersection mechanism before projecting its owned guide dimensions.
+/// # Errors
+/// Returns a missing or incompatible root/mechanism diagnostic without mutating authored guides.
 fn validate_selected_intersection_target(
     definition: &PatternDefinition,
     mechanism_id: PatternMechanismId,
-) -> Result<&[StraightGuideDimension], ValidationError> {
+) -> Result<std::borrow::Cow<'_, [StraightGuideDimension]>, ValidationError> {
     let available = straight_guide_root_dimensions(definition)?;
     match definition
         .mechanisms
@@ -15834,10 +16168,13 @@ fn validate_selected_intersection_target(
     }
 }
 
+/// Validates the addressed Along Guides mechanism before projecting straight or generic guide IDs.
+/// # Errors
+/// Returns a missing or incompatible root/mechanism diagnostic without mutating authored guides.
 fn validate_along_guide_target(
     definition: &PatternDefinition,
     mechanism_id: PatternMechanismId,
-) -> Result<&[StraightGuideDimension], ValidationError> {
+) -> Result<std::borrow::Cow<'_, [StraightGuideDimension]>, ValidationError> {
     let available = straight_guide_root_dimensions(definition)?;
     match definition
         .mechanisms
@@ -16158,8 +16495,28 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
             "each channel pattern requires exactly one drawing layer; combine patterns across channels or composite separate renders externally",
         ));
     }
+    if definition.uses_adaptive_square_marks() && !definition.supports_adaptive_square_marks() {
+        return Err(ValidationError::new("pattern.adaptive_square.grid", "Adaptive shapes require two perpendicular straight guide directions at equal pitch"));
+    }
     let mut output_ids = HashSet::new();
     for output in &definition.output_layers {
+        if matches!(&output.realization, PatternOutputRealization::MarkPrototype {
+            prototype: MarkPrototype::AdaptiveSquare | MarkPrototype::AdaptiveSquareBlueNoise, orientation, ..
+        } if *orientation != MarkOrientation::Fixed) {
+            return Err(ValidationError::new("pattern.adaptive_square.orientation", "Adaptive shapes own their fixed reference-pose selection"));
+        }
+        if let Some(hatch) = output.realization.hatch_style() {
+            hatch.validate()?;
+            if !definition.supports_interleaved_hatching() || !matches!(output.realization, PatternOutputRealization::GuidePaths { .. }) {
+                return Err(ValidationError::new("pattern.hatch.carriers", "interleaved hatching requires repeated guide carriers; disable hatching before choosing a single guide or parametric source"));
+            }
+        }
+        if matches!(&output.realization,
+            PatternOutputRealization::CurveMotifPaths { style, .. }
+            | PatternOutputRealization::ConnectionPaths { style, .. }
+            | PatternOutputRealization::MazeWalls { style, .. } if style.hatch.is_some()) {
+            return Err(ValidationError::new("pattern.hatch.output", "hatch policy is valid only for structural guide or parametric paths"));
+        }
         match &output.realization {
             PatternOutputRealization::GuidePaths {
                 tone_sample_spacing,
@@ -17332,6 +17689,7 @@ fn project_output_capability(
 /// Maps the active random-process variant to its payload-free capability discriminant.
 fn random_character_kind(character: &RandomSiteCharacter) -> RandomCharacterKind {
     match character {
+        RandomSiteCharacter::Dispersion { layout } => layout.character_kind(),
         RandomSiteCharacter::RawUniform => RandomCharacterKind::RawUniform,
         RandomSiteCharacter::Even { .. } => RandomCharacterKind::Even,
         RandomSiteCharacter::Clustered { .. } => RandomCharacterKind::Clustered,
@@ -17368,6 +17726,7 @@ fn guide_prototype_kind(prototype: &GuidePrototype) -> GuidePrototypeKind {
 fn mark_prototype_kind(prototype: &MarkPrototype) -> MarkPrototypeKind {
     match prototype {
         MarkPrototype::Circle => MarkPrototypeKind::Circle,
+                            MarkPrototype::AdaptiveSquare | MarkPrototype::AdaptiveSquareBlueNoise => MarkPrototypeKind::AdaptiveSquare,
         MarkPrototype::AuthoredClosedShape { .. } => MarkPrototypeKind::AuthoredClosedShape,
     }
 }
@@ -17465,6 +17824,16 @@ fn validate_random_site_definition(
             "random-site products require exactly one fixed mark prototype layer",
         ));
     };
+    if matches!(character, RandomSiteCharacter::Dispersion { .. })
+        && (!matches!(output, PatternOutputRealization::MarkPrototype { .. })
+            || !matches!(policy, SiteExclusionPolicy::None)
+            || refinement.enabled)
+    {
+        return Err(ValidationError::new(
+            "pattern.dispersion.output",
+            "channel-driven dispersion requires Marks without Lloyd relaxation or separate exclusion",
+        ));
+    }
     let source_id = match output {
         PatternOutputRealization::MarkPrototype {
             site_mechanism_id,
@@ -17503,9 +17872,12 @@ fn validate_random_site_definition(
     Ok(())
 }
 
+/// Validates the payload bounds of the active authored process; intrinsic layouts carry no floats.
+/// # Errors
+/// Rejects invalid minimum distance, cluster bounds or jitter without mutating the recipe.
 fn validate_random_character(character: &RandomSiteCharacter) -> Result<(), ValidationError> {
     match character {
-        RandomSiteCharacter::RawUniform => Ok(()),
+        RandomSiteCharacter::Dispersion { .. } | RandomSiteCharacter::RawUniform => Ok(()),
         RandomSiteCharacter::Even {
             minimum_center_distance,
         } => validate_positive_finite(
@@ -18780,6 +19152,9 @@ pub enum PropertyFieldId {
     ConnectionAllowLoops,
     ConnectionMinimumComponentPoints,
 
+    AdaptiveBlueNoise,
+    HatchEnabled,
+    HatchStrokeWidth,
     ToneSampleSpacing,
     SourceReference,
     Density,
@@ -18907,6 +19282,9 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::ConnectionAllowLoops,
     PropertyFieldId::ConnectionMinimumComponentPoints,
 
+    PropertyFieldId::AdaptiveBlueNoise,
+    PropertyFieldId::HatchEnabled,
+    PropertyFieldId::HatchStrokeWidth,
     PropertyFieldId::ToneSampleSpacing,
     PropertyFieldId::SourceReference,
     PropertyFieldId::Density,
@@ -19080,6 +19458,14 @@ pub enum PaintKind {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RandomCharacterKind {
+    RankedBlueNoise,
+    Bayer,
+    FloydSteinberg,
+    InkQuadtree,
+    TangentSpacing,
+    TangentSize,
+    TangentBlend,
+    ClusterScreen,
     RawUniform,
     Even,
     Clustered,
@@ -19099,6 +19485,7 @@ pub enum ExclusionKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkPrototypeKind {
     Circle,
+    AdaptiveSquare,
     AuthoredClosedShape,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19164,6 +19551,8 @@ pub enum PropertyDependency {
     ArtworkWeightedDensity,
     MinimumCenterExclusion,
     VisibleMarkExclusion,
+    /// A full-cell adaptive area-selection output.
+    AdaptiveMarkOutput,
     MarkPrototypeOutput,
     AuthoredClosedShapeMark,
     GuidedOutputOrientation,
@@ -19173,6 +19562,8 @@ pub enum PropertyDependency {
 /// active.  This is capability metadata, not a stored value or UI policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropertyApplicability {
+    /// Restricts area mixing to typed adaptive mark outputs.
+    AdaptiveMarkOutput,
     /// Structural guide, parametric or motif strokes; excludes point connections and mazes.
     ToneSampledCurveOutput,
     Always,
@@ -19251,6 +19642,9 @@ pub enum PropertyCommandKind {
     SetConnectionAllowLoops,
     SetConnectionMinimumComponentPoints,
 
+    SetAdaptiveBlueNoise,
+    SetHatchEnabled,
+    SetHatchStrokeWidth,
     SetToneSampleSpacing,
     SetParametricCurve,
     SetSourceReference,
@@ -19710,7 +20104,8 @@ fn property_value_for_mechanism(
             PatternMechanism::RandomSiteProcess { character, .. },
         ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::RandomCharacter(
             match character {
-                RandomSiteCharacter::RawUniform => RandomCharacterKind::RawUniform,
+                RandomSiteCharacter::Dispersion { layout } => layout.character_kind(),
+        RandomSiteCharacter::RawUniform => RandomCharacterKind::RawUniform,
                 RandomSiteCharacter::Even { .. } => RandomCharacterKind::Even,
                 RandomSiteCharacter::Clustered { .. } => RandomCharacterKind::Clustered,
                 RandomSiteCharacter::Stratified { .. } => RandomCharacterKind::Stratified,
@@ -19976,6 +20371,9 @@ fn transition_mechanism(
         })
 }
 
+/// Builds only the active selector payload fields, preserving existing values for a same-variant edit.
+/// # Errors
+/// Rejects a missing or non-random mechanism before creating transition fields.
 fn random_transition_fields(
     document: &Document,
     definition_id: PatternDefinitionId,
@@ -19992,7 +20390,15 @@ fn random_transition_fields(
     };
     let target = PropertyTarget::Mechanism(definition_id, mechanism_id);
     match choice {
-        RandomCharacterKind::RawUniform => Ok(Vec::new()),
+        RandomCharacterKind::RankedBlueNoise
+        | RandomCharacterKind::Bayer
+        | RandomCharacterKind::FloydSteinberg
+        | RandomCharacterKind::InkQuadtree
+        | RandomCharacterKind::TangentSpacing
+        | RandomCharacterKind::TangentSize
+        | RandomCharacterKind::TangentBlend
+        | RandomCharacterKind::ClusterScreen
+        | RandomCharacterKind::RawUniform => Ok(Vec::new()),
         RandomCharacterKind::Even => {
             let value = if base == choice {
                 match character {
@@ -20567,7 +20973,7 @@ fn mark_prototype_transition_fields(
             "selector is not a mark-prototype output",
         ));
     };
-    if choice == MarkPrototypeKind::Circle {
+    if matches!(choice, MarkPrototypeKind::Circle | MarkPrototypeKind::AdaptiveSquare) {
         return Ok(Vec::new());
     }
     let existing = if base == choice {
@@ -20575,7 +20981,7 @@ fn mark_prototype_transition_fields(
             MarkPrototype::AuthoredClosedShape { structure_id } => {
                 Some(PropertyReferenceValue::AuthoredStructure(*structure_id))
             }
-            MarkPrototype::Circle => unreachable!("base selector is current"),
+            MarkPrototype::Circle | MarkPrototype::AdaptiveSquare | MarkPrototype::AdaptiveSquareBlueNoise => unreachable!("base selector is current"),
         }
     } else {
         None
@@ -20837,6 +21243,30 @@ fn transition_draft_edit(
             PropertyEnumChoice::RandomCharacter(choice),
         ) => {
             let character = match choice {
+                RandomCharacterKind::RankedBlueNoise => RandomSiteCharacter::Dispersion {
+                    layout: DispersionLayout::RankedBlueNoise,
+                },
+                RandomCharacterKind::Bayer => RandomSiteCharacter::Dispersion {
+                    layout: DispersionLayout::Bayer,
+                },
+                RandomCharacterKind::FloydSteinberg => RandomSiteCharacter::Dispersion {
+                    layout: DispersionLayout::FloydSteinberg,
+                },
+                RandomCharacterKind::InkQuadtree => RandomSiteCharacter::Dispersion {
+                    layout: DispersionLayout::InkQuadtree,
+                },
+                RandomCharacterKind::TangentSpacing => RandomSiteCharacter::Dispersion {
+                    layout: DispersionLayout::TangentSpacing,
+                },
+                RandomCharacterKind::TangentSize => RandomSiteCharacter::Dispersion {
+                    layout: DispersionLayout::TangentSize,
+                },
+                RandomCharacterKind::TangentBlend => RandomSiteCharacter::Dispersion {
+                    layout: DispersionLayout::TangentBlend,
+                },
+                RandomCharacterKind::ClusterScreen => RandomSiteCharacter::Dispersion {
+                    layout: DispersionLayout::ClusterScreen,
+                },
                 RandomCharacterKind::RawUniform => RandomSiteCharacter::RawUniform,
                 RandomCharacterKind::Even => RandomSiteCharacter::Even {
                     minimum_center_distance: transition_f64(
@@ -20947,6 +21377,7 @@ fn transition_draft_edit(
         ) => {
             let prototype = match choice {
                 MarkPrototypeKind::Circle => MarkPrototype::Circle,
+                MarkPrototypeKind::AdaptiveSquare => MarkPrototype::AdaptiveSquare,
                 MarkPrototypeKind::AuthoredClosedShape => {
                     match transition_reference(draft, PropertyFieldId::OutputAuthoredClosedShape)? {
                         PropertyReferenceValue::AuthoredStructure(structure_id) => {
@@ -21125,6 +21556,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::ConnectionAllowLoops => PropertyCommandKind::SetConnectionAllowLoops,
             PropertyFieldId::ConnectionMinimumComponentPoints => PropertyCommandKind::SetConnectionMinimumComponentPoints,
 
+            PropertyFieldId::AdaptiveBlueNoise => PropertyCommandKind::SetAdaptiveBlueNoise,
+            PropertyFieldId::HatchEnabled => PropertyCommandKind::SetHatchEnabled,
+            PropertyFieldId::HatchStrokeWidth => PropertyCommandKind::SetHatchStrokeWidth,
             PropertyFieldId::ToneSampleSpacing => PropertyCommandKind::SetToneSampleSpacing,
             PropertyFieldId::ParametricShape
             | PropertyFieldId::ParametricTurns
@@ -21312,7 +21746,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::ModeledMappingInverted
             | PropertyFieldId::ArtworkWeightMappingInverted
             | PropertyFieldId::Visibility
-            | PropertyFieldId::RandomLloydEnabled
+            | PropertyFieldId::AdaptiveBlueNoise | PropertyFieldId::HatchEnabled | PropertyFieldId::RandomLloydEnabled
             | PropertyFieldId::RandomLloydDensityWeighted
             | PropertyFieldId::CurveMotifMirrorAlternateRows => PropertyValueKind::Boolean,
             PropertyFieldId::CurveMotifAlternateRowPhase => PropertyValueKind::OptionalFiniteF64,
@@ -21381,6 +21815,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
         bounds: match field {
             PropertyFieldId::ConnectionMaximumFinalDegree | PropertyFieldId::ConnectionMinimumComponentPoints => Some(PropertyBounds { minimum: Some(1.0), minimum_inclusive: true, maximum: Some(u32::MAX as f64), maximum_inclusive: true }),
 
+            PropertyFieldId::HatchStrokeWidth => Some(PropertyBounds { minimum: Some(0.0), minimum_inclusive: false, maximum: Some(2.0), maximum_inclusive: true }),
             PropertyFieldId::ToneSampleSpacing => positive_bounds(),
             PropertyFieldId::Density
             | PropertyFieldId::DensityAspect
@@ -21473,7 +21908,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
         unit: match field {
             PropertyFieldId::ConnectionMaximumFinalDegree | PropertyFieldId::ConnectionMinimumComponentPoints => PropertyUnit::Count,
 
-            PropertyFieldId::ToneSampleSpacing => PropertyUnit::FeatureSizeMultiplier,
+            PropertyFieldId::HatchStrokeWidth | PropertyFieldId::ToneSampleSpacing => PropertyUnit::FeatureSizeMultiplier,
             PropertyFieldId::Density
             | PropertyFieldId::DensityAspect
             | PropertyFieldId::GuideSpacingMultiplier
@@ -21533,12 +21968,13 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             _ => PropertyUnit::None,
         },
         applicability: match field {
+            PropertyFieldId::AdaptiveBlueNoise => PropertyApplicability::AdaptiveMarkOutput,
             PropertyFieldId::ConnectionFinalDegreeLimit => PropertyApplicability::ConnectionPathOutput,
             PropertyFieldId::ConnectionMaximumFinalDegree => PropertyApplicability::ConnectionPathOutput,
             PropertyFieldId::ConnectionAllowLoops => PropertyApplicability::ConnectionPathOutput,
             PropertyFieldId::ConnectionMinimumComponentPoints => PropertyApplicability::ConnectionPathOutput,
 
-            PropertyFieldId::ToneSampleSpacing => PropertyApplicability::ToneSampledCurveOutput,
+            PropertyFieldId::HatchEnabled | PropertyFieldId::HatchStrokeWidth | PropertyFieldId::ToneSampleSpacing => PropertyApplicability::ToneSampledCurveOutput,
             PropertyFieldId::ModeledMappingComponent
             | PropertyFieldId::ModeledMappingPlacement
             | PropertyFieldId::ModeledMappingInverted
@@ -21632,7 +22068,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             _ => PropertyApplicability::Always,
         },
         invalidation: match field {
-            PropertyFieldId::ToneSampleSpacing => InvalidationLevel::Realization,
+            PropertyFieldId::AdaptiveBlueNoise => InvalidationLevel::Realization,
+            PropertyFieldId::HatchEnabled => InvalidationLevel::Family,
+            PropertyFieldId::HatchStrokeWidth | PropertyFieldId::ToneSampleSpacing => InvalidationLevel::Realization,
             PropertyFieldId::SourceReference => InvalidationLevel::Source,
             PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
@@ -21696,7 +22134,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::ConnectionAllowLoops |
             PropertyFieldId::ConnectionMinimumComponentPoints |
 
-            PropertyFieldId::ToneSampleSpacing
+            PropertyFieldId::AdaptiveBlueNoise | PropertyFieldId::HatchEnabled | PropertyFieldId::HatchStrokeWidth | PropertyFieldId::ToneSampleSpacing
                 | PropertyFieldId::CoverageGuardSteps
                 | PropertyFieldId::CoverageAdditionalMargin
                 | PropertyFieldId::GuideBaselineAngle
@@ -21828,7 +22266,21 @@ const SOURCE_PLACEMENT_CHOICES: &[PropertyEnumChoice] = &[PropertyEnumChoice::So
 const SOLID_PAINT_CHOICES: &[PropertyEnumChoice] = &[PropertyEnumChoice::Paint(PaintKind::Solid)];
 const SAMPLED_PAINT_CHOICES: &[PropertyEnumChoice] =
     &[PropertyEnumChoice::Paint(PaintKind::SampledSource)];
+const LEGACY_RANDOM_CHARACTER_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::RawUniform),
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Even),
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Clustered),
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Stratified),
+];
 const RANDOM_CHARACTER_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::RankedBlueNoise),
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Bayer),
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::FloydSteinberg),
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::InkQuadtree),
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::TangentSpacing),
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::TangentSize),
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::TangentBlend),
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::ClusterScreen),
     PropertyEnumChoice::RandomCharacter(RandomCharacterKind::RawUniform),
     PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Even),
     PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Clustered),
@@ -21848,6 +22300,11 @@ const EXCLUSION_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::Exclusion(ExclusionKind::VisibleMarkMargin),
 ];
 const MARK_PROTOTYPE_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::MarkPrototype(MarkPrototypeKind::Circle),
+    PropertyEnumChoice::MarkPrototype(MarkPrototypeKind::AuthoredClosedShape),
+    PropertyEnumChoice::MarkPrototype(MarkPrototypeKind::AdaptiveSquare),
+];
+const NON_ADAPTIVE_MARK_PROTOTYPE_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::MarkPrototype(MarkPrototypeKind::Circle),
     PropertyEnumChoice::MarkPrototype(MarkPrototypeKind::AuthoredClosedShape),
 ];
@@ -21910,6 +22367,7 @@ const REGION_SAMPLING_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::RegionSampling(RegionSamplingStrategy::AreaAverage),
 ];
 
+/// Projects descriptor applicability onto its existing dependency predicate without storing state.
 const fn dependency_for_contract(
     applicability: PropertyApplicability,
     dynamic: PropertyDependency,
@@ -21936,6 +22394,7 @@ const fn dependency_for_contract(
         PropertyApplicability::ArtworkWeightedDensity => PropertyDependency::ArtworkWeightedDensity,
         PropertyApplicability::MinimumCenterExclusion => PropertyDependency::MinimumCenterExclusion,
         PropertyApplicability::VisibleMarkExclusion => PropertyDependency::VisibleMarkExclusion,
+        PropertyApplicability::AdaptiveMarkOutput => PropertyDependency::AdaptiveMarkOutput,
         PropertyApplicability::MarkPrototypeOutput => PropertyDependency::MarkPrototypeOutput,
         PropertyApplicability::AuthoredClosedShapeMark => {
             PropertyDependency::AuthoredClosedShapeMark
@@ -22372,6 +22831,27 @@ pub enum PatternStructureRecipe {
     },
 }
 
+impl PatternStructureRecipe {
+    /// Projects intrinsic layout authority through every transparent recipe wrapper.
+    pub fn dispersion_layout(&self) -> Option<DispersionLayout> {
+        match self {
+            Self::RandomSites {
+                character: RandomSiteCharacter::Dispersion { layout },
+                ..
+            } => Some(*layout),
+            Self::AuthoredResources { definition, .. }
+            | Self::ConnectionPaths { definition, .. }
+            | Self::MazeWalls { definition, .. }
+            | Self::AuthoredClosedShapeMarks { definition, .. }
+            | Self::CurveMotifPaths { definition, .. }
+            | Self::VoronoiRegions { definition }
+            | Self::GuideFaceRegions { definition, .. }
+            | Self::OrderedOutputs { definition, .. } => definition.dispersion_layout(),
+            _ => None,
+        }
+    }
+}
+
 /// ID-free equal-arc site intent for a parametric recipe.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParametricCurveSiteDraft {
@@ -22382,6 +22862,10 @@ pub struct ParametricCurveSiteDraft {
 /// One ID-free output realization authored in preset painter order.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternOutputRealizationRecipe {
+    /// Selects fixed full-cell silhouettes on compatible perpendicular square guides.
+    AdaptiveSquareMarks,
+    /// Mixes adjacent analytic cell areas with deterministic blue-noise thresholds.
+    AdaptiveSquareBlueNoiseMarks,
     /// Uses the family recipe's mark prototype and orientation controls.
     Marks,
     /// Emits marks from one root-table closed shape with a recipe-local orientation.
@@ -22671,7 +23155,8 @@ impl PatternDefinitionRecipe {
                 PatternOutputRealizationRecipe::AuthoredClosedShapeMarks {
                     orientation, ..
                 } => reset_removed_recipe_orientation(orientation, 1),
-                PatternOutputRealizationRecipe::Marks
+                PatternOutputRealizationRecipe::AdaptiveSquareMarks | PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks
+                | PatternOutputRealizationRecipe::Marks
                 | PatternOutputRealizationRecipe::StructuralPaths { .. }
                 | PatternOutputRealizationRecipe::CurveMotifPaths { .. }
                 | PatternOutputRealizationRecipe::ConnectionPaths { .. }
@@ -23387,7 +23872,8 @@ fn active_recipe_mark_orientation_dimensions(
                         orientation,
                         ..
                     } => mark_orientation_dimension_index(orientation),
-                    PatternOutputRealizationRecipe::StructuralPaths { .. }
+                    PatternOutputRealizationRecipe::AdaptiveSquareMarks | PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks
+                    | PatternOutputRealizationRecipe::StructuralPaths { .. }
                     | PatternOutputRealizationRecipe::CurveMotifPaths { .. }
                     | PatternOutputRealizationRecipe::ConnectionPaths { .. }
                     | PatternOutputRealizationRecipe::MazeWalls { .. }
@@ -23762,7 +24248,7 @@ fn assemble_recipe_outputs(parts: EditableRecipeOutputs) -> PatternDefinitionRec
 /// Classifies one current ID-free output realization for artist-facing construction controls.
 fn recipe_output_kind(output: &PatternOutputRealizationRecipe) -> PatternRecipeOutputKind {
     match output {
-        PatternOutputRealizationRecipe::Marks => PatternRecipeOutputKind::Marks,
+        PatternOutputRealizationRecipe::AdaptiveSquareMarks | PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks | PatternOutputRealizationRecipe::Marks => PatternRecipeOutputKind::Marks,
         PatternOutputRealizationRecipe::AuthoredClosedShapeMarks { .. } => {
             PatternRecipeOutputKind::CustomShapeMarks
         }
@@ -23788,7 +24274,8 @@ fn recipe_construction_kind(
     output: &PatternOutputRealizationRecipe,
 ) -> PatternRecipeConstructionKind {
     match output {
-        PatternOutputRealizationRecipe::Marks
+        PatternOutputRealizationRecipe::AdaptiveSquareMarks | PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks
+        | PatternOutputRealizationRecipe::Marks
         | PatternOutputRealizationRecipe::AuthoredClosedShapeMarks { .. } => {
             PatternRecipeConstructionKind::Marks
         }
@@ -23822,7 +24309,8 @@ fn recipe_connection_method_kind(
         PatternOutputRealizationRecipe::MazeWalls { .. } => {
             Some(PatternRecipeConnectionMethodKind::Maze)
         }
-        PatternOutputRealizationRecipe::Marks
+        PatternOutputRealizationRecipe::AdaptiveSquareMarks | PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks
+        | PatternOutputRealizationRecipe::Marks
         | PatternOutputRealizationRecipe::AuthoredClosedShapeMarks { .. }
         | PatternOutputRealizationRecipe::VoronoiRegions
         | PatternOutputRealizationRecipe::GuideFaceRegions { .. } => None,
@@ -23840,7 +24328,8 @@ fn recipe_region_method_kind(
         PatternOutputRealizationRecipe::GuideFaceRegions { .. } => {
             Some(PatternRecipeRegionMethodKind::GuideCells)
         }
-        PatternOutputRealizationRecipe::Marks
+        PatternOutputRealizationRecipe::AdaptiveSquareMarks | PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks
+        | PatternOutputRealizationRecipe::Marks
         | PatternOutputRealizationRecipe::AuthoredClosedShapeMarks { .. }
         | PatternOutputRealizationRecipe::StructuralPaths { .. }
         | PatternOutputRealizationRecipe::CurveMotifPaths { .. }
@@ -23902,6 +24391,17 @@ fn default_recipe_output(
     definition: &PatternStructureRecipe,
     resources: &mut Vec<AuthoredStructureDraft>,
 ) -> Result<(PatternOutputRealizationRecipe, PatternGeometryResponse), ValidationError> {
+    if definition.dispersion_layout().is_some()
+        && !matches!(
+            kind,
+            PatternRecipeOutputKind::Marks | PatternRecipeOutputKind::CustomShapeMarks
+        )
+    {
+        return Err(ValidationError::new(
+            "preset.dispersion.output",
+            "channel-driven dispersion offers Marks and Shapes",
+        ));
+    }
     let result = match kind {
         PatternRecipeOutputKind::Marks => (
             PatternOutputRealizationRecipe::Marks,
@@ -24149,7 +24649,8 @@ fn resize_recipe_guide_dimensions(
                             "preset.recipe.outputs.guide_faces.dimension_indices",
                         )?;
                     }
-                    PatternOutputRealizationRecipe::Marks
+                    PatternOutputRealizationRecipe::AdaptiveSquareMarks | PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks
+                    | PatternOutputRealizationRecipe::Marks
                     | PatternOutputRealizationRecipe::StructuralPaths { .. }
                     | PatternOutputRealizationRecipe::CurveMotifPaths { .. }
                     | PatternOutputRealizationRecipe::ConnectionPaths { .. }
@@ -24402,6 +24903,7 @@ pub struct PresetRecord {
 /// Returns metadata, recipe, or exact companion-binding validation diagnostics.
 pub fn validate_preset_record(record: &PresetRecord) -> Result<(), ValidationError> {
     if let Some(artifact) = &record.saved_calibration {
+        artifact.require_complete()?;
         let expected = CalibrationBinding::new(
             record.recipe.clone(),
             artifact.binding().density_aspect(),
@@ -24804,7 +25306,7 @@ fn validate_pattern_structure_recipe_with_resources(
                 "preset.recipe.character.nominal_spacing",
             )?;
             match character {
-                RandomSiteCharacter::RawUniform => {}
+                RandomSiteCharacter::Dispersion { .. } | RandomSiteCharacter::RawUniform => {}
                 RandomSiteCharacter::Even {
                     minimum_center_distance,
                 } => validate_positive_finite(
@@ -25049,7 +25551,8 @@ fn validate_pattern_structure_recipe_with_resources(
                             ));
                         }
                     }
-                    PatternOutputRealizationRecipe::Marks
+                    PatternOutputRealizationRecipe::AdaptiveSquareMarks | PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks
+                    | PatternOutputRealizationRecipe::Marks
                     | PatternOutputRealizationRecipe::StructuralPaths { .. }
                     | PatternOutputRealizationRecipe::VoronoiRegions => {}
                 }
@@ -25111,7 +25614,8 @@ fn validate_recipe_output_settings(
         PatternStructureRecipe::OrderedOutputs { outputs, .. } => matches!(
             outputs.get(index),
             Some(
-                PatternOutputRealizationRecipe::Marks
+                PatternOutputRealizationRecipe::AdaptiveSquareMarks | PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks
+                | PatternOutputRealizationRecipe::Marks
                     | PatternOutputRealizationRecipe::AuthoredClosedShapeMarks { .. }
                     | PatternOutputRealizationRecipe::ConnectionPaths { .. }
                     | PatternOutputRealizationRecipe::MazeWalls { .. }
@@ -25160,7 +25664,7 @@ fn validate_recipe_output_settings(
                 matches!(
                     (&outputs[index], &setting.response),
                     (
-                        PatternOutputRealizationRecipe::Marks,
+                        PatternOutputRealizationRecipe::AdaptiveSquareMarks | PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks | PatternOutputRealizationRecipe::Marks,
                         PatternGeometryResponse::Marks(_)
                     ) | (
                         PatternOutputRealizationRecipe::AuthoredClosedShapeMarks { .. },
@@ -25502,6 +26006,10 @@ pub enum PatternDefinitionEdit {
     SetConnectionAllowLoops { output_layer_id: PatternOutputLayerId, allow: bool },
     SetConnectionMinimumComponentPoints { output_layer_id: PatternOutputLayerId, value: u32 },
 
+    /// Changes only area selection within an already adaptive output.
+    SetAdaptiveBlueNoise { output_layer_id: PatternOutputLayerId, enabled: bool },
+    SetHatchEnabled { output_layer_id: PatternOutputLayerId, enabled: bool },
+    SetHatchStrokeWidth { output_layer_id: PatternOutputLayerId, value: f64 },
     SetToneSampleSpacing { output_layer_id: PatternOutputLayerId, value: ToneSampleSpacing },
     SetParametricShape {
         mechanism_id: PatternMechanismId,
@@ -26104,6 +26612,9 @@ impl PatternDefinitionEdit {
             Edit::SetConnectionAllowLoops { allow, .. } => (PropertyFieldId::ConnectionAllowLoops, PropertyFieldValue::Boolean(*allow)),
             Edit::SetConnectionMinimumComponentPoints { value, .. } => (PropertyFieldId::ConnectionMinimumComponentPoints, PropertyFieldValue::U32(*value)),
 
+            Edit::SetAdaptiveBlueNoise { enabled, .. } => (PropertyFieldId::AdaptiveBlueNoise, PropertyFieldValue::Boolean(*enabled)),
+            Edit::SetHatchEnabled { enabled, .. } => (PropertyFieldId::HatchEnabled, PropertyFieldValue::Boolean(*enabled)),
+            Edit::SetHatchStrokeWidth { value, .. } => (PropertyFieldId::HatchStrokeWidth, PropertyFieldValue::FiniteF64(*value)),
             Edit::SetToneSampleSpacing { value, .. } => (PropertyFieldId::ToneSampleSpacing, PropertyFieldValue::FiniteF64(value.multiplier)),
 
             Edit::SetParametricShape { shape, .. } => (
@@ -26277,7 +26788,8 @@ impl PatternDefinitionEdit {
                 PropertyFieldId::RandomCharacter,
                 PropertyFieldValue::EnumChoice(PropertyEnumChoice::RandomCharacter(
                     match character {
-                        RandomSiteCharacter::RawUniform => RandomCharacterKind::RawUniform,
+                        RandomSiteCharacter::Dispersion { layout } => layout.character_kind(),
+        RandomSiteCharacter::RawUniform => RandomCharacterKind::RawUniform,
                         RandomSiteCharacter::Even { .. } => RandomCharacterKind::Even,
                         RandomSiteCharacter::Clustered { .. } => RandomCharacterKind::Clustered,
                         RandomSiteCharacter::Stratified { .. } => RandomCharacterKind::Stratified,
@@ -26390,6 +26902,7 @@ impl PatternDefinitionEdit {
                 PropertyFieldValue::EnumChoice(PropertyEnumChoice::MarkPrototype(
                     match prototype {
                         MarkPrototype::Circle => MarkPrototypeKind::Circle,
+                            MarkPrototype::AdaptiveSquare | MarkPrototype::AdaptiveSquareBlueNoise => MarkPrototypeKind::AdaptiveSquare,
                         MarkPrototype::AuthoredClosedShape { .. } => {
                             MarkPrototypeKind::AuthoredClosedShape
                         }

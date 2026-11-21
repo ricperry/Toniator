@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+wgpu = { workspace = true, optional = true }
 rayon.workspace = true
 serde.workspace = true
 spade.workspace = true
@@ -17,6 +18,7 @@ toniator-sampling = { path = "../toniator-sampling" }
 path = "src/lib.rs"
 
 [features]
+geometry-compute = ["dep:wgpu"]
 # Compiles test-only observation records for engine-owned validation evidence. This feature is
 # deliberately opt-in so production pattern consumers receive no observation API or ABI surface.
 test-evidence = []

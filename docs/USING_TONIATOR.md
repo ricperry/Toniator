@@ -46,7 +46,11 @@ HDR/high-bit-depth output is not retained; primary premultiplied alpha is reject
 
 **Preview / Source** compares the design with its original. Zoom in to inspect
 marks and drag with the primary mouse button to pan beyond Fit. **Fit** restores
-the whole image. These view changes do not change export resolution.
+the whole image; click it again to restore the previous manual zoom and pan.
+The percentage shows the fitted scale to one decimal place where needed.
+**+ / −** selects the nearest manual zoom level in the requested direction from
+that fitted scale.
+Ctrl+0 selects Fit. These view changes do not change export resolution.
 
 Accurate preview renders the whole artwork in the background at each visited eligible
 zoom. Panning keeps that work running. The closest
@@ -131,13 +135,49 @@ your artwork. Thin blue guides and orange point indicators show the underlying
 construction; those overlays are never exported. The Wizard chooses structure;
 Advanced Settings owns fill/thickness ranges, region sampling, and mark sizing.
 
-Scatter offers **Random**, **Poisson disk**, **Jittered cells**, and **Clustered**.
-Pattern point spacing controls authored scale. **Point density** determines
-whether placement follows artwork; **Keep points apart** adds an exclusion rule.
-Cluster centers are specified per 100 points, and spread controls group size.
-**Relax points (Lloyd)** moves points toward local cell centers. **Follow artwork
-density** makes relaxation follow the weighting field; otherwise it aims for even
-spacing. More relaxation can soften clusters.
+Choose **Ranked Blue Noise** directly in the Pattern Gallery, or customize a
+Scatter Pattern such as **Poisson Disk Marks** through **Customize → Family
+options → Dispersion → Ranked blue noise**. For Patterns that draw marks, the
+six layouts below join **Random**, **Poisson disk**, **Jittered cells**, and
+**Clustered** in the Dispersion menu.
+
+| Dispersion | Character |
+|---|---|
+| **Ranked blue noise** | Progressive ranks reveal dispersed marks on a repeating 64×64 screen. |
+| **Bayer 8×8** | Ordered dots on an 8×8 threshold screen. |
+| **Floyd–Steinberg** | Tone error spreads along alternating (serpentine) rows. |
+| **Ink-weighted quadtree** | Subdivided regions place marks at their ink-weighted centers. |
+| **Tangent ribbons** | Continuous rows follow artwork contours. **Tangent tone** selects **Spacing**, **Size**, or **Blend**. |
+| **Stochastic cluster screen** | Tone grows irregular islands of fine marks. **Scatter variation** changes the seed. |
+
+For Tangent ribbons, Spacing varies separation, Size varies mark area, and Blend
+shares tone between both. All three use the same continuous artwork guides.
+Choose the mark outline separately in the Shape Library. **Pattern point spacing** and **Feature size** set scale.
+Separate point-density, exclusion, and Lloyd controls do not apply to these six
+layouts. Scatter Patterns drawing lines or areas retain their compatible choices.
+
+For the original four layouts, **Point density** determines whether placement
+follows artwork; **Keep points apart** adds an exclusion rule. Cluster centers
+are specified per 100 points, and spread controls group size. **Relax points
+(Lloyd)** moves points toward local cell centers. **Follow artwork density**
+makes relaxation follow the weighting field; otherwise it aims for even spacing.
+More relaxation can soften clusters.
+
+Open **Customize → Drawing → Shapes** in any Guides, Scatter, or Spiral Pattern
+that draws marks. Choose Circle, Oval, Square, Triangle, or Star under **Built-in**,
+or choose a thumbnail under **My Shapes**. For example, choose Square and set
+**Shape rotation** to 45° to draw diamonds on the same grid. Choosing a shape
+keeps your placement, orientation, tone response, and output filter settings.
+Where placement uses a visible margin, the new outline can change which marks
+fit. The Wizard recalibrates when needed.
+
+**New Shape…** starts an editable triangle. **Edit Shape…** opens the current
+outline in the closed-path editor. Choose **Apply to Pattern** to return your
+edit to the Wizard. **Save to My Shapes…** gives that shape a name and makes it
+available to other Patterns, even if you cancel the Wizard afterward.
+**Update My Shape…** replaces a personal shape you choose. If its file changed
+elsewhere, **Refresh My Shapes** reloads it before you try again. Projects and
+saved Patterns each keep their own copy of the outline.
 
 **Save Pattern…** stores a reusable construction in your personal library.
 It also stores the compatible calibration, measuring one if needed. Bundled
@@ -146,6 +186,73 @@ customization can require a fresh measurement; applying alone does not update
 the library entry. Saving is separate from applying. Personal Patterns can be
 updated, copied, renamed, or moved to recoverable trash through **Manage Pattern
 Library…**.
+
+### Adaptive Shape Marks
+
+Choose **Adaptive Shape Marks** in the Pattern Gallery's **Guides** group, or
+open a compatible square-grid Guides Pattern and choose **Customize → Drawing →
+Shapes → Adaptive Shape Marks**. The choice is disabled for incompatible
+constructions, including Scatter. Select **All** before applying to share the
+Pattern, or select a named channel to change only that channel.
+
+Each square cell can be empty or hold a circular segment, a right isosceles
+triangle, a quarter-circle sector, a circle, or a full square. With **Blue noise**
+off, the default, average channel ink selects the nearest of five areas
+(**0%, 28.54%, 50%, 78.54%, 100%**). At an exact midpoint, the lower area wins.
+The outline turns in 90° increments
+to cover the most ink within the cell. A circle and a sector both cover 78.54%.
+Ink in a corner can favor the sector, and equal overlap favors the circle.
+
+With **Blue noise** off, tone changes in steps. For example, a uniform 60%
+request produces 50% triangles. Turn **Blue noise** on to mix the two adjacent
+areas across a stable blue-noise grid and reproduce more tones. Each mark keeps
+one of the same fixed areas and still turns to fit the ink inside its cell.
+
+Find **Blue noise** under **Output** in the main inspector. Choose **All** or a
+named channel in **Edit channel** first. **All** changes compatible Adaptive
+Shape Marks channels together. A dash means their settings differ, and clicking
+the dashed checkbox turns them all on. Choosing a named channel changes only
+that channel. This structural setting is shared by all frames. Edit it at
+**Start**, since the checkbox is disabled at **End**.
+
+**Fill** mapping and coverage bounds determine the ink request. Use **Feature size**
+for the width of a cell, and whole-Pattern **Rotation** and offsets to place
+the grid. The adaptive strategy controls individual shape size and rotation.
+
+With **Source color + alpha**, alpha selects the footprint and each mark samples
+color and alpha over its chosen footprint. SVG export retains editable curves
+and straight edges. A channel can hold many marks in one compound path. Use
+your vector editor’s Node tool to select and edit an individual outline.
+
+### Fixed-width hatching
+
+Choose **Parallel Hatching** or **Concentric Hatching** in the Pattern Gallery,
+then **Customize → Drawing** to adjust **Hatch stroke width**. In **Family
+options**, you can change the line angle and spacing or edit the circular guides.
+To hatch your own repeated guide paths, choose Paths drawing and enable
+**Interleaved hatching** on the Drawing page. The switch is unavailable for
+single guides, parametric paths, motifs, connections and mazes.
+
+Hatching represents tone with eight ink-density steps plus empty paper. As the
+artwork darkens, more strokes appear and their visible spans grow. Each stroke
+keeps the same width. Tone uses the nearest measured step.
+Turning **Interleaved hatching** off restores ordinary variable-width strokes.
+Point placement controls do not apply while hatching is enabled.
+
+**Hatch stroke width** is measured as a fraction of adjacent line spacing.
+Use a value greater than 0 and at most 2. At the default of **1**, strokes meet
+at the darkest step. Finer strokes, such as **0.6**, leave gaps even at
+the darkest step, limiting the maximum ink coverage. **Feature size** scales
+line spacing and stroke width together.
+
+In an SVG export, each channel retains an editable compound path. Concentric
+Hatching keeps eligible circular outlines as Bézier curves. In Inkscape, select
+a channel path and switch to the Node tool to edit individual arcs.
+[Editable Concentric Hatching example](../target/validation/concentric-corners-svg-20261119/native/final/raster1-optimized.svg).
+
+The [native output gallery](../target/validation/ranked-hatch-20261118/index.html)
+compares Ranked Blue Noise, both hatch Patterns, Bayer and Tangent ribbons on
+both sample artworks, with reopenable projects and exact PNG/SVG exports.
 
 ### Coverage and placement
 
@@ -172,12 +279,12 @@ coverage theorem for random or curved Voronoi cells.
 
 ### Tone sample spacing
 
-For guide lines, parametric curves/spirals, and Curve Motif paths, **Tone sample
-spacing** controls how often the artwork changes line thickness along a curve.
-It is a positive finite multiplier, default **1**, expressed as × Feature size.
+For ordinary guide lines, parametric curves/spirals, and Curve Motif paths,
+**Tone sample spacing** controls how often the artwork changes line thickness
+along a curve. It is a positive finite multiplier, default **1**, expressed as × Feature size.
 Larger values simplify tonal detail; smaller values retain more changes. This
 control is absent from connected-point paths and mazes. Geometric point spacing
-remains a separate control.
+remains a separate control. Interleaved hatching keeps its stroke width constant.
 
 The requested interval in document units is
 `multiplier × max(canvas width, canvas height) / 100 × F`, where
@@ -236,8 +343,17 @@ placement follows artwork. Each has component, inversion, gain/offset, black/whi
 points, gamma, contrast, and cutoff; Weighting has its own strength and curve.
 Artwork-weighted placement is reevaluated at rotated/offset positions.
 
-**Variable** marks vary size with fill. Eligible artwork-weighted mark Patterns
-use **Uniform** sizing by default: a calibrated full-tone size plus
+For the five new dispersions, **Source weighting** controls placement and the
+tangent guide. Tangent **Size** and **Blend** use the separate **Fill** mapping
+for mark area. The other modes use Fill as an optional independent mask, which
+is off at cutoff 0. Fill cutoff, requested coverage bounds, paint Alpha, and channel
+**Opacity** retain their separate effects. These layouts own their spacing/size
+response, so the ordinary Uniform sizing and size-scale controls do not apply.
+Overlapping curved ribbons can leave Size or Blend lighter than requested.
+The cluster screen deliberately varies local coverage to form ink islands.
+
+**Variable** marks vary size with fill. Other eligible artwork-weighted mark
+Patterns use **Uniform** sizing by default: a calibrated full-tone size plus
 source-dependent survival. Uniform size scale (0–2, default 1) remains an artistic
 adjustment. Its optional Fill mask is Off at cutoff 0. Minimum-center-distance
 exclusion supports Uniform; Visible Mark Margin requires Variable sizing.

@@ -25,6 +25,7 @@ image.workspace = true
 zip.workspace = true
 
 [features]
+geometry-compute = ["toniator-patterns/geometry-compute"]
 default = []
 fast-preview = ["toniator-render/fast-preview"]
 prepared-crop-pilot = ["toniator-render/prepared-crop-pilot"]

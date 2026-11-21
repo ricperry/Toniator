@@ -63,6 +63,13 @@ impl CoverageCurve {
         &self.knots
     }
 
+    /// Returns the first measured near-full coverage without inflating marks into a plateau.
+    /// The tolerance is one ten-thousandth of the measured attainable span; observations stay exact.
+    pub fn near_full_coverage(&self)->f64 {
+        let first=self.knots[0].coverage;let last=self.knots[self.knots.len()-1].coverage;
+        self.knots.iter().find(|k|k.coverage>=last-0.0001*(last-first)).map_or(last,|k|k.coverage)
+    }
+
     /// Inverts endpoint-normalized coverage with the earliest attainable response at plateaus.
     ///
     /// Exact zero and one retain the authored size bounds. A positive interior target never

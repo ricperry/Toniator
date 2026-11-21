@@ -471,6 +471,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "creatiator"
+version = "0.1.0"
+dependencies = [
+ "gtk4",
+]
+
+[[package]]
 name = "crossbeam-deque"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2835,6 +2842,7 @@ name = "toniator-app"
 version = "0.4.7"
 dependencies = [
  "async-channel",
+ "creatiator",
  "gio",
  "glib",
  "glib-build-tools",
@@ -2868,6 +2876,7 @@ dependencies = [
 name = "toniator-domain"
 version = "0.4.7"
 dependencies = [
+ "creatiator",
  "serde",
 ]
 
@@ -2925,12 +2934,14 @@ dependencies = [
  "toniator-domain",
  "toniator-geometry",
  "toniator-sampling",
+ "wgpu",
 ]
 
 [[package]]
 name = "toniator-render"
 version = "0.4.7"
 dependencies = [
+ "creatiator",
  "i_overlay",
  "image",
  "kurbo",
@@ -2948,6 +2959,7 @@ dependencies = [
 name = "toniator-sampling"
 version = "0.4.7"
 dependencies = [
+ "creatiator",
  "image",
  "jxl-oxide",
  "rayon",

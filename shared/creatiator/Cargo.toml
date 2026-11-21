@@ -1,0 +1,15 @@
+[package]
+name = "creatiator"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "GPL-3.0-or-later"
+description = "Shared GTK presentation helpers for the Creatiator applications"
+publish = false
+
+[dependencies]
+gtk = { package = "gtk4", version = "=0.11.4", features = ["v4_12"], optional = true }
+
+[features]
+default = []
+gtk = ["dep:gtk"]

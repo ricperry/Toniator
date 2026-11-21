@@ -1,0 +1,35 @@
+[package]
+name = "toniator-gpu-vulkan-eval"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "GPL-3.0-only"
+publish = false
+
+[workspace]
+
+[dependencies]
+vello = { git = "https://github.com/linebender/vello", rev = "72c2fb0628dc6f4bbc7eaf3375284be89be03a06", default-features = false, features = ["wgpu", "debug_layers"] }
+vello_gpu = { git = "https://github.com/linebender/vello", rev = "72c2fb0628dc6f4bbc7eaf3375284be89be03a06", default-features = false, features = ["wgpu"] }
+vello_common = { git = "https://github.com/linebender/vello", rev = "72c2fb0628dc6f4bbc7eaf3375284be89be03a06", default-features = false, features = ["std"] }
+wgpu = { version = "=30.0.0", default-features = false, features = ["std", "wgsl", "vulkan"] }
+pollster = "=0.4.0"
+serde_json = "=1.0.149"
+roxmltree = "=0.20.0"
+sha2 = "=0.10.9"
+toniator-engine = { path = "../../crates/toniator-engine" }
+toniator-io = { path = "../../crates/toniator-io" }
+toniator-domain = { path = "../../crates/toniator-domain" }
+toniator-geometry = { path = "../../crates/toniator-geometry" }
+toniator-render = { path = "../../crates/toniator-render" }
+
+[patch.crates-io]
+i_overlay = { path = "../../vendor/i_overlay" }
+i_tree = { path = "../../vendor/i_tree" }
+
+[profile.dev]
+opt-level = 2
+
+# Isolated single capacity configuration; upstream commit and three-line patch retained in evidence.
+[patch."https://github.com/linebender/vello"]
+vello_encoding = { path = "../../target/validation/gpu-vulkan-20261031/c/capacity-v1-source/research/vello_encoding" }

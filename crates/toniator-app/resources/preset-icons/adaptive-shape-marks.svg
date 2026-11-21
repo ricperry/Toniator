@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+<title>Adaptive Shape Marks</title>
+<desc>Full-cell circular segments, right triangles, quarter sectors, circles and squares.</desc>
+<rect width="100" height="100" fill="#faf9f6"/>
+<g fill="#242229" transform="translate(7 11) scale(26)">
+<path d="M0 0 C.55228475 0 1 .44771525 1 1 Z"/>
+<path d="M1.15 0 L1.15 1 L2.15 1 Z"/>
+<path d="M2.3 0 C2.85228475 0 3.3 .44771525 3.3 1 L2.3 1 Z"/>
+<circle cx=".5" cy="2" r=".5"/>
+<path d="M1.15 1.5 H2.15 V2.5 H1.15 Z"/>
+<path d="M2.3 2.5 C2.85228475 2.5 3.3 2.05228475 3.3 1.5 Z"/>
+</g></svg>

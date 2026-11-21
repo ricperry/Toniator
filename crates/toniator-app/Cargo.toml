@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+creatiator = { workspace = true, features = ["gtk"] }
 gtk = { package = "gtk4", version = "0.11.4", features = ["v4_12"] }
 glib = { version = "0.22.0", features = ["v2_72"] }
 gio = "0.22.0"
@@ -28,5 +29,6 @@ name = "toniator-app"
 path = "src/main.rs"
 
 [features]
-default = ["fast-preview"]
+default = ["fast-preview", "geometry-compute"]
+geometry-compute = ["toniator-engine/geometry-compute"]
 fast-preview = ["toniator-engine/fast-preview"]

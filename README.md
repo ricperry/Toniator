@@ -1,4 +1,4 @@
-<a href="assets/icon-final.svg"><img src="assets/appicon.png" alt="Toniator icon" width="96" /></a>
+<a href="assets/appicon.svg"><img src="assets/appicon.png" alt="Toniator icon" width="96" /></a>
 
 # Toniator
 
@@ -7,6 +7,10 @@
 Open an image, explore a Pattern, and make it your own. Toniator is a native
 desktop app with independent color channels, a visual Pattern Wizard, and PNG
 or editable SVG output. It is free software under [GPL-3.0-only](LICENSE).
+Toniator is part of [**Creatiator Suite**](https://ricperry.github.io/CreatiatorSuite/)
+alongside Chromiator and Bezziator. The apps
+share native interface conventions and the local `creatiator` library while
+remaining independently buildable; see [interface conventions](docs/INTERFACE_CONVENTIONS.md).
 
 [![Toniator 0.4.5 editing a portrait made from source-colored Poisson-disk marks](docs/examples/showcase/screenshots/editor.png)](docs/examples/showcase/screenshots/editor.png)
 

@@ -2,6 +2,13 @@
 
 //! Deterministic straight-guide family evaluation.
 
+mod adaptive_square;
+mod dispersion;
+mod hatching;
+#[cfg(test)]
+mod compute_regressions;
+#[cfg(feature = "geometry-compute")]
+mod geometry_compute;
 #[cfg(test)]
 mod transform_regressions;
 
@@ -154,6 +161,101 @@ fn path_recipe(structure: PatternStructureRecipe) -> PatternDefinitionRecipe {
             bias: 0.0,
         });
     recipe
+}
+
+/// Builds one native square Guides recipe with the full-cell nearest-area output strategy.
+/// Geometry is selected independently per cell; ordinary fill endpoints remain desired coverage.
+pub fn adaptive_square_marks_recipe() -> PatternDefinitionRecipe {
+    use toniator_domain::{
+        CoveragePolicy, GeneralizedSiteProductDraft, PatternOutputRealizationRecipe,
+    };
+    mark_recipe(PatternStructureRecipe::OrderedOutputs {
+        definition: Box::new(PatternStructureRecipe::GeneralizedStraightGuides {
+            name: "Adaptive Shape Marks".into(),
+            coverage: CoveragePolicy {
+                guard_steps: 2,
+                additional_margin: 0.0,
+            },
+            dimensions: [0.0, 90.0]
+                .into_iter()
+                .map(|angle| GuideDimensionDraft {
+                    baseline_angle_degrees: angle,
+                    phase: 0.0,
+                    spacing_multiplier: 1.0,
+                })
+                .collect(),
+            product: GeneralizedSiteProductDraft::Intersections {
+                dimension_indices: vec![0, 1],
+                merge_epsilon: 1e-8,
+            },
+            orientation: MarkOrientationDraft::Fixed,
+        }),
+        outputs: vec![PatternOutputRealizationRecipe::AdaptiveSquareMarks],
+    })
+}
+
+/// Constructs editable parallel or concentric hatching from ordinary structural guide authority.
+/// The fine carrier pitch is one quarter of the nominal Feature scale; eight rank classes
+/// interleave within an eight-carrier repeat. Width one reaches the full printable pitch.
+/// No preset name participates in evaluation, clipping, calibration or rendering.
+pub fn interleaved_hatch_recipe(concentric: bool) -> PatternDefinitionRecipe {
+    use toniator_domain::{
+        AuthoredPoint2, CoveragePolicy, GeneralizedSiteProductDraft, GenericGuideDimensionDraft,
+        GenericGuidePrototypeDraft, HatchStyle, PathStrokeStyle, PatternOutputRealizationRecipe,
+    };
+    let coverage = CoveragePolicy {
+        guard_steps: 2,
+        additional_margin: 0.0,
+    };
+    let product = GeneralizedSiteProductDraft::AlongGuides {
+        dimension_indices: vec![0],
+        interval_multiplier: 1.0,
+        phase: 0.0,
+    };
+    let foundation = if concentric {
+        PatternStructureRecipe::GenericGuides {
+            name: "Concentric Hatching".into(),
+            coverage,
+            dimensions: vec![GenericGuideDimensionDraft {
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                prototype: GenericGuidePrototypeDraft::CircularArc {
+                    center: AuthoredPoint2 { x: 0.0, y: 0.0 },
+                    radius: 2.56,
+                    start_angle_degrees: 0.0,
+                    sweep_angle_degrees: 360.0,
+                },
+                repetition: GuideRepetition::NormalOffset {
+                    spacing: 2.56,
+                    cleanup: OffsetCleanup::DissolveCrossings,
+                },
+            }],
+            product,
+            orientation: MarkOrientationDraft::Fixed,
+        }
+    } else {
+        PatternStructureRecipe::GeneralizedStraightGuides {
+            name: "Parallel Hatching".into(),
+            coverage,
+            dimensions: vec![GuideDimensionDraft {
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                spacing_multiplier: 0.25,
+            }],
+            product,
+            orientation: MarkOrientationDraft::Fixed,
+        }
+    };
+    path_recipe(PatternStructureRecipe::OrderedOutputs {
+        definition: Box::new(foundation),
+        outputs: vec![PatternOutputRealizationRecipe::StructuralPaths {
+            tone_sample_spacing: Default::default(),
+            style: PathStrokeStyle {
+                hatch: Some(HatchStyle { width: 1.0 }),
+                ..Default::default()
+            },
+        }],
+    })
 }
 
 /// Builds a catalog Voronoi recipe with an explicit existing region response.
@@ -980,6 +1082,11 @@ impl PresetRegistry {
             vec![
                 PresetRecord {
                     saved_calibration: None,
+                    metadata: metadata("adaptive-shape-marks", "Adaptive Shape Marks", "Guides", "Full-cell silhouettes match each square cell’s ink area and direction."),
+                    recipe: adaptive_square_marks_recipe(),
+                },
+                PresetRecord {
+                    saved_calibration: None,
                     metadata: metadata(
                         "clustered-dispersion-random-links",
                         "Clustered Connections",
@@ -1006,6 +1113,11 @@ impl PresetRegistry {
                         },
                         style: Default::default(),
                     }),
+                },
+                PresetRecord {
+                    saved_calibration: None,
+                    metadata: metadata("concentric-hatching", "Concentric Hatching", "Hatching", "Constant-width circular strokes interleave as artwork ink rises."),
+                    recipe: interleaved_hatch_recipe(true),
                 },
                 PresetRecord {
                     saved_calibration: None,
@@ -1096,6 +1208,16 @@ impl PresetRegistry {
                             },
                         ],
                     }),
+                },
+                PresetRecord {
+                    saved_calibration: None,
+                    metadata: metadata("parallel-hatching", "Parallel Hatching", "Hatching", "Constant-width parallel strokes interleave as artwork ink rises."),
+                    recipe: interleaved_hatch_recipe(false),
+                },
+                PresetRecord {
+                    saved_calibration: None,
+                    metadata: metadata("ranked-blue-noise-marks", "Ranked Blue Noise", "Dispersion", "Progressive void-and-cluster ranks reveal evenly dispersed Shape Library marks."),
+                    recipe: mark_recipe(random("Ranked blue noise", RandomSiteCharacter::Dispersion { layout: toniator_domain::DispersionLayout::RankedBlueNoise }, 0)),
                 },
                 PresetRecord {
                     saved_calibration: None,
@@ -1635,6 +1757,8 @@ pub struct ParametricCurveCapability {
 /// Resolved document-owned or procedural guide prototypes retained only for one family evaluation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GenericGuideCapability {
+    /// Retains analytic circular supports for explicitly fixed-width hatch outputs only.
+    pub analytic_hatch_circles: bool,
     pub dimensions: Vec<GuideDimension>,
     pub resolved_paths: Vec<(Option<AuthoredStructureId>, CurvePath)>,
     /// Optional neutral source used by adapters that reuse finite-path mechanics without becoming guides.
@@ -1665,6 +1789,12 @@ pub enum ResolvedSiteDensityModulation {
 /// explicit, keeping independent random/even/clustered families source-free.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RandomSiteCapability {
+    /// Receiving mark target range consumed once by intrinsic channel-driven placement.
+    pub dispersion_target_range: Option<(f64, f64)>,
+    /// Fixed source-independent tone used only by the explicit calibration producer.
+    pub dispersion_probe: Option<f64>,
+    /// Separately measured flat-field C(q) transfer, never fitted during generation.
+    pub dispersion_calibration: Option<toniator_domain::DispersionCalibration>,
     pub character: RandomSiteCharacter,
     /// Authored spatial cell side for Raw, Clustered, and Stratified; Even owns distance.
     pub nominal_spacing: Option<f64>,
@@ -1679,7 +1809,7 @@ pub struct RandomSiteCapability {
     pub maximum_neighbor_checks: u32,
     /// Optional bounded centroid refinement applied after initial site generation.
     pub refinement: toniator_domain::RandomSiteRefinement,
-    /// Receiving-channel response used only by density-weighted Lloyd refinement.
+    /// Receiving-channel response used by intrinsic dispersion and density-weighted Lloyd refinement.
     pub refinement_weighting: Option<SourceWeighting>,
 }
 
@@ -1687,13 +1817,14 @@ pub struct RandomSiteCapability {
 /// source IDs remain solely at the decoder lookup boundary.
 pub fn family_requires_decoded_source(family: &FamilyCapability) -> bool {
     family.random.as_ref().is_some_and(|random| {
-        (!random.full_population_for_uniform_marks
-            && matches!(
-                random.density_modulation,
-                ResolvedSiteDensityModulation::ArtworkWeightedUnbound
-                    | ResolvedSiteDensityModulation::ArtworkWeighted { .. }
-            ))
-            || (random.refinement.enabled && random.refinement.density_weighted)
+        (matches!(random.character, RandomSiteCharacter::Dispersion { .. })
+            || (!random.full_population_for_uniform_marks
+                && matches!(
+                    random.density_modulation,
+                    ResolvedSiteDensityModulation::ArtworkWeightedUnbound
+                        | ResolvedSiteDensityModulation::ArtworkWeighted { .. }
+                ))
+            || (random.refinement.enabled && random.refinement.density_weighted))
     })
 }
 
@@ -4997,6 +5128,7 @@ fn resolve_document_pattern_pipeline_with_weighting(
         resolved_paths.push((source_id, path));
     }
     plan.family.generic_guides = Some(GenericGuideCapability {
+        analytic_hatch_circles: definition.output_layers.iter().any(|o| o.realization.hatch_style().is_some()) && generic_dimensions.iter().any(|dimension| matches!(dimension.prototype, GuidePrototype::CircularArc { sweep_angle_degrees, .. } if sweep_angle_degrees.abs() == 360.0) && matches!(dimension.repetition, GuideRepetition::NormalOffset { .. })),
         dimensions: generic_dimensions,
         resolved_paths,
         structural_source: None,
@@ -5164,6 +5296,9 @@ fn resolve_random_site_pipeline(
             along_interval_multiplier: None,
             along_phase: None,
             random: Some(RandomSiteCapability {
+                dispersion_target_range: None,
+                dispersion_probe: None,
+                dispersion_calibration: None,
                 character: character.clone(),
                 nominal_spacing: *nominal_spacing,
                 seed: *seed,
@@ -5173,7 +5308,8 @@ fn resolve_random_site_pipeline(
                 maximum_attempts: *maximum_attempts,
                 maximum_neighbor_checks: *maximum_neighbor_checks,
                 refinement: refinement.clone(),
-                refinement_weighting: (refinement.enabled && refinement.density_weighted)
+                refinement_weighting: (matches!(character, RandomSiteCharacter::Dispersion { .. })
+                    || (refinement.enabled && refinement.density_weighted))
                     .then_some(weighting)
                     .flatten(),
             }),
@@ -6137,6 +6273,7 @@ fn evaluate_parametric_curve_with_progress_cancellable(
     };
     let mut reusable = family.clone();
     reusable.generic_guides = Some(GenericGuideCapability {
+        analytic_hatch_circles: false,
         dimensions: vec![dimension],
         resolved_paths: vec![(None, path)],
         structural_source: Some(parametric.source_id),
@@ -6190,6 +6327,7 @@ fn clone_curve_family_cancellable(
             ));
         }
         Some(GenericGuideCapability {
+            analytic_hatch_circles: generic.analytic_hatch_circles,
             dimensions: generic.dimensions.clone(),
             resolved_paths,
             structural_source: generic.structural_source,
@@ -7165,6 +7303,9 @@ fn scaled_random_capability(
         })
         .transpose()?;
     scaled.character = match &random.character {
+        RandomSiteCharacter::Dispersion { layout } => {
+            RandomSiteCharacter::Dispersion { layout: *layout }
+        }
         RandomSiteCharacter::RawUniform => RandomSiteCharacter::RawUniform,
         RandomSiteCharacter::Even {
             minimum_center_distance,
@@ -7228,7 +7369,9 @@ fn scaled_random_capability(
 ///
 /// Authored grid prototypes use the centered local origin, while the parametric structural-source
 /// adapter retains its already-established document placement. Cancellation is observed before
-/// allocation and during finite-path expansion.
+/// allocation and during finite-path expansion. One analytic concentric hatch dimension contains
+/// nested convex circle copies, so it requires no inter-path crossing arrangement; mixed families
+/// retain the ordinary solved-crossing authority.
 ///
 /// # Errors
 ///
@@ -7300,6 +7443,9 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                 "coverage.curved_guides.proof",
                 "curved-guide coverage could not prove a complete generation envelope",
             ))?;
+    let local_padded_corners = document_domain
+        .corners()
+        .map(|point| channel_transform.inverse_point(point));
     // The authored core belongs to a placement-independent centered canvas frame. Only
     // endpoint/rank continuation consumes the actual inverse-transformed generation domain.
     let stable_authored_domain = Bounds::new(
@@ -7348,6 +7494,9 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
             (unscaled_base, 0, None)
         };
         let authored_frame = authored_frame.as_ref().unwrap_or(&base);
+        let uses_analytic_hatch_circle = generic.analytic_hatch_circles
+            && matches!(dimension.prototype, GuidePrototype::CircularArc { sweep_angle_degrees, .. } if sweep_angle_degrees.abs() == 360.0)
+            && matches!(dimension.repetition, GuideRepetition::NormalOffset { .. });
         let (unit, spacing, indices, normal_offset_coverage) = match dimension.repetition {
             GuideRepetition::Single => {
                 let angle = dimension.baseline_angle_degrees.to_radians();
@@ -7417,118 +7566,148 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
             }
             GuideRepetition::NormalOffset { spacing, .. } => {
                 let spacing = spacing * pattern_size_scale;
-                // Constant-gap construction is always bilateral. Visible left/right weighting is
-                // output response bias and must not delete guide topology or family sites.
-                let path_bounds = base.bounds()?;
-                if path_bounds.min == path_bounds.max {
-                    return Err(PatternPipelineError::new(
-                        "coverage.curved_guides.normal_offset",
-                        "normal-offset source guide collapsed before coverage could be proved",
-                    ));
-                }
-                let mut first_raw = f64::INFINITY;
-                let mut last_raw = f64::NEG_INFINITY;
-                for segment_index in 0..base.segments().len() {
-                    for parameter in [0.0, 0.5, 1.0] {
-                        let normal =
-                            base.unit_normal_at(PathLocation::new(segment_index, parameter)?)?;
-                        let domain_projections = local_domain
-                            .corners()
-                            .into_iter()
-                            .map(|point| point.dot(normal));
-                        let (domain_minimum, domain_maximum) = domain_projections.fold(
-                            (f64::INFINITY, f64::NEG_INFINITY),
-                            |(minimum, maximum), projection| {
-                                (minimum.min(projection), maximum.max(projection))
-                            },
-                        );
-                        let path_projections = path_bounds
-                            .corners()
-                            .into_iter()
-                            .map(|point| point.dot(normal));
-                        let (path_minimum, path_maximum) = path_projections.fold(
-                            (f64::INFINITY, f64::NEG_INFINITY),
-                            |(minimum, maximum), projection| {
-                                (minimum.min(projection), maximum.max(projection))
-                            },
-                        );
-                        first_raw =
-                            first_raw.min(((domain_minimum - path_maximum) / spacing).floor());
-                        last_raw = last_raw.max(((domain_maximum - path_minimum) / spacing).ceil());
-                    }
-                }
-                if !first_raw.is_finite()
-                    || !last_raw.is_finite()
-                    || first_raw < i64::MIN as f64
-                    || last_raw > i64::MAX as f64
-                {
-                    return Err(PatternPipelineError::new(
-                        "coverage.curved_guides.numeric_overflow",
-                        "normal-offset coverage arithmetic overflowed",
-                    ));
-                }
-                let guard = i64::from(request.guard_steps);
-                let first =
-                    (first_raw as i64)
-                        .checked_sub(guard)
-                        .ok_or(PatternPipelineError::new(
-                            "coverage.curved_guides.numeric_overflow",
-                            "normal-offset coverage arithmetic overflowed",
-                        ))?;
-                let last =
-                    (last_raw as i64)
-                        .checked_add(guard)
-                        .ok_or(PatternPipelineError::new(
-                            "coverage.curved_guides.numeric_overflow",
-                            "normal-offset coverage arithmetic overflowed",
-                        ))?;
-                let first = first.min(0);
-                let last = last.max(0);
-                let (first, last) =
-                    if matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { .. }) {
-                        authored_normal_offset_rank_bounds(
-                            &base,
-                            authored_frame,
-                            local_domain,
-                            0.5 * request.canvas.width.hypot(request.canvas.height),
+                let (first, last, first_probe_limit, last_probe_limit) =
+                    if uses_analytic_hatch_circle {
+                        let GuidePrototype::CircularArc {
+                            center,
+                            radius,
+                            sweep_angle_degrees,
+                            ..
+                        } = dimension.prototype
+                        else {
+                            unreachable!("analytic circle eligibility");
+                        };
+                        let center = baseline.apply_point(Point2::new(center.x, center.y));
+                        let (first, last) = hatching::circle_coverage_bounds(
+                            center,
+                            radius,
+                            sweep_angle_degrees,
                             spacing,
-                            i64::from(request.guard_steps),
-                        )?
+                            local_padded_corners,
+                            request.guard_steps,
+                        )?;
+                        (first, last, first, last)
                     } else {
-                        (first, last)
-                    };
-                let (first_probe_limit, last_probe_limit) =
-                    if matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { .. }) {
-                        let fallback_ranks = i64::from(request.guard_steps).max(2) + 1;
-                        let symmetric_extent = first
-                            .saturating_abs()
-                            .max(last.saturating_abs())
-                            .checked_add(fallback_ranks)
-                            .ok_or(PatternPipelineError::new(
+                        // Constant-gap construction is always bilateral. Visible left/right weighting is
+                        // output response bias and must not delete guide topology or family sites.
+                        let path_bounds = base.bounds()?;
+                        if path_bounds.min == path_bounds.max {
+                            return Err(PatternPipelineError::new(
+                                "coverage.curved_guides.normal_offset",
+                                "normal-offset source guide collapsed before coverage could be proved",
+                            ));
+                        }
+                        let mut first_raw = f64::INFINITY;
+                        let mut last_raw = f64::NEG_INFINITY;
+                        for segment_index in 0..base.segments().len() {
+                            for parameter in [0.0, 0.5, 1.0] {
+                                let normal = base
+                                    .unit_normal_at(PathLocation::new(segment_index, parameter)?)?;
+                                let domain_projections = local_domain
+                                    .corners()
+                                    .into_iter()
+                                    .map(|point| point.dot(normal));
+                                let (domain_minimum, domain_maximum) = domain_projections.fold(
+                                    (f64::INFINITY, f64::NEG_INFINITY),
+                                    |(minimum, maximum), projection| {
+                                        (minimum.min(projection), maximum.max(projection))
+                                    },
+                                );
+                                let path_projections = path_bounds
+                                    .corners()
+                                    .into_iter()
+                                    .map(|point| point.dot(normal));
+                                let (path_minimum, path_maximum) = path_projections.fold(
+                                    (f64::INFINITY, f64::NEG_INFINITY),
+                                    |(minimum, maximum), projection| {
+                                        (minimum.min(projection), maximum.max(projection))
+                                    },
+                                );
+                                first_raw = first_raw
+                                    .min(((domain_minimum - path_maximum) / spacing).floor());
+                                last_raw = last_raw
+                                    .max(((domain_maximum - path_minimum) / spacing).ceil());
+                            }
+                        }
+                        if !first_raw.is_finite()
+                            || !last_raw.is_finite()
+                            || first_raw < i64::MIN as f64
+                            || last_raw > i64::MAX as f64
+                        {
+                            return Err(PatternPipelineError::new(
                                 "coverage.curved_guides.numeric_overflow",
                                 "normal-offset coverage arithmetic overflowed",
-                            ))?;
-                        (
-                            symmetric_extent
-                                .checked_neg()
+                            ));
+                        }
+                        let guard = i64::from(request.guard_steps);
+                        let first = (first_raw as i64).checked_sub(guard).ok_or(
+                            PatternPipelineError::new(
+                                "coverage.curved_guides.numeric_overflow",
+                                "normal-offset coverage arithmetic overflowed",
+                            ),
+                        )?;
+                        let last = (last_raw as i64).checked_add(guard).ok_or(
+                            PatternPipelineError::new(
+                                "coverage.curved_guides.numeric_overflow",
+                                "normal-offset coverage arithmetic overflowed",
+                            ),
+                        )?;
+                        let first = first.min(0);
+                        let last = last.max(0);
+                        let (first, last) = if matches!(
+                            dimension.prototype,
+                            GuidePrototype::AuthoredOpenPath { .. }
+                        ) {
+                            authored_normal_offset_rank_bounds(
+                                &base,
+                                authored_frame,
+                                local_domain,
+                                0.5 * request.canvas.width.hypot(request.canvas.height),
+                                spacing,
+                                i64::from(request.guard_steps),
+                            )?
+                        } else {
+                            (first, last)
+                        };
+                        let (first_probe_limit, last_probe_limit) = if matches!(
+                            dimension.prototype,
+                            GuidePrototype::AuthoredOpenPath { .. }
+                        ) {
+                            let fallback_ranks = i64::from(request.guard_steps).max(2) + 1;
+                            let symmetric_extent = first
+                                .saturating_abs()
+                                .max(last.saturating_abs())
+                                .checked_add(fallback_ranks)
                                 .ok_or(PatternPipelineError::new(
                                     "coverage.curved_guides.numeric_overflow",
                                     "normal-offset coverage arithmetic overflowed",
-                                ))?,
-                            symmetric_extent,
-                        )
-                    } else {
-                        let absolute_index_limit =
-                            normal_offset_absolute_index_limit(path_bounds, local_domain, spacing)?;
-                        (
-                            first.min(absolute_index_limit.checked_neg().ok_or(
-                                PatternPipelineError::new(
-                                    "coverage.curved_guides.numeric_overflow",
-                                    "normal-offset coverage arithmetic overflowed",
-                                ),
-                            )?),
-                            last.max(absolute_index_limit),
-                        )
+                                ))?;
+                            (
+                                symmetric_extent
+                                    .checked_neg()
+                                    .ok_or(PatternPipelineError::new(
+                                        "coverage.curved_guides.numeric_overflow",
+                                        "normal-offset coverage arithmetic overflowed",
+                                    ))?,
+                                symmetric_extent,
+                            )
+                        } else {
+                            let absolute_index_limit = normal_offset_absolute_index_limit(
+                                path_bounds,
+                                local_domain,
+                                spacing,
+                            )?;
+                            (
+                                first.min(absolute_index_limit.checked_neg().ok_or(
+                                    PatternPipelineError::new(
+                                        "coverage.curved_guides.numeric_overflow",
+                                        "normal-offset coverage arithmetic overflowed",
+                                    ),
+                                )?),
+                                last.max(absolute_index_limit),
+                            )
+                        };
+                        (first, last, first_probe_limit, last_probe_limit)
                     };
                 let count = last
                     .checked_sub(first)
@@ -7559,8 +7738,13 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
         // bounded rank ownership and charge every retained closed event component against one
         // quadratic cleanup budget. Direct one-shot offset families still require the collection
         // arrangement below.
-        requires_solved_crossing_nodes |=
-            normal_offset_coverage.is_some() && !uses_authored_normal_offset_rays;
+        // Positive-radius analytic copies share one center, seam, winding and convex cubic shape.
+        // Homothetic copies are strictly nested, including after the shared affine placement and
+        // clipping, so a single such dimension has no crossings to solve. Mixed dimensions still
+        // require the collection arrangement because their centers or other carriers may differ.
+        requires_solved_crossing_nodes |= normal_offset_coverage.is_some()
+            && !uses_authored_normal_offset_rays
+            && !(uses_analytic_hatch_circle && generic.dimensions.len() == 1);
         let (evaluation_base, evaluation_anchor_index) = if uses_authored_normal_offset_rays {
             let coverage = normal_offset_coverage.expect("authored normal offset owns coverage");
             let maximum_offset_rank = coverage
@@ -7595,6 +7779,10 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
             }
             match dimension.repetition {
                 GuideRepetition::NormalOffset { cleanup, .. } => {
+                    if uses_analytic_hatch_circle
+                        && let GuidePrototype::CircularArc { center, radius, start_angle_degrees, sweep_angle_degrees } = dimension.prototype {
+                        return hatching::circle_offset(center, radius, start_angle_degrees, sweep_angle_degrees, index as f64 * spacing, baseline, is_cancelled);
+                    }
                     let cleanup = match cleanup {
                         OffsetCleanup::DissolveCrossings => PathOffsetCleanup::PlanarConstantGap,
                     };
@@ -7821,7 +8009,10 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                     "normal-offset source guide collapsed before coverage could be proved",
                 ));
             }
-            if !uses_authored_normal_offset_rays && coverage.last_required > 0 {
+            if !uses_authored_normal_offset_rays
+                && !uses_analytic_hatch_circle
+                && coverage.last_required > 0
+            {
                 let mut probe = coverage.last_required;
                 while paths_by_index
                     .get(&probe)
@@ -7849,7 +8040,10 @@ fn evaluate_generic_curve_guides_with_progress_cancellable(
                     paths_by_index.insert(probe, paths);
                 }
             }
-            if !uses_authored_normal_offset_rays && coverage.first_required < 0 {
+            if !uses_authored_normal_offset_rays
+                && !uses_analytic_hatch_circle
+                && coverage.first_required < 0
+            {
                 let mut probe = coverage.first_required;
                 while paths_by_index
                     .get(&probe)
@@ -8955,60 +9149,162 @@ fn random_cell_basis(spacing: f64) -> Result<NominalCellBasis, PatternPipelineEr
         .map_err(family_site_error)
 }
 
-/// Derives an intersection cell basis from ordered contributing straight guides and their resolved spacing.
+/// Indexes immutable first-occurrence guide identity once for all sites in one family.
+/// Coverage and contributor order remain the original nominal-basis authority.
+type CachedStraightBasis = ((u64, u64), Option<(f64, NominalCellBasis)>);
+
+struct StraightBasisIndex<'a> {
+    guides: &'a [StraightGuide],
+    indexed: Option<HashMap<(u64, i64, u32), &'a StraightGuide>>,
+    coverage: &'a [GuideCoverage],
+    uniform_pairs: Vec<CachedStraightBasis>,
+}
+impl<'a> StraightBasisIndex<'a> {
+    /// Retains first-match identity and caches pair bases only after exact per-dimension tangent validation.
+    /// Failed auxiliary reservations retain the original allocation-free lookup path.
+    fn new(guides: &'a [StraightGuide], coverage: &'a [GuideCoverage]) -> Self {
+        let mut indexed = HashMap::new();
+        let indexed = if indexed.try_reserve(guides.len()).is_ok() {
+            for guide in guides {
+                indexed
+                    .entry((
+                        guide.id.dimension_id,
+                        guide.id.index,
+                        guide.id.component_ordinal,
+                    ))
+                    .or_insert(guide);
+            }
+            Some(indexed)
+        } else {
+            None
+        };
+        let mut uniform_pairs = Vec::new();
+        if coverage.len() <= 4
+            && uniform_pairs
+                .try_reserve_exact(coverage.len() * coverage.len())
+                .is_ok()
+        {
+            for left in coverage {
+                for right in coverage {
+                    let uniform = |id| {
+                        let mut members = guides.iter().filter(|g| g.id.dimension_id == id);
+                        let first = members.next()?;
+                        members
+                            .all(|g| {
+                                g.tangent.x.to_bits() == first.tangent.x.to_bits()
+                                    && g.tangent.y.to_bits() == first.tangent.y.to_bits()
+                            })
+                            .then_some(first)
+                    };
+                    if let (Some(a), Some(b)) =
+                        (uniform(left.dimension_id), uniform(right.dimension_id))
+                    {
+                        uniform_pairs.push((
+                            (left.dimension_id, right.dimension_id),
+                            straight_pair_basis(a, left.spacing, b, right.spacing)
+                                .map(|basis| (basis.diameter(), basis)),
+                        ));
+                    }
+                }
+            }
+        }
+        Self {
+            guides,
+            indexed,
+            coverage,
+            uniform_pairs,
+        }
+    }
+    /// Returns the original first matching stable guide without a linear scan when indexing succeeds.
+    fn guide(&self, id: GuideInstanceId) -> Option<&'a StraightGuide> {
+        if let Some(indexed) = &self.indexed {
+            indexed
+                .get(&(id.dimension_id, id.index, id.component_ordinal))
+                .copied()
+        } else {
+            self.guides.iter().find(|guide| guide.id == id)
+        }
+    }
+    /// Derives the original ordered minimum-diameter nonparallel basis without repeated guide scans.
+    /// # Errors
+    /// Returns the original nominal-basis diagnostic when no valid contributor pair exists.
+    fn basis(
+        &self,
+        contributors: &[GuideInstanceId],
+    ) -> Result<NominalCellBasis, PatternPipelineError> {
+        let mut best: Option<(f64, NominalCellBasis)> = None;
+        for (left_index, left) in contributors.iter().enumerate() {
+            for right in &contributors[left_index + 1..] {
+                let (Some(a), Some(b)) = (self.guide(*left), self.guide(*right)) else {
+                    continue;
+                };
+                let basis = if let Some((_, basis)) = self
+                    .uniform_pairs
+                    .iter()
+                    .find(|(key, _)| *key == (left.dimension_id, right.dimension_id))
+                {
+                    *basis
+                } else {
+                    let spacing = |id| {
+                        self.coverage
+                            .iter()
+                            .find(|c| c.dimension_id == id)
+                            .map(|c| c.spacing)
+                    };
+                    let (Some(sa), Some(sb)) =
+                        (spacing(left.dimension_id), spacing(right.dimension_id))
+                    else {
+                        continue;
+                    };
+                    straight_pair_basis(a, sa, b, sb).map(|basis| (basis.diameter(), basis))
+                };
+                if let Some((candidate, basis)) = basis
+                    && best.is_none_or(|(diameter, _)| candidate < diameter)
+                {
+                    best = Some((candidate, basis));
+                }
+            }
+        }
+        best.map(|(_, basis)| basis).ok_or_else(|| {
+            PatternPipelineError::new(
+                "pattern.family.nominal_cell_basis",
+                "guide intersection lacks a finite nonparallel contributor basis",
+            )
+        })
+    }
+}
+
+/// Computes one original ordered guide-pair basis, preserving finite and parallel rejection.
+fn straight_pair_basis(
+    left: &StraightGuide,
+    left_spacing: f64,
+    right: &StraightGuide,
+    right_spacing: f64,
+) -> Option<NominalCellBasis> {
+    let cross = left
+        .tangent
+        .x
+        .mul_add(right.tangent.y, -left.tangent.y * right.tangent.x);
+    if !cross.is_finite() || cross.abs() <= 1.0e-12 {
+        return None;
+    }
+    NominalCellBasis::new(
+        left.tangent.scale(right_spacing),
+        right.tangent.scale(left_spacing),
+    )
+    .ok()
+}
+
+/// Exercises the indexed basis through the same test-facing finite guide contract.
+/// # Errors
+/// Returns the authoritative nominal-basis error for absent or parallel contributors.
+#[cfg(test)]
 fn straight_intersection_basis(
     guides: &[StraightGuide],
     coverage: &[GuideCoverage],
     contributors: &[GuideInstanceId],
 ) -> Result<NominalCellBasis, PatternPipelineError> {
-    let mut best: Option<(f64, NominalCellBasis)> = None;
-    for (left_index, left) in contributors.iter().enumerate() {
-        for right in &contributors[left_index + 1..] {
-            let Some(left_guide) = guides.iter().find(|guide| guide.id == *left) else {
-                continue;
-            };
-            let Some(right_guide) = guides.iter().find(|guide| guide.id == *right) else {
-                continue;
-            };
-            let Some(left_spacing) = coverage
-                .iter()
-                .find(|value| value.dimension_id == left.dimension_id)
-                .map(|value| value.spacing)
-            else {
-                continue;
-            };
-            let Some(right_spacing) = coverage
-                .iter()
-                .find(|value| value.dimension_id == right.dimension_id)
-                .map(|value| value.spacing)
-            else {
-                continue;
-            };
-            let cross = left_guide.tangent.x.mul_add(
-                right_guide.tangent.y,
-                -left_guide.tangent.y * right_guide.tangent.x,
-            );
-            if !cross.is_finite() || cross.abs() <= 1.0e-12 {
-                continue;
-            }
-            let Ok(basis) = NominalCellBasis::new(
-                left_guide.tangent.scale(right_spacing),
-                right_guide.tangent.scale(left_spacing),
-            ) else {
-                continue;
-            };
-            let candidate = basis.diameter();
-            if best.is_none_or(|(diameter, _)| candidate < diameter) {
-                best = Some((candidate, basis));
-            }
-        }
-    }
-    best.map(|(_, basis)| basis).ok_or_else(|| {
-        PatternPipelineError::new(
-            "pattern.family.nominal_cell_basis",
-            "guide intersection lacks a finite nonparallel contributor basis",
-        )
-    })
+    StraightBasisIndex::new(guides, coverage).basis(contributors)
 }
 
 /// Bounds every possible Stage 20E1 nominal-cell diagonal before family allocation,
@@ -9026,7 +9322,20 @@ pub fn maximum_nominal_cell_diameter(
     let pattern_size_scale = resolved_pattern_size_scale(canvas, density)?;
     if let Some(random) = &family.random {
         let scaled = scaled_random_capability(random, pattern_size_scale)?;
-        return Ok(random_cell_basis(random_spatial_spacing(&scaled)?)?.diameter());
+        return Ok(random_cell_basis(
+            random_spatial_spacing(&scaled)?
+                * if matches!(
+                    scaled.character,
+                    RandomSiteCharacter::Dispersion {
+                        layout: toniator_domain::DispersionLayout::ClusterScreen
+                    }
+                ) {
+                    0.5
+                } else {
+                    1.0
+                },
+        )?
+        .diameter());
     }
     if let Some(parametric) = &family.parametric_curve {
         let effective_curve = scaled_parametric_curve(&parametric.curve, pattern_size_scale)?;
@@ -9411,6 +9720,7 @@ fn generic_curve_fingerprint(
         "coverage.curved_guides.allocation",
         "curve fingerprint allocation failed",
     )?;
+    if family.generic_guides.as_ref().is_some_and(|g| g.analytic_hatch_circles) { bytes.extend(b"|analytic-hatch-circles-v1|"); }
     bytes.extend(family.provenance.definition_id.to_le_bytes());
     for id in &family.provenance.mechanism_ids {
         if is_cancelled() {
@@ -9981,16 +10291,13 @@ fn family_sites_from_grid(
     output: &GridFamilyOutput,
     product_mechanism_id: PatternMechanismId,
 ) -> Result<FamilySiteSet, PatternPipelineError> {
+    let basis_index = StraightBasisIndex::new(&output.guides, &output.coverage);
     let sites = output
         .sites
         .iter()
         .enumerate()
         .map(|(ordinal, site)| {
-            let nominal_cell_basis = straight_intersection_basis(
-                &output.guides,
-                &output.coverage,
-                &site.provenance.contributors,
-            )?;
+            let nominal_cell_basis = basis_index.basis(&site.provenance.contributors)?;
             Ok(FamilySite {
                 id: FamilySiteId {
                     mechanism_id: product_mechanism_id,
@@ -10020,6 +10327,7 @@ fn family_sites_from_generalized(
     request: &GridInspectRequest,
     product_mechanism_id: PatternMechanismId,
 ) -> Result<FamilySiteSet, PatternPipelineError> {
+    let basis_index = StraightBasisIndex::new(&output.guides, &output.coverage);
     let sites = output
         .sites
         .iter()
@@ -10027,19 +10335,15 @@ fn family_sites_from_generalized(
         .map(|(ordinal, site)| {
             let nominal_cell_basis = match &site.provenance {
                 GeneralizedSiteProvenance::Intersection { contributors } => {
-                    straight_intersection_basis(&output.guides, &output.coverage, contributors)?
+                    basis_index.basis(contributors)?
                 }
                 GeneralizedSiteProvenance::AlongGuide { guide_id, .. } => {
-                    let guide = output
-                        .guides
-                        .iter()
-                        .find(|guide| guide.id == *guide_id)
-                        .ok_or_else(|| {
-                            PatternPipelineError::new(
-                                "pattern.family.nominal_cell_basis",
-                                "along-guide site lacks its resolved guide",
-                            )
-                        })?;
+                    let guide = basis_index.guide(*guide_id).ok_or_else(|| {
+                        PatternPipelineError::new(
+                            "pattern.family.nominal_cell_basis",
+                            "along-guide site lacks its resolved guide",
+                        )
+                    })?;
                     let transverse_spacing = output
                         .coverage
                         .iter()
@@ -10773,16 +11077,116 @@ fn evaluate_random_sites_with_progress_cancellable(
         report_progress,
         estimated_work,
     )?;
-    let prepared_candidates = prepared_random_candidates(
-        &random.character,
-        local,
-        spatial_spacing,
-        candidate_budget,
-        usize::MAX,
-        &mut prng,
-        is_cancelled,
+    let prepared_candidates = if let RandomSiteCharacter::Dispersion { layout } = random.character {
+        let prepared_mapping = if let (Some(field), Some(weighting)) =
+            (source, random.refinement_weighting)
+        {
+            let queries = ((local.max.x - local.min.x) / spatial_spacing).ceil()
+                * ((local.max.y - local.min.y) / spatial_spacing).ceil();
+            let pixels = f64::from(field.identity().width) * f64::from(field.identity().height);
+            let budget = if queries * 4.0 >= pixels {
+                16 * 1024 * 1024
+            } else {
+                0
+            };
+            Some(
+                field
+                    .prepare_mapping_response(
+                        &request.canvas,
+                        weighting.mapping,
+                        budget,
+                        is_cancelled,
+                    )
+                    .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?,
+            )
+        } else {
+            None
+        };
+        let sample = |p: Point2| -> Result<f64, PatternPipelineError> {
+            if let Some(q) = random.dispersion_probe {
+                return Ok(q);
+            }
+            let point = transform.apply_point(p);
+            if let (Some(prepared), Some(weighting)) =
+                (&prepared_mapping, random.refinement_weighting)
+            {
+                let raw = prepared
+                    .sample(point)
+                    .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+                if weighting.mapping.suppresses(raw) {
+                    return Ok(0.0);
+                }
+                let q = completed_density_weight(
+                    raw,
+                    weighting.mapping,
+                    weighting.strength,
+                    &weighting.response,
+                );
+                let target = if layout.spacing_fraction() == 1.0 {
+                    let (minimum, maximum) = random.dispersion_target_range.unwrap_or((0.0, 1.0));
+                    minimum + (maximum - minimum) * q
+                } else {
+                    q
+                };
+                Ok(random
+                    .dispersion_calibration
+                    .as_ref()
+                    .map_or(target, |fit| fit.inverse(target)))
+            } else {
+                Ok(1.0)
+            }
+        };
+        let guide = |p: Point2| -> Result<f64, PatternPipelineError> {
+            if let (Some(prepared), Some(weighting)) =
+                (&prepared_mapping, random.refinement_weighting)
+            {
+                let raw = prepared
+                    .sample(transform.apply_point(p))
+                    .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+                Ok(completed_density_weight(
+                    raw,
+                    weighting.mapping,
+                    weighting.strength,
+                    &weighting.response,
+                ))
+            } else {
+                Ok(1.0)
+            }
+        };
+        Some(dispersion::generate(
+            layout,
+            local,
+            spatial_spacing,
+            random.seed,
+            candidate_budget,
+            &sample,
+            &guide,
+            is_cancelled,
+        )?)
+    } else {
+        prepared_random_candidates(
+            &random.character,
+            local,
+            spatial_spacing,
+            candidate_budget,
+            usize::MAX,
+            &mut prng,
+            is_cancelled,
+        )?
+    };
+    let nominal_cell_basis = random_cell_basis(
+        spatial_spacing
+            * if matches!(
+                random.character,
+                RandomSiteCharacter::Dispersion {
+                    layout: toniator_domain::DispersionLayout::ClusterScreen
+                }
+            ) {
+                0.5
+            } else {
+                1.0
+            },
     )?;
-    let nominal_cell_basis = random_cell_basis(spatial_spacing)?;
     let offered_candidates = prepared_candidates.as_ref().map_or(offered, Vec::len);
     if offered_candidates > candidate_budget {
         return Err(PatternPipelineError::new(
@@ -10852,7 +11256,10 @@ fn evaluate_random_sites_with_progress_cancellable(
                 _ => unreachable!("weighted source requirement is checked above"),
             }
         };
-        if !random.full_population_for_uniform_marks && prng.unit() > density_weight {
+        if !matches!(random.character, RandomSiteCharacter::Dispersion { .. })
+            && !random.full_population_for_uniform_marks
+            && prng.unit() > density_weight
+        {
             rejected_by_density += 1;
             continue;
         }
@@ -10992,7 +11399,9 @@ fn prepared_random_candidates(
             stratified_candidates(bounds, *jitter, spatial_spacing, budget, prng, is_cancelled)
                 .map(Some)
         }
-        RandomSiteCharacter::RawUniform | RandomSiteCharacter::Clustered { .. } => Ok(None),
+        RandomSiteCharacter::Dispersion { .. }
+        | RandomSiteCharacter::RawUniform
+        | RandomSiteCharacter::Clustered { .. } => Ok(None),
     }
 }
 
@@ -11943,8 +12352,15 @@ fn random_family_fingerprint(
         }
         None => bytes.push(0),
     }
+    if let Some(q) = random.dispersion_probe {
+        bytes.extend(q.to_bits().to_le_bytes());
+    }
     bytes.push(u8::from(random.full_population_for_uniform_marks));
     match &random.character {
+        RandomSiteCharacter::Dispersion { layout } => {
+            bytes.push(5);
+            bytes.push(*layout as u8);
+        }
         RandomSiteCharacter::RawUniform => bytes.push(1),
         RandomSiteCharacter::Even {
             minimum_center_distance,
@@ -12009,10 +12425,20 @@ fn random_family_fingerprint(
     bytes.push(u8::from(random.refinement.enabled));
     bytes.push(u8::from(random.refinement.density_weighted));
     bytes.extend(random.refinement.iterations.to_le_bytes());
-    if random.refinement.enabled && random.refinement.density_weighted {
-        let weighting = random
-            .refinement_weighting
-            .expect("weighted refinement has receiving-channel weighting");
+    if let Some(weighting) = random.refinement_weighting
+        && (matches!(random.character, RandomSiteCharacter::Dispersion { .. })
+            || (random.refinement.enabled && random.refinement.density_weighted))
+    {
+        if let Some((minimum, maximum)) = random.dispersion_target_range {
+            bytes.extend(minimum.to_bits().to_le_bytes());
+            bytes.extend(maximum.to_bits().to_le_bytes());
+        }
+        if let Some(fit) = &random.dispersion_calibration {
+            for k in fit.observations() {
+                bytes.extend(k.input.to_bits().to_le_bytes());
+                bytes.extend(k.coverage.to_bits().to_le_bytes());
+            }
+        }
         append_source_mapping_identity(&mut bytes, weighting.mapping);
         bytes.extend(weighting.strength.to_bits().to_le_bytes());
         bytes.push(match weighting.response {
@@ -12509,7 +12935,11 @@ pub fn realize_typed_canonical_marks_with_response_cancellable(
         "pattern.output_layers.capability",
         "canonical mark realization requires a mark output",
     ))?;
+    if matches!(prototype, MarkPrototype::AdaptiveSquare | MarkPrototype::AdaptiveSquareBlueNoise) {
+        return adaptive_square::realize(document, family, plan, source, canvas, request, response_input, *prototype == MarkPrototype::AdaptiveSquareBlueNoise, is_cancelled);
+    }
     let prototype_path = match prototype {
+        MarkPrototype::AdaptiveSquare | MarkPrototype::AdaptiveSquareBlueNoise => unreachable!("adaptive strategy dispatched above"),
         MarkPrototype::Circle => None,
         MarkPrototype::AuthoredClosedShape { structure_id } => {
             let structure =
@@ -12553,6 +12983,29 @@ pub fn realize_typed_canonical_marks_with_response_cancellable(
         )?;
     }
     let construction_context = ConstructionContext::current();
+    let straight_guides = StraightBasisIndex::new(family.straight_guides(), &[]);
+    let prepared_mapping = if !request.sampled_paint
+        && !family.site_set().is_empty()
+        && !matches!(
+            response_input,
+            GeometryResponseInput::ConstantProbe(_)
+                | GeometryResponseInput::RawProbe(_)
+                | GeometryResponseInput::UniformRadiusProbe(_)
+        ) {
+        let pixels = u64::from(source.identity().width) * u64::from(source.identity().height);
+        let budget = if (family.site_set().len() as u64).saturating_mul(4) >= pixels {
+            16 * 1024 * 1024
+        } else {
+            0
+        };
+        Some(
+            source
+                .prepare_mapping_response(canvas, request.mapping, budget, is_cancelled)
+                .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?,
+        )
+    } else {
+        None
+    };
     let mut parallel_results = Vec::new();
     reserve_stage20m(
         &mut parallel_results,
@@ -12575,6 +13028,7 @@ pub fn realize_typed_canonical_marks_with_response_cancellable(
             }
             let orientation = site_orientation_degrees(
                 family,
+                &straight_guides,
                 site,
                 orientation,
                 request.response.rotation_offset_degrees,
@@ -12607,8 +13061,10 @@ pub fn realize_typed_canonical_marks_with_response_cancellable(
                 )
             } else {
                 (
-                    source
-                        .sample_mapping_response(site.position, canvas, request.mapping)
+                    prepared_mapping.as_ref().map_or_else(
+                        || source.sample_mapping_response(site.position, canvas, request.mapping),
+                        |prepared| prepared.sample(site.position),
+                    )
                         .map_err(|error| {
                             PatternPipelineError::new(error.path(), error.message())
                         })?,
@@ -12632,6 +13088,35 @@ pub fn realize_typed_canonical_marks_with_response_cancellable(
             if matches!(response_input, GeometryResponseInput::UniformRadius(0.0)) {
                 return Ok(None);
             }
+            let residual_ink = if matches!(
+                response_input,
+                GeometryResponseInput::ConstantProbe(_)
+                    | GeometryResponseInput::RawProbe(_)
+                    | GeometryResponseInput::UniformRadiusProbe(_)
+            ) {
+                ink
+            } else if let Some(RandomSiteCapability {
+                character: RandomSiteCharacter::Dispersion { layout },
+                dispersion_target_range,
+                dispersion_calibration,
+                dispersion_probe,
+                ..
+            }) = &plan.family.random
+            {
+                if layout.spacing_fraction() == 1.0 {
+                    1.0
+                } else {
+                    let (minimum, maximum) = dispersion_target_range.unwrap_or((0.0, 1.0));
+                    let target = dispersion_probe.unwrap_or(minimum + (maximum - minimum) * ink);
+                    let target = dispersion_calibration
+                        .as_ref()
+                        .map_or(target, |fit| fit.inverse(target));
+                    if target == 0.0 {
+                        return Ok(None);
+                    }
+                    target.powf(1.0 - layout.spacing_fraction())
+                }
+            }else{ink};
             let radius = if sampled_paint.is_some_and(|(_, suppressed)| suppressed) {
                 0.0
             } else if let GeometryResponseInput::UniformRadius(radius)
@@ -12641,7 +13126,7 @@ pub fn realize_typed_canonical_marks_with_response_cancellable(
             } else {
                 radius_from_raw_size_with_diameter(
                     response_input.resolve_raw_size(
-                        ink,
+                        residual_ink,
                         request.response.minimum_fill,
                         request.response.maximum_fill,
                     )?,
@@ -13144,6 +13629,7 @@ fn transform_closed_shape(
 /// Returns stable missing-contributor, guide, location, or tangent diagnostics.
 fn site_orientation_degrees(
     family: &TypedFamilyOutput,
+    straight_guides: &StraightBasisIndex<'_>,
     site: &FamilySite,
     orientation: &MarkOrientation,
     rotation_offset_degrees: f64,
@@ -13191,11 +13677,7 @@ fn site_orientation_degrees(
                 "requested orientation dimension is absent from this site provenance",
             ))?;
             if let Some(guide_id) = path_id.guide_instance() {
-                if let Some(guide) = family
-                    .straight_guides()
-                    .iter()
-                    .find(|guide| guide.id == guide_id)
-                {
+                if let Some(guide) = straight_guides.guide(guide_id) {
                     guide.tangent
                 } else {
                     let location = match &site.provenance {
@@ -13302,6 +13784,8 @@ fn orientation_identity(
         bytes.extend(layer_id.0.to_le_bytes());
         match prototype {
             MarkPrototype::Circle => bytes.push(1),
+            MarkPrototype::AdaptiveSquare => bytes.push(3),
+            MarkPrototype::AdaptiveSquareBlueNoise => bytes.push(4),
             MarkPrototype::AuthoredClosedShape { structure_id } => {
                 bytes.push(2);
                 bytes.extend(structure_id.0.to_le_bytes());
@@ -13968,7 +14452,7 @@ fn generalized_intersections(
             })?;
     let estimated_work = pair_work_total.saturating_mul(2).max(1);
     let mut inspected_pairs = 0_usize;
-    let mut raw: Vec<(Point2, Vec<GuideInstanceId>)> = Vec::new();
+    let mut raw: Vec<(Point2, [GuideInstanceId; 2])> = Vec::new();
     for (left_offset, &left) in selected.iter().enumerate() {
         for &right in &selected[left_offset + 1..] {
             if (observer.is_cancelled)() {
@@ -14031,7 +14515,7 @@ fn generalized_intersections(
                         .map(|point| snap_intersection_to_canvas_boundary(point, canvas))
                         && distance_to_canvas(point, canvas) <= margin
                     {
-                        raw.push((point, vec![guide_a.id, guide_b.id]));
+                        raw.push((point, [guide_a.id, guide_b.id]));
                     }
                 }
             }
@@ -14043,12 +14527,17 @@ fn generalized_intersections(
             "selected parallel or coincident dimensions cannot produce intersections",
         ));
     }
-    raw.sort_by(|a, b| {
+    let compare = |a: &(Point2, [GuideInstanceId; 2]), b: &(Point2, [GuideInstanceId; 2])| {
         a.0.x
             .total_cmp(&b.0.x)
             .then(a.0.y.total_cmp(&b.0.y))
             .then(a.1.cmp(&b.1))
-    });
+    };
+    if raw.len() >= 32_768 {
+        raw.par_sort_by(compare);
+    } else {
+        raw.sort_by(compare);
+    }
     let mut sites: Vec<GeneralizedSite> = Vec::with_capacity(raw.len());
     let mut merge_buckets: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
     let mut merge_comparisons = 0_usize;
@@ -14073,12 +14562,13 @@ fn generalized_intersections(
         let bucket_start = bucket.map_or(0, |key| key.saturating_sub(1));
         let bucket_end = bucket.map_or(0, |key| key.saturating_add(1));
         for key in bucket_start..=bucket_end {
-            let candidate_indices = if epsilon == 0.0 {
-                sites.last().map(|_| vec![sites.len() - 1])
+            let last = sites.len().checked_sub(1);
+            let candidate_indices: &[usize] = if epsilon == 0.0 {
+                last.as_slice()
             } else {
-                merge_buckets.get(&key).cloned()
+                merge_buckets.get(&key).map_or(&[], Vec::as_slice)
             };
-            for index in candidate_indices.into_iter().flatten().rev() {
+            for &index in candidate_indices.iter().rev() {
                 if (observer.is_cancelled)() {
                     return Err(GridError::new(
                         "evaluation.cancelled",
@@ -14119,7 +14609,7 @@ fn generalized_intersections(
             existing_contributors.dedup();
             continue;
         }
-        let mut contributors = contributors;
+        let mut contributors = contributors.to_vec();
         contributors.sort();
         contributors.dedup();
         let scope = if canvas.contains(point) {
@@ -14591,6 +15081,9 @@ pub fn realize_typed_canonical_strokes_with_response_cancellable(
             "pattern.output_layers.capability",
             "canonical stroke realization requires a guide-path output",
         ));
+    }
+    if output.guide_paths().is_some_and(|(_, style)| style.hatch.is_some()) {
+        return hatching::realize(family, plan, source, canvas, mapping, response, max_profile_samples, max_outline_segments, response_input, is_cancelled);
     }
     let interval = family.tone_sample_interval(output.tone_sample_spacing().ok_or(PatternPipelineError::new("realization.tone.applicability", "tone spacing requires guide/parametric output"))?)?;
     let mut strokes = Vec::new();
@@ -16656,6 +17149,8 @@ fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapabil
             bytes.push(1);
             match prototype {
                 MarkPrototype::Circle => bytes.push(1),
+            MarkPrototype::AdaptiveSquare => bytes.push(3),
+            MarkPrototype::AdaptiveSquareBlueNoise => bytes.push(4),
                 MarkPrototype::AuthoredClosedShape { structure_id } => {
                     bytes.push(2);
                     bytes.extend(structure_id.0.to_le_bytes());
@@ -16681,6 +17176,10 @@ fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapabil
             bytes.push(2);
             bytes.extend(tone_sample_spacing.multiplier.to_bits().to_le_bytes());
             bytes.extend(guide_mechanism_id.0.to_le_bytes());
+            if let Some(hatch) = style.hatch {
+                bytes.extend(b"|hatch-v1|");
+                bytes.extend(hatch.width.to_bits().to_le_bytes());
+            }
             bytes.push(match style.join {
                 toniator_domain::StrokeJoin::Round => 1,
             });
@@ -16702,6 +17201,10 @@ fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapabil
             bytes.extend(structure_id.0.to_le_bytes());
             bytes.push(u8::from(*mirror_alternate_rows));
             bytes.extend(alternate_row_phase.unwrap_or(-1.0).to_bits().to_le_bytes());
+            if let Some(hatch) = style.hatch {
+                bytes.extend(b"|hatch-v1|");
+                bytes.extend(hatch.width.to_bits().to_le_bytes());
+            }
             bytes.push(match style.join {
                 toniator_domain::StrokeJoin::Round => 1,
             });
@@ -16738,6 +17241,10 @@ fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapabil
             bytes.push(match program.algorithm {
                 toniator_domain::GridMazeAlgorithm::RecursiveBacktracker => 1,
             });
+            if let Some(hatch) = style.hatch {
+                bytes.extend(b"|hatch-v1|");
+                bytes.extend(hatch.width.to_bits().to_le_bytes());
+            }
             bytes.push(match style.join {
                 toniator_domain::StrokeJoin::Round => 1,
             });
@@ -16761,6 +17268,10 @@ fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapabil
             bytes.push(3);
             bytes.extend(site_mechanism_id.0.to_le_bytes());
             append_connection_program_identity(bytes, program);
+            if let Some(hatch) = style.hatch {
+                bytes.extend(b"|hatch-v1|");
+                bytes.extend(hatch.width.to_bits().to_le_bytes());
+            }
             bytes.push(match style.join {
                 toniator_domain::StrokeJoin::Round => 1,
             });
@@ -18871,52 +19382,36 @@ pub fn evaluate_straight_grid_cancellable(
         guides.extend(dimension.guides(*coverage, generation_domain, transform, extension));
     }
 
+    #[cfg(feature = "geometry-compute")]
+    let computed = if request.rotation_degrees == 0.0 {
+        geometry_compute::rectangular_grid(
+            (plans[0].first_index, plans[0].last_index),
+            (plans[1].first_index, plans[1].last_index),
+            (spacing_x, spacing_y),
+            transform,
+            document_canvas,
+            planning_margin,
+            is_cancelled,
+        )
+    } else {
+        None
+    };
+    #[cfg(not(feature = "geometry-compute"))]
+    let computed: Option<Vec<(i64, i64, Point2, SiteScope)>> = None;
+    let nominal_cell_diameter = spacing_x.hypot(spacing_y);
     let mut sites = Vec::new();
-    for first_index in plans[0].first_index..=plans[0].last_index {
-        if is_cancelled() {
-            return Err(GridError::new(
-                "evaluation.cancelled",
-                "evaluation was cancelled",
-            ));
-        }
-        let range = if construction_context.mode == ConstructionMode::Canvas {
-            fixed_grid_row_range(
-                plans[1].first_index,
-                plans[1].last_index,
-                first_index,
-                dimensions[0].spacing,
-                dimensions[1].spacing,
-                transform,
-                document_canvas,
-                planning_margin,
-                is_cancelled,
-                &construction_context,
-            )?
-        } else {
-            Some((plans[1].first_index, plans[1].last_index))
-        };
-        let Some((row_first, row_last)) = range else {
-            continue;
-        };
-        for second_index in row_first..=row_last {
-            let local = Point2::new(
-                first_index as f64 * dimensions[0].spacing,
-                second_index as f64 * dimensions[1].spacing,
-            );
-            construction_context.count(ConstructionCounter::GridPositions, 1);
-            let position = transform.apply_point(local);
-            // Coverage enumeration intentionally remains conservative in
-            // inverse-local space. Publish only intersections whose world-space
-            // Euclidean distance to the axis-aligned canvas is within the same
-            // support/AA/guard envelope used to plan that enumeration. This
-            // keeps required corner coverage while excluding Cartesian-product
-            // corners that cannot affect final marks or clipping.
-            construction_context.count(ConstructionCounter::GridPredicates, 1);
-            if distance_to_canvas(position, document_canvas) > planning_margin {
-                continue;
+    if let Some(computed) = computed {
+        construction_context.count(ConstructionCounter::GridPositions, candidate_count);
+        construction_context.count(ConstructionCounter::GridPredicates, candidate_count);
+        for (ordinal, (first_index, second_index, position, scope)) in
+            computed.into_iter().enumerate()
+        {
+            if ordinal.is_multiple_of(4096) && is_cancelled() {
+                return Err(GridError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
             }
-            let first = GuideInstanceId::new(FIRST_DIMENSION_ID, first_index);
-            let second = GuideInstanceId::new(SECOND_DIMENSION_ID, second_index);
             sites.push(IntersectionSite {
                 id: SiteId {
                     first_dimension_id: FIRST_DIMENSION_ID.0,
@@ -18925,16 +19420,81 @@ pub fn evaluate_straight_grid_cancellable(
                     second_index,
                 },
                 position,
-                nominal_cell_diameter: spacing_x.hypot(spacing_y),
-                scope: if document_canvas.contains(position) {
-                    SiteScope::Canvas
-                } else {
-                    SiteScope::Guard
-                },
+                nominal_cell_diameter,
+                scope,
                 provenance: GuideIntersectionProvenance {
-                    contributors: vec![first, second],
+                    contributors: vec![
+                        GuideInstanceId::new(FIRST_DIMENSION_ID, first_index),
+                        GuideInstanceId::new(SECOND_DIMENSION_ID, second_index),
+                    ],
                 },
             });
+        }
+    } else {
+        for first_index in plans[0].first_index..=plans[0].last_index {
+            if is_cancelled() {
+                return Err(GridError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            let range = if construction_context.mode == ConstructionMode::Canvas {
+                fixed_grid_row_range(
+                    plans[1].first_index,
+                    plans[1].last_index,
+                    first_index,
+                    dimensions[0].spacing,
+                    dimensions[1].spacing,
+                    transform,
+                    document_canvas,
+                    planning_margin,
+                    is_cancelled,
+                    &construction_context,
+                )?
+            } else {
+                Some((plans[1].first_index, plans[1].last_index))
+            };
+            let Some((row_first, row_last)) = range else {
+                continue;
+            };
+            for second_index in row_first..=row_last {
+                let local = Point2::new(
+                    first_index as f64 * dimensions[0].spacing,
+                    second_index as f64 * dimensions[1].spacing,
+                );
+                construction_context.count(ConstructionCounter::GridPositions, 1);
+                let position = transform.apply_point(local);
+                // Coverage enumeration intentionally remains conservative in
+                // inverse-local space. Publish only intersections whose world-space
+                // Euclidean distance to the axis-aligned canvas is within the same
+                // support/AA/guard envelope used to plan that enumeration. This
+                // keeps required corner coverage while excluding Cartesian-product
+                // corners that cannot affect final marks or clipping.
+                construction_context.count(ConstructionCounter::GridPredicates, 1);
+                if distance_to_canvas(position, document_canvas) > planning_margin {
+                    continue;
+                }
+                let first = GuideInstanceId::new(FIRST_DIMENSION_ID, first_index);
+                let second = GuideInstanceId::new(SECOND_DIMENSION_ID, second_index);
+                sites.push(IntersectionSite {
+                    id: SiteId {
+                        first_dimension_id: FIRST_DIMENSION_ID.0,
+                        first_index,
+                        second_dimension_id: SECOND_DIMENSION_ID.0,
+                        second_index,
+                    },
+                    position,
+                    nominal_cell_diameter,
+                    scope: if document_canvas.contains(position) {
+                        SiteScope::Canvas
+                    } else {
+                        SiteScope::Guard
+                    },
+                    provenance: GuideIntersectionProvenance {
+                        contributors: vec![first, second],
+                    },
+                });
+            }
         }
     }
 
@@ -20866,4 +21426,14 @@ fn fixed_grid_row_range(
         hi = l;
     }
     Ok((lo <= hi).then_some((lo, hi)))
+}
+
+/// Returns a genuine compiled adaptive-mode companion only for its complete measured binding.
+/// No alternate gallery record or approximate recipe identity participates in reuse.
+/// # Errors
+/// Returns frozen artifact validation diagnostics; an unmatched binding returns no artifact.
+pub fn adaptive_shape_marks_calibration(
+    binding: &toniator_domain::CalibrationBinding,
+) -> Result<Option<toniator_domain::SavedCalibration>, toniator_domain::ValidationError> {
+    builtin_calibrations::adaptive_shape_for_binding(binding)
 }

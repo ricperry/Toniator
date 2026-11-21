@@ -2917,23 +2917,7 @@ fn rotate_hue(color: &ColorValue, degrees: f64) -> ColorValue {
     }
 }
 
-/// Converts a normalized linear-light component to encoded sRGB.
-pub(crate) fn linear_to_srgb(value: f64) -> f64 {
-    if value <= 0.003_130_8 {
-        12.92 * value
-    } else {
-        1.055 * value.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-/// Converts a normalized encoded-sRGB component to linear light.
-pub(crate) fn srgb_to_linear(value: f64) -> f64 {
-    if value <= 0.040_45 {
-        value / 12.92
-    } else {
-        ((value + 0.055) / 1.055).powf(2.4)
-    }
-}
+pub(crate) use creatiator::color::{linear_to_srgb, srgb_to_linear};
 
 /// Converts normalized encoded sRGB to CSS-compatible HSL degrees/fractions.
 fn encoded_rgb_to_hsl(rgb: [f64; 3]) -> (f64, f64, f64) {

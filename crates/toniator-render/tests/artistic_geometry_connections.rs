@@ -54,6 +54,7 @@ fn stroke() -> CanonicalStroke {
     let style = PathStrokeStyle {
         join: StrokeJoin::Round,
         cap: StrokeCap::Round,
+        hatch: None,
     };
     let outline = build_variable_width_outline_cancellable(
         &path,

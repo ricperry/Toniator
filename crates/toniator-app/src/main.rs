@@ -37,6 +37,7 @@ mod print_preparation_view;
 mod process_memory;
 mod scatter_memory;
 mod sequence_import;
+mod shape_library;
 mod source_notice;
 #[cfg(test)]
 mod source_response_ui_tests;
@@ -169,11 +170,12 @@ const SOURCE_VIEW_MAX_EDGE: u32 = 4096;
 static PERSONAL_PATTERN_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// Lists every Gate 21B-2 image resource whose GResource presence is test-authoritative.
 ///
-/// The first entry is the ordinary synthetic thumbnail source. The remaining exact 17 entries are
-/// the adopted Stage 20S built-in icon subset, including Curve Motif.
+/// The first entry is the ordinary synthetic thumbnail source. The remaining entries retain the
+/// adopted Stage 20S icon subset plus the current Adaptive Shape Marks gallery resource.
 #[cfg(test)]
-const WIZARD_IMAGE_RESOURCE_PATHS: [&str; 18] = [
+const WIZARD_IMAGE_RESOURCE_PATHS: [&str; 19] = [
     "/com/silentbutdigital/Toniator/preset-icon-source.svg",
+    "/com/silentbutdigital/Toniator/preset-icons/adaptive-shape-marks.svg",
     "/com/silentbutdigital/Toniator/preset-icons/clustered-dispersion-random-links.svg",
     "/com/silentbutdigital/Toniator/preset-icons/curve-motif-rows.svg",
     "/com/silentbutdigital/Toniator/preset-icons/even-random-circles.svg",
@@ -1674,6 +1676,7 @@ struct AdvancedCalibrationTask {
 /// The surface captures a stable target and compact candidate at open. Its history, source proxy,
 /// tickets, texture, and widget state never alter the main workspace until its explicit Apply.
 struct PatternWizardSurface {
+    shapes: shape_library::State,
     guide_overlay: wizard_guides::Overlay,
     scatter_memory: scatter_memory::Memory,
     validation: wizard_validation::Validation,
@@ -1911,6 +1914,7 @@ enum WizardRecipeControlFocus {
     Construction(usize),
     ConstructionMethod(usize),
     Descriptor(PropertyTarget, PropertyFieldId),
+    TangentTone(PropertyTarget),
     ReferenceCollection(PropertyTarget, PropertyFieldId, usize),
     AppendReferenceCollection(PropertyTarget, PropertyFieldId),
     SiteUseFilter(PropertyTarget),
@@ -2148,6 +2152,7 @@ fn wizard_page_for_descriptor(
         | MarkMaximumFill
         | MarkSizeScale
         | VisibleMarkMargin
+        | AdaptiveBlueNoise
         | OutputPrototype
         | OutputAuthoredClosedShape
         | OutputOrientation
@@ -2165,6 +2170,8 @@ fn wizard_page_for_descriptor(
         ConnectedMinimumThickness
         | ConnectedMaximumThickness
         | CurveResponseBias
+        | HatchEnabled
+        | HatchStrokeWidth
         | ToneSampleSpacing
         | CurveMotifMirrorAlternateRows
         | CurveMotifAlternateRowPhase => WizardRoutePage::Paths,
@@ -3231,6 +3238,16 @@ fn append_wizard_fixed_method_row(
     }
 }
 
+/// Describes the typed cell strategy without inferring drawing behavior from display vocabulary.
+/// Resource wrappers preserve output order and do not change the selected strategy's meaning.
+fn wizard_uses_adaptive_square_output(structure: &toniator_domain::PatternStructureRecipe, output: usize) -> bool {
+    match structure {
+        toniator_domain::PatternStructureRecipe::AuthoredResources { definition, .. } => wizard_uses_adaptive_square_output(definition, output),
+        toniator_domain::PatternStructureRecipe::OrderedOutputs { outputs, .. } => matches!(outputs.get(output), Some(toniator_domain::PatternOutputRealizationRecipe::AdaptiveSquareMarks | toniator_domain::PatternOutputRealizationRecipe::AdaptiveSquareBlueNoiseMarks)),
+        _ => false,
+    }
+}
+
 /// Appends the channel pattern's construction and compatible drawing-method controls.
 ///
 /// Every offered class and method is validated by the reconstructed recipe. Marks retain their
@@ -3268,8 +3285,12 @@ fn append_wizard_output_construction_controls(
         let control = accessible_string_dropdown(&labels);
         control.set_selected(valid.iter().position(|kind| *kind == current).unwrap_or(0) as u32);
         let canonical_selected = control.selected();
-        let guidance = wizard_choice_explanation(wizard_construction_kind_label(current))
-            .unwrap_or("Choose shapes, lines, or filled areas for this drawing layer.");
+        let guidance = if wizard_uses_adaptive_square_output(&recipe.structure, output_index) {
+            "Choose a fixed full-cell silhouette from each square cell's average ink. The shape and its quarter-turn pose fit where the ink lies inside the cell; footprints keep their full cell size."
+        } else {
+            wizard_choice_explanation(wizard_construction_kind_label(current))
+                .unwrap_or("Choose shapes, lines, or filled areas for this drawing layer.")
+        };
         let description =
             wizard_dropdown_description(wizard_construction_kind_label(current), guidance);
         control.set_tooltip_text(Some(guidance));
@@ -3728,7 +3749,8 @@ enum AdvancedDescriptorTargetKind {
 }
 
 impl PatternEditorDraft {
-    /// Reports whether this private editor has changes that a close must disclose.
+    /// Reports parent-relative changes for Apply readiness and the private editor summary.
+    /// Child-only preparation remains applyable even before the artist edits its geometry.
     fn is_dirty(&self) -> bool {
         self.history.document() != &self.initial_document
     }
@@ -4028,6 +4050,8 @@ fn retry_main_preview(state: &Rc<RefCell<AppState>>) {
             match EvaluationScheduler::new() {
                 Ok(scheduler) => {
                     state.scheduler = Arc::new(scheduler);
+                    state.canonical_preview = None;
+                    state.pending_scene = None;
                     state.preview_worker_unavailable = false;
                     match start_preview_event_bridge(
                         state.scheduler.clone(),
@@ -4108,6 +4132,7 @@ struct AppState {
     accepted_preview_metadata:
         Option<((u64, u64, u64), toniator_engine::preview_cache::Provenance)>,
     pending_scene: Option<(u64, u64, u64)>,
+    canonical_preview: Option<((u64, u64, u64), toniator_engine::EvaluationCompletion)>,
     preview_view: gtk::ToggleButton,
     source_view: gtk::ToggleButton,
     endpoint_controls: gtk::Box,
@@ -4721,6 +4746,7 @@ fn build_window(app: &gtk::Application) -> Rc<RefCell<AppState>> {
         preview_quality_label: shell.preview_quality(),
         accepted_preview_metadata: None,
         pending_scene: None,
+        canonical_preview: None,
         preview_view,
         source_view,
         endpoint_controls: shell.endpoint_controls().0,
@@ -5827,23 +5853,8 @@ fn apply_print_preparation_settings(
 
 /// Installs the vendored suite baseline before the application-specific native-theme rules.
 fn install_css() {
-    let shared = gtk::CssProvider::new();
-    shared.load_from_resource(&format!("{RESOURCE_PREFIX}/creative-suite.css"));
     if let Some(display) = gtk::gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &shared,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION - 1,
-        );
-    }
-    let provider = gtk::CssProvider::new();
-    provider.load_from_resource(&format!("{RESOURCE_PREFIX}/toniator.css"));
-    if let Some(display) = gtk::gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
+        creatiator::install_styles(&display, Some(&format!("{RESOURCE_PREFIX}/toniator.css")));
     }
 }
 
@@ -5851,7 +5862,10 @@ fn install_css() {
 ///
 /// These callbacks never apply document commands; zoom submits only derived raster work.
 /// Preview and Source share the same scrolled viewport and its adjustments.
+/// Fit retains the last manual camera; GTK clamps restored pan after the manual layout returns.
 fn connect_main_view_controls(state: &Rc<RefCell<AppState>>) {
+    let manual_pan = Rc::new(Cell::new(None::<(u64, (f64, f64))>));
+    let restore_pan = Rc::new(Cell::new(None::<(u64, (f64, f64))>));
     {
         let weak = Rc::downgrade(state);
         let switch = state.borrow().fast_preview.clone();
@@ -5893,11 +5907,19 @@ fn connect_main_view_controls(state: &Rc<RefCell<AppState>>) {
         (state.borrow().zoom_in.clone(), true),
     ] {
         let state = Rc::clone(state);
+        let restore_pan = Rc::clone(&restore_pan);
         button.connect_clicked(move |_| {
-            if zoom_in {
-                state.borrow_mut().view_state.zoom_in();
-            } else {
-                state.borrow_mut().view_state.zoom_out();
+            restore_pan.set(None);
+            {
+                let mut app = state.borrow_mut();
+                if app.view_state.is_fit() {
+                    observe_main_fit_scale(&mut app);
+                }
+                if zoom_in {
+                    app.view_state.zoom_in();
+                } else {
+                    app.view_state.zoom_out();
+                }
             }
             apply_main_view_presentation(&mut state.borrow_mut());
             queue_main_viewport_refresh(&state);
@@ -5906,19 +5928,43 @@ fn connect_main_view_controls(state: &Rc<RefCell<AppState>>) {
     {
         let state = Rc::clone(state);
         let fit = state.borrow().fit.clone();
+        let restore_pan = Rc::clone(&restore_pan);
         fit.connect_toggled(move |button| {
             if state.try_borrow().is_err() {
                 return;
             }
             let already_fit = state.borrow().view_state.is_fit();
-            if button.is_active() && !already_fit {
-                state.borrow_mut().view_state.fit();
-                apply_main_view_presentation(&mut state.borrow_mut());
-                queue_main_viewport_refresh(&state);
-            } else if !button.is_active() && already_fit {
-                // Fit is a mode selector: clicking the selected mode keeps its truthful state.
-                button.set_active(true);
+            if button.is_active() == already_fit {
+                return;
             }
+            if button.is_active() {
+                let app = state.borrow();
+                let current = (
+                    app.workspace_generation,
+                    (
+                        app.viewport_scroll.hadjustment().value(),
+                        app.viewport_scroll.vadjustment().value(),
+                    ),
+                );
+                manual_pan.set(Some(
+                    restore_pan
+                        .get()
+                        .filter(|(generation, _)| *generation == app.workspace_generation)
+                        .unwrap_or(current),
+                ));
+                restore_pan.set(None);
+            } else {
+                restore_pan.set(manual_pan.get());
+            }
+            {
+                let mut app = state.borrow_mut();
+                app.view_state.set_fit(button.is_active());
+                if button.is_active() {
+                    observe_main_fit_scale(&mut app);
+                }
+            }
+            apply_main_view_presentation(&mut state.borrow_mut());
+            queue_main_viewport_refresh(&state);
         });
     }
     for (button, mode) in [
@@ -5946,6 +5992,20 @@ fn connect_main_view_controls(state: &Rc<RefCell<AppState>>) {
         .viewport_scroll
         .add_tick_callback(move |_, _| {
             if let Some(state) = weak.upgrade() {
+                if let Ok(mut app) = state.try_borrow_mut()
+                    && app.view_state.is_fit()
+                {
+                    let previous = app.view_state;
+                    observe_main_fit_scale(&mut app);
+                    if app.view_state != previous {
+                        sync_main_zoom_controls(&app);
+                    }
+                }
+                if let Some((generation, pan)) = restore_pan.get()
+                    && restore_main_manual_pan(&state, generation, pan)
+                {
+                    restore_pan.set(None);
+                }
                 refresh_main_viewport_if_changed(&state);
                 glib::ControlFlow::Continue
             } else {
@@ -5967,6 +6027,88 @@ fn connect_main_view_controls(state: &Rc<RefCell<AppState>>) {
         });
     }
     connect_main_view_pan_gesture(state);
+}
+
+/// Projects Fit from the live native viewport page into logical canvas units, never proxy pixels.
+/// Fit fills that page for Source and Preview, matching the full-frame viewport request authority.
+/// Page dimensions remain valid across manual-to-Fit layout and pending pixels; absent canvas or
+/// unallocated page dimensions keep the fitted scale unavailable. Device scale cancels in this ratio.
+fn observe_main_fit_scale(state: &mut AppState) {
+    let canvas = state
+        .workspace
+        .as_ref()
+        .map(|workspace| workspace.document().canvas());
+    let dimensions = canvas
+        .map(|canvas| (canvas.width, canvas.height))
+        .unwrap_or((0.0, 0.0));
+    let page = (
+        state.viewport_scroll.hadjustment().page_size(),
+        state.viewport_scroll.vadjustment().page_size(),
+    );
+    state.view_state.observe_fit(dimensions, page);
+}
+
+/// Restores the retained manual pan only after GTK's adjustments describe the requested manual size.
+/// Native adjustments clamp pan after resize; values are applied outside the AppState borrow because
+/// GTK emits synchronous scroll notifications. Replacement workspaces or superseded Fit end restoration.
+fn restore_main_manual_pan(
+    state: &Rc<RefCell<AppState>>,
+    generation: u64,
+    pan: (f64, f64),
+) -> bool {
+    let (horizontal, vertical) = {
+        let Ok(app) = state.try_borrow() else {
+            return false;
+        };
+        let Some(workspace) = app.workspace.as_ref() else {
+            return true;
+        };
+        if app.view_state.is_fit() || app.workspace_generation != generation {
+            return true;
+        }
+        let canvas = workspace.document().canvas();
+        let horizontal = app.viewport_scroll.hadjustment();
+        let vertical = app.viewport_scroll.vadjustment();
+        let width = (canvas.width * app.view_state.zoom()).round().max(1.0);
+        let height = (canvas.height * app.view_state.zoom()).round().max(1.0);
+        if (horizontal.upper() - width.max(horizontal.page_size())).abs() > 1.0
+            || (vertical.upper() - height.max(vertical.page_size())).abs() > 1.0
+        {
+            return false;
+        }
+        (horizontal, vertical)
+    };
+    horizontal.set_value(pan.0);
+    vertical.set_value(pan.1);
+    true
+}
+
+/// Projects the current displayed percentage and strictly directional zoom availability into GTK.
+/// Fit remains a native toggle; visible text and accessibility describe the same observed scale.
+fn sync_main_zoom_controls(state: &AppState) {
+    let zoom_label = state.view_state.zoom_label();
+    state.zoom_label.set_label(&zoom_label);
+    state
+        .zoom_label
+        .update_property(&[gtk::accessible::Property::Description(&format!(
+            "{}: {zoom_label}",
+            if state.view_state.is_fit() {
+                "Fitted zoom"
+            } else {
+                "Manual zoom"
+            }
+        ))]);
+    state.zoom_in.set_sensitive(state.view_state.can_zoom_in());
+    state
+        .zoom_out
+        .set_sensitive(state.view_state.can_zoom_out());
+    state
+        .fit
+        .set_tooltip_text(Some(if state.view_state.is_fit() {
+            "Restore the previous manual zoom and pan; Ctrl+0 keeps Fit"
+        } else {
+            "Fit the artwork in the viewport (Ctrl+0); click again to restore the manual view"
+        }));
 }
 
 /// Installs left-button panning on the main viewport using its native scroll adjustments.
@@ -6216,6 +6358,9 @@ fn sync_endpoint_controls(state: &AppState) {
 /// Pan instructions remain in the viewport's accessible description without
 /// adding canvas hover hints.
 fn apply_main_view_presentation(state: &mut AppState) {
+    if state.view_state.is_fit() {
+        observe_main_fit_scale(state);
+    }
     sync_main_preview_quality(state);
     let paintable = match state.view_state.mode() {
         MainViewMode::Preview => state.preview.as_ref(),
@@ -6343,15 +6488,7 @@ fn apply_main_view_presentation(state: &mut AppState) {
         .source_view
         .set_active(state.view_state.mode() == MainViewMode::Source);
     state.fit.set_active(state.view_state.is_fit());
-    state.zoom_label.set_label(&if state.view_state.is_fit() {
-        "Fit".to_owned()
-    } else {
-        state.view_state.zoom_label()
-    });
-    state.zoom_in.set_sensitive(state.view_state.can_zoom_in());
-    state
-        .zoom_out
-        .set_sensitive(state.view_state.can_zoom_out());
+    sync_main_zoom_controls(state);
 
     if state.view_state.is_fit() {
         state.picture.set_can_shrink(true);
@@ -6605,32 +6742,33 @@ fn main_recipe_summary(document: &Document, target: InspectorTarget) -> Option<M
     let recipe = document
         .reconstruct_pattern_definition_recipe(definition_id)
         .ok()?;
-    if target == InspectorTarget::DocumentAll {
-        let mixed = authoritative_channel_ids(document)
-            .into_iter()
-            .any(|channel_id| {
-                document
-                    .pattern_definition_for(channel_id)
-                    .and_then(|definition| {
-                        document
-                            .reconstruct_pattern_definition_recipe(definition.id)
-                            .ok()
-                    })
-                    .is_some_and(|channel_recipe| channel_recipe != recipe)
-            });
-        if mixed {
-            return Some(MainRecipeSummary {
-                family: "Mixed".to_owned(),
-                sites: "Varies by channel".to_owned(),
-                connections: "Varies by channel".to_owned(),
-            });
-        }
-    }
-    Some(MainRecipeSummary {
+    let mut summary = MainRecipeSummary {
         family: wizard_family_label(recipe.family_kind()).to_owned(),
         sites: wizard_site_generation_label(recipe.site_generation_kind()).to_owned(),
         connections: main_recipe_connection_summary(&recipe),
-    })
+    };
+    if target == InspectorTarget::DocumentAll {
+        for channel_id in authoritative_channel_ids(document) {
+            let Some(channel_recipe) = document
+                .pattern_definition_for(channel_id)
+                .and_then(|definition| {
+                    document.reconstruct_pattern_definition_recipe(definition.id).ok()
+                })
+            else {
+                continue;
+            };
+            if channel_recipe.family_kind() != recipe.family_kind() {
+                summary.family = "Mixed".to_owned();
+            }
+            if channel_recipe.site_generation_kind() != recipe.site_generation_kind() {
+                summary.sites = "Varies by channel".to_owned();
+            }
+            if main_recipe_connection_summary(&channel_recipe) != main_recipe_connection_summary(&recipe) {
+                summary.connections = "Varies by channel".to_owned();
+            }
+        }
+    }
+    Some(summary)
 }
 
 /// Returns a concise connection summary from the reconstructed recipe only.
@@ -6920,7 +7058,38 @@ fn inline_inspector_values(
             }
         }
     }
+    let adaptive = adaptive_blue_noise_values(document, target);
+    if target == InspectorTarget::DocumentAll {
+        if let Some(first) = adaptive.first() { values.push(first.clone()); }
+    } else { values.extend(adaptive); }
     values
+}
+
+/// Reads active adaptive output values from actual effective channel definitions.
+/// ALL uses active channels for readback; its edit also updates an eligible stored base.
+fn adaptive_blue_noise_values(
+    document: &Document,
+    target: InspectorTarget,
+) -> Vec<PropertyCurrentValue> {
+    let ids = match target {
+        InspectorTarget::DocumentAll => authoritative_channel_ids(document),
+        InspectorTarget::Channel(channel) => vec![channel],
+    }
+    .into_iter()
+    .filter_map(|channel| {
+        document
+            .pattern_definition_for(channel)
+            .map(|definition| definition.id)
+    })
+    .collect::<std::collections::BTreeSet<_>>();
+    document
+        .property_values()
+        .into_iter()
+        .filter(|value| {
+            value.descriptor.field == PropertyFieldId::AdaptiveBlueNoise
+                && target_definition_id(value.descriptor.target).is_some_and(|id| ids.contains(&id))
+        })
+        .collect()
 }
 
 /// Identifies structural stroke alignment retained beside the normal Pattern controls.
@@ -7184,7 +7353,7 @@ fn main_inspector_section(field: PropertyFieldId) -> MainInspectorSection {
         PropertyFieldId::RandomSeed
         | PropertyFieldId::ConnectionSeed
         | PropertyFieldId::MazeSeed => MainInspectorSection::Variation,
-        PropertyFieldId::Opacity | PropertyFieldId::Visibility => {
+        PropertyFieldId::AdaptiveBlueNoise | PropertyFieldId::Opacity | PropertyFieldId::Visibility => {
             MainInspectorSection::FrequentOutput
         }
         _ => MainInspectorSection::Options,
@@ -7207,6 +7376,9 @@ fn main_inspector_container(state: &AppState, section: MainInspectorSection) -> 
 /// state; the domain descriptor remains authoritative for those boundaries.
 fn inspector_field_label(field: PropertyFieldId) -> String {
     match field {
+        PropertyFieldId::AdaptiveBlueNoise => "Blue noise".into(),
+        PropertyFieldId::HatchEnabled => "Interleaved hatching".into(),
+        PropertyFieldId::HatchStrokeWidth => "Hatch stroke width".into(),
         PropertyFieldId::ToneSampleSpacing => "Tone sample spacing".into(),
         PropertyFieldId::SourceReference => "Source artwork".into(),
         PropertyFieldId::Density => "Feature size".into(),
@@ -7267,7 +7439,7 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::AlongGuideDimensions => "Guides that receive points".into(),
         PropertyFieldId::AlongGuideIntervalMultiplier => "Point spacing".into(),
         PropertyFieldId::AlongGuidePhase => "Point offset".into(),
-        PropertyFieldId::RandomCharacter => "Scatter style".into(),
+        PropertyFieldId::RandomCharacter => "Dispersion".into(),
         PropertyFieldId::RandomNominalSpacing => "Pattern point spacing".into(),
         PropertyFieldId::RandomEvenMinimumCenterDistance => "Minimum point spacing".into(),
         PropertyFieldId::RandomClusterDensity => "Cluster frequency".into(),
@@ -7403,6 +7575,9 @@ fn authority_numeric_value(
 /// this exhaustive mapping supplies only shared wizard, inspector, and transition vocabulary.
 fn inspector_field_guidance(field: PropertyFieldId) -> &'static str {
     match field {
+        PropertyFieldId::AdaptiveBlueNoise => "Mix nearby shape sizes across cells to reproduce more tones. Turn off for stepped tones.",
+        PropertyFieldId::HatchEnabled => "Adds fixed-width strokes in eight interleaved levels as artwork ink rises. Disabling restores continuous variable-width strokes. Tone is quantized to the nearest measured population.",
+        PropertyFieldId::HatchStrokeWidth => "Sets one constant stroke width as a fraction of carrier pitch. Artwork tone adds interleaved strokes and clips their lengths; it never thins them. Feature size scales width and pitch together.",
         PropertyFieldId::ToneSampleSpacing => "Spaces artwork tone samples along smooth curves relative to Feature size. Larger values simplify tonal detail; smaller values retain more detail. Curve shape and numerical accuracy stay unchanged.",
         PropertyFieldId::SourceReference => "Chooses the artwork sampled by this channel.",
         PropertyFieldId::Density => {
@@ -7550,7 +7725,7 @@ fn inspector_field_guidance(field: PropertyFieldId) -> &'static str {
             "Slides points forward or backward along each guide without changing their spacing."
         }
         PropertyFieldId::RandomCharacter => {
-            "Random leaves irregular gaps. Poisson disk creates even random spacing without clumps. Jittered cells place one point per cell. Clustered gathers points into visible groups."
+            "Ranked blue noise reveals nested marks from unique progressive void-and-cluster ranks. Bayer orders dots in an 8×8 screen. Floyd–Steinberg diffuses tone error along alternating rows. Ink-weighted quadtree places marks at ink centroids. Tangent ribbons follow continuous artwork contours. Stochastic cluster screen gathers fine marks into irregular islands. Each uses the receiving channel’s artwork tone."
         }
         PropertyFieldId::RandomNominalSpacing => {
             "Sets the authored distance behind scatter density. Random and Clustered offer points per unit area from this spacing; Jittered places one point per cell. Feature size scales it without changing the saved Pattern."
@@ -7958,6 +8133,26 @@ fn enum_choice_label(choice: PropertyEnumChoice) -> &'static str {
         }
         PropertyEnumChoice::Paint(PaintKind::Solid) => "Solid color",
         PropertyEnumChoice::Paint(PaintKind::SampledSource) => "Sampled source color",
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::RankedBlueNoise) => "Ranked blue noise",
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Bayer) => "Bayer 8×8",
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::FloydSteinberg) => {
+            "Floyd–Steinberg"
+        }
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::InkQuadtree) => {
+            "Ink-weighted quadtree"
+        }
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::TangentSpacing) => {
+            "Tangent ribbons · Spacing"
+        }
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::TangentSize) => {
+            "Tangent ribbons · Size"
+        }
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::TangentBlend) => {
+            "Tangent ribbons · Blend"
+        }
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::ClusterScreen) => {
+            "Stochastic cluster screen"
+        }
         PropertyEnumChoice::RandomCharacter(RandomCharacterKind::RawUniform) => "Random",
         PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Even) => "Poisson disk",
         PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Clustered) => "Clustered",
@@ -7981,6 +8176,7 @@ fn enum_choice_label(choice: PropertyEnumChoice) -> &'static str {
         PropertyEnumChoice::Exclusion(toniator_domain::ExclusionKind::VisibleMarkMargin) => {
             "Visible mark margin"
         }
+        PropertyEnumChoice::MarkPrototype(toniator_domain::MarkPrototypeKind::AdaptiveSquare) => "Adaptive Shape Marks",
         PropertyEnumChoice::MarkPrototype(toniator_domain::MarkPrototypeKind::Circle) => "Circle",
         PropertyEnumChoice::MarkPrototype(
             toniator_domain::MarkPrototypeKind::AuthoredClosedShape,
@@ -8476,6 +8672,15 @@ fn reconcile_descriptor_components(
         advanced_temporal::display_document(workspace.document(), app.endpoint).ok()
     });
     for component in app.descriptor_components.values() {
+        if component.value.descriptor.field == PropertyFieldId::AdaptiveBlueNoise
+            && let Some(control) = component.control.downcast_ref::<gtk::CheckButton>()
+            && let Some(document) = display.as_ref()
+        {
+            let values = adaptive_blue_noise_values(document, app.inspector_runtime.target);
+            let mixed = values.first().is_some_and(|first| values.iter().any(|value| value.value != first.value));
+            control.set_inconsistent(mixed);
+            component.detail.set_label(if mixed { "Mixed · edits set all adaptive channels" } else { "" });
+        }
         if main_all_scalar(app.inspector_runtime.target, &component.value.descriptor)
             && let Some(document) = display.as_ref()
             && let Ok(batch) = document.channel_scalar_batch(component.value.descriptor.field)
@@ -8664,6 +8869,9 @@ fn update_descriptor_component(
         }
         (PropertyCurrentValueKind::Boolean(_), PropertyCurrentValueKind::Boolean(next)) => {
             if let Some(control) = component.control.downcast_ref::<gtk::Switch>() {
+                control.set_active(*next);
+                true
+            } else if let Some(control) = component.control.downcast_ref::<gtk::CheckButton>() {
                 control.set_active(*next);
                 true
             } else {
@@ -9143,6 +9351,7 @@ fn open_pattern_wizard(state: &Rc<RefCell<AppState>>, invoking_edit: gtk::Button
     };
     let scatter_memory = state.borrow().scatter_memory.clone();
     state.borrow_mut().pattern_wizard = Some(PatternWizardSurface {
+        shapes: shape_library::State::default(),
         guide_overlay,
         scatter_memory,
         validation: wizard_validation::Validation::default(),
@@ -9417,7 +9626,7 @@ fn wizard_family_label(family: PatternRecipeFamilyKind) -> &'static str {
 
 /// Appends one native exclusive selection card for every entry in the shared layered catalog order.
 ///
-/// Built-in resource thumbnails remain exact GResource SVGs for the authorized 17-item subset.
+/// Built-in resource thumbnails use their ID-addressed GResource SVGs, including Adaptive Shape Marks.
 /// Personal entries receive a canonical synthetic-source thumbnail instead. The
 /// returned stable-ID map is presentation-only and permits one current-candidate marker to update
 /// without changing catalog order, metadata, draft, history, or evaluator authority.
@@ -12038,6 +12247,17 @@ fn weighted_mark_density_states(
     else {
         return Vec::new();
     };
+    if bundle.definition.mechanisms.iter().any(|mechanism| {
+        matches!(
+            mechanism,
+            toniator_domain::PatternMechanism::RandomSiteProcess {
+                character: toniator_domain::RandomSiteCharacter::Dispersion { .. },
+                ..
+            }
+        )
+    }) {
+        return Vec::new();
+    }
     if !toniator_domain::definition_uses_artwork_weighted_density(&bundle.definition) {
         return Vec::new();
     }
@@ -12082,9 +12302,21 @@ fn channel_mark_scale_visible(document: &Document, channel: ChannelId) -> bool {
         .any(|(_, density)| density.mode == MarkDensityMode::Uniform)
 }
 
-/// Reports whether Uniform weighted Marks have their independent Fill tone mask switched off.
+/// Reports whether fixed-area marks have their independent Fill tone mask switched off.
+/// Variable-area tangent modes retain the real Fill mapping authority.
 fn channel_fill_mask_inactive(document: &Document, channel: ChannelId) -> bool {
-    if !channel_mark_scale_visible(document, channel) {
+    let fixed_dispersion = document
+        .effective_channel_pattern(channel)
+        .ok()
+        .and_then(|effective| {
+            document
+                .pattern_definition_bundles()
+                .iter()
+                .find(|bundle| bundle.definition.id == effective.definition_id)
+        })
+        .and_then(|bundle| bundle.definition.dispersion_layout())
+        .is_some_and(|layout| layout.spacing_fraction() == 1.0);
+    if !fixed_dispersion && !channel_mark_scale_visible(document, channel) {
         return false;
     }
     selected_property_values(document, channel)
@@ -12107,7 +12339,7 @@ fn all_response_field_visible(document: &Document, field: PropertyFieldId) -> bo
     }
 }
 
-/// Disables only mapped Fill controls while an eligible Uniform Mark mask cutoff is zero.
+/// Identifies mapped Fill fields that become inactive for zero-cutoff fixed-area mark masks.
 fn is_fill_tone_mapping_field(field: PropertyFieldId) -> bool {
     matches!(
         field,
@@ -13168,6 +13400,10 @@ fn show_wizard_route_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
     values.retain(|value| {
         !wizard_descriptor_is_locked_triangular(&recipe, value.descriptor.field)
             && wizard_value_has_meaningful_choice(&document, value)
+            && !matches!(
+                value.descriptor.field,
+                PropertyFieldId::OutputPrototype | PropertyFieldId::OutputAuthoredClosedShape
+            )
     });
     values.sort_by_key(|value| wizard_control_section(route_page, value.descriptor.field));
     let mut count = 0;
@@ -13184,7 +13420,8 @@ fn show_wizard_route_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
             count += append_wizard_locked_triangular_layout(&page, route_page, &recipe);
         }
     }
-    if route_page == WizardRoutePage::Rendering {
+    let fixed_width_hatching = values.iter().any(|value| value.descriptor.field == PropertyFieldId::HatchEnabled && value.value == PropertyCurrentValueKind::Boolean(true));
+    if route_page == WizardRoutePage::Rendering && !fixed_width_hatching {
         let section = WizardControlSection::SitePlacement;
         append_wizard_control_section(&page, section, &projection.family);
         current_section = Some(section);
@@ -13217,6 +13454,7 @@ fn show_wizard_route_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
             );
             current_section = Some(WizardControlSection::OutputConstruction);
             count += append_wizard_output_construction_controls(state, epoch, &page, &recipe);
+            count += shape_library::append(state, epoch, &page, &document, target);
             construction_rendered = true;
         }
         if current_section != Some(section) {
@@ -13368,6 +13606,7 @@ fn show_wizard_route_page(state: &Rc<RefCell<AppState>>, epoch: u64) {
             &projection.family,
         );
         count += append_wizard_output_construction_controls(state, epoch, &page, &recipe);
+        count += shape_library::append(state, epoch, &page, &document, target);
     }
     if !transition_rendered
         && let Some(transition) = transition.as_ref().filter(|draft| {
@@ -15574,7 +15813,8 @@ fn wizard_output_move_command(
     })
 }
 
-/// Appends one descriptor-owned enum dropdown and begins a domain transition when needed.
+/// Projects the saved combined tangent variant into two ordinary descriptor-backed controls.
+/// Both dropdowns dispatch the existing typed selector command and preserve private draft history.
 fn append_wizard_enum_control(
     state: &Rc<RefCell<AppState>>,
     epoch: u64,
@@ -15584,11 +15824,56 @@ fn append_wizard_enum_control(
     label_text: &str,
     restore_focus: bool,
 ) {
+    let tangent = matches!(
+        selected,
+        PropertyEnumChoice::RandomCharacter(
+            RandomCharacterKind::TangentSpacing
+                | RandomCharacterKind::TangentSize
+                | RandomCharacterKind::TangentBlend
+        )
+    );
+    append_wizard_enum_control_projected(
+        state,
+        epoch,
+        page,
+        descriptor.clone(),
+        selected,
+        label_text,
+        restore_focus,
+        false,
+    );
+    if descriptor.field == PropertyFieldId::RandomCharacter && tangent {
+        append_wizard_enum_control_projected(
+            state,
+            epoch,
+            page,
+            descriptor,
+            selected,
+            "Tangent tone",
+            true,
+            true,
+        );
+    }
+}
+
+/// Appends one descriptor-owned enum dropdown and begins a domain transition when needed.
+/// The optional tangent projection reuses the same selector command and GTK state authority.
+#[allow(clippy::too_many_arguments)]
+fn append_wizard_enum_control_projected(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    page: &gtk::Box,
+    descriptor: PropertyDescriptor,
+    selected: PropertyEnumChoice,
+    label_text: &str,
+    restore_focus: bool,
+    tangent_tone: bool,
+) {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let label = gtk::Label::new(Some(label_text));
     label.set_xalign(0.0);
     label.set_hexpand(true);
-    let choices = {
+    let mut choices = {
         let app = state.borrow();
         app.pattern_wizard
             .as_ref()
@@ -15605,27 +15890,85 @@ fn append_wizard_enum_control(
             })
             .unwrap_or_else(|| descriptor.choices.to_vec())
     };
-    let labels = choices
-        .iter()
-        .copied()
-        .map(enum_choice_label)
-        .collect::<Vec<_>>();
+    let is_dispersion = descriptor.field == PropertyFieldId::RandomCharacter;
+    let tangent_choice = |choice| {
+        matches!(
+            choice,
+            PropertyEnumChoice::RandomCharacter(
+                RandomCharacterKind::TangentSpacing
+                    | RandomCharacterKind::TangentSize
+                    | RandomCharacterKind::TangentBlend
+            )
+        )
+    };
+    let selected_projection = if is_dispersion && !tangent_tone && tangent_choice(selected) {
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::TangentSpacing)
+    } else {
+        selected
+    };
+    if is_dispersion {
+        choices.retain(|choice| {
+            if tangent_tone {
+                tangent_choice(*choice)
+            } else {
+                !tangent_choice(*choice)
+                    || *choice
+                        == PropertyEnumChoice::RandomCharacter(RandomCharacterKind::TangentSpacing)
+            }
+        });
+    }
+    let label_for = |choice| {
+        if is_dispersion && tangent_choice(choice) {
+            if tangent_tone {
+                match choice {
+                    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::TangentSize) => "Size",
+                    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::TangentBlend) => {
+                        "Blend"
+                    }
+                    _ => "Spacing",
+                }
+            } else {
+                "Tangent ribbons"
+            }
+        } else {
+            enum_choice_label(choice)
+        }
+    };
+    let labels = choices.iter().copied().map(label_for).collect::<Vec<_>>();
     let control = accessible_string_dropdown(&labels);
     let selected_index = choices
         .iter()
-        .position(|choice| *choice == selected)
+        .position(|choice| *choice == selected_projection)
         .unwrap_or(gtk::INVALID_LIST_POSITION as usize);
     control.set_selected(selected_index as u32);
     control.set_sensitive(choices.iter().any(|choice| *choice != selected));
     label.set_mnemonic_widget(Some(&control));
-    let guidance = inspector_field_detail(&descriptor);
+    let guidance = if tangent_tone {
+        "Spacing varies mark separation. Size varies mark area. Blend shares tone between separation and area. All three follow the same continuous artwork guides.".to_string()
+    } else if is_dispersion {
+        match selected {
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::RankedBlueNoise)=>"Unique progressive void-and-cluster ranks reveal nested, evenly dispersed Shape Library marks. The 64×64 screen keeps its phase across the complete artwork.",
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Bayer)=>"Ordered dispersed dots use a repeating 8×8 threshold screen. Artwork tone controls how many full-size marks appear.",
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::FloydSteinberg)=>"Alternating rows diffuse tone error to nearby cells, keeping local ink while avoiding a repeating threshold tile.",
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::InkQuadtree)=>"Artwork ink recursively divides space. Marks gather at each region’s ink-weighted center.",
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::ClusterScreen)=>"A source-independent stochastic screen gathers marks around irregular nuclei. Artwork tone grows these islands.",
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::TangentSpacing | RandomCharacterKind::TangentSize | RandomCharacterKind::TangentBlend)=>"Continuous ribbons follow the artwork’s contours. Choose how channel tone changes spacing, size, or both below.",
+        _=>"Random leaves irregular gaps. Poisson disk keeps a minimum spacing. Jittered cells place one point per cell. Clustered gathers points into groups.",
+    }.to_string()
+    } else {
+        inspector_field_detail(&descriptor)
+    };
     let description = wizard_dropdown_description(enum_choice_label(selected), &guidance);
     control.set_tooltip_text(Some(&guidance));
     control.update_property(&[
-        gtk::accessible::Property::Label(&inspector_field_label(descriptor.field)),
+        gtk::accessible::Property::Label(label_text),
         gtk::accessible::Property::Description(&description),
     ]);
-    let focus = WizardRecipeControlFocus::Descriptor(descriptor.target, descriptor.field);
+    let focus = if tangent_tone {
+        WizardRecipeControlFocus::TangentTone(descriptor.target)
+    } else {
+        WizardRecipeControlFocus::Descriptor(descriptor.target, descriptor.field)
+    };
     let state_for_change = Rc::clone(state);
     control.connect_selected_notify(move |control| {
         if let Some(choice) = choices.get(control.selected() as usize).copied() {
@@ -17070,7 +17413,9 @@ fn scale_wizard_preview_family_lengths(mechanism: &mut PatternMechanism, scale: 
                     minimum_center_distance,
                 } => *minimum_center_distance *= scale,
                 RandomSiteCharacter::Clustered { cluster_spread, .. } => *cluster_spread *= scale,
-                RandomSiteCharacter::RawUniform | RandomSiteCharacter::Stratified { .. } => {}
+                RandomSiteCharacter::Dispersion { .. }
+                | RandomSiteCharacter::RawUniform
+                | RandomSiteCharacter::Stratified { .. } => {}
             }
         }
         PatternMechanism::SiteExclusion { policy, .. } => match policy {
@@ -18233,6 +18578,8 @@ fn advanced_settings_values(
                     | PropertyFieldId::ConnectedMinimumThickness
                     | PropertyFieldId::ConnectedMaximumThickness
                     | PropertyFieldId::CurveResponseBias
+                    | PropertyFieldId::HatchEnabled
+                    | PropertyFieldId::HatchStrokeWidth
                     | PropertyFieldId::ToneSampleSpacing
                     | PropertyFieldId::RegionSampling
                     | PropertyFieldId::RegionMinimumFill
@@ -20094,7 +20441,8 @@ fn open_pattern_editor_with_launch(
                         .filter(|surface| surface.epoch == *epoch)
                 {
                     wizard.status.set_label(&format!(
-                        "Couldn’t prepare this editable guide curve: {error}"
+                        "Couldn’t prepare the {}: {error}",
+                        purpose.title()
                     ));
                 }
                 return;
@@ -20112,7 +20460,8 @@ fn open_pattern_editor_with_launch(
                             .filter(|wizard| wizard.epoch == *epoch)
                     {
                         wizard.status.set_label(&format!(
-                            "Couldn’t prepare this editable guide curve: {error}"
+                            "Couldn’t prepare the {}: {error}",
+                            purpose.title()
                         ));
                     }
                     return;
@@ -23512,7 +23861,8 @@ fn submit_draft_preview(state: &Rc<RefCell<AppState>>) {
     emit_draft_automation_state(&mut state.borrow_mut(), "draft_preview_submitted", None);
 }
 
-/// Requests a private-draft discard, confirming only when local edits exist.
+/// Requests private-draft discard, confirming deliberate changes while ignoring untouched Shape preparation.
+/// Shape child preparation stays available to Apply; every other editor retains its existing dirty boundary.
 fn request_draft_discard(state: &Rc<RefCell<AppState>>) {
     let (dirty, parent) = {
         let app_state = state.borrow();
@@ -23525,7 +23875,19 @@ fn request_draft_discard(state: &Rc<RefCell<AppState>>) {
                 .status
                 .set_label("Canceling Pattern calibration; confirm discard to close.");
         }
-        (surface.draft.borrow().is_dirty(), surface.window.clone())
+        let draft = surface.draft.borrow();
+        let dirty = if surface.purpose == PatternEditorPurpose::Shape
+            && matches!(surface.parent, PatternEditorParent::Wizard { .. })
+        {
+            shape_library::discard_requires_confirmation(
+                draft.history.document(),
+                &draft.initial_document,
+                &draft.prepared_document,
+            ) || draft.geometry_editor.incomplete()
+        } else {
+            draft.is_dirty()
+        };
+        (dirty, surface.window.clone())
     };
     if !dirty {
         close_pattern_editor(state);
@@ -23835,6 +24197,47 @@ fn append_descriptor_control(
         && main_start_appearance_baseline_field(descriptor.field);
     let focus_for_dice = focus.clone();
     let control: gtk::Widget = match (&descriptor.value_kind, &current.value) {
+        (PropertyValueKind::Boolean, PropertyCurrentValueKind::Boolean(active))
+            if descriptor.field == PropertyFieldId::AdaptiveBlueNoise =>
+        {
+            let control = gtk::CheckButton::new();
+            control.set_active(*active);
+            label.set_mnemonic_widget(Some(&control));
+            control.update_property(&[gtk::accessible::Property::Label("Blue noise")]);
+            control.set_tooltip_text(Some(inspector_field_guidance(descriptor.field)));
+            let action = gio::SimpleAction::new("toggle", None);
+            let group = gio::SimpleActionGroup::new();
+            group.add_action(&action);
+            control.insert_action_group("adaptive", Some(&group));
+            control.set_action_name(Some("adaptive.toggle"));
+            control
+                .bind_property("sensitive", &action, "enabled")
+                .sync_create()
+                .build();
+            let weak_control = control.downgrade();
+            let state_for_callback = Rc::clone(state);
+            let descriptor_for_callback = descriptor.clone();
+            let focus_for_callback = focus.clone();
+            action.connect_activate(move |_, _| {
+                let Some(control) = weak_control.upgrade() else {
+                    return;
+                };
+                if state_for_callback.borrow().syncing_inspector || !control.is_sensitive() {
+                    return;
+                }
+                let active = control.is_inconsistent() || !control.is_active();
+                commit_inspector_input_with_focus(
+                    &state_for_callback,
+                    descriptor_for_callback.clone(),
+                    InspectorInput::Boolean(active),
+                    focus_for_callback.clone(),
+                );
+            });
+            row.append(&labels);
+            row.append(&control);
+            schedule_inspector_focus(state, focus, &control);
+            control.upcast()
+        }
         (PropertyValueKind::Boolean, PropertyCurrentValueKind::Boolean(active)) => {
             let control = gtk::Switch::new();
             control.set_active(*active);
@@ -24541,6 +24944,8 @@ fn rebind_unchanged_spatial(state: &mut AppState, old: Option<(u64, u64, u64)>) 
             worker.cancel();
         }
         state.scheduler.cancel_pending();
+        state.canonical_preview = None;
+        state.pending_scene = None;
         state.preview_coordinator.clear_submission();
     }
 }
@@ -24569,17 +24974,6 @@ fn build_background_progress(viewer: &gtk::Overlay) -> gtk::ProgressBar {
     );
     viewer.add_overlay(&progress);
     progress
-}
-/// Chooses a genuine raster-free Main evaluation until a current accepted scene has selected CPU fallback.
-/// Other preview/export schedulers retain their own existing raster policies.
-fn main_scene_only(state: &AppState) -> bool {
-    state.view_state.mode() == MainViewMode::Preview
-        && state.view_state.quality() == toniator_engine::preview_cache::Quality::Fast
-        && !(main_preview_frame_identity(state)
-            .is_some_and(|a| state.spatial_preview.has_artwork(a))
-            && state.spatial_preview.provenance().effective
-                == toniator_engine::preview_cache::Quality::Accurate
-            && state.spatial_preview.fallback_reason().is_some())
 }
 /// Projects requested applicability and actual accepted pixels independently, without changing authored state.
 fn sync_main_preview_quality(state: &AppState) {
@@ -24660,7 +25054,9 @@ fn fast_preparation_pending(state: &AppState) {
         .set_label("Preview updating…");
     state.preview_progress_bar.set_text(None);
     state.preview_stage_progress_bar.set_text(None);
-    state.preview_progress_bar.set_fraction(0.);
+    state
+        .preview_progress_bar
+        .set_fraction(state.preview_progress_bar.fraction().clamp(0.5, 0.99));
     state.preview_stage_progress_bar.set_fraction(0.);
     state.preview_progress_bar.pulse();
     state.preview_stage_progress_bar.pulse();
@@ -24957,21 +25353,38 @@ fn set_preview_pending(state: &mut AppState) {
         set_page(state, Page::Empty);
         return;
     }
-    state.preview_progress_bar.set_fraction(0.0);
-    state.preview_progress_bar.set_text(Some("Overall 0%"));
+    let fraction = if state
+        .canonical_preview
+        .as_ref()
+        .is_some_and(|(frame, _)| Some(*frame) == main_preview_frame_identity(state))
+    {
+        state.preview_progress_bar.fraction().clamp(0.5, 0.99)
+    } else {
+        0.0
+    };
+    state.preview_progress_bar.set_fraction(fraction);
+    state
+        .preview_progress_bar
+        .set_text(Some(&format!("Overall {:.1}%", fraction * 100.0)));
     state
         .preview_overall_progress_label
-        .set_label("Overall preview · 0%");
+        .set_label(&format!("Overall preview · {:.1}%", fraction * 100.0));
     state.preview_stage_progress_bar.set_fraction(0.0);
     state.preview_stage_progress_bar.set_text(Some("Stage 0%"));
     state
         .preview_stage_progress_bar
         .update_property(&[gtk::accessible::Property::Label(
-            "Preparing preview stage progress",
+            if fraction >= 0.5 {
+                "Rasterizing preview stage progress"
+            } else {
+                "Preparing preview stage progress"
+            },
         )]);
-    state
-        .preview_progress_label
-        .set_label("Preparing preview… · 0%");
+    state.preview_progress_label.set_label(if fraction >= 0.5 {
+        "Rasterizing preview… · 0%"
+    } else {
+        "Preparing preview… · 0%"
+    });
     show_source_diagnostic(state);
     sync_main_preview_pending(state);
     set_page(state, page_while_preview_pending(state.preview.is_some()));
@@ -25231,7 +25644,7 @@ fn apply_inspector_command(
         let base_revision = workspace.history.revision();
         let workspace_generation = app_state.workspace_generation;
         let mut draft = DocumentHistory::new_draft(&workspace.history);
-        if let Err(error) = draft.apply(command) {
+        if let Err(error) = apply_main_inspector_history(&mut draft, command) {
             app_state.inspector_runtime.focus = focus_after_command_attempt(
                 app_state.inspector_runtime.focus.clone(),
                 focus.clone(),
@@ -25285,7 +25698,7 @@ fn apply_inspector_command(
     let Some(workspace) = app_state.workspace.as_mut() else {
         return false;
     };
-    match workspace.history.apply(command) {
+    match apply_main_inspector_history(&mut workspace.history, command) {
         Ok(result) => {
             if result.invalidation.is_none() {
                 rebind_unchanged_spatial(&mut app_state, old_artwork);
@@ -25316,6 +25729,36 @@ fn apply_inspector_command(
             false
         }
     }
+}
+
+/// Applies adaptive ALL changes through compatible descriptor slots as one atomic transition.
+/// Other commands retain their ordinary history semantics and named-copy ownership.
+/// # Errors
+/// Returns domain validation or history errors without publishing a partial edit.
+fn apply_main_inspector_history(
+    history: &mut DocumentHistory,
+    command: &DocumentCommand,
+) -> Result<toniator_domain::CommandResult, String> {
+    if let DocumentCommand::EditSharedPatternDefinition {
+        base_definition,
+        edit: edit @ PatternDefinitionEdit::SetAdaptiveBlueNoise { .. },
+        ..
+    } = command
+    {
+        let document = history.document().clone();
+        let configuration = document
+            .edit_all_pattern_definition_configuration(base_definition, edit)
+            .map_err(|error| error.to_string())?;
+        let result = history
+            .apply_document_configuration(&document, history.revision(), &configuration)
+            .map_err(|error| error.to_string())?;
+        return Ok(toniator_domain::CommandResult {
+            affected_channels: result.affected_channels,
+            invalidation: result.invalidation,
+            created_authored_structure_id: None,
+        });
+    }
+    history.apply(command).map_err(|error| error.to_string())
 }
 
 /// Retains one command candidate while changed structural bindings are measured off the GTK thread.
@@ -25594,6 +26037,10 @@ fn commit_inspector_input_with_focus(
             })
     };
     if !current {
+        return;
+    }
+    if descriptor.field == PropertyFieldId::AdaptiveBlueNoise && state.borrow().endpoint == temporal_preview::Endpoint::End {
+        set_inspector_status(&mut state.borrow_mut(), "Blue noise is shared by all frames. Edit it at Start.");
         return;
     }
     if main_all_scalar(state.borrow().inspector_runtime.target, &descriptor)
@@ -26512,6 +26959,9 @@ fn structural_command_for_input(
         PropertyFieldId::ConnectionAllowLoops => PatternDefinitionEdit::SetConnectionAllowLoops { output_layer_id: output_layer_id()?, allow: boolean(input)? },
         PropertyFieldId::ConnectionMinimumComponentPoints => PatternDefinitionEdit::SetConnectionMinimumComponentPoints { output_layer_id: output_layer_id()?, value: count(input)? },
 
+        PropertyFieldId::AdaptiveBlueNoise => PatternDefinitionEdit::SetAdaptiveBlueNoise { output_layer_id: output_layer_id()?, enabled: boolean(input)? },
+        PropertyFieldId::HatchEnabled => PatternDefinitionEdit::SetHatchEnabled { output_layer_id: output_layer_id()?, enabled: boolean(input)? },
+        PropertyFieldId::HatchStrokeWidth => PatternDefinitionEdit::SetHatchStrokeWidth { output_layer_id: output_layer_id()?, value: number(input)? },
         PropertyFieldId::ToneSampleSpacing => PatternDefinitionEdit::SetToneSampleSpacing {
             output_layer_id: output_layer_id()?, value: toniator_domain::ToneSampleSpacing { multiplier: number(input)? },
         },
@@ -32053,9 +32503,12 @@ fn handle_preview_progress(
         return;
     }
     let fraction = if app_state.pending_scene.is_some() {
-        progress.fraction().clamp(0.0, 0.9)
+        progress.fraction().clamp(0.0, 0.5)
     } else {
-        progress.fraction().clamp(0.0, 1.0)
+        progress
+            .fraction()
+            .clamp(0.0, 1.0)
+            .max(app_state.preview_progress_bar.fraction())
     };
     let stage_fraction = progress.stage_fraction().clamp(0.0, 1.0);
     let stage = preview_progress_stage_label(progress.stage());
@@ -32142,6 +32595,7 @@ fn handle_preview_completion(
                 .preview_coordinator
                 .accept(workspace_generation, ticket);
             app_state.pending_scene = None;
+            app_state.canonical_preview = Some((artwork, completion.clone()));
             if let Some(sink) = app_state.automation.as_mut() {
                 sink.emit(&facts);
             }
@@ -32149,7 +32603,10 @@ fn handle_preview_completion(
             set_page(&mut app_state, Page::Success);
             set_preview_pending(&mut app_state);
             submit_if_viewport_ready(&mut app_state);
-            if app_state.spatial_preview.pending {
+            if app_state.spatial_preview.pending
+                && app_state.spatial_preview.provenance().effective
+                    == toniator_engine::preview_cache::Quality::Fast
+            {
                 fast_preparation_pending(&app_state);
             }
             apply_main_view_presentation(&mut app_state);
@@ -32179,8 +32636,6 @@ fn handle_preview_completion(
                         app_state
                             .spatial_preview
                             .accept(artwork, result.shared_scene());
-                        #[cfg(test)]
-                        stage4_probe::accepted_scene(result.shared_scene());
                         app_state.spatial_preview.remember_fallback(
                             artwork,
                             target,
@@ -32584,6 +33039,7 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
         state.workspace_generation = state.workspace_generation.saturating_add(1);
         state.preview_coordinator.clear_workspace();
         state.pending_scene = None;
+        state.canonical_preview = None;
         state.spatial_preview.clear();
         sync_main_preview_pending(&state);
         state.inspector_runtime.reset_for_workspace();
@@ -32708,6 +33164,7 @@ fn clear_workspace(state: &Rc<RefCell<AppState>>) {
         state.workspace_generation = state.workspace_generation.saturating_add(1);
         state.preview_coordinator.clear_workspace();
         state.pending_scene = None;
+        state.canonical_preview = None;
         state.spatial_preview.clear();
         state.media_preview_key = None;
         if let Some(worker) = state.media_worker.as_mut() {
@@ -32935,6 +33392,29 @@ fn submit_current_source(
             "Preview worker requires explicit Retry",
         ));
     }
+    // Source/frame association belongs to the accepted candidate, never to a second request.
+    if state.view_state.mode() == MainViewMode::Preview
+        && let Some((_, candidate)) = state
+            .canonical_preview
+            .as_ref()
+            .filter(|(frame, _)| *frame == key.frame_identity())
+    {
+        let ticket = state
+            .scheduler
+            .submit_scene_raster(target, candidate)
+            .map_err(PreviewDiagnostic::scheduler)?
+            .expect("retained canonical completion has a scene payload");
+        let generation = state.workspace_generation;
+        state.preview_coordinator.submit(generation, ticket.value());
+        state.pending_scene = None;
+        emit_automation_state(
+            state,
+            "preview_cpu_continuation_submitted",
+            Some(ticket.value()),
+        );
+        sync_main_preview_pending(state);
+        return Ok(());
+    }
     let workspace = state
         .workspace
         .as_ref()
@@ -32957,7 +33437,8 @@ fn submit_current_source(
         .ok_or(unavailable)?
         .submit(key, session, sources, target)?;
     state.media_preview_key = Some(key);
-    state.pending_scene = main_scene_only(state).then_some(key.frame_identity());
+    state.pending_scene =
+        (state.view_state.mode() == MainViewMode::Preview).then_some(key.frame_identity());
     emit_automation_state(state, "preview_source_preparation_started", None);
     sync_main_preview_pending(state);
     set_inspector_status(state, "Preparing source frame…");
@@ -33035,6 +33516,7 @@ fn handle_media_preview_completion(
         state.source_texture = Some(texture.upcast());
         state.source_texture_frame = Some(completion.key.frame_identity());
         if state.view_state.mode() == MainViewMode::Source {
+            state.pending_scene = None;
             state.preview_coordinator.clear_submission();
             apply_main_view_presentation(&mut state);
             emit_automation_state(&mut state, "source_only_accepted", None);
@@ -33043,32 +33525,41 @@ fn handle_media_preview_completion(
         if let Some(error) = injected_preview_error(&mut state, "submit") {
             return Err(error);
         }
-        let scene_only = state.pending_scene == Some(completion.key.frame_identity());
-        let ticket = if scene_only {
-            state.scheduler.submit_scene(prepared.request)
-        } else {
-            state.scheduler.submit(prepared.request)
-        }
-        .map_err(PreviewDiagnostic::scheduler)?;
-        let generation = state.workspace_generation;
-        state.preview_coordinator.submit(generation, ticket.value());
+        submit_prepared_main_preview(
+            &mut state,
+            completion.key.frame_identity(),
+            prepared.request,
+        )?;
         apply_main_view_presentation(&mut state);
         set_inspector_status(&mut state, "Preview updating…");
-        emit_automation_state(
-            &mut state,
-            if scene_only {
-                "preview_scene_submitted"
-            } else {
-                "preview_submitted"
-            },
-            Some(ticket.value()),
-        );
         Ok(())
     });
     if let Err(error) = result {
         show_preview_error(&mut state, error);
     }
     sync_main_preview_pending(&state);
+}
+
+/// Submits one prepared Main frame, publishing canonical authority before any CPU pixels.
+/// Exact-target CPU continuation uses only the accepted scene, without another source request.
+/// Frame identity gates every reuse; quality stays derived.
+///
+/// # Errors
+/// Returns scheduler submission failures without publishing a ticket or replacing accepted pixels.
+fn submit_prepared_main_preview(
+    state: &mut AppState,
+    frame: (u64, u64, u64),
+    request: EvaluationRequest,
+) -> Result<(), PreviewDiagnostic> {
+    let ticket = state
+        .scheduler
+        .submit_scene(request)
+        .map_err(PreviewDiagnostic::scheduler)?;
+    state.pending_scene = Some(frame);
+    let generation = state.workspace_generation;
+    state.preview_coordinator.submit(generation, ticket.value());
+    emit_automation_state(state, "preview_scene_submitted", Some(ticket.value()));
+    Ok(())
 }
 
 /// Emits a bounded immutable state snapshot after an authoritative UI event.
@@ -33502,6 +33993,7 @@ fn clear_preview(state: &mut AppState) {
     state.preview = None;
     state.accepted_preview_metadata = None;
     state.pending_scene = None;
+    state.canonical_preview = None;
     state.accepted_preview_target = None;
     state.preview_full = None;
     state.preview_full_identity = None;
@@ -38660,7 +39152,7 @@ mod tests {
 
     /// Exercises every current built-in through both captured wizard targets without publishing it.
     ///
-    /// The test uses only cloned histories and proves the shared layered order is the 16-record
+    /// The test uses only cloned histories and proves the shared layered order is the 20-record
     /// built-in authority. Each selected-channel replacement and ALL replacement stays private
     /// until the ordinary history squash boundary is explicitly invoked elsewhere.
     ///
@@ -38670,7 +39162,7 @@ mod tests {
     fn stage21b_wizard_materializes_all_catalog_records_for_all_and_named_targets() {
         let workspace = direct_png_workspace();
         let catalog = LayeredPresetCatalog::new(&PresetRegistry::bundled(), Vec::new()).unwrap();
-        assert_eq!(catalog.entries().len(), 16);
+        assert_eq!(catalog.entries().len(), 20);
         let selected = authoritative_channel_ids(workspace.document())[0];
         for entry in catalog.entries() {
             let mut all_draft = DocumentHistory::new_draft(&workspace.history);
@@ -38712,7 +39204,7 @@ mod tests {
     #[test]
     fn wizard_candidate_materialization_reuses_exact_and_skips_mismatched_companions() {
         let registry = PresetRegistry::bundled();
-        assert_eq!(registry.entries().len(), 16);
+        assert_eq!(registry.entries().len(), 20);
         let catalog = LayeredPresetCatalog::new(&registry, Vec::new()).unwrap();
         for (width, height) in [(1024.0, 1024.0), (900.0, 620.0)] {
             let base = Document::new_default_document(
@@ -40447,12 +40939,15 @@ mod tests {
                 .filter(|value| value.kind() == structure.kind())
                 .position(|value| value.id() == structure.id())
                 .expect("candidate structure retains its ordinal");
-            let target = target_document
+            let Some(target) = target_document
                 .authored_structures()
                 .iter()
                 .filter(|value| value.kind() == structure.kind())
-                .nth(ordinal)
-                .unwrap_or_else(|| panic!("target lacks {:?} curve {ordinal}", structure.kind()));
+                .nth(ordinal) else {
+                    // A later ordinary prototype transition can replace the temporary drawn guide
+                    // with a procedural arc; complete recipe equality below checks the result.
+                    continue;
+                };
             if structure.kind() != target.kind() || structure.segments() != target.segments() {
                 candidate
                     .apply(&DocumentCommand::ReplaceAuthoredStructure {
@@ -40636,18 +41131,24 @@ mod tests {
             | PatternStructureRecipe::ParametricCurve { name, .. } => name.clear(),
             PatternStructureRecipe::RandomSites {
                 name,
+                character,
+                seed,
                 maximum_attempts,
                 maximum_neighbor_checks,
                 ..
             } => {
                 name.clear();
+                if matches!(character, toniator_domain::RandomSiteCharacter::Dispersion { layout } if *layout != toniator_domain::DispersionLayout::ClusterScreen) {
+                    // These fixed layouts do not expose or consume the stored random seed.
+                    *seed = 0;
+                }
                 *maximum_attempts = 0;
                 *maximum_neighbor_checks = 0;
             }
         }
     }
 
-    /// Proves New can reconstruct every setting and nested payload of all 16 single-drawing built-ins.
+    /// Proves New can reconstruct every setting and nested payload of all 20 single-drawing built-ins.
     ///
     /// The test starts only from the domain-owned New starters, reconstructs each catalog
     /// target solely as an acceptance oracle, and applies the same guide-count, site-generation,
@@ -40660,10 +41161,33 @@ mod tests {
     /// controls or when the reached painter order differs from its reconstructed target.
     #[test]
     fn stage21b_new_workflow_recreates_every_builtin_recipe() {
+        recreate_catalog_recipes_from_new(|_| true);
+    }
+
+    /// Reconstructs the three new patterns solely through existing ordinary wizard commands.
+    /// # Panics
+    /// Panics if a new gallery recipe cannot be authored from New and its exposed controls.
+    #[test]
+    fn ranked_hatch_new_workflow_recreates_all_new_recipes() {
+        recreate_catalog_recipes_from_new(|id| matches!(id, "concentric-hatching" | "parallel-hatching" | "ranked-blue-noise-marks"));
+    }
+
+    /// Recreates the full-cell adaptive strategy solely through current New and Shapes authority.
+    /// # Panics
+    /// Panics if square-grid authoring or the typed Shapes selection cannot reach the gallery recipe.
+    #[test]
+    fn adaptive_new_workflow_recreates_the_gallery_recipe() {
+        recreate_catalog_recipes_from_new(|id| id == "adaptive-shape-marks");
+    }
+
+    /// Runs the complete New-authoring contract for the requested current catalog subset.
+    /// # Panics
+    /// Panics when an exposed transition, control, or final recipe differs from its catalog oracle.
+    fn recreate_catalog_recipes_from_new(include: impl Fn(&str) -> bool) {
         let workspace = direct_png_workspace();
         let registry = PresetRegistry::bundled();
-        assert_eq!(registry.entries().len(), 16);
-        for entry in registry.entries() {
+        assert_eq!(registry.entries().len(), 20);
+        for entry in registry.entries().iter().filter(|entry| include(&entry.metadata.id)) {
             let mut target_draft = DocumentHistory::new_draft(&workspace.history);
             registry
                 .apply_to_document_base(&mut target_draft, &entry.metadata.id)
@@ -40747,11 +41271,20 @@ mod tests {
                 entry.metadata.id,
             );
 
+            // The visible Edit guide curves route exposes procedural arc alternatives after
+            // preparing the same ordinary editable guide foundation used by the product.
+            if matches!(&target_projection.family, PatternFamilyCapabilityProjection::Grid(grid) if !grid.guides.prototype_kinds.is_empty()) {
+                candidate = candidate.with_editable_guide_paths(workspace.document().canvas().clone()).expect("New guide curves prepare through the ordinary authoring route");
+            }
             let mut new_draft = DocumentHistory::new_draft(&workspace.history);
             apply_wizard_recipe(&mut new_draft, InspectorTarget::DocumentAll, candidate)
                 .unwrap_or_else(|error| {
                     panic!("{} New topology materializes: {error}", entry.metadata.id)
                 });
+            if target_draft.document().pattern_definition_bundles().iter().any(|bundle| bundle.definition.output_layers.iter().any(|output| output.realization.hatch_style().is_some())) {
+                let toggle = new_draft.document().property_descriptors().into_iter().find(|descriptor| descriptor.field == PropertyFieldId::HatchEnabled).expect("structural Paths expose the ordinary hatch toggle");
+                apply_wizard_descriptor_edit(&mut new_draft, InspectorTarget::DocumentAll, &toggle, InspectorInput::Boolean(true)).expect("New enables hatching through the normal wizard command");
+            }
             let new_projection = new_draft
                 .document()
                 .pattern_capabilities(PatternCapabilityScope::DocumentBase)
@@ -41024,17 +41557,17 @@ mod tests {
     ///
     /// # Panics
     ///
-    /// Panics when any of the sixteen registry-owned records loses its ID-free authored-resource
+    /// Panics when any of the twenty registry-owned records loses its ID-free authored-resource
     /// graph, output order, response, orientation, or filter graph at the strict IO save/load
     /// boundary. The app is intentionally the test owner because it already depends on both
     /// `toniator-patterns` and `toniator-io`; neither lower-layer crate gains an inverse edge.
     #[test]
     fn stage21b_all_bundled_presets_round_trip_through_current_v4_without_allocated_ids() {
         let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/validation/stage-21b3/preset-v4-roundtrip");
+            .join("../../target/validation/adaptive-shape-marks/implementation/current-catalog/preset-v4-roundtrip");
         fs::create_dir_all(&directory).expect("derived preset validation directory creates");
         let registry = PresetRegistry::bundled();
-        assert_eq!(registry.entries().len(), 16);
+        assert_eq!(registry.entries().len(), 20);
         for entry in registry.entries() {
             let path = directory.join(format!("{}-current-v4.preset.json", entry.metadata.id));
             save_preset(&path, entry).expect("every built-in saves through current v4");
@@ -44352,5 +44885,105 @@ mod svg_publication_tests {
             still_export_failure_status(&unpublished, false, true, ExportFormat::Png),
             Some("Print PNG export failed; see error log.")
         );
+    }
+}
+
+#[cfg(test)]
+mod adaptive_blue_noise_tests {
+    use super::*;
+
+    /// Exercises the real main-inspector command route with a nonadaptive hidden base and mixed modes.
+    /// # Panics
+    /// Panics if eligible readback, named isolation, atomic ALL history or inherited defaults regress.
+    #[test]
+    fn adaptive_blue_noise_main_all_projects_named_modes_without_changing_circle_base() {
+        let document = Document::new_default_document(
+            CanvasSpec {
+                width: 128.0,
+                height: 96.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .unwrap();
+        let ids = authoritative_channel_ids(&document);
+        let mut history = DocumentHistory::new(DocumentSession::new(document.clone()).unwrap());
+        for channel in &ids[..2] {
+            let before = history.document().clone();
+            let definition = before.pattern_definition_for(*channel).unwrap();
+            let configuration = before
+                .edit_pattern_adaptive_square_configuration(
+                    definition,
+                    definition.output_layers[0].id,
+                    Some(*channel),
+                )
+                .unwrap();
+            history
+                .apply_document_configuration(&before, history.revision(), &configuration)
+                .unwrap();
+        }
+        let values = inline_inspector_values(history.document(), InspectorTarget::Channel(ids[0]));
+        let descriptor = values
+            .iter()
+            .find(|value| value.descriptor.field == PropertyFieldId::AdaptiveBlueNoise)
+            .unwrap()
+            .descriptor
+            .clone();
+        let command = command_for_inspector_input(
+            history.document(),
+            Some(ids[0]),
+            DefinitionEditScope::SelectedCopy,
+            &descriptor,
+            InspectorInput::Boolean(true),
+        )
+        .unwrap();
+        let summary_before = main_recipe_summary(history.document(), InspectorTarget::DocumentAll);
+        apply_main_inspector_history(&mut history, &command).unwrap();
+        let before = history.document().clone();
+        assert_eq!(
+            main_recipe_summary(&before, InspectorTarget::DocumentAll),
+            summary_before
+        );
+        let named_summary = main_recipe_summary(&before, InspectorTarget::Channel(ids[0])).unwrap();
+        assert_eq!(named_summary.family, "Guides");
+        assert_eq!(named_summary.connections, "None");
+        let mixed = adaptive_blue_noise_values(&before, InspectorTarget::DocumentAll);
+        assert_eq!(mixed.len(), 2);
+        assert_ne!(mixed[0].value, mixed[1].value);
+        let all = inline_inspector_values(&before, InspectorTarget::DocumentAll);
+        let descriptor = &all
+            .iter()
+            .find(|value| value.descriptor.field == PropertyFieldId::AdaptiveBlueNoise)
+            .unwrap()
+            .descriptor;
+        let command = command_for_inspector_input(
+            &before,
+            None,
+            DefinitionEditScope::DocumentBase,
+            descriptor,
+            InspectorInput::Boolean(true),
+        )
+        .unwrap();
+        apply_main_inspector_history(&mut history, &command).unwrap();
+        let after = history.document().clone();
+        assert!(
+            adaptive_blue_noise_values(&after, InspectorTarget::DocumentAll)
+                .iter()
+                .all(|value| value.value == PropertyCurrentValueKind::Boolean(true))
+        );
+        assert_eq!(after.pattern_settings(), before.pattern_settings());
+        assert_eq!(
+            after.pattern_definition_for(ids[2]),
+            before.pattern_definition_for(ids[2])
+        );
+        assert!(
+            !after
+                .baseline_calibration_binding()
+                .unwrap()
+                .uses_adaptive_square_marks()
+        );
+        history.undo().unwrap();
+        assert_eq!(history.document(), &before);
+        history.redo().unwrap();
+        assert_eq!(history.document(), &after);
     }
 }

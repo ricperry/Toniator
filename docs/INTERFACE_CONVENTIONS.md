@@ -1,7 +1,11 @@
-# Creative Suite interface conventions
+# Creatiator Suite interface conventions
 
-Toniator, Chromiator and Bezziator share a native GTK4 presentation baseline.
-Each app vendors an identical `creative-suite.css`; builds remain independent.
+Toniator, Chromiator and Bezziator belong to Creatiator Suite and share the local
+`creatiator` Rust library. Each source checkout carries a synchronized copy in
+`shared/creatiator`, so builds require no sibling checkout or unpublished remote
+dependency. Its default feature set contains only double-precision sRGB transfer
+functions; only `toniator-app` enables the optional `gtk` feature for the system
+theme bridge and embedded `resources/creative-suite.css`.
 The theme owns colors, fonts, high contrast and visible keyboard focus. Local
 CSS follows the shared baseline and retains application-specific canvas colors
 and controls. The common classes cover headers, inspectors, section headings,
@@ -62,10 +66,17 @@ See [accessibility support and verification limits](ACCESSIBILITY.md).
 
 ## Maintaining the shared stylesheet
 
-The canonical source is Toniator's
-`crates/toniator-app/resources/creative-suite.css`. Review a common change there,
-copy its exact bytes to the existing `creative-suite.css` source file in
-Chromiator and Bezziator, and run `python3 scripts/check_suite_style.py --check`.
-The command only reads files and prints the shared SHA-256. Missing sibling
-checkouts are explicit skips; present differing or missing source copies fail.
-Application builds embed their own copy and never read sibling repositories.
+The suite's canonical source is
+`../CreatiatorSuite/creatiator/resources/creative-suite.css`; the local standalone
+copy is `shared/creatiator/resources/creative-suite.css`. Coordinate changes in
+the suite source, synchronize the vendored crate, and run
+`python3 scripts/check_suite_style.py --check`. The command compares fixed
+source locations and prints the shared SHA-256. Missing sibling checkouts are
+explicit skips; present differing or missing source copies fail.
+
+Application builds embed their local crate's baseline at application priority
+minus one. Toniator's own resource stylesheet follows at application priority.
+The library reads GNOME preferences and, inside Flatpak/AppImage, the Settings
+portal without changing desktop settings. Core color transfers remain GTK-free;
+rendering keeps its explicit output-boundary clipping. UI templates, document
+state, history, commands and file formats remain application-owned.

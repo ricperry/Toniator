@@ -275,3 +275,41 @@ fn zoom_split_order_clips_exact_original_shapes_with_certified_area() {
         assert!(control.operations() < 8_000_000);
     }
 }
+
+/// Preserves exact accepted geometry, scalar certificates and all failed-attempt work with spatial proof.
+/// # Panics
+/// Panics if bucket storage changes dispatch or retains any discarded-attempt debt.
+#[test]
+fn spatial_certificate_preserves_exact_retry_and_work() {
+    let (rect, shapes) = maze();
+    let adapter =
+        FloatPointAdapter::<[f64; 2], i64>::try_with_scale_conservative(rect, 1e12).unwrap();
+    let lo = adapter.try_float_to_int(&[rect.min_x, rect.min_y]).unwrap();
+    let hi = adapter.try_float_to_int(&[rect.max_x, rect.max_y]).unwrap();
+    for solver in [Solver::AUTO, Solver::TREE, Solver::FRAG] {
+        let mut original = CheckedOverlayControl::new(4_000_000, &|| false);
+        let expected = overlay(rect, &shapes, solver)
+            .overlay_checked(OverlayRule::Subject, FillRule::NonZero, &mut original)
+            .unwrap();
+        let mut spatial = CheckedOverlayControl::new(4_000_000, &|| false)
+            .with_spatial_certificate([lo.x, lo.y, hi.x, hi.y]);
+        let actual = overlay(rect, &shapes, solver)
+            .overlay_checked(OverlayRule::Subject, FillRule::NonZero, &mut spatial)
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(spatial.operations(), original.operations());
+        assert_eq!(spatial.attempts(), 3);
+        assert_eq!(spatial.split_rounds(), original.split_rounds());
+        let regions = spatial.take_spatial_certificate().unwrap();
+        assert!(regions.len() <= 1024);
+        assert_eq!(
+            regions.iter().map(|r| r.doubled_area).sum::<u128>(),
+            actual.1
+        );
+        assert!(
+            regions
+                .iter()
+                .all(|r| r.bounds[0] <= r.bounds[2] && r.bounds[1] <= r.bounds[3])
+        );
+    }
+}

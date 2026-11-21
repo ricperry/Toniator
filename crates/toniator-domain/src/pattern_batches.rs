@@ -77,7 +77,266 @@ impl PatternRecipeEdit {
     }
 }
 
+/// Classifies both current analytic and prototype mark outputs for shared silhouette slot mapping.
+fn is_mark_output(output: &PatternOutputLayer) -> bool {
+    matches!(
+        output.realization,
+        PatternOutputRealization::CircularMarks { .. }
+            | PatternOutputRealization::MarkPrototype { .. }
+    )
+}
+
+/// Compares a typed mark's embedded geometry without treating display/library identity as authority.
+/// Analytic Circle compares only to the analytic choice; authored cubic copies remain authored.
+fn mark_shape_matches(
+    document: &Document,
+    output: &PatternOutputLayer,
+    shape: Option<&AuthoredStructureDraft>,
+) -> bool {
+    match (&output.realization, shape) {
+        (
+            PatternOutputRealization::CircularMarks { .. }
+            | PatternOutputRealization::MarkPrototype {
+                prototype: MarkPrototype::Circle,
+                ..
+            },
+            None,
+        ) => true,
+        (
+            PatternOutputRealization::MarkPrototype {
+                prototype: MarkPrototype::AuthoredClosedShape { structure_id },
+                ..
+            },
+            Some(shape),
+        ) => document
+            .authored_structure(*structure_id)
+            .is_some_and(|resource| {
+                resource.kind() == shape.kind() && resource.segments() == shape.segments()
+            }),
+        _ => false,
+    }
+}
+
 impl Document {
+    /// Replaces only one mark silhouette, retaining placement, orientation, filters and responses.
+    ///
+    /// `channel_id` scopes a private channel copy; `None` uses the established ALL compatible-slot
+    /// mapping. Authored geometry receives a fresh document identity, protecting other uses and
+    /// reusable masters. `None` geometry restores the analytic Circle representation. Callers
+    /// publish the returned configuration as one undoable transition; this document is unchanged.
+    ///
+    /// # Errors
+    /// Rejects stale definitions, missing/non-mark outputs, wrong topology and invalid candidates.
+    pub fn edit_pattern_mark_shape_configuration(
+        &self,
+        base_definition: &PatternDefinition,
+        output_layer_id: PatternOutputLayerId,
+        channel_id: Option<ChannelId>,
+        shape: Option<&AuthoredStructureDraft>,
+    ) -> Result<DocumentConfiguration, ValidationError> {
+        self.edit_pattern_mark_strategy_configuration(
+            base_definition,
+            output_layer_id,
+            channel_id,
+            shape,
+            false,
+        )
+    }
+
+    /// Selects the full-cell adaptive policy atomically for ALL compatible slots or one channel.
+    /// Preserves placements, history authority and unrelated channels; rejects incompatible grids.
+    /// # Errors
+    /// Returns stale-target, incompatible-square-grid or document validation diagnostics.
+    pub fn edit_pattern_adaptive_square_configuration(
+        &self,
+        base_definition: &PatternDefinition,
+        output_layer_id: PatternOutputLayerId,
+        channel_id: Option<ChannelId>,
+    ) -> Result<DocumentConfiguration, ValidationError> {
+        self.edit_pattern_mark_strategy_configuration(
+            base_definition,
+            output_layer_id,
+            channel_id,
+            None,
+            true,
+        )
+    }
+
+    /// Builds one scoped mark strategy transition using the common resource and ALL-slot authority.
+    /// # Errors
+    /// Rejects stale definitions, incompatible grids and invalid complete candidates.
+    fn edit_pattern_mark_strategy_configuration(
+        &self,
+        base_definition: &PatternDefinition,
+        output_layer_id: PatternOutputLayerId,
+        channel_id: Option<ChannelId>,
+        shape: Option<&AuthoredStructureDraft>,
+        adaptive: bool,
+    ) -> Result<DocumentConfiguration, ValidationError> {
+        if self.definition(base_definition.id) != Some(base_definition)
+            || channel_id.is_some_and(|channel| {
+                self.pattern_definition_id_for(channel) != Some(base_definition.id)
+            })
+        {
+            return Err(ValidationError::new(
+                "document.mark_shape",
+                "the Pattern target is stale",
+            ));
+        }
+        let output = base_definition
+            .output_layers
+            .iter()
+            .find(|output| output.id == output_layer_id)
+            .ok_or_else(|| ValidationError::new("document.mark_shape", "the mark output is missing"))?;
+        if !matches!(
+            output.realization,
+            PatternOutputRealization::CircularMarks { .. }
+                | PatternOutputRealization::MarkPrototype { .. }
+        ) {
+            return Err(ValidationError::new(
+                "document.mark_shape",
+                "the output does not draw marks",
+            ));
+        }
+        if shape.is_some_and(|shape| shape.kind() != AuthoredStructureKind::ClosedShape) {
+            return Err(ValidationError::new(
+                "document.mark_shape",
+                "a mark requires a closed shape",
+            ));
+        }
+        let source_ordinal = base_definition
+            .output_layers
+            .iter()
+            .take_while(|output| output.id != output_layer_id)
+            .filter(|output| is_mark_output(output))
+            .count();
+        let mut definitions = BTreeSet::from([base_definition.id]);
+        if channel_id.is_none() {
+            definitions.insert(self.pattern_settings.definition_id);
+            for channel in self.channel_ids() {
+                definitions.insert(self.effective_channel_pattern(channel)?.definition_id);
+            }
+        }
+        let targets = definitions
+            .into_iter()
+            .filter_map(|id| {
+                self.definition(id).and_then(|definition| {
+                    definition
+                        .output_layers
+                        .iter()
+                        .filter(|output| is_mark_output(output))
+                        .nth(source_ordinal)
+                        .map(|output| (id, output.id))
+                })
+            })
+            .collect::<Vec<_>>();
+        let unchanged = targets.iter().all(|(id, output_id)| {
+            self.definition(*id)
+                .and_then(|definition| {
+                    definition
+                        .output_layers
+                        .iter()
+                        .find(|output| output.id == *output_id)
+                })
+                .is_some_and(|output| {
+                    if adaptive {
+                        matches!(
+                            output.realization,
+                            PatternOutputRealization::MarkPrototype {
+                                prototype: MarkPrototype::AdaptiveSquare | MarkPrototype::AdaptiveSquareBlueNoise,
+                                ..
+                            }
+                        )
+                    } else {
+                        mark_shape_matches(self, output, shape)
+                    }
+                })
+        });
+        if unchanged {
+            return Ok(DocumentConfiguration::capture(self));
+        }
+        let mut candidate = self.clone();
+        let prototype = if adaptive {
+            MarkPrototype::AdaptiveSquare
+        } else if let Some(shape) = shape {
+            let added = materialize_recipe_resource_table(
+                std::slice::from_ref(shape),
+                &candidate.authored_structures,
+            )?;
+            let structure_id = added[0].id();
+            candidate.authored_structures.extend(added);
+            MarkPrototype::AuthoredClosedShape { structure_id }
+        } else {
+            MarkPrototype::Circle
+        };
+        let edit = PatternDefinitionEdit::SetOutputMarkPrototype {
+            output_layer_id,
+            prototype: prototype.clone(),
+        };
+        if let Some(channel_id) = channel_id {
+            candidate = candidate
+                .apply_command(&DocumentCommand::EditSelectedChannelPatternDefinition {
+                    channel_id,
+                    base_definition: base_definition.clone(),
+                    edit,
+                })?
+                .0;
+        } else {
+            for (definition_id, output_layer_id) in targets {
+                let base_definition = candidate
+                    .definition(definition_id)
+                    .ok_or_else(|| {
+                        ValidationError::new("document.mark_shape", "a compatible Pattern is missing")
+                    })?
+                    .clone();
+                if adaptive
+                    && base_definition.output_layers.iter().any(|output| {
+                        output.id == output_layer_id
+                            && matches!(
+                                output.realization,
+                                PatternOutputRealization::MarkPrototype {
+                                    prototype: MarkPrototype::AdaptiveSquare
+                                        | MarkPrototype::AdaptiveSquareBlueNoise,
+                                    ..
+                                }
+                            )
+                    })
+                {
+                    continue;
+                }
+                let command = DocumentCommand::EditSharedPatternDefinition {
+                    definition_id,
+                    base_definition,
+                    edit: PatternDefinitionEdit::SetOutputMarkPrototype {
+                        output_layer_id,
+                        prototype: prototype.clone(),
+                    },
+                };
+                if candidate.linked_channels(definition_id).is_empty() {
+                    command.apply_to_valid_document(&mut candidate);
+                } else {
+                    candidate = candidate.apply_command(&command)?.0;
+                }
+            }
+        }
+        // Retire only formerly used geometry orphaned by this transition. Unattached artist
+        // resources remain intact, and history retains the exact previous resource table.
+        let retired = self
+            .authored_structures
+            .iter()
+            .map(AuthoredStructure::id)
+            .filter(|id| {
+                self.authored_structure_is_referenced(*id)
+                    && !candidate.authored_structure_is_referenced(*id)
+            })
+            .collect::<BTreeSet<_>>();
+        candidate
+            .authored_structures
+            .retain(|resource| !retired.contains(&resource.id()));
+        candidate.validate()?;
+        Ok(DocumentConfiguration::capture(&candidate))
+    }
+
     /// Intersects a structural output selector across the same compatible slots used by ALL edits.
     /// Unrelated output kinds remain untouched; choice order comes from the source descriptor.
     ///

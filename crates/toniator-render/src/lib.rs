@@ -1786,6 +1786,10 @@ pub enum RasterAntialiasing {
 struct RasterWork<'a> {
     remaining_edges: usize,
     remaining_boolean_operations: usize,
+    /// Bounds retained optional split-support metadata across the complete preparation run.
+    remaining_spatial_certificate_bytes: usize,
+    /// Enables one final-overlay precision attempt only after existing typed fallbacks fail.
+    refine_final_overlay: bool,
     antialiasing: RasterAntialiasing,
     is_cancelled: &'a (dyn Fn() -> bool + Sync),
     completed_units: usize,
@@ -1816,7 +1820,7 @@ impl<'a> RasterWork<'a> {
         )
     }
 
-    /// Initializes request-wide edge and primitive-progress accounting.
+    /// Initializes request-wide edge/progress accounting and the finite retained spatial-proof allowance.
     fn with_progress(
         limits: RasterizationLimits,
         antialiasing: RasterAntialiasing,
@@ -1827,6 +1831,8 @@ impl<'a> RasterWork<'a> {
         Self {
             remaining_edges: limits.max_flattened_edges(),
             remaining_boolean_operations: limits.max_boolean_operations(),
+            remaining_spatial_certificate_bytes: 8 * 1024 * 1024,
+            refine_final_overlay: false,
             antialiasing,
             is_cancelled,
             completed_units: 0,
@@ -5170,23 +5176,15 @@ mod print_density_tests {
 }
 
 /// Converts canonical linear RGB to sRGB at a presentation/output boundary.
+/// Clips the component to 0–1 before applying the shared double-precision transfer.
 pub fn linear_to_srgb(value: f64) -> f64 {
-    let value = value.clamp(0.0, 1.0);
-    if value <= 0.003_130_8 {
-        value * 12.92
-    } else {
-        1.055 * value.powf(1.0 / 2.4) - 0.055
-    }
+    creatiator::color::linear_to_srgb(value.clamp(0.0, 1.0))
 }
 
 /// Converts sRGB to canonical linear RGB at a presentation/input boundary.
+/// Clips the component to 0–1 before applying the shared double-precision transfer.
 pub fn srgb_to_linear(value: f64) -> f64 {
-    let value = value.clamp(0.0, 1.0);
-    if value <= 0.040_45 {
-        value / 12.92
-    } else {
-        ((value + 0.055) / 1.055).powf(2.4)
-    }
+    creatiator::color::srgb_to_linear(value.clamp(0.0, 1.0))
 }
 
 fn quantize_srgb(value: f64) -> u8 {

@@ -9,6 +9,86 @@ verification are complete. These measurements establish specific workload
 improvements, not universal speedups or user acceptance. The later recovery and
 capacity work below is user-accepted for the 0.4.5 release preparation.
 
+## 2026-11-18 development exact Pattern construction
+
+The current development app enables exact Vulkan geometry assistance independently
+of the Fast/Accurate canvas switch. It constructs the same canonical family and
+scene used by preview, PNG and SVG. Existing settings, calibration and UI controls
+continue to apply. The CLI remains headless and CPU-only by default, with
+an explicit `geometry-compute` build feature. See [build options](BUILDING.md).
+
+| Work | Current route and preserved authority |
+| --- | --- |
+| Tangent ribbons Spacing, Size and Blend | Automatic Vulkan certification of independent nearest-guide ownership queries. CPU source sampling, mass accumulation, tracing and final placement retain their original order. |
+| Fixed and rotated rectangular grids and generalized straight guides, including Triagrid | CPU construction uses guide/orientation indexing, uniform tangent-pair basis and diameter reuse, borrowed merge buckets, stable raw sorting and bounded row rejection. Rectangular Vulkan assembly is forced-diagnostic only. |
+| Bayer and Stochastic cluster screen | Independent source samples use bounded indexed Rayon blocks at 262,144 or more candidates. Results are consumed in the original serpentine order. Cluster nucleus rows are reused. |
+| Floyd–Steinberg diffusion, quadtree debt, seeded Poisson, weighted Lloyd, curve tracing and greedy merging | CPU topology and order-dependent decisions remain authoritative. Shared sampling/indexing improvements can reduce surrounding work. |
+
+Intrinsic placement and ordinary mark realization reuse exact bounded prepared
+source mappings and avoid duplicate density samples. RGB/Alpha component sampling
+avoids unused channel conversions. These changes retain numeric results, site
+identity, provenance, ties, stable ordering and authored density.
+
+Automatic ribbon admission starts at **65,536 ownership queries per window**.
+Row/column stripes retain at most **1,048,576 owners** at once. Individual GPU
+buffers and point/index prefixes are capped at **64 MiB**. This permits meshes
+larger than three million queries without retaining the whole ownership mesh.
+Only physical discrete/integrated Vulkan adapters are admitted. Integer interval
+certificates require a strictly separated winner. Overlaps, ties and unsupported
+numeric ranges use the original CPU nearest-guide routine. Unavailable hardware,
+allocation/device failures and contention also fall back to CPU. Cancellation
+discards private pending work and returns the ordinary cancellation result
+before publishing a canonical family. The shaders use integer arithmetic
+without optional FP64.
+
+`TONIATOR_GEOMETRY_COMPUTE=cpu` disables geometry dispatch before initialization.
+Unset or `auto` uses the admission policy above. `=gpu` forces supported diagnostic
+jobs, including the unrotated rectangular-grid kernel, and bypasses the minimum
+query threshold.
+`TONIATOR_GEOMETRY_COMPUTE_TRACE=1` reports adapter, kernel, certificate/correction
+counts and timings to stderr. These are developer diagnostics, separate from
+Fast preview.
+
+Measurements use RX 6900 XT/RADV Vulkan, four Rayon workers and genuine calibrated
+fixtures derived from both immutable sample artworks. The
+[verification method](../target/validation/pattern-compute-20261118/README.md) and
+[raw summary](../target/validation/pattern-compute-20261118/summary.json) retain
+binary/source pins, complete family/scene hashes and guarded resource records.
+Timed engine calls include upload, dispatch, synchronization, readback and CPU
+fallback, plus the ordinary one-pixel AA-off raster. Native export timings are
+separate. Setup/loading/pool creation are reported separately. These local
+development measurements establish engine-call latency for the named workloads.
+
+| Matched workload | Pre-change CPU | Optimized CPU | GPU-assisted | Measurement |
+| --- | ---: | ---: | ---: | --- |
+| Dense raster Tangent ribbons Spacing 512, 653,436 RGB primitives | 6.011 s | 3.707 s | 2.255 s forced | Medians of 3 baseline and 4 final calls per route. Both ownership windows meet automatic admission. |
+| Fresh CMYK raster Tangent ribbons Blend 192, 134,511 primitives | 3.089 s | 2.847 s | 2.038 s automatic | Medians of 2 baseline and 4 final calls per route. |
+| Wizard CMYK Star vector 192, 46,218 primitives | 1.364 s | 1.286 s | 0.979 s automatic | Medians of 2 baseline and 4 final calls per route. |
+| Dense raster Tangent ribbons Spacing 704, 1,230,243 RGB primitives | — | 7.346 s | 5.046 s automatic | One call per route. Over 3 million ownership queries in four stripes. |
+| Raster rectangular grid 1024, 3,213,555 RGB primitives | 4.326 s | 2.966 s | 3.067 s forced | Medians of 3 baseline and 4 optimized calls per route. Automatic mode uses CPU. |
+| Vector rectangular grid 1024, 2,219,991 RGB primitives | 4.395 s | 2.318 s | 2.449 s forced | Medians of 3 baseline and 4 optimized calls per route. Automatic mode uses CPU. |
+
+Complete family/scene hashes match across the compared routes. For both fresh
+colored CMYK cases, native PNG bytes, raw straight-sRGBA pixels and SVG bytes also
+match the pre-change output exactly. Native rasterization and export are measured
+separately from the engine-call results above. The paired grid measurements favor
+the optimized CPU route on both artworks. In a separate run of the final app
+policy, the two rectangular grid cases took 3.364 s and 2.581 s respectively,
+both on CPU. The [complete benchmark report](../target/validation/pattern-compute-20261118/report.md)
+includes the Bayer, Stochastic cluster screen and Triagrid measurements.
+
+With the Vulkan driver unavailable, the raster Spacing 100 project completed
+on the CPU. Its geometry, native PNG, RGBA pixels and SVG matched the baseline.
+
+The final ordinary app check uses all four CMYK channels with Accurate preview
+and Fast off. Across four dispatches, 342,531 ownership queries are GPU-certified
+and 6,233 are resolved on CPU. The
+[GUI record](../target/validation/pattern-compute-20261118/gui-verification.json)
+retains the executable pin, semantic readback, screenshot and clean session
+shutdown. This is automated private Sway evidence. Human and GNOME Shell/Mutter
+acceptance remain unverified. The 65,536-query policy is measured on this adapter.
+Other hardware needs paired workload measurements.
+
 ## 2026-11-02 development: Fast / Accurate preview
 
 Toniator 0.4.7 includes optional approximate GPU rendering for the main
@@ -295,6 +375,15 @@ split-certificate budget. It reuses frozen geometry and the same remaining work
 allowances, without relaxing precision. A failing case pays for both attempts and
 can use more temporary memory; the measurements below do not benchmark that retry.
 See the [correction report](../target/validation/preview-area-precision-20261019/fix/report.md).
+
+Fine concentric hatching exposed a second case during final canvas clipping.
+When the final operation alone exceeds the layer's area-error limit after the
+ordinary recovery path, Accurate rendering can retry that operation with one
+quarter of the original grid spacing. It lifts the original integer
+coordinates exactly and checks that the result fits the existing error and work
+allowances. The reported 3118 × 1808 Fit preview took about two minutes from a
+cold launch. A separate headless run spent about 99 seconds generating the scene.
+[Fine concentric preview verification](../target/validation/fine-concentric-20261119/ui/report.md).
 
 One warmup and five measured cold/warm timings per case use the same final binary,
 counters off. Timed end-to-end work includes native evaluation, scaled PNG, preview,

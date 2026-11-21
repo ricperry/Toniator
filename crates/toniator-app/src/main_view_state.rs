@@ -4,15 +4,7 @@
 //! owns only viewport choices and a live projection of the desktop color
 //! preference into GTK's application theme hint.
 
-use gio::prelude::*;
-use std::{
-    cell::RefCell,
-    rc::Rc,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+pub(crate) use creatiator::{SystemThemeBridge, inherit_system_color_scheme};
 
 /// Selects which existing image is shown in the shared main viewport.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -30,6 +22,7 @@ pub(crate) struct MainViewState {
     mode: MainViewMode,
     zoom_index: usize,
     fit: bool,
+    fitted_zoom: Option<f64>,
     quality: toniator_engine::preview_cache::Quality,
 }
 
@@ -40,6 +33,7 @@ impl Default for MainViewState {
             mode: MainViewMode::Preview,
             zoom_index: Self::DEFAULT_ZOOM_INDEX,
             fit: true,
+            fitted_zoom: None,
             quality: toniator_engine::preview_cache::Quality::Accurate,
         }
     }
@@ -82,36 +76,84 @@ impl MainViewState {
         Self::ZOOM_LEVELS[self.zoom_index]
     }
 
-    /// Returns the user-facing whole-percent label for the current zoom multiplier.
+    /// Returns fitted zoom to a tenth of a percent, whole manual presets, or an em dash before allocation.
+    /// Whole fitted percentages omit the decimal; retained manual levels remain independent of Fit.
     pub(crate) fn zoom_label(self) -> String {
-        format!("{}%", (self.zoom() * 100.0).round() as u32)
+        self.displayed_zoom()
+            .map(|zoom| {
+                if self.fit {
+                    let percentage = format!("{:.1}", zoom * 100.0);
+                    format!("{}%", percentage.strip_suffix(".0").unwrap_or(&percentage))
+                } else {
+                    format!("{:.0}%", zoom * 100.0)
+                }
+            })
+            .unwrap_or_else(|| "—".to_owned())
     }
 
-    /// Selects Fit without changing the retained manual zoom level.
-    pub(crate) fn fit(&mut self) {
-        self.fit = true;
+    /// Selects Fit or restores the retained manual level without changing document authority.
+    /// Entering Fit invalidates its old allocation observation before the caller projects the live page.
+    pub(crate) fn set_fit(&mut self, fit: bool) {
+        if fit && !self.fit {
+            self.fitted_zoom = None;
+        }
+        self.fit = fit;
     }
 
-    /// Advances to the next bounded zoom level and leaves Fit mode.
+    /// Observes the fitted page's contain scale in logical canvas units, independently of device/proxy pixels.
+    /// Invalid or unallocated dimensions clear the observation; manual mode retains its own level.
+    pub(crate) fn observe_fit(&mut self, canvas: (f64, f64), page: (f64, f64)) {
+        self.fitted_zoom = [canvas.0, canvas.1, page.0, page.1]
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0)
+            .then(|| (page.0 / canvas.0).min(page.1 / canvas.1))
+            .filter(|zoom| zoom.is_finite() && *zoom > 0.0);
+    }
+
+    /// Returns the live fitted scale or retained manual ladder value in logical canvas units.
+    fn displayed_zoom(self) -> Option<f64> {
+        if self.fit {
+            self.fitted_zoom
+        } else {
+            Some(self.zoom())
+        }
+    }
+
+    /// Finds the nearest strictly directional manual level from the actually displayed zoom.
+    /// No candidate leaves Fit and the retained manual camera unchanged, including outside bounds.
+    fn adjacent_zoom_index(self, zoom_in: bool) -> Option<usize> {
+        let current = self.displayed_zoom()?;
+        if zoom_in {
+            Self::ZOOM_LEVELS.iter().position(|zoom| *zoom > current)
+        } else {
+            Self::ZOOM_LEVELS.iter().rposition(|zoom| *zoom < current)
+        }
+    }
+
+    /// Selects the nearest strictly larger manual level and leaves Fit only when one exists.
     pub(crate) fn zoom_in(&mut self) {
-        self.zoom_index = (self.zoom_index + 1).min(Self::ZOOM_LEVELS.len() - 1);
-        self.fit = false;
+        if let Some(index) = self.adjacent_zoom_index(true) {
+            self.zoom_index = index;
+            self.fit = false;
+        }
     }
 
-    /// Moves to the previous bounded zoom level and leaves Fit mode.
+    /// Selects the nearest strictly smaller manual level and leaves Fit only when one exists.
     pub(crate) fn zoom_out(&mut self) {
-        self.zoom_index = self.zoom_index.saturating_sub(1);
-        self.fit = false;
+        if let Some(index) = self.adjacent_zoom_index(false) {
+            self.zoom_index = index;
+            self.fit = false;
+        }
     }
 
     /// Reports whether a larger bounded zoom level remains available.
-    pub(crate) const fn can_zoom_in(self) -> bool {
-        self.zoom_index + 1 < Self::ZOOM_LEVELS.len()
+    pub(crate) fn can_zoom_in(self) -> bool {
+        self.adjacent_zoom_index(true).is_some()
     }
 
     /// Reports whether a smaller bounded zoom level remains available.
-    pub(crate) const fn can_zoom_out(self) -> bool {
-        self.zoom_index > 0
+    pub(crate) fn can_zoom_out(self) -> bool {
+        self.adjacent_zoom_index(false).is_some()
     }
 }
 
@@ -163,132 +205,6 @@ pub(crate) fn pan_adjustment_value(
         .then(|| requested.clamp(lower, maximum))
 }
 
-/// Retains desktop preference subscriptions without document or persistence authority.
-pub(crate) struct SystemThemeBridge {
-    _desktop_settings: Option<gio::Settings>,
-    _portal: Rc<RefCell<Option<gio::DBusProxy>>>,
-}
-
-/// Follows native GNOME preferences and the Settings portal in Flatpak/AppImage packages.
-///
-/// Portal reads are asynchronous and bounded; unavailable services leave GTK's fallback intact.
-/// This function only reads desktop preferences and never writes them or document state.
-pub(crate) fn inherit_system_color_scheme() -> SystemThemeBridge {
-    let portal = Rc::new(RefCell::new(None));
-    let desktop_settings = inherit_gnome_color_scheme();
-    if std::env::var_os("FLATPAK_ID").is_some() || std::env::var_os("APPIMAGE").is_some() {
-        subscribe_portal_color_scheme(&portal);
-    }
-    SystemThemeBridge {
-        _desktop_settings: desktop_settings,
-        _portal: portal,
-    }
-}
-
-/// Retains the native GNOME setting callback when the desktop schema is available.
-/// Missing schemas preserve GTK's current theme and require no backend writes.
-fn inherit_gnome_color_scheme() -> Option<gio::Settings> {
-    let schema_source = gio::SettingsSchemaSource::default()?;
-    let schema = schema_source.lookup("org.gnome.desktop.interface", true)?;
-    if !schema.has_key("color-scheme") {
-        return None;
-    }
-    let desktop_settings =
-        gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None::<&str>);
-    let default_prefer_dark = gtk::Settings::default()
-        .is_some_and(|settings| settings.is_gtk_application_prefer_dark_theme());
-    apply_system_color_scheme(&desktop_settings, default_prefer_dark);
-    desktop_settings.connect_changed(Some("color-scheme"), move |settings, _| {
-        apply_system_color_scheme(settings, default_prefer_dark)
-    });
-    Some(desktop_settings)
-}
-
-/// Reads the Settings portal and follows its signals on GTK's main context.
-/// A live signal takes precedence over an older initial reply; dropping the bridge releases the proxy.
-fn subscribe_portal_color_scheme(storage: &Rc<RefCell<Option<gio::DBusProxy>>>) {
-    let weak_storage = Rc::downgrade(storage);
-    let fallback = gtk::Settings::default()
-        .is_some_and(|settings| settings.is_gtk_application_prefer_dark_theme());
-    glib::MainContext::default().spawn_local(async move {
-        let Ok(proxy) = gio::DBusProxy::for_bus_future(
-            gio::BusType::Session,
-            gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES,
-            None,
-            "org.freedesktop.portal.Desktop",
-            "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.Settings",
-        )
-        .await
-        else {
-            return;
-        };
-        let changed = Arc::new(AtomicBool::new(false));
-        let changed_for_signal = Arc::clone(&changed);
-        proxy.connect_g_signal(move |_, _, signal, parameters| {
-            if signal != "SettingChanged" {
-                return;
-            }
-            let Some((namespace, key, value)) = parameters.get::<(String, String, glib::Variant)>()
-            else {
-                return;
-            };
-            if namespace == "org.freedesktop.appearance"
-                && key == "color-scheme"
-                && let Some(prefer_dark) = portal_prefer_dark(&value, fallback)
-            {
-                changed_for_signal.store(true, Ordering::Relaxed);
-                if let Some(settings) = gtk::Settings::default() {
-                    settings.set_gtk_application_prefer_dark_theme(prefer_dark);
-                }
-            }
-        });
-        let reply = proxy
-            .call_future(
-                "ReadOne",
-                Some(&("org.freedesktop.appearance", "color-scheme").to_variant()),
-                gio::DBusCallFlags::NONE,
-                1500,
-            )
-            .await;
-        let Some(storage) = weak_storage.upgrade() else {
-            return;
-        };
-        if !changed.load(Ordering::Relaxed)
-            && let Ok(reply) = reply
-            && let Some((value,)) = reply.get::<(glib::Variant,)>()
-            && let Some(prefer_dark) = portal_prefer_dark(&value, fallback)
-            && let Some(settings) = gtk::Settings::default()
-        {
-            settings.set_gtk_application_prefer_dark_theme(prefer_dark);
-        }
-        *storage.borrow_mut() = Some(proxy);
-    });
-}
-
-/// Projects portal values 1/2 to dark/light; zero and unknown values retain GTK's fallback.
-/// Malformed non-uint32 values are ignored, preserving the current presentation.
-fn portal_prefer_dark(value: &glib::Variant, fallback: bool) -> Option<bool> {
-    value.get::<u32>().map(|value| match value {
-        1 => true,
-        2 => false,
-        _ => fallback,
-    })
-}
-
-/// Projects explicit GNOME preferences and restores GTK's original hint for system default.
-fn apply_system_color_scheme(desktop_settings: &gio::Settings, default_prefer_dark: bool) {
-    let Some(gtk_settings) = gtk::Settings::default() else {
-        return;
-    };
-    let prefer_dark = match desktop_settings.string("color-scheme").as_str() {
-        "prefer-dark" => true,
-        "prefer-light" => false,
-        _ => default_prefer_dark,
-    };
-    gtk_settings.set_gtk_application_prefer_dark_theme(prefer_dark);
-}
-
 #[cfg(test)]
 mod tests {
     /// Keeps each new window Accurate while quality changes preserve camera and Source preference.
@@ -299,6 +215,7 @@ mod tests {
         use toniator_engine::preview_cache::Quality;
         let mut state = MainViewState::default();
         assert_eq!(state.quality(), Quality::Accurate);
+        state.set_fit(false);
         state.zoom_in();
         let zoom = state.zoom();
         let fit = state.is_fit();
@@ -310,34 +227,20 @@ mod tests {
         state.set_mode(MainViewMode::Preview);
         assert_eq!(state.quality(), Quality::Fast);
         assert!(!state.set_quality(Quality::Fast));
-        state.fit();
+        state.set_fit(true);
         assert_eq!(state.quality(), Quality::Fast);
         assert_eq!(MainViewState::default().quality(), Quality::Accurate);
     }
 
     use super::*;
 
-    /// Checks standardized portal preferences and ignores malformed replies without inventing a theme.
-    #[test]
-    fn portal_color_scheme_handles_preferences_and_fallback() {
-        assert_eq!(portal_prefer_dark(&1u32.to_variant(), false), Some(true));
-        assert_eq!(portal_prefer_dark(&2u32.to_variant(), true), Some(false));
-        assert_eq!(portal_prefer_dark(&0u32.to_variant(), true), Some(true));
-        assert_eq!(portal_prefer_dark(&99u32.to_variant(), false), Some(false));
-        assert_eq!(portal_prefer_dark(&"dark".to_variant(), false), None);
-        let reply = (1u32.to_variant(),).to_variant();
-        assert_eq!(
-            reply
-                .get::<(glib::Variant,)>()
-                .and_then(|(v,)| portal_prefer_dark(&v, false)),
-            Some(true)
-        );
-    }
-
     /// Proves viewport choices stay bounded and mode changes preserve zoom state.
+    /// # Panics
+    /// Panics if manual ladder bounds or presentation-only mode independence changes.
     #[test]
     fn main_view_state_bounds_zoom_and_keeps_mode_independent() {
         let mut state = MainViewState::default();
+        state.set_fit(false);
         state.zoom_in();
         let zoom = state.zoom();
         state.set_mode(MainViewMode::Source);
@@ -353,8 +256,99 @@ mod tests {
         }
         assert_eq!(state.zoom(), 0.25);
         assert!(!state.can_zoom_out());
-        state.fit();
+        state.set_fit(true);
         assert!(state.is_fit());
+    }
+
+    /// Checks strict nearest Fit steps, exact presets, unavailable directions and both ladder bounds.
+    /// # Panics
+    /// Panics if Fit steps use the retained manual level or move opposite the requested direction.
+    #[test]
+    fn fit_zoom_steps_from_displayed_scale_in_requested_direction() {
+        for (fit, smaller, larger) in [
+            (0.10, None, Some(0.25)),
+            (0.25, None, Some(0.33)),
+            (0.33, Some(0.25), Some(0.5)),
+            (0.42, Some(0.33), Some(0.5)),
+            (1.0, Some(0.67), Some(1.5)),
+            (1.8, Some(1.5), Some(2.0)),
+            (4.0, Some(3.0), None),
+            (6.0, Some(4.0), None),
+        ] {
+            let mut fitted = MainViewState::default();
+            fitted.observe_fit((100.0, 100.0), (fit * 100.0, fit * 100.0));
+            assert_eq!(fitted.can_zoom_out(), smaller.is_some());
+            assert_eq!(fitted.can_zoom_in(), larger.is_some());
+            for (zoom_in, expected) in [(false, smaller), (true, larger)] {
+                let mut state = fitted;
+                if zoom_in {
+                    state.zoom_in();
+                } else {
+                    state.zoom_out();
+                }
+                match expected {
+                    Some(zoom) => {
+                        assert_eq!(state.zoom(), zoom);
+                        assert!(!state.is_fit());
+                    }
+                    None => assert_eq!(state, fitted),
+                }
+            }
+        }
+    }
+
+    /// Checks fractional fitted labels distinguish nearby manual presets without unnecessary decimal zeros.
+    /// # Panics
+    /// Panics if fitted tenths disappear, whole fitted labels gain decimals, or manual labels change.
+    #[test]
+    fn fit_zoom_label_keeps_fractional_steps_visible() {
+        let mut state = MainViewState::default();
+        for (page_width, expected) in [
+            (1136.0, "83.5%"),
+            (916.0, "67.4%"),
+            (1360.0, "100%"),
+            (680.0, "50%"),
+        ] {
+            state.observe_fit((1360.0, 768.0), (page_width, 1000.0));
+            assert_eq!(state.zoom_label(), expected);
+        }
+        state.observe_fit((1360.0, 768.0), (916.0, 1000.0));
+        state.zoom_out();
+        assert_eq!(state.zoom_label(), "67%");
+        state.zoom_out();
+        assert_eq!(state.zoom_label(), "50%");
+    }
+
+    /// Checks Fit observations track contain allocation and preserve manual zoom across toggle/mode changes.
+    /// # Panics
+    /// Panics if resize, absent allocation or a Source switch changes the retained manual camera.
+    #[test]
+    fn fit_toggle_retains_manual_zoom_while_allocation_changes() {
+        let mut state = MainViewState::default();
+        assert_eq!(state.zoom_label(), "—");
+        assert!(!state.can_zoom_in() && !state.can_zoom_out());
+        state.set_fit(false);
+        state.zoom_in();
+        assert_eq!(state.zoom(), 1.5);
+        state.set_fit(true);
+        assert_eq!(state.zoom_label(), "—");
+        state.zoom_in();
+        assert!(state.is_fit());
+        assert_eq!(state.zoom(), 1.5);
+        state.observe_fit((900.0, 620.0), (1000.0, 310.0));
+        assert_eq!(state.zoom_label(), "50%");
+        state.observe_fit((900.0, 620.0), (450.0, 1000.0));
+        assert_eq!(state.zoom_label(), "50%");
+        state.set_mode(MainViewMode::Source);
+        state.observe_fit((900.0, 620.0), (1800.0, 1240.0));
+        assert_eq!(state.zoom_label(), "200%");
+        state.observe_fit((900.0, 620.0), (0.0, 0.0));
+        assert_eq!(state.zoom_label(), "—");
+        state.observe_fit((f64::NAN, 620.0), (1800.0, 1240.0));
+        assert!(!state.can_zoom_in());
+        state.set_fit(false);
+        assert_eq!(state.zoom(), 1.5);
+        assert_eq!(state.zoom_label(), "150%");
     }
 
     /// Checks pointer movement follows the drag and clamps to the live adjustment range.

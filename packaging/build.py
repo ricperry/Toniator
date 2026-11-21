@@ -69,6 +69,9 @@ def payload(prefix):
         install(ROOT / 'assets' / ('appicon' + suffix),
                 prefix / 'share/icons/hicolor' / size / 'apps' / (APP_ID + suffix))
     install(ROOT / 'LICENSE', prefix / 'share/licenses' / APP_ID / 'LICENSE')
+    for name in ['LICENSE', 'PROVENANCE.md']:
+        install(ROOT / 'shared/creatiator' / name,
+                prefix / 'share/licenses' / APP_ID / 'creatiator' / name)
     # Retain exact license texts and local patch provenance for both shared bundles.
     for crate, notices in [('i_overlay', ['LICENSE-MIT', 'LICENSE-APACHE', 'PROVENANCE.md']),
                            ('i_tree', ['LICENSE', 'PROVENANCE.md'])]:

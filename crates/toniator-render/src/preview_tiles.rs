@@ -65,10 +65,11 @@ struct Layer {
     prepared: Arc<PreparedAreaLayer>,
     ledger: AreaDebtLedger,
     retry_used: bool,
+    refinement_used: bool,
 }
 
 /// Worker-owned retained root. A later typed restoration invalidates all previous pixel generations.
-/// Global debt remains global; only normalization receives the existing zero-visible-fill waiver.
+/// Incurred/collapsed debt stays global; exact split supports can exclude only provably invisible error.
 pub struct PreviewRoot {
     scene: Arc<RenderScene>,
     frame: Frame,
@@ -79,6 +80,7 @@ pub struct PreviewRoot {
     generation: u64,
     limits: RasterizationLimits,
     remaining: RasterizationLimits,
+    remaining_spatial_certificate_bytes: usize,
 }
 
 /// Permission for one complete sampled region at one root generation; not a per-tile budget.
@@ -234,6 +236,7 @@ impl PreviewRoot {
                 prepared: Arc::new(prepared),
                 ledger,
                 retry_used: false,
+                refinement_used: false,
             });
         }
         let remaining = RasterizationLimits {
@@ -250,6 +253,7 @@ impl PreviewRoot {
             generation: 0,
             limits,
             remaining,
+            remaining_spatial_certificate_bytes: work.remaining_spatial_certificate_bytes,
         })
     }
     /// Shares the actually retained canonical scene for derived-storage accounting without cloning it.
@@ -334,8 +338,10 @@ impl PreviewRoot {
         Ok(region)
     }
     /// Certifies one entire sampled view, replaying every layer's debt exactly once in original order.
-    /// At most one remaining typed complete-stroke restoration per layer shares consumed root work;
+    /// At most one typed complete-stroke restoration and subsequent final-split refinement per layer
+    /// share consumed root work; passing former routes keep their existing geometry and pixels.
     /// any replacement increments generation even if its subsequent region certification fails.
+    /// Optional spatial-proof storage shares one root-lifetime allowance across all replacements.
     /// # Errors
     /// Returns original debt/local/resource/cancellation errors. Failed work is never refunded.
     pub fn certify(
@@ -357,6 +363,7 @@ impl PreviewRoot {
             0,
             &ignore_raster_progress,
         );
+        work.remaining_spatial_certificate_bytes = self.remaining_spatial_certificate_bytes;
         let result = (|| {
             work.check()?;
             let mut bounds = Vec::new();
@@ -364,39 +371,56 @@ impl PreviewRoot {
                 .try_reserve_exact(self.layers.len())
                 .map_err(|_| error("certificate allocation failed"))?;
             for (index, layer) in self.layers.iter_mut().enumerate() {
-                let bound = match layer.ledger.certify(visible, &work) {
-                    Ok(value) => value,
-                    Err(failure) if failure.split_budget && !layer.retry_used => {
+                let mut restored = None;
+                let bound = loop {
+                    let failure = match layer.ledger.certify(visible, &work) {
+                        Ok(value) => break value,
+                        Err(failure) => failure,
+                    };
+                    let refining = if failure.split_budget && !layer.retry_used {
                         work.check()?;
-                        let Some(restored) = materialization::complete_restricted_stroke_layer(
+                        restored = materialization::complete_restricted_stroke_layer(
                             &self.scene.layers[index],
                             cancelled,
-                        )?
-                        else {
-                            return Err(failure.error);
-                        };
-                        // Cancellation before an actual preparation attempt does not consume
-                        // the root-lifetime retry. Restoration has not published any geometry.
+                        )?;
                         work.check()?;
                         layer.retry_used = true;
-                        let (prepared, ledger) = area_raster::prepare_retained_area_layer(
-                            &restored,
-                            self.frame.width,
-                            self.frame.height,
-                            self.transform,
-                            self.clip,
-                            &mut work,
-                        )?;
-                        let generation = self
-                            .generation
-                            .checked_add(1)
-                            .ok_or(error("root generation overflows"))?;
-                        layer.prepared = Arc::new(prepared);
-                        layer.ledger = ledger;
-                        self.generation = generation;
-                        layer.ledger.certify(visible, &work).map_err(|f| f.error)?
+                        restored.is_none()
+                    } else {
+                        true
+                    };
+                    if refining && (!failure.final_split_budget || layer.refinement_used) {
+                        return Err(failure.error);
                     }
-                    Err(failure) => return Err(failure.error),
+                    if refining {
+                        if restored.is_none() {
+                            restored = materialization::complete_restricted_stroke_layer(
+                                &self.scene.layers[index],
+                                cancelled,
+                            )?;
+                        }
+                        work.check()?;
+                        layer.refinement_used = true;
+                    }
+                    let previous_refinement = work.refine_final_overlay;
+                    work.refine_final_overlay = refining;
+                    let replacement = area_raster::prepare_retained_area_layer(
+                        restored.as_ref().unwrap_or(&self.scene.layers[index]),
+                        self.frame.width,
+                        self.frame.height,
+                        self.transform,
+                        self.clip,
+                        &mut work,
+                    );
+                    work.refine_final_overlay = previous_refinement;
+                    let (prepared, ledger) = replacement?;
+                    let generation = self
+                        .generation
+                        .checked_add(1)
+                        .ok_or(error("root generation overflows"))?;
+                    layer.prepared = Arc::new(prepared);
+                    layer.ledger = ledger;
+                    self.generation = generation;
                 };
                 bounds.push(bound);
             }
@@ -408,6 +432,7 @@ impl PreviewRoot {
                 bounds,
             })
         })();
+        self.remaining_spatial_certificate_bytes = work.remaining_spatial_certificate_bytes;
         self.remaining = RasterizationLimits {
             max_flattened_edges: work.remaining_edges,
             max_boolean_operations: work.remaining_boolean_operations,
@@ -462,14 +487,7 @@ impl PreviewRoot {
                 .checked_add(layer.prepared.pilot_storage()?.0)
                 .ok_or(error("capacity overflows"))?;
             debts = debts
-                .checked_add(
-                    layer
-                        .ledger
-                        .events
-                        .capacity()
-                        .checked_mul(std::mem::size_of::<area_raster::AreaDebt>())
-                        .ok_or(error("capacity overflows"))?,
-                )
+                .checked_add(layer.ledger.storage_bytes()?)
                 .ok_or(error("capacity overflows"))?;
             events = events
                 .checked_add(layer.ledger.events.len())
@@ -607,9 +625,91 @@ impl RootSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// Exercises cancellation/resume and actual restoration after an ordered synthetic debt rejection.
+    /// Exercises the retained-root refinement transition after the existing restoration route succeeds.
+    /// Original pixels remain equal while accepted replacements invalidate the old certificate namespace.
     /// # Panics
-    /// Panics on stale tile admission, repeated restoration, work refund or consumed pre-attempt eligibility.
+    /// Panics if refinement repeats, consumed work/proof storage resets, cancellation consumes eligibility,
+    /// or an older snapshot/tile remains admissible after the bounded replacement.
+    #[test]
+    fn final_refinement_invalidates_retained_root_generation_once() {
+        let mut layer = area_raster::restricted_retry_tests::layer();
+        layer.outputs[0].primitive_paints = None;
+        let scene = Arc::new(
+            RenderScene::new(
+                CanvasSpec {
+                    width: 32.,
+                    height: 24.,
+                },
+                "fine-root".into(),
+                "restricted".into(),
+                vec![layer],
+            )
+            .unwrap(),
+        );
+        let mut root = PreviewRoot::new(
+            scene,
+            1.,
+            RasterBackground::Transparent,
+            RasterizationLimits::default(),
+            &|| false,
+        )
+        .unwrap();
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 32,
+            height: 24,
+        };
+        root.layers[0]
+            .ledger
+            .events
+            .push(area_raster::AreaDebt::Split(2e-6));
+        let prior = root.certify(region, &|| false).unwrap();
+        assert!(root.layers[0].retry_used);
+        assert!(!root.layers[0].refinement_used);
+        let snapshot = root.snapshot(&prior).unwrap();
+        let old_tile = snapshot.paint(region, &prior, &|| false).unwrap();
+        let expected = old_tile.surface(&root, &prior).unwrap().pixels().to_vec();
+        let before = root.facts().unwrap();
+        let proof_remaining = root.remaining_spatial_certificate_bytes;
+        root.layers[0]
+            .ledger
+            .events
+            .push(area_raster::AreaDebt::Split(2e-6));
+        assert_eq!(
+            root.certify(region, &|| true).err().unwrap().path(),
+            "evaluation.cancelled"
+        );
+        assert!(!root.layers[0].refinement_used);
+        assert_eq!(root.generation, prior.generation());
+        let refined = root.certify(region, &|| false).unwrap();
+        assert!(root.layers[0].refinement_used);
+        assert_eq!(refined.generation(), prior.generation() + 1);
+        assert!(root.snapshot(&prior).is_err());
+        assert!(old_tile.surface(&root, &prior).is_err());
+        assert!(old_tile.surface(&root, &refined).is_err());
+        let tile = root
+            .snapshot(&refined)
+            .unwrap()
+            .paint(region, &refined, &|| false)
+            .unwrap();
+        assert_eq!(tile.surface(&root, &refined).unwrap().pixels(), expected);
+        let after = root.facts().unwrap();
+        assert!(after.consumed_edges > before.consumed_edges);
+        assert!(after.consumed_boolean_operations > before.consumed_boolean_operations);
+        assert!(root.remaining_spatial_certificate_bytes <= proof_remaining);
+        root.layers[0]
+            .ledger
+            .events
+            .push(area_raster::AreaDebt::Split(2e-6));
+        assert!(root.certify(region, &|| false).is_err());
+        assert_eq!(root.generation, refined.generation());
+        assert_eq!(root.facts().unwrap().consumed_edges, after.consumed_edges);
+    }
+
+    /// Exercises cancellation/resume and restoration, retaining a later normalization failure without retry.
+    /// # Panics
+    /// Panics on stale tile admission, repeated restoration, work/proof-storage refund or consumed pre-attempt eligibility.
     #[test]
     fn later_typed_retry_invalidates_old_namespace_and_is_not_replenished() {
         let mut layer = area_raster::restricted_retry_tests::layer();
@@ -648,6 +748,7 @@ mod tests {
             .ledger
             .events
             .push(area_raster::AreaDebt::Split(2e-6));
+        root.remaining_spatial_certificate_bytes = 0;
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let cancellation = root
             .certify(region, &|| {
@@ -659,6 +760,7 @@ mod tests {
         assert!(!root.layers[0].retry_used);
         assert_eq!(root.generation, certificate.generation());
         let replacement = root.certify(region, &|| false).unwrap();
+        assert_eq!(root.remaining_spatial_certificate_bytes, 0);
         assert_eq!(replacement.generation(), certificate.generation() + 1);
         assert!(tile.surface(&root, &certificate).is_err());
         assert!(tile.surface(&root, &replacement).is_err());
@@ -669,7 +771,10 @@ mod tests {
         root.layers[0]
             .ledger
             .events
-            .push(area_raster::AreaDebt::Split(2e-6));
+            .push(area_raster::AreaDebt::Normalization {
+                bound: 2e-6,
+                boxes: None,
+            });
         let before = root.facts().unwrap();
         assert!(root.certify(region, &|| false).is_err());
         assert_eq!(root.generation, before.generation);
